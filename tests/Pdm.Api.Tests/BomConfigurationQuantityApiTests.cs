@@ -28,7 +28,7 @@ public sealed class BomConfigurationQuantityApiTests
         var motor=await Material("主料",MaterialKind.Standard);var drive=await Material("电气配件",MaterialKind.Electrical);
         var category=await provider.GetRequiredService<StandardLibraryService>().SaveCategoryAsync(null,new("数量联动验收分类",null,1,true),"admin",UserRole.Administrator,default);
         await relations.AssignMainCategoryAsync(motor.Id,category.Id,"admin",UserRole.Administrator,default);
-        var project=await repo.CreateProjectAsync(new("CONFIRM-"+Guid.NewGuid().ToString("N"),"联动数量API验收","admin","vault","release"),"admin",default);
+        var project=await ApiTestAuthorization.CreateProjectAsync(repo, new("CONFIRM-"+Guid.NewGuid().ToString("N"),"联动数量API验收","admin","vault","release"),"admin",default);
         var draft=await relations.SaveDraftAsync(null,new(motor.Id,"数量确认",null,null,[new("配件",true,MaterialRelationSelectionMode.Single,1,1,false,1,[new(drive.Id,MaterialRelationQuantityMode.PerMainQuantity,2,false,1)])]),"admin",UserRole.Administrator,default);
         var template=await relations.PublishAsync(draft.Id,draft.DraftRevision!.Id,draft.DraftRevision.RowVersion,"admin",UserRole.Administrator,default);var group=template.PublishedRevision!.Groups.Single();
         var main=new BomItem(Guid.NewGuid(),project.Id,BomKind.Standard,1,motor.MaterialCode,motor.Name,2,"001",null,motor.Specification,"W1",true){Source="Manual",Brand=brand};

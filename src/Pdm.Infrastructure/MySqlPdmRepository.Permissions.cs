@@ -16,7 +16,7 @@ public sealed partial class MySqlPdmRepository
         var userCounts = (await connection.QueryAsync<RoleUserCountRow>(new CommandDefinition(
             "SELECT role_code RoleCode,COUNT(DISTINCT user_id) UserCount FROM pdm_user_role GROUP BY role_code", cancellationToken: cancellationToken)))
             .ToDictionary(item => item.RoleCode, item => checked((int)item.UserCount), StringComparer.OrdinalIgnoreCase);
-        return AuthorizationPolicy.ProjectDirectory(BuildRolePermissionDirectory(definitions, permissions, userCounts), await ReadAuthorizationSettingsAsync(cancellationToken));
+        return AuthorizationPolicy.ProjectDirectory(BuildRolePermissionDirectory(definitions, permissions, userCounts), await ReadAuthorizationSettingsAsync(connection, cancellationToken));
     }
 
     public async Task<IReadOnlySet<string>> GetRolePermissionsAsync(UserRole role, CancellationToken cancellationToken)

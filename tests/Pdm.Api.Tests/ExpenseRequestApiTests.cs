@@ -23,9 +23,11 @@ public sealed class ExpenseRequestApiTests
         if (await repository.FindUserAsync("admin", default) is null)
             await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "项目经理", "unused", UserRole.Administrator, true, CompanyId: project.OrganizationId), default);
         project = await repository.SetMainProjectStaffingAsync(project.Id, new("admin", [], []), "admin", default);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Administrator", PermissionCodes.ProjectExpenseSubmit);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Approver", PermissionCodes.ProjectExpenseApprove);
         foreach (var name in new[] { "expense-buyer", "expense-extra" })
-            await repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", UserRole.Approver, true), default);
-        var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+            await repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", UserRole.Approver, true, CompanyId: project.OrganizationId), default);
+        var company = project.OrganizationId!.Value;
         var department = await repository.SaveOrganizationUnitAsync(new(null, company, null, "EXPENSE", "采购部", OrganizationUnitKind.Department, true, 0), default);
         await repository.SetOrganizationMembershipsAsync("expense-buyer", [department.Id], department.Id, default);
         var settings = (await client.GetFromJsonAsync<PdmSystemSettings>("/api/system-settings"))!;

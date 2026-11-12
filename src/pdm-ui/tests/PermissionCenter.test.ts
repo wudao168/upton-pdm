@@ -41,6 +41,64 @@ describe('统一权限中心', () => {
     } finally { wrapper.unmount() }
   })
 
+  it('保存作废图档时只添加权限中心可以配置的前置权限', async () => {
+    const directory = fixture()
+    directory.permissions.push(
+      { code: 'document.view', name: '查看图档', module: '项目图档', sensitive: false, scope: 'project', dependencies: ['project.view'] },
+      { code: 'document.obsolete', name: '作废图档', module: '项目图档', sensitive: true, scope: 'project', dependencies: ['document.view', 'release.manage'] },
+    )
+    vi.mocked(api.getAuthorization).mockResolvedValue(directory)
+    vi.mocked(api.saveAuthorization).mockImplementation(async settings => ({ ...settings, revision: 6 }))
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockImplementation(async () => 'confirm' as never)
+    const wrapper = mount(PermissionCenter, { props: { token: 'token', companyId: 'company' }, global: { plugins: [ElementPlus] } })
+    try {
+      await flushPromises()
+      const navigation = wrapper.get('[aria-label="权限分类"]')
+      await navigation.findAll('button').find(button => button.text().startsWith('项目中心'))!.trigger('click')
+      await navigation.findAll('button').find(button => button.text().startsWith('图档'))!.trigger('click')
+      await wrapper.get('[aria-label="授权作废图档"]').setValue(true)
+      expect((wrapper.get('[aria-label="授权查看图档"]').element as HTMLInputElement).checked).toBe(true)
+      await wrapper.findAll('button').find(button => button.text() === '保存生效')!.trigger('click')
+      await flushPromises()
+      const [saved] = vi.mocked(api.saveAuthorization).mock.calls[0]!
+      expect(saved.templates[0]!.grants.map(grant => grant.permission)).toEqual(['project.view', 'document.obsolete', 'document.view'])
+      expect(wrapper.text()).toContain('配置版本 6')
+    } finally { wrapper.unmount(); confirm.mockRestore() }
+  })
+
+  it('按侧栏顺序及子页分类，跨分类搜索保留待保存授权', async () => {
+    const directory = fixture()
+    directory.permissions.push(
+      { code: 'stock.view', name: '查看常备物料', module: '常备物料', sensitive: false },
+      { code: 'project.expense.view', name: '查看费用申请', module: '费用申请', sensitive: true, scope: 'project' },
+      { code: 'project.budget.view', name: '查看项目预算', module: '项目预算', sensitive: true, scope: 'project' },
+      { code: 'future.view', name: '查看新功能', module: '新功能', sensitive: false },
+    )
+    vi.mocked(api.getAuthorization).mockResolvedValue(directory)
+    const wrapper = mount(PermissionCenter, { props: { token: 'token', companyId: 'company' }, global: { plugins: [ElementPlus] } })
+    try {
+      await flushPromises()
+      const navigation = wrapper.get('[aria-label="权限分类"]')
+      const category = (label: string) => navigation.findAll('button').find(button => button.get('span').text() === label)!
+      expect(navigation.findAll('.authorization-category-entry > span').map(label => label.text())).toEqual(['项目总览', '项目中心', '标准物料', '其他'])
+      await category('项目中心').trigger('click')
+      await category('预算').trigger('click')
+      expect(wrapper.get('[aria-label="权限设置"] h3').text()).toContain('项目中心 → 预算')
+      expect(wrapper.find('[aria-label="授权查看常备物料"]').exists()).toBe(false)
+      await wrapper.get('[aria-label="授权查看费用申请"]').setValue(true)
+      expect(category('预算').text()).toContain('1/2')
+      const search = wrapper.get('[aria-label="搜索权限"]')
+      await search.setValue('标准物料 → 常备件')
+      expect(wrapper.find('[aria-label="授权查看常备物料"]').exists()).toBe(true)
+      await search.setValue('费用申请')
+      expect((wrapper.get('[aria-label="授权查看费用申请"]').element as HTMLInputElement).checked).toBe(true)
+      await search.setValue('')
+      expect(category('预算').attributes('aria-pressed')).toBe('true')
+      await category('其他').trigger('click')
+      expect(wrapper.find('[aria-label="授权查看新功能"]').exists()).toBe(true)
+    } finally { wrapper.unmount() }
+  })
+
   it('切换检查项目保留人员，较早的请求不会覆盖当前结果', async () => {
     const directory = fixture()
     directory.projects = [{ id: 'project-a', code: 'P260841', name: '生产线改造项目', organizationId: 'company' }]

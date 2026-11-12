@@ -17,7 +17,7 @@ public sealed partial class DingTalkConfigurationTests
             services.AddHttpClient<DingTalkOplIntegration>().ConfigurePrimaryHttpMessageHandler(() => new BotHandler())));
         using var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First(item => item.IsActive).Id;
+        var company = (await repository.FindProjectAsync(RootId, default))!.OrganizationId!.Value;
         await repository.CreateUserAsync(new(Guid.NewGuid(), "command-admin", "项目管理员", "unused", UserRole.Administrator, true), default);
         await repository.SetUserCompanyScopeAsync("command-admin", company, false, [], "command-admin", default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("command-admin", "Administrator"));
@@ -45,7 +45,7 @@ public sealed partial class DingTalkConfigurationTests
         Assert.True((await scope.ServiceProvider.GetRequiredService<DingTalkOplIntegration>().PublishEntryAsync(bound.Value, default, company)).Sent);
         Assert.Null(await service.BindProjectGroupAsync(company, "test-corp", "test-key", "robot-test", Message(command, "cid-replay"), default));
 
-        var second = await repository.CreateProjectAsync(new CreateProjectCommand("DING-DIRECT-2", "另一个项目", "command-admin", "unused", "unused"), "command-admin", default);
+        var second = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("DING-DIRECT-2", "另一个项目", "command-admin", "unused", "unused"), "command-admin", default);
         var secondCommand = await Command(second.Id);
         Assert.Null(await service.BindProjectGroupAsync(company, "test-corp", "test-key", "robot-test", Message(secondCommand), default));
         var secondView = await client.GetFromJsonAsync<JsonElement>($"/api/projects/{second.Id}/dingtalk");

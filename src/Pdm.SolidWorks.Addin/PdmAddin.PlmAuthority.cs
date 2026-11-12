@@ -30,6 +30,11 @@ public sealed partial class PdmAddin
             }
             initial.Add(item);
         }
+        var selectedMissing = initial.Where(item => item.Node.Status == CadReferenceStatus.Missing
+            && !File.Exists(item.Node.FullPath)).Select(item => item.Node.FileName).Distinct().ToArray();
+        if (selectedMissing.Length > 0)
+            throw new InvalidOperationException("所选图档缺少可用文件，尚未获取权限。请补齐或取消勾选："
+                + string.Join("、", selectedMissing));
         if (stored.Count == 0)
             return await AcquireLatestAndCheckoutAsync(initial, projectId, registrationDecisions);
         var ids = stored.Select(item => item.Node.DocumentId.Value).Distinct().ToArray();
@@ -47,6 +52,11 @@ public sealed partial class PdmAddin
                 || await TryAcquireReusableWorkingCopyAsync(stored, projectId, rootId);
             opened = reused || await ExecuteControlledOpenAsync(projectId, rootId, ControlledOpenMode.LatestEdit,
                 null, ids[0], ids, false);
+        }
+        catch (Exception error)
+        {
+            var recovery = await RecoverRecordedAcquisitionsAsync();
+            throw new InvalidOperationException(error.Message + "\r\n" + recovery, error);
         }
         finally { Interlocked.Exchange(ref controlledOpenInProgress, 0); }
         if (!opened) throw new InvalidOperationException("从PLM获取编辑副本未完成。"

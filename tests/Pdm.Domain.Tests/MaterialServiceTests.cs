@@ -1537,10 +1537,18 @@ public sealed partial class MaterialServiceTests
         Assert.Contains("缺少：型号、品牌", exception.Message);
     }
 
-    [Fact]
-    public async Task BackgroundRelease_PreparesCodesForEachBomRowAndResumesSnapshotWriteback()
+    [Theory]
+    [InlineData("admin", UserRole.Administrator)]
+    [InlineData("qa-final-approver", UserRole.Approver)]
+    public async Task BackgroundRelease_PreparesCodesForEachBomRowAndResumesSnapshotWriteback(string approvalActor, UserRole approvalRole)
     {
         var service = CreateService(out var materials, out var repository, out _);
+        await PermissionTestUsers.Ensure(repository, (approvalActor, approvalRole));
+        if (approvalRole == UserRole.Approver)
+        {
+            await repository.SetRolePermissionsAsync("Approver", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ApprovalDecide], default);
+            Assert.False(await repository.HasUserPermissionAsync(approvalActor, approvalRole, PermissionCodes.BomEdit, default));
+        }
         var publisher = new MaterialPreparationPublisher();
         var workflow = new PdmWorkflowService(repository, null!, publisher, TimeProvider.System,
             materialRepository: materials, materialService: service);
@@ -1559,6 +1567,9 @@ public sealed partial class MaterialServiceTests
         var packages = (ConcurrentDictionary<Guid, ReleasePackage>)typeof(InMemoryPdmRepository)
             .GetField("packages", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .GetValue(repository)!;
+        packages[package.Id] = package;
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.ResumePublishAsync(package.Id, default));
+        package = package with { ApprovalTasks = [new(Guid.NewGuid(), package.Id, ApprovalStage.Approval, approvalActor, approvalActor, ApprovalDecision.Approved, "冻结批准", DateTimeOffset.UtcNow)] };
         packages[package.Id] = package;
         Assert.Null(await materials.FindMaterialBySourceBomItemAsync(bom[0].Id, default));
         await Assert.ThrowsAsync<InvalidOperationException>(() => workflow.ResumePublishAsync(package.Id, default));
@@ -1620,7 +1631,7 @@ public sealed partial class MaterialServiceTests
             null, null, null, null, null, 1), default);
 
         var applications = await service.ListCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending,
-            "admin", UserRole.Administrator, default);
+            "standardizer", UserRole.ProcessReviewer, default);
 
         var headers = applications.Where(application => application.BomHeaderKind is not null).ToArray();
         Assert.Equal(Enum.GetValues<ProjectBomHeaderKind>().Length, headers.Length);
@@ -1975,7 +1986,7 @@ public sealed partial class MaterialServiceTests
     {
         var service = CreateService(out var materials, out var repository, out _);
         foreach (var name in new[] { "admin", "reviewer" })
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), name, name, "unused", UserRole.Administrator, true), default);
+            await PermissionTestUsers.Ensure(repository, (name, UserRole.Administrator));
         var settings = await repository.GetSystemSettingsAsync(default);
         var flow = MaterialCodeWorkflowDefaults.Template() with { Steps = [
             new(ApprovalStage.MechanicalEngineer, "自检", ApprovalAssigneeSource.Submitter),
@@ -2008,7 +2019,7 @@ public sealed partial class MaterialServiceTests
     {
         var service = CreateService(out var materials, out var repository, out _);
         foreach (var name in new[] { "admin", "reviewer", "finisher" })
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), name, name, "unused", UserRole.Administrator, true), default);
+            await PermissionTestUsers.Ensure(repository, (name, UserRole.Administrator));
         var settings = await repository.GetSystemSettingsAsync(default);
         var flow = MaterialCodeWorkflowDefaults.Template() with { Version = 5, EmergencyRoleCodes = [], Steps = [
             new(ApprovalStage.MechanicalEngineer, "自检", ApprovalAssigneeSource.Submitter),
@@ -2043,7 +2054,7 @@ public sealed partial class MaterialServiceTests
     {
         var service = CreateService(out var materials, out var repository, out _);
         foreach (var name in new[] { "admin", "reviewer" })
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), name, name, "unused", UserRole.Administrator, true), default);
+            await PermissionTestUsers.Ensure(repository, (name, UserRole.Administrator));
         var settings = await repository.GetSystemSettingsAsync(default);
         var flow = MaterialCodeWorkflowDefaults.Template() with { EmergencyRoleCodes = ["Administrator"], Steps = [
             new(ApprovalStage.MechanicalEngineer, "自检", ApprovalAssigneeSource.Submitter),
@@ -2231,8 +2242,9 @@ public sealed partial class MaterialServiceTests
         out AvailableCodeClient u9Client)
     {
         var timeProvider = TimeProvider.System;
-        repository = new InMemoryPdmRepository(timeProvider);
-        PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer), ("viewer", UserRole.ProductionViewer)).GetAwaiter().GetResult();
+        repository = BusinessTestRepository.CreateWithDeveloper(timeProvider);
+        PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer), ("viewer", UserRole.ProductionViewer), ("standardizer", UserRole.ProcessReviewer)).GetAwaiter().GetResult();
+        PermissionTestUsers.Grant(repository, "ProcessReviewer", PermissionCodes.MaterialManage).GetAwaiter().GetResult();
         materials = new InMemoryMaterialRepository(timeProvider);
         materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",

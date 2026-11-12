@@ -267,7 +267,7 @@ public sealed class ProductionDrawingAccessTests(PdmApiFactory factory) : IClass
         var client = factory.CreateClient();
         Authorize(client, "admin", "Administrator");
         var repository = (InMemoryPdmRepository)factory.Services.GetRequiredService<IPdmRepository>();
-        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First(item => item.IsActive).Id;
+        var company = (await repository.FindUserAsync("admin", default))!.CompanyId!.Value;
         foreach (var (username, role) in new[] { ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer) })
             if (await repository.FindUserAsync(username, default) is null)
                 await repository.CreateUserAsync(new(Guid.NewGuid(), username, username == "admin" ? "测试管理员" : "测试工程师", "unused", role, true, CompanyId: company), default);
@@ -275,7 +275,7 @@ public sealed class ProductionDrawingAccessTests(PdmApiFactory factory) : IClass
         Directory.CreateDirectory(root);
         Project project;
         TenantContext.Set(new(Guid.NewGuid(), company, company, "admin", "Administrator", false, new HashSet<string>()));
-        try { project = await repository.CreateProjectAsync(new("PROD-ACCESS-" + Guid.NewGuid().ToString("N"),
+        try { project = await ApiTestAuthorization.CreateProjectAsync(repository, new("PROD-ACCESS-" + Guid.NewGuid().ToString("N"),
             "生产取用验收", "admin", root, root), "admin", default); }
         finally { TenantContext.Clear(); }
         var model = await repository.RegisterDocumentAsync(new(project.Id, "PART", "模型", "PART.SLDPRT", DocumentKind.Part), "admin", default);

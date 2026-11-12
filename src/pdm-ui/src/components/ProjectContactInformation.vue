@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { readProjectContactInformation, saveProjectContactInformation } from '../api'
@@ -82,7 +83,7 @@ watch(() => [props.projectId, props.token], () => { void load() }, { immediate: 
   <form class="project-contacts pdm-panel" aria-label="客户及发货信息" @submit.prevent>
     <header><h2>客户信息</h2><div class="project-contacts__header-actions"><el-button aria-label="刷新客户信息" :disabled="loading || saving" @click="load">刷新</el-button><el-button v-if="view?.canEdit" aria-label="新增" :disabled="!canEdit" @click="addEntry">新增</el-button><el-button v-if="view?.canEdit" type="primary" aria-label="保存客户信息" :disabled="!canEdit" @click="save">保存</el-button></div></header>
     <dl class="project-contacts__customer" aria-label="客户档案信息">
-      <div><dt>客户名称</dt><dd>{{ customer?.name || view?.customerName || customerName || '—' }}</dd></div>
+      <div><dt>客户名称</dt><dd><CompanyName :name="customer?.name || view?.customerName || customerName || '—'" /></dd></div>
       <div><dt>客户编码</dt><dd>{{ customerCode || customer?.code || '—' }}</dd></div>
       <div><dt>客户状态</dt><dd>{{ customer ? (customer.isActive ? '正常' : '已停用') : '—' }}</dd></div>
       <div><dt>客户来源</dt><dd>{{ customerSource }}</dd></div>

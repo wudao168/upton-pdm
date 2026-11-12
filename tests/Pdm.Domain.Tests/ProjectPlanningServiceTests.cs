@@ -10,7 +10,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Template_roles_resolve_phase_custom_and_commercial_owners_without_manager_fallback()
     {
         var contacts = new InMemoryProjectContactInformationRepository();
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         await pdm.SetProjectPhaseOwnersAsync(project.Id, new Dictionary<string,string> { ["ElectricalEngineer"] = "electric、backup", ["ElectricalCommissioning"] = "commissioning、backup", ["Acceptance"] = "quality" }, "admin", default);
         await pdm.SetCustomProjectPositionsAsync(project.Id, new Dictionary<string,IReadOnlyList<string>> { ["service"] = new[] { "service-owner" } }, "admin", default);
@@ -33,7 +33,8 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Project_manager_can_create_personal_template_but_cannot_modify_system_template()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
+        await pdm.UpdateUserAsync("admin", "计划维护工程师", UserRole.Engineer, "Engineer", ["Engineer"], true, default);
         var plans = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(plans, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -61,7 +62,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Project_plan_can_remove_all_unstarted_tasks_and_rewire_dependencies()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var plans = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(plans, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -92,7 +93,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Approved_plan_can_only_be_deleted_by_the_approved_change_requester()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, clock);
         var project = await CreatePlanningRoot(pdm);
@@ -127,7 +128,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Approved_schedule_changes_take_effect_without_approval_and_preserve_live_progress()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var plans = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(plans, pdm, clock);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -185,7 +186,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Delayed_predecessors_cascade_successors_without_pulling_earlier_tasks()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, clock);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         ProjectPlanTemplateTask[] templateTasks = [
@@ -244,7 +245,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Change_permission_needs_reason_only_and_activation_notifies_stage_owners()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         await PermissionTestUsers.Ensure(pdm, ("admin", UserRole.Administrator));
         var plans = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(plans, pdm, clock);
@@ -286,7 +287,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Formal_bom_publications_complete_only_matching_tasks_and_are_idempotent()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, clock);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -328,7 +329,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Actual_dates_cannot_be_in_the_future()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, clock);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -343,7 +344,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Master_edits_sync_followers_but_preserve_independent_approved_and_deleted_children()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var root = await CreatePlanningRoot(pdm);
@@ -387,7 +388,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Explicit_follower_sync_creates_only_missing_child_drafts()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var root = await CreatePlanningRoot(pdm);
@@ -411,7 +412,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Plan_batch_rolls_back_every_write_on_a_stale_child()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var root = await CreatePlanningRoot(pdm);
@@ -430,7 +431,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Initial_tasks_keep_fixed_duration_without_forcing_first_or_last_boundaries()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var root = await CreatePlanningRoot(pdm);
         var tasks = AllocationTasks();
@@ -453,7 +454,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Full_stage_windows_are_continuous_and_follow_whole_plan_shifts()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await CreatePlanningRoot(pdm);
@@ -473,7 +474,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Supplement_legacy_windows_preserves_every_task_without_archiving_unapproved_work()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await CreatePlanningRoot(pdm);
@@ -496,7 +497,8 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Standalone_unapproved_plan_is_hard_deleted_without_deleting_project_or_template()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.CreateWithDeveloper(TimeProvider.System);
+        await PermissionTestUsers.Ensure(pdm, ("collaborator", UserRole.Engineer));
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await CreatePlanningRoot(pdm);
@@ -531,7 +533,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Deleting_master_removes_unapproved_followers_and_optionally_independent_children()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var root = await CreatePlanningRoot(pdm);
@@ -570,7 +572,7 @@ public sealed class ProjectPlanningServiceTests
     [InlineData("replace-id")]
     public async Task Task_editor_cannot_change_template_identity_or_weight(string field)
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -597,7 +599,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Reused_child_draft_can_be_edited_hard_deleted_and_reused_without_affecting_source()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var root = await CreatePlanningRoot(pdm);
@@ -633,7 +635,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Pending_plan_can_be_changed_or_deleted_before_approval()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var root = await CreatePlanningRoot(pdm);
@@ -661,7 +663,7 @@ public sealed class ProjectPlanningServiceTests
     {
         var numbering = await pdm.GetProjectNumberingOptionsAsync(default);
         var customer = Assert.Single(await pdm.ListCustomersAsync(true, default));
-        var project = await pdm.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "计划维护测试", null,
+        var project = await pdm.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 0, customer.Id, "计划维护测试", null,
             new DateOnly(2026, 9, 10), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
         return await AssignProjectManager(pdm, project);
     }
@@ -685,7 +687,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Two_level_schedule_uses_stage_duration_parallel_tasks_offsets_and_independent_dates()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         var template = await service.SaveTemplateAsync(null, new("两级分配", null, true, AllocationTasks(), null, AllocationStages()), "admin", UserRole.Administrator, default);
@@ -709,7 +711,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Fixed_duration_startup_and_review_do_not_scale_with_project_duration()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         var tasks = AllocationTasks();
@@ -735,7 +737,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Post_delivery_stages_are_consecutive_and_follow_delivery_even_without_task_dependencies()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         var template = await SavePostDeliveryTemplate(service);
@@ -761,7 +763,7 @@ public sealed class ProjectPlanningServiceTests
     [InlineData(true)]
     public async Task Deferred_post_delivery_stages_do_not_generate_tasks_and_remaining_plan_stays_editable(bool deferBoth)
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         var template = await SavePostDeliveryTemplate(service);
@@ -780,7 +782,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Deferral_rejects_delivery_stages_missing_preceding_stages_and_dangling_dependencies()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         var template = await SavePostDeliveryTemplate(service);
@@ -801,7 +803,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Delivery_progress_is_two_level_and_zero_weight_still_blocks_required_stage_gate()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -830,7 +832,7 @@ public sealed class ProjectPlanningServiceTests
     [InlineData("legacy")]
     public async Task Invalid_stage_allocation_cannot_be_saved(string invalid)
     {
-        var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), new InMemoryPdmRepository(TimeProvider.System), TimeProvider.System);
+        var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), BusinessTestRepository.Create(TimeProvider.System), TimeProvider.System);
         var stages = AllocationStages();
         var tasks = AllocationTasks();
         if (invalid == "duration") stages[0] = stages[0] with { DurationRatio = .5m };
@@ -844,7 +846,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Dependency_overflow_and_invalid_independent_override_are_rejected_without_writing_plan()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -861,7 +863,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Generate_baseline_progress_and_version_are_kept()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, clock);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -893,7 +895,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task Due_tasks_create_idempotent_message_center_notifications_but_overdue_stays_out()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, clock);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -908,6 +910,7 @@ public sealed class ProjectPlanningServiceTests
             { ImpactStage = ProjectPlanStage.Assembly }], default);
         var assemblyTask = approved.Tasks.First(item => item.Stage == ProjectPlanStage.Assembly);
         var owner = assemblyTask.Assignee!;
+        await PermissionTestUsers.Grant(pdm, "Administrator", AuthorizationActions.BusinessNotifications);
         var reminderClock = new FixedTimeProvider(new DateTimeOffset(assemblyTask.PlannedFinish.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero));
         service = new ProjectPlanningService(planning, pdm, reminderClock);
 
@@ -931,7 +934,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Latest_task_reminder_replaces_older_reminder_without_hiding_other_tasks_or_changes()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var taskId = Guid.NewGuid();
         var now = TimeProvider.System.GetUtcNow();
         var older = new UserNotification(Guid.NewGuid(), "engineer", "project-plan", "三天后到期", "旧提醒", null, null,
@@ -952,7 +955,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Legacy_plan_overdue_notification_is_hidden_from_message_center()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var taskId = Guid.NewGuid();
         var overdue = new UserNotification(Guid.NewGuid(), "engineer", "project-plan", "项目计划任务已逾期6天",
             "P700010 · 内部终审，计划完成日期 2026-09-16。", null, null,
@@ -975,13 +978,13 @@ public sealed class ProjectPlanningServiceTests
     public async Task Reuse_copies_equal_dates_but_keeps_child_plans_independent()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = BusinessTestRepository.Create(clock);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, clock);
         var numbering = await pdm.GetProjectNumberingOptionsAsync(default);
         var customer = Assert.Single(await pdm.ListCustomersAsync(true, default));
         var root = await pdm.CreateNumberedProjectAsync(new(
-            numbering.Organizations[0].Id, "P", 0, customer.Id, "批量计划测试", null,
+            Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 0, customer.Id, "批量计划测试", null,
             new DateOnly(2026, 9, 10), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
         root = await AssignProjectManager(pdm, root);
         var sourceProject = await pdm.CreateSubprojectAsync(new(root.Id, "来源设备", null, 1), default);
@@ -1021,7 +1024,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Template_display_order_can_change_without_changing_dependency_dates()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         ProjectPlanTemplateTask[] tasks = [
@@ -1049,7 +1052,7 @@ public sealed class ProjectPlanningServiceTests
     [InlineData(99)]
     public async Task Template_rejects_self_circular_or_missing_dependencies(int predecessor)
     {
-        var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), new InMemoryPdmRepository(TimeProvider.System), TimeProvider.System);
+        var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), BusinessTestRepository.Create(TimeProvider.System), TimeProvider.System);
         ProjectPlanTemplateTask[] tasks = [
             new(Guid.NewGuid(), "任务一", ProjectPlanStage.Design, .2m, [predecessor], "DesignLead", 1, false, true, 10),
             new(Guid.NewGuid(), "任务二", ProjectPlanStage.Design, .3m, [10], "DesignLead", 1, false, true, 20),
@@ -1070,7 +1073,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Draft_is_editable_without_reason_and_cannot_execute_or_remind()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -1093,7 +1096,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Draft_allows_only_custom_tasks_to_be_added_or_removed()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -1127,7 +1130,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Only_assigned_division_manager_can_approve_current_submission()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -1157,7 +1160,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Custom_stage_order_and_template_snapshot_drive_generated_plan()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -1182,11 +1185,12 @@ public sealed class ProjectPlanningServiceTests
     [InlineData(UserRole.ProductionViewer)]
     public async Task Project_manager_can_manage_personal_but_not_system_templates_for_any_base_role(UserRole role)
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         await pdm.SetMainProjectStaffingAsync(project.Id, new("pm", [], ["designer"]), "admin", default);
+        await PermissionTestUsers.Ensure(pdm, ("pm", role));
         var permissions = await pdm.GetRolePermissionsAsync(role, default);
         await pdm.SetRolePermissionsAsync(role.ToString(), permissions.Append(PermissionCodes.ProjectPlanEdit).ToArray(), default);
         var shared = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
@@ -1205,7 +1209,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task Administrator_can_replace_the_system_default_with_a_personal_template()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -1225,7 +1229,7 @@ public sealed class ProjectPlanningServiceTests
     [Fact]
     public async Task SystemTemplateEditingUsesIndependentPermission()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = BusinessTestRepository.Create(TimeProvider.System);
         await PermissionTestUsers.Ensure(pdm, ("admin", UserRole.Administrator), ("actor", UserRole.Engineer));
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var shared = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));

@@ -71,7 +71,7 @@ public sealed class DrawingModelPairingTests
 
     private static async Task<(InMemoryPdmRepository,Project,PdmDocument,PdmDocument,PdmDocument,PdmDocument,PdmDocument?,BomItem[])> Prepare(bool independentPartDrawing,bool nested=true)
     {
-        var repo=new InMemoryPdmRepository(TimeProvider.System);
+        var repo=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project=await repo.CreateProjectAsync(new("PAIR-"+Guid.NewGuid().ToString("N"),"图模一一对应","admin","vault","release"),"admin",default);
         var session=Guid.NewGuid();
         var part=await ArchiveBatchTests.Register(repo,project,"ASM-01",DocumentKind.Part,session);

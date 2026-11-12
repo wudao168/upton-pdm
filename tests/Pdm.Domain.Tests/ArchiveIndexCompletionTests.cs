@@ -13,7 +13,7 @@ public sealed class ArchiveIndexCompletionTests
     [InlineData(DocumentKind.Drawing)]
     public async Task SameNativeBytesCanCompletePendingIndexOnce(DocumentKind kind)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("INDEX-" + Guid.NewGuid().ToString("N"), "补全索引", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var suffix = kind == DocumentKind.Part ? ".SLDPRT" : kind == DocumentKind.Drawing ? ".SLDDRW" : ".SLDASM";
@@ -51,7 +51,7 @@ public sealed class ArchiveIndexCompletionTests
     [Fact]
     public async Task EmptyClientPropertyFallbackPreservesExistingVersionAndBomValues()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("PROPS-" + Guid.NewGuid().ToString("N"), "属性读失败保护", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var part = await ArchiveBatchTests.Register(repository, project, "PART", DocumentKind.Part, session);

@@ -740,9 +740,22 @@ public static class PdmEndpointExtensions
             var visibleFolderIds = folders.Where(folder => (folder.EffectiveAccess & FolderAccess.View) != 0).Select(folder => folder.Id).ToHashSet();
             var documents = await repository.ListDocumentsAsync(projectId, cancellationToken);
             var drawingReviewLockedIds = await repository.ListActiveDrawingReviewDocumentIdsAsync(projectId, cancellationToken);
-            return Results.Ok(documents
+            return Results.Ok(await new DocumentOperationAccessService(repository).ApplyAsync(projectId, documents
                 .Where(document => document.FolderId is Guid folderId && visibleFolderIds.Contains(folderId))
-                .Select(document => document with { DrawingReviewLocked = drawingReviewLockedIds.Contains(document.Id) }));
+                .Select(document => document with { DrawingReviewLocked = drawingReviewLockedIds.Contains(document.Id) }), actor, role, cancellationToken));
+        });
+
+        api.MapGet("/documents/{documentId:guid}", async (Guid documentId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var document = await repository.FindDocumentAsync(documentId, cancellationToken);
+            if (document is null) return Results.NotFound();
+            if (!await repository.HasProjectContentReadAccessAsync(document.ProjectId, actor, role, cancellationToken)
+                || !await repository.HasDocumentAccessAsync(documentId, actor, role, FolderAccess.View, cancellationToken)) return Results.Forbid();
+            var drawingReviewLockedIds = await repository.ListActiveDrawingReviewDocumentIdsAsync(document.ProjectId, cancellationToken);
+            document = document with { DrawingReviewLocked = drawingReviewLockedIds.Contains(document.Id) };
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Ok((await new DocumentOperationAccessService(repository).ApplyAsync(document.ProjectId, [document], actor, role, cancellationToken)).Single());
         });
 
         api.MapGet("/projects/{projectId:guid}/folders", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -2152,11 +2165,12 @@ public static class PdmEndpointExtensions
             return Results.Ok(await ProjectActivityFeed.ReadAsync(repository, actor, role, clock.GetUtcNow(), ct));
         });
 
-        api.MapGet("/notifications/mine", async (int? take, HttpContext context, IPdmRepository repository, NotificationInboxService inbox, CancellationToken cancellationToken) =>
+        api.MapGet("/notifications/mine", async (int? take, HttpContext context, IPdmRepository repository, NotificationInboxService inbox, QualityReviewService quality, CancellationToken cancellationToken) =>
         {
             var (actor, _) = CurrentUser(context.User);
             await inbox.ReconcileAsync(actor, cancellationToken);
             var notifications = await repository.ListUserNotificationsAsync(actor, take ?? 100, cancellationToken);
+            notifications = await quality.FilterNotificationsAsync(notifications, actor, cancellationToken);
             var oplProjects = new HashSet<Guid>();
             foreach (var projectId in notifications.Where(item => item.Category == ProjectOplService.AssignmentCategory)
                 .Select(item => item.ProjectId).OfType<Guid>().Distinct())

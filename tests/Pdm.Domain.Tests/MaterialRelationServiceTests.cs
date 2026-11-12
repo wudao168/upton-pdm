@@ -10,7 +10,7 @@ public sealed partial class MaterialRelationServiceTests
     public async Task MechanicalGrantCannotAddElectricalAccessoriesWithoutElectricalProjectPermission()
     {
         var clock = TimeProvider.System;
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(clock);
         await PermissionTestUsers.Ensure(pdm, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         var materials = new InMemoryMaterialRepository(clock);
         var relations = new InMemoryMaterialRelationRepository();
@@ -39,7 +39,7 @@ public sealed partial class MaterialRelationServiceTests
     public async Task UniqueAccessory_RequiresExplicitSelectionAndKeepsEachMainRowIndependent()
     {
         var clock = TimeProvider.System;
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(clock);
         var materials = new InMemoryMaterialRepository(clock);
         var relations = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(relations, materials, pdm, clock);
@@ -138,7 +138,7 @@ public sealed partial class MaterialRelationServiceTests
     public async Task LegacyProjectWideFingerprintReview_IsNotTreatedAsPending()
     {
         var clock = TimeProvider.System;
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(clock);
         var materials = new InMemoryMaterialRepository(clock);
         var relations = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(relations, materials, pdm, clock);
@@ -168,7 +168,7 @@ public sealed partial class MaterialRelationServiceTests
     public async Task NoAccessoryConfirmation_IsRecordedAndQuantityChangeReturnsToPending()
     {
         var clock = TimeProvider.System;
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(clock);
         var materials = new InMemoryMaterialRepository(clock);
         var relations = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(relations, materials, pdm, clock);

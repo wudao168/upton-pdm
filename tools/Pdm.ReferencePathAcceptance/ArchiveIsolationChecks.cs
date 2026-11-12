@@ -114,7 +114,8 @@ internal static partial class Program
         }).GetTransparentProxy()).ToArray();
         var model = new DrawingProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call => {
             if (call.MethodName == "GetType") return 3;
-            if (call.MethodName == "GetViews") return new object[] { views };
+            // SOLIDWORKS returns the sheet view first; model views follow it.
+            if (call.MethodName == "GetViews") return new object[] { new object[] { null }.Concat(views).ToArray() };
             throw new Exception(call.MethodName);
         }).GetTransparentProxy();
         var drawing = Node(drawingPath, "Drawing");
@@ -140,7 +141,7 @@ internal static partial class Program
         }).GetTransparentProxy();
         var model = new DrawingProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call => {
             if (call.MethodName == "GetType") return 3;
-            if (call.MethodName == "GetViews") return new object[] { new[] { view } };
+            if (call.MethodName == "GetViews") return new object[] { new object[] { null, view } };
             throw new Exception(call.MethodName);
         }).GetTransparentProxy();
         foreach (var listed in new[] { false, true })
@@ -276,6 +277,7 @@ internal static partial class Program
             throw new Exception(call.MethodName);
         }).GetTransparentProxy();
         var scanner = New("SolidWorksReferenceTreeScanner", app);
+        SetField(scanner, "strictStructure", true);
         SetField(scanner, "scannedDocumentPath", owner);
         SetField(scanner, "activeDocumentDirectory", Path.GetDirectoryName(folder));
         ((IList)scanner.GetType().GetField("assemblyPaths", Flags).GetValue(scanner)).Add(owner);

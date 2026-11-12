@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import DepartmentSelectField from './DepartmentSelectField.vue'
+import DepartmentName from './DepartmentName.vue'
 import PersonName from './PersonName.vue'
 import ParallelApprovalStatus from './ParallelApprovalStatus.vue'
 import { computed, ref, watch } from 'vue'
@@ -147,7 +149,7 @@ watch(() => props.requestedId, () => { if (!draft.value) void load() })
     <form v-if="draft" class="pdm-panel expense-form" @submit.prevent="save(true)">
       <fieldset :disabled="busy" class="expense-fields">
         <label>申请用途<select v-model="draft.purpose" aria-label="申请用途"><option value="SitePurchase">现场采购</option><option value="RepairSupplement">维修补订</option></select></label>
-        <label>审批部门<select v-model="draft.department" aria-label="审批部门"><option value="Procurement">采购部</option><option value="SupplyChain">供应链</option></select></label>
+        <label>审批部门<DepartmentSelectField :name="draft.department === 'Procurement' ? '采购部' : '供应链'"><select v-model="draft.department" aria-label="审批部门"><option value="Procurement">采购部</option><option value="SupplyChain">供应链</option></select></DepartmentSelectField></label>
         <label>需求日期<span class="required">*</span><input :value="draft.requiredOn" @input="draft.requiredOn = ($event.target as HTMLInputElement).value || null" aria-label="需求日期" type="date" required /></label>
         <label class="expense-reason">申请原因<span class="required">*</span><textarea v-model="draft.reason" aria-label="申请原因" maxlength="2000" rows="2" required /></label>
       </fieldset>
@@ -175,7 +177,7 @@ watch(() => props.requestedId, () => { if (!draft.value) void load() })
     </form>
     <template v-else>
       <div class="expense-table-scroll"><table class="expense-list"><thead><tr><th>申请用途</th><th>申请人</th><th>需求日期</th><th>审批部门</th><th>预计总金额</th><th>状态</th><th>当前节点</th><th>操作</th></tr></thead>
-        <tbody><tr v-for="view in directory?.requests ?? []" :key="view.request.id"><td>{{ expensePurpose(view.request.purpose) }}</td><td><PersonName :name="displayName(view.request.applicant)" /></td><td>{{ view.request.requiredOn || '待填写' }}</td><td>{{ view.request.department === 'Procurement' ? '采购部' : '供应链' }}</td><td>{{ view.canViewAmount === false ? '无权查看' : money(view.request.totalAmount) }}</td><td>{{ expenseStatus(view.request.status) }}</td><td>{{ view.request.currentStep?.name || '—' }}</td><td><button type="button" class="pdm-text-action" @click="select(view)">{{ view.canApprove ? '查看并审批' : '查看' }}</button></td></tr>
+        <tbody><tr v-for="view in directory?.requests ?? []" :key="view.request.id"><td>{{ expensePurpose(view.request.purpose) }}</td><td><PersonName :name="displayName(view.request.applicant)" /></td><td>{{ view.request.requiredOn || '待填写' }}</td><td><DepartmentName :name="view.request.department === 'Procurement' ? '采购部' : '供应链'" /></td><td>{{ view.canViewAmount === false ? '无权查看' : money(view.request.totalAmount) }}</td><td>{{ expenseStatus(view.request.status) }}</td><td>{{ view.request.currentStep?.name || '—' }}</td><td><button type="button" class="pdm-text-action" @click="select(view)">{{ view.canApprove ? '查看并审批' : '查看' }}</button></td></tr>
         <tr v-if="directory && !directory.requests.length"><td colspan="8">暂无费用申请</td></tr></tbody>
       </table></div>
       <article v-if="selected" class="pdm-panel expense-detail">

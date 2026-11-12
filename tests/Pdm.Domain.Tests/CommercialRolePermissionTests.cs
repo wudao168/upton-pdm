@@ -21,12 +21,7 @@ public sealed class CommercialRolePermissionTests
             PresalesPeople: roleCode == "PresalesEngineer" ? "commercial" : "other"), 0, default);
         Assert.True(await repository.HasProjectReadAccessAsync(project.Id, "commercial", UserRole.ProductionViewer, default));
         Assert.True(await repository.HasProjectContentReadAccessAsync(project.Id, "commercial", UserRole.ProductionViewer, default));
-        var user = await repository.FindUserAsync("commercial", default);
-        Assert.True(await CommercialProjectAccess.CanReadAsync(project with { Id = Guid.NewGuid(), RootProjectId = project.Id, ParentProjectId = project.Id },
-            user, "commercial", UserRole.ProductionViewer, contacts, default));
-        Assert.False(await CommercialProjectAccess.CanReadAsync(project with { Id = Guid.NewGuid(), RootProjectId = Guid.NewGuid() },
-            user, "commercial", UserRole.ProductionViewer, contacts, default));
-        Assert.Single(await repository.ListProjectsForUserAsync("commercial", UserRole.ProductionViewer, default));
+        Assert.Single(await ((IPdmRepository)repository).ListProjectHeadersForUserAsync("commercial", UserRole.ProductionViewer, default));
         var folders = await repository.ListProjectFoldersAsync(project.Id, "commercial", UserRole.ProductionViewer, default);
         foreach (var key in new[] { "presales", "customer-files" })
         {
@@ -40,5 +35,6 @@ public sealed class CommercialRolePermissionTests
         Assert.DoesNotContain(PermissionCodes.DrawingReviewDecide, permissions);
         await contacts.SaveAsync(new(project.Id, SalesPeople: "other", PresalesPeople: "other"), 1, default);
         Assert.False(await repository.HasProjectContentReadAccessAsync(project.Id, "commercial", UserRole.ProductionViewer, default));
+        Assert.Empty(await ((IPdmRepository)repository).ListProjectHeadersForUserAsync("commercial", UserRole.ProductionViewer, default));
     }
 }

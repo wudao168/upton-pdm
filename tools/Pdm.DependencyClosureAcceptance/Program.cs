@@ -107,9 +107,11 @@ Check((await repository.ListDocumentVersionsAsync(owner.Id,default)).Single().Id
 Check((await repository.ListDocumentVersionsAsync(main.Id,default)).Single().Id==bases[main.Id].Id,"总装原生文件未修改时版本保持不变");
 var indexes=await repository.ListNativeReferenceIndexesAsync(project.Id,default);
 Check(indexes.Any(index=>index.DocumentId==owner.Id&&index.Children.Count==ownerFiles.Count+directModels.Count),"历史依赖索引独立保存，完整保留已有组件与八个漏档组件");
-var ownerManifest=await service.CreateControlledOpenManifestAsync(owner.Id,null,false,false,"admin",UserRole.Administrator,default);
+var pinnedOwnerManifest=await service.CreateControlledOpenManifestAsync(owner.Id,null,false,false,"admin",UserRole.Administrator,default);
+Check(pinnedOwnerManifest.Files.Count==oldManifest.Files.Count,"未确认更新引用时保持原工程版本的引用，不静默切换到补全后的最新集合");
+var ownerManifest=await service.CreateControlledOpenManifestAsync(owner.Id,null,false,false,"admin",UserRole.Administrator,default,resolveLegacyReferences:true);
 Check(ownerManifest.Files.Count==ownerFiles.Count+1,"子装配打开最新返回全部实际依赖，包含已有零件和八个补齐零件");
-var mainManifest=await service.CreateControlledOpenManifestAsync(main.Id,null,false,false,"admin",UserRole.Administrator,default);
+var mainManifest=await service.CreateControlledOpenManifestAsync(main.Id,null,false,false,"admin",UserRole.Administrator,default,resolveLegacyReferences:true);
 Check(mainManifest.Files.Count==catalog.Catalog.Count,"大装配打开最新返回完整原生文件集合");
 Check((await repository.FindArchiveBatchAsync(batchId,default))!.Results.Count==commits.Count,"服务端完整回执可查询，不误报部分成功");
 await repository.CheckInBatchVersionsAsync(batchId,"repair","admin",session,commits,default);
@@ -129,6 +131,13 @@ var failed=false;try{await repository.CheckInBatchVersionsAsync(Guid.NewGuid(),"
 var rootIndexAfter=await IndexState();
 if(!failed||rootIndexAfter!=rootIndexBefore){await File.WriteAllTextAsync(Path.Combine(output,"rollback-before.json"),rootIndexBefore);await File.WriteAllTextAsync(Path.Combine(output,"rollback-after.json"),rootIndexAfter);}
 Check(failed&&rootIndexAfter==rootIndexBefore,"后续文件失败时依赖索引也整批回滚");
+if(args.Contains("--dependency-only",StringComparer.Ordinal))
+{
+ await File.WriteAllTextAsync(Path.Combine(output,"backend-results.json"),JsonSerializer.Serialize(new{passed=true,checks=passed,provider,productionDataWritten=false,
+  scope="dependency closure, immutable versions, idempotency and atomic rollback; native geometry projection excluded",nativeFiles=catalog.Catalog.Count},json));
+ Console.WriteLine("Passed="+passed+"; dependency-only; production data not written.");
+ return;
+}
 var isolatedName="PSU-08OG-20250301014805833.SLDPRT";
 var isolatedDocument=await repository.CheckoutAsync(docs[isolatedName].Id,"admin",session,"CLOSURE-QA",DateTimeOffset.UtcNow.AddMinutes(30),null,default);
 var isolatedBase=(await repository.ListDocumentVersionsAsync(isolatedDocument.Id,default)).First();

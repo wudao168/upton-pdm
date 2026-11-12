@@ -19,7 +19,7 @@ public sealed class CanceledProcurementApiTests
             signingCredentials:new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")),SecurityAlgorithms.HmacSha256));
         client.DefaultRequestHeaders.Authorization=new("Bearer",new JwtSecurityTokenHandler().WriteToken(token));
         var repository=scope.ServiceProvider.GetRequiredService<IPdmRepository>();var now=DateTimeOffset.UtcNow;
-        var project=await repository.CreateProjectAsync(new("CANCEL-"+Guid.NewGuid().ToString("N"),"取消备料接口验收","admin","vault","release"),"admin",default);
+        var project=await ApiTestAuthorization.CreateProjectAsync(repository, new("CANCEL-"+Guid.NewGuid().ToString("N"),"取消备料接口验收","admin","vault","release"),"admin",default);
         var item=new BomItem(Guid.NewGuid(),project.Id,BomKind.Standard,1,"01021000192","6004ZZ",2,"001",null,"6004ZZ","W1",true);
         await repository.CreateReleasePackageAsync(new(Guid.NewGuid(),project.Id,"RP-ORIGINAL",ReleasePackageState.Published,null,"","",[],now.AddMinutes(-3),now.AddMinutes(-2),null)
             {Scope=ReleaseScope.StandardFormal,StandardBomSnapshot=[item]},default);

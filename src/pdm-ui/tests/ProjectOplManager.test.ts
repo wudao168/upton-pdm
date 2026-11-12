@@ -131,7 +131,7 @@ describe('OPL drawer', () => {
     const [file, exported, metadata] = exporter.downloadOplWorkbook.mock.calls[0]!
     expect(file).toBe('P700012_OPL_202610141200.xlsx')
     expect(exported).toHaveLength(30)
-    expect(exported[26]).toEqual([27,'P700012-1','高','待处理','完整描述26\n第二行','证据.txt','完整解决措施','2020-01-01','王工','—','2026-10-12','admin'])
+    expect(exported[26]).toEqual([27,'P700012-1','高','待处理','完整描述26\n第二行','证据.txt','完整解决措施','2020-01-01','王工','—','2026-10-12','姓名待补充'])
     expect(metadata).toMatchObject({title:'OPL开口问题清单',scope:'当前主项目及子项目 · 全部30条',notes:'完整导出，包含全部状态，不受列表筛选与分页影响'})
   })
 

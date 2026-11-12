@@ -10,6 +10,15 @@ function Expect-Failure([scriptblock]$Action) {
     if (-not $failed) { throw '应拒绝无效或不完整的备份，但操作意外成功。' }
 }
 try {
+    $runtimeRoot = Join-Path $root 'relocated-install'
+    $runtimeBin = Join-Path $runtimeRoot '.runtime\mysql-8.4.11-winx64\bin'
+    New-Item -ItemType Directory -Path $runtimeBin -Force | Out-Null
+    $expectedTool = Join-Path $runtimeBin 'mysql.exe'
+    [IO.File]::WriteAllText($expectedTool, '仅用于路径核对，不执行')
+    $movedReceipt = [pscustomobject]@{ mysqlHome = Join-Path $root 'previous-install'; mysqlVersion = '8.4.11' }
+    if ((Resolve-PdmMySqlTool $runtimeRoot $movedReceipt 'mysql.exe') -ne $expectedTool) { throw '安装目录迁移后未识别同版本数据库工具。' }
+    Expect-Failure { Resolve-PdmMySqlTool $runtimeRoot ($movedReceipt | Select-Object mysqlHome, @{n='mysqlVersion';e={'8.4.12'}}) 'mysql.exe' }
+    Expect-Failure { Resolve-PdmMySqlTool $runtimeRoot ($movedReceipt | Select-Object mysqlHome, @{n='mysqlVersion';e={'..\other'}}) 'mysql.exe' }
     $vault = Join-Path $root 'old-vault'
     $attachments = Join-Path $root 'attachments'
     $destination = Join-Path $root 'backup'
@@ -28,6 +37,7 @@ try {
     $manifest = Copy-PdmStorageSources $plan $destination
     if ($manifest.sources.Count -ne 2 -or $manifest.files.Count -ne 3 -or $manifest.references.Count -ne 3) { throw '备份覆盖范围或去重结果不正确。' }
     Test-PdmStorageBackupFiles $manifest $destination
+    Test-PdmStorageBackupFiles ([pscustomobject]@{ format = 'upton-pdm-backup-v1'; files = $manifest.files }) $destination
     if (-not (Test-Path -LiteralPath $sourceFiles[0])) { throw '测试期间不应移除源档案。' }
     Expect-Failure { Resolve-PdmBackupPath $destination '..\outside.txt' }
     $missing = [pscustomobject]@{ sources = $plan.sources; references = @($references) + @([pscustomobject]@{ path = (Join-Path $attachments 'missing.pdf'); length = 1; sha256 = 'A'; category = '缺失档案' }) }

@@ -9,7 +9,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task ReleasedKitCanShareConfigurationAndEachReferenceSelectsAccessoriesOnce()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var kits = new InMemoryEngineeringKitRepository();
         var store = new InMemoryMaterialRelationRepository();

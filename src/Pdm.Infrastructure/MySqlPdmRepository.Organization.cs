@@ -30,7 +30,7 @@ public sealed partial class MySqlPdmRepository
         var managerRows = await connection.QueryAsync<OrganizationManagerRow>(new CommandDefinition(
             "SELECT unit_id,username,is_primary FROM organization_unit_manager ORDER BY unit_id,is_primary DESC,username",
             cancellationToken: cancellationToken));
-        var users = await ListUsersAsync(cancellationToken);
+        var users = await ListUsersAsync(connection, cancellationToken);
         var companyAccess = (await connection.QueryAsync<UserCompanyAccessRow>(new CommandDefinition(
             "SELECT user_account.username,access_grant.accessible_company_id CompanyId FROM user_company_access access_grant INNER JOIN pdm_user user_account ON user_account.id=access_grant.user_id ORDER BY user_account.username,access_grant.accessible_company_id",
             cancellationToken: cancellationToken))).GroupBy(item => item.Username, StringComparer.OrdinalIgnoreCase)

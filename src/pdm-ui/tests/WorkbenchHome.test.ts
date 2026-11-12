@@ -1,7 +1,9 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { computed, ref, type Ref } from 'vue'
 import WorkbenchHome from '../src/components/WorkbenchHome.vue'
+import { projectCenterAccessKey, projectCenterSchema } from '../src/projectCenterAccess'
 import type { DocumentNode, ProjectSummary } from '../src/types'
 
 const apiMocks = vi.hoisted(() => ({
@@ -12,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   getMaterialRelationCompleteness: vi.fn(),
   getProjectProcurementTracking: vi.fn(),
   readProjectOverviewRecords: vi.fn(),
+  readProjectOpl: vi.fn(),
   addProjectManagerNote: vi.fn(),
   createProjectTodo: vi.fn(),
 }))
@@ -40,6 +43,7 @@ const project = {
   canManageMainStaffing: true,
   canAssignDesigners: true,
   canReadContent: true,
+  effectiveProjectPermissions: ['project.opl.view'],
 } satisfies ProjectSummary
 
 const childProject = {
@@ -61,6 +65,7 @@ const childProject = {
   canManageMainStaffing: false,
   canAssignDesigners: true,
   canReadContent: true,
+  effectiveProjectPermissions: ['project.opl.view'],
 } satisfies ProjectSummary
 
 const selected = {
@@ -71,12 +76,36 @@ const selected = {
   configuration: '默认',
 } as DocumentNode
 
+const oplRows = (count: number, relatedProjectId = project.id, status = '待处理') => Array.from({ length: count }, (_, index) => ({
+  issue: { id: `${relatedProjectId}-${status}-${index}`, relatedProjectId, status },
+}))
+
+function mountOverview(overrides: Partial<InstanceType<typeof WorkbenchHome>['$props']> = {}, permissions?: Ref<string[]>) {
+  return mount(WorkbenchHome, {
+    props: {
+      project, projects: [project, childProject], users: [], selected, hasDocuments: false,
+      modelCount: 0, drawingCount: 0, bomPendingCount: 0, pendingBomItems: [], standardCount: 0,
+      nonStandardCount: 0, electricalCount: 0, standardItemIds: [], nonStandardItemIds: [], electricalItemIds: [],
+      drawingReviews: [], materialApplications: [], releasePackages: [], releasePackage: null,
+      pending: false, token: 'token', canAddManagerNote: false, ...overrides,
+    },
+    global: { plugins: [ElementPlus], provide: permissions ? { [projectCenterAccessKey as symbol]: computed(() => permissions.value) } : {} },
+  })
+}
+
+function detailRows(label: '待处理' | '审批中') {
+  return [...document.body.querySelectorAll(`[aria-label="${label}事项明细"] tbody tr`)]
+    .map(row => [...row.querySelectorAll('td')].map(cell => cell.textContent))
+}
+
 describe('WorkbenchHome', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
     vi.setSystemTime(new Date('2026-09-25T08:00:00+08:00'))
     apiMocks.readProjectRiskOverview.mockResolvedValue([])
+    apiMocks.readProjectOpl.mockResolvedValue({ rows: [] })
     apiMocks.readProjectPlanPortfolio.mockResolvedValue({
       rootProjectId: 'project-root', currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedFinish: '2026-10-18',
       projects: [{ projectId: 'project-root', projectCode: 'P700001', projectName: '气密设备', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging: false, isAtRisk: false,
@@ -103,6 +132,190 @@ describe('WorkbenchHome', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('待处理按事项类别计数，抽屉保留各类明细数量并打开对应BOM或OPL', async () => {
+    apiMocks.getMaterialRelationCompleteness.mockResolvedValue({ incompleteGroupCount: 0 })
+    apiMocks.readProjectOpl.mockResolvedValue({ rows: [
+      ...oplRows(5), ...oplRows(2, project.id, '已完成'), ...oplRows(1, project.id, '已作废'),
+    ] })
+    const wrapper = mountOverview({
+      bomPendingCount: 25,
+      pendingBomItems: [
+        ...Array.from({ length: 15 }, (_, index) => ({ id: `standard-${index}`, kind: 'Standard' })),
+        ...Array.from({ length: 10 }, (_, index) => ({ id: `non-standard-${index}`, kind: 'NonStandard' })),
+        { id: 'excluded', kind: 'Electrical', manuallyExcluded: true },
+      ] as never,
+    })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('3')
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    expect(detailRows('待处理')).toEqual([
+      ['标准件BOM', '待处理', '15', '查看明细'],
+      ['非标件BOM', '待处理', '10', '查看明细'],
+      ['OPL', '待处理', '5', '查看明细'],
+    ])
+    ;(document.body.querySelector('[aria-label="查看标准件BOM待处理明细"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(wrapper.emitted('bom')).toEqual([['Standard']])
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    ;(document.body.querySelector('[aria-label="查看OPL待处理明细"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(wrapper.emitted('opl')).toEqual([[]])
+    wrapper.unmount()
+  })
+
+  it('待分类行即使已有物料类型也归入BOM分类，明细进入源结构分类入口', async () => {
+    apiMocks.getMaterialRelationCompleteness.mockResolvedValue({ incompleteGroupCount: 0 })
+    const wrapper = mountOverview({ pendingBomItems: [
+      { id: 'standard', kind: 'Standard' }, { id: 'non-standard', kind: 'NonStandard' },
+      { id: 'pending-standard', kind: 'Standard', pendingClassification: true },
+      { id: 'pending-non-standard', kind: 'NonStandard', pendingClassification: true },
+      { id: 'unknown', kind: 'Unclassified' },
+    ] as never })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('3')
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    expect(detailRows('待处理')).toEqual([
+      ['标准件BOM', '待处理', '1', '查看明细'],
+      ['非标件BOM', '待处理', '1', '查看明细'],
+      ['BOM分类', '待处理', '3', '查看明细'],
+    ])
+    ;(document.body.querySelector('[aria-label="查看BOM分类待处理明细"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(wrapper.emitted('bom')).toEqual([['Unclassified']])
+    wrapper.unmount()
+  })
+
+  it('审批中按类别合并单据，包含工艺审核、待批准和主管审核，当前发布单不重复计算', async () => {
+    apiMocks.readProjectValidationPlan.mockResolvedValue({ state: 'Draft' })
+    const releases = [
+      { id: 'standard-a', scope: 'StandardFormal', state: '工艺审核' },
+      { id: 'standard-b', scope: 'StandardFormal', state: '待批准' },
+      { id: 'non-standard', scope: 'NonStandardWithDrawing', state: '审批中' },
+      { id: 'released', scope: 'ElectricalFormal', state: '已发布' },
+    ]
+    const wrapper = mountOverview({
+      releasePackages: releases as never, releasePackage: releases[0] as never,
+      drawingReviews: [
+        { id: 'drawing-a', state: 'InReview' }, { id: 'drawing-b', state: 'PendingSupervisorApproval' },
+        { id: 'drawing-c', state: 'WritingProperties' }, { id: 'drawing-d', state: 'Approved' },
+      ] as never,
+    })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看审批中"] strong').text()).toBe('3')
+    await wrapper.get('[aria-label="查看审批中"]').trigger('click'); await flushPromises()
+    expect(detailRows('审批中')).toEqual([
+      ['图档审核', '审批中', '3', '查看明细'],
+      ['标准件BOM', '审批中', '2', '查看明细'],
+      ['非标件BOM', '审批中', '1', '查看明细'],
+    ])
+    ;(document.body.querySelector('[aria-label="查看标准件BOM审批中明细"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(wrapper.emitted('release')).toEqual([[]])
+    wrapper.unmount()
+  })
+
+  it('没有未处理和审批事项时，两张卡片及抽屉均显示零和中文空态', async () => {
+    apiMocks.getMaterialRelationCompleteness.mockResolvedValue({ incompleteGroupCount: 0 })
+    apiMocks.readProjectValidationPlan.mockResolvedValue({ state: 'Approved' })
+    const wrapper = mountOverview()
+    await flushPromises()
+    for (const label of ['待处理', '审批中'] as const) {
+      expect(wrapper.get(`[aria-label="查看${label}"] strong`).text()).toBe('0')
+      await wrapper.get(`[aria-label="查看${label}"]`).trigger('click'); await flushPromises()
+      expect(detailRows(label)).toEqual([[`暂无${label}事项`]])
+      ;([...document.body.querySelectorAll('button')].find(button => button.textContent === '关闭') as HTMLButtonElement).click()
+      await flushPromises()
+    }
+    wrapper.unmount()
+  })
+
+  it('未授权不请求受限事项，授权后可见，动态撤销立即清空且刷新不再请求', async () => {
+    const permissions = ref([projectCenterSchema, 'project.tab.overview.view'])
+    apiMocks.readProjectOpl.mockResolvedValue({ rows: oplRows(5) })
+    const wrapper = mountOverview({ pendingBomItems: [{ id: 'standard', kind: 'Standard' }] as never }, permissions)
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    expect(apiMocks.readProjectOpl).not.toHaveBeenCalled()
+    expect(apiMocks.getMaterialRelationCompleteness).not.toHaveBeenCalled()
+    expect(apiMocks.readProjectValidationPlan).not.toHaveBeenCalled()
+    permissions.value.push('project.tab.bom.view', 'project.content.write', 'project.tab.opl.view', 'project.tab.validation-plan.view')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('3')
+    expect(wrapper.get('[aria-label="查看审批中"] strong').text()).toBe('1')
+    expect(apiMocks.readProjectOpl).toHaveBeenCalledWith(project.id, 'token', false)
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    expect(detailRows('待处理').map(row => row[0])).toEqual(['标准件BOM', '关联物料', 'OPL'])
+    permissions.value = [projectCenterSchema, 'project.tab.overview.view']
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    expect(wrapper.get('[aria-label="查看审批中"] strong').text()).toBe('0')
+    vi.clearAllMocks()
+    await wrapper.get('[aria-label="刷新项目概览"]').trigger('click'); await flushPromises()
+    expect(apiMocks.readProjectOpl).not.toHaveBeenCalled()
+    expect(apiMocks.getMaterialRelationCompleteness).not.toHaveBeenCalled()
+    expect(apiMocks.readProjectValidationPlan).not.toHaveBeenCalled()
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    expect(detailRows('待处理')).toEqual([['暂无待处理事项']])
+    wrapper.unmount()
+  })
+
+  it('保留OPL页签时仍须项目OPL权限，单独撤销立即隐藏且迟到响应不能回填或打开', async () => {
+    const permissions = ref([projectCenterSchema, 'project.tab.overview.view', 'project.tab.opl.view'])
+    const restricted = { ...project, effectiveProjectPermissions: [] }
+    const wrapper = mountOverview({ project: restricted, projects: [restricted, childProject] }, permissions)
+    await flushPromises()
+    expect(apiMocks.readProjectOpl).not.toHaveBeenCalled()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    apiMocks.readProjectOpl.mockResolvedValue({ rows: oplRows(5) })
+    await wrapper.setProps({ project, projects: [project, childProject] }); await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('1')
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    expect(detailRows('待处理')).toEqual([['OPL', '待处理', '5', '查看明细']])
+    const oldButton = document.body.querySelector('[aria-label="查看OPL待处理明细"]') as HTMLButtonElement
+    let finishOld!: (value: { rows: ReturnType<typeof oplRows> }) => void
+    apiMocks.readProjectOpl.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+    await wrapper.get('[aria-label="刷新项目概览"]').trigger('click'); await flushPromises()
+    await wrapper.setProps({ project: restricted, projects: [restricted, childProject] }); await flushPromises()
+    expect(permissions.value).toContain('project.tab.opl.view')
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    oldButton.click(); await flushPromises()
+    expect(wrapper.emitted('opl')).toBeUndefined()
+    finishOld({ rows: oplRows(99) }); await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    apiMocks.readProjectOpl.mockClear()
+    await wrapper.get('[aria-label="刷新项目概览"]').trigger('click'); await flushPromises()
+    expect(apiMocks.readProjectOpl).not.toHaveBeenCalled()
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    expect(detailRows('待处理')).toEqual([['暂无待处理事项']])
+    wrapper.unmount()
+  })
+
+  it('切换项目清空旧OPL并忽略迟到响应，子项目只统计关联到自己的未完成问题', async () => {
+    apiMocks.getMaterialRelationCompleteness.mockResolvedValue({ incompleteGroupCount: 0 })
+    let finishOld!: (value: { rows: ReturnType<typeof oplRows> }) => void
+    let finishChild!: (value: { rows: ReturnType<typeof oplRows> }) => void
+    apiMocks.readProjectOpl.mockImplementation((id: string) => id === project.id
+      ? new Promise(resolve => { finishOld = resolve })
+      : new Promise(resolve => { finishChild = resolve }))
+      .mockResolvedValueOnce({ rows: oplRows(5) })
+    const wrapper = mountOverview()
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('1')
+    await wrapper.get('[aria-label="刷新项目概览"]').trigger('click'); await flushPromises()
+    await wrapper.setProps({ project: childProject }); await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    finishOld({ rows: oplRows(99) }); await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    finishChild({ rows: [...oplRows(5), ...oplRows(2, childProject.id), ...oplRows(1, childProject.id, '已完成')] })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('1')
+    await wrapper.get('[aria-label="查看待处理"]').trigger('click'); await flushPromises()
+    expect(detailRows('待处理')).toEqual([['OPL', '待处理', '2', '查看明细']])
+    await wrapper.setProps({ token: '' }); await flushPromises()
+    expect(wrapper.get('[aria-label="查看待处理"] strong').text()).toBe('0')
+    wrapper.unmount()
   })
 
   it('仅可见项目的普通人员可查看记录，计划不可读也不影响，维护和待办表单保持关闭', async () => {
@@ -239,7 +452,7 @@ describe('WorkbenchHome', () => {
     expect(shippingCountdown.text()).toContain('已超期6天')
     expect(shippingCountdown.text()).toContain('2026/09/19')
     expect(shippingCountdown.text()).not.toContain('计划发货')
-    expect(wrapper.get('button[aria-label="查看待处理"]').text()).toContain('5')
+    expect(wrapper.get('button[aria-label="查看待处理"] strong').text()).toBe('2')
     expect(wrapper.find('button[aria-label="查看关键物料"]').exists()).toBe(false)
     expect(wrapper.get('[aria-label="项目待办与风险"]').find('.pdm-overview-alerts').element.children).toHaveLength(3)
     expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="项目风险"]').exists()).toBe(true)

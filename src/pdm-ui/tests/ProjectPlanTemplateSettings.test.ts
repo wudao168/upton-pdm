@@ -30,7 +30,7 @@ describe('设置页项目计划模板', () => {
   it('默认责任角色包括项目信息岗位和自定义岗位', async () => {
     const wrapper = render(); await flushPromises()
     const labels = wrapper.findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))
-    for (const role of ['项目经理','协同项目经理','主设计','设计人员','销售','售前','电气工程师','硬件工程师','标准件采购','非标件采购','非标件生产','机械装配','电气装配','调试工程师','验收','测试负责人']) expect(labels).toContain(role)
+    for (const role of ['项目经理','协同项目经理','主设计','设计人员','销售经理','售前工程师','电气工程师','硬件工程师','采购部负责人','供应链负责人','生产负责人','机械装配','电气装配','调试工程师','质量','测试负责人']) expect(labels).toContain(role)
     expect(labels).not.toContain('电气调试')
   })
 

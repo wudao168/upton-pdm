@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElTree } from 'element-plus'
 import { Tag } from '../solidMenuIcons'
 type CategoryNode = { id: string; label: string; isActive?: boolean; children: CategoryNode[] }
 withDefaults(defineProps<{ nodes: CategoryNode[]; modelValue: string; ariaLabel?: string; allLabel?: string; collapsed?: boolean; collapsible?: boolean; defaultExpandAll?: boolean }>(), { ariaLabel: '分类筛选', allLabel: '全部分类' })

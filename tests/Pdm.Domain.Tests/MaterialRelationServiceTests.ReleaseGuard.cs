@@ -9,7 +9,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task ChangingOnlyAnAccessoryStillRequiresItsMainMaterialRelationToBeComplete()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var store = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(store, materials, pdm, TimeProvider.System);
@@ -44,7 +44,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task ReleaseChecksOnlySelectedMainRowsAndDoesNotBlockOnAnotherRowWithTheSameCode()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var service = new MaterialRelationService(new InMemoryMaterialRelationRepository(), materials, pdm, TimeProvider.System);
         var project = await pdm.CreateProjectAsync(new("REL-SCOPE-" + Guid.NewGuid().ToString("N"), "发布范围核对", "admin", "vault", "release"), "admin", default);
@@ -76,7 +76,7 @@ public sealed partial class MaterialRelationServiceTests
     [InlineData(false)]
     public async Task EveryGroupRequiresSelectionOrExplicitNoAccessoryEvenAfterSavingEmptyChoices(bool required)
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var store = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(store, materials, pdm, TimeProvider.System);

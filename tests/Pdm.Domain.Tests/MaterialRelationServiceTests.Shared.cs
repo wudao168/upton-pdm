@@ -13,9 +13,9 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task RetiredRulesKeepExistingBomBoundToItsRevisionAndSkipNewRows()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "关联配置测试员", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var store = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(store, materials, repository, TimeProvider.System);
@@ -51,7 +51,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task SharedRangeIsDraftedThenPublishedAndRemovedAnchorCanJoinAnotherGroup()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var store = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(store, materials, repository, TimeProvider.System);
@@ -75,7 +75,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task EverySharedMainResolvesTheSameRevisionAndKeepsItsOwnBomQuantity()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var service = new MaterialRelationService(new InMemoryMaterialRelationRepository(), materials, repository, TimeProvider.System);
         var a = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "MAIN-A", "M6x18");
@@ -100,7 +100,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task AllSharedMainsRequireTheirOwnCategoryAndAppearInTheirOwnLibraryEntries()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var store = new InMemoryMaterialRelationRepository();
         var library = new InMemoryStandardLibraryRepository();

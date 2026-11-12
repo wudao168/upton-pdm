@@ -97,6 +97,8 @@ internal static class PluginSettingsStore
 internal sealed class PluginUpdateSnapshot
 {
     public string InstalledVersion { get; set; } = string.Empty;
+    public string LoadedVersion { get; set; } = string.Empty;
+    public string DiskVersion { get; set; } = string.Empty;
     public string AvailableVersion { get; set; } = string.Empty;
     public string Status { get; set; } = "尚未检查更新";
     public DateTimeOffset? LastCheckedAt { get; set; }

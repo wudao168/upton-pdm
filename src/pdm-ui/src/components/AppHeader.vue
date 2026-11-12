@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import { Bell, Check, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut, Monitor, Moon, Sun } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
@@ -196,7 +197,7 @@ onUnmounted(() => {
           <span>{{ props.companyName }}</span><ChevronDown :size="14" aria-hidden="true" />
         </button>
         <template #dropdown><el-dropdown-menu>
-          <el-dropdown-item v-for="company in props.accessibleCompanies" :key="company.id" :command="company.id" :class="{ 'is-active-company': company.id === props.activeCompanyId }">{{ company.name }}</el-dropdown-item>
+          <el-dropdown-item v-for="company in props.accessibleCompanies" :key="company.id" :command="company.id" :class="{ 'is-active-company': company.id === props.activeCompanyId }"><CompanyName :name="company.name" /></el-dropdown-item>
         </el-dropdown-menu></template>
       </el-dropdown>
       <span v-else class="pdm-tenant-company" :title="props.companyName">{{ props.companyName }}</span>

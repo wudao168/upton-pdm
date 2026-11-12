@@ -365,7 +365,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
 
     public async Task<StoredFile> CopyVersionAsync(Project sourceProject, Project targetProject, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken)
     {
-        await VerifyStoredFileAsync(sourceProject, source, cancellationToken);
+        await VerifyVersionReadAsync(sourceProject, source, cancellationToken);
         var sourcePath = StorageLocationPolicy.ResolveUnder(sourceProject.VaultLocation, source.RelativePath);
         var targetPath = StorageLocationPolicy.ResolveUnder(targetProject.VaultLocation, relativeTargetPath);
         if (File.Exists(targetPath))

@@ -459,7 +459,9 @@ internal sealed class PluginSettingsDialog : Form
     {
         snapshot = snapshot ?? new PluginUpdateSnapshot();
         installUpdateButton.Text = snapshot.ReadyToInstall ? "安装更新" : "下载并安装";
-        installedVersion.Text = DisplayVersion(snapshot.InstalledVersion);
+        installedVersion.Text = DisplayVersion(string.IsNullOrWhiteSpace(snapshot.LoadedVersion) ? snapshot.InstalledVersion : snapshot.LoadedVersion)
+            + (!string.IsNullOrWhiteSpace(snapshot.DiskVersion) && snapshot.DiskVersion != snapshot.LoadedVersion
+                ? "（磁盘 " + snapshot.DiskVersion + "，重启SolidWorks后生效）" : "");
         availableVersion.Text = DisplayVersion(snapshot.AvailableVersion);
         updateStatus.Text = snapshot.Status ?? string.Empty;
         lastCheckedAt.Text = snapshot.LastCheckedAt.HasValue

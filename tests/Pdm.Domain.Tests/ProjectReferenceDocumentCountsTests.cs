@@ -80,7 +80,7 @@ public sealed class ProjectReferenceDocumentCountsTests
     [Fact]
     public async Task ProjectSummaryExcludesRecycledAndPurgedDrawingsAndRestoresLiveCounts()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new Upton.Pdm.Application.CreateProjectCommand("COUNT-TEST", "计数测试", "admin", "unused", "unused"), "admin", default);
         var drawing = await repository.RegisterDocumentAsync(new Upton.Pdm.Application.RegisterDocumentCommand(project.Id, "COUNT-001", "独立工程图", "COUNT-001.SLDDRW", DocumentKind.Drawing), "admin", default);
         async Task<int?> DrawingCount() => (await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default)).Single(item => item.Id == project.Id).DrawingDocumentCount;

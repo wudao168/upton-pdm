@@ -12,10 +12,11 @@ public sealed class ProjectNameplateServiceTests
     [InlineData("Approver", UserRole.Approver)]
     public async Task AssignedHardwareCanMaintainWithoutProjectEdit(string roleCode, UserRole role)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.CreateUserAsync(new(Guid.NewGuid(), "nameplate-editor", "铭牌维护", "unused", role, true, RoleCode: roleCode), default);
-        await repository.SetRolePermissionsAsync(roleCode, [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit, "project.nameplate.execution.edit"], default);
+        await repository.SetRolePermissionsAsync(roleCode, [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit, "project.nameplate.hardware.edit"], default);
+        await PermissionTestUsers.Scope(repository, roleCode, "project.nameplate.hardware.edit", "current-hardware");
         await repository.SetProjectPhaseOwnersAsync(project.Id, new Dictionary<string, string> { ["ElectricalHardware"] = "nameplate-editor" }, "admin", default);
         var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         Assert.True((await service.GetAsync(project.Id, "nameplate-editor", role, default)).CanEdit);
@@ -27,7 +28,7 @@ public sealed class ProjectNameplateServiceTests
     [Fact]
     public async Task NameplatePermissionRequiresTheAssignedProjectPosition()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer), ("lead", UserRole.Engineer));
         var root = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2,
             Guid.Parse("c0046500-0000-0000-0000-000000000001"), "铭牌权限", null, new(2026, 10, 2), 1, "admin", "D:/test", "D:/release"), default);
@@ -56,7 +57,7 @@ public sealed class ProjectNameplateServiceTests
     [Fact]
     public async Task EachProjectHasItsOwnNameplateAndIdentityComesFromTheProject()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         var other = await repository.CreateProjectAsync(new("NAMEPLATE-2", "第二台设备", "admin", "D:/test", "D:/release"), "admin", default);
         var store = new InMemoryProjectNameplateRepository(repository);
@@ -76,7 +77,7 @@ public sealed class ProjectNameplateServiceTests
     [Fact]
     public async Task ReadAndWriteRequireProjectAccessAndEditingPermission()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView], default);
@@ -88,7 +89,7 @@ public sealed class ProjectNameplateServiceTests
     [Fact]
     public async Task TemplateRequiresAdministratorAndChecksVersionAndFields()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         var template = NameplateTemplate.Default with { Title = "UPTON 设备铭牌" };
@@ -102,7 +103,7 @@ public sealed class ProjectNameplateServiceTests
     [Fact]
     public async Task OverlongManualFieldsAreRejected()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(project.Id, new(true, new string('x', 101), "", "", "", null, 0), "admin", UserRole.Administrator, default));

@@ -41,11 +41,18 @@ public sealed partial class PdmAddin
             if (node.Status == CadReferenceStatus.Virtual || node.IsStoredImport || string.IsNullOrWhiteSpace(node.FullPath)
                 || !known.TryGetValue(Path.GetFileName(node.FullPath), out var file)) continue;
             var expected = Path.GetFullPath(Path.Combine(context.Key, file.RelativePath ?? file.FileName));
+            if (CanUseDeferredArchiveCopy(node, file, expected)) continue;
             if (!PathsEqual(node.FullPath, expected) || node.DocumentId.HasValue && node.DocumentId != file.DocumentId)
                 throw new InvalidOperationException("当前存档结构引用了另一份同名文件，尚未保存、上传或升版，原窗口和修改均保留。请从当前PLM工作区重新打开配套图档。"
                     + "\r\n当前引用：" + node.FullPath + "\r\n受控副本：" + expected);
         }
     }
+
+    private bool CanUseDeferredArchiveCopy(CadTreeNode node, ControlledOpenFileDto file, string expected) =>
+        !PathsEqual(node.FullPath, expected) && IsNativeModelReference(node.FullPath)
+        && (node.IsSuppressed || node.Status == CadReferenceStatus.Missing && !File.Exists(node.FullPath))
+        && (!node.DocumentId.HasValue || node.DocumentId.Value == file.DocumentId)
+        && FindLoadedDocument(node.FullPath) == null && ControlledReferenceMaterializer.Matches(expected, file);
 
     private bool RejectUncontrolledNativeOpen(string fileName)
     {
@@ -134,9 +141,10 @@ public sealed partial class PdmAddin
         var rootPath = ControlledReferenceMaterializer.LocalPath(context.Key, localRoot);
         var manifest = new ControlledOpenManifestDto { Id = requested.Id, ProjectId = requested.ProjectId,
             ProjectCode = requested.ProjectCode, RootDocumentId = requested.RootDocumentId, RootVersionId = requested.RootVersionId,
-            RootRelativePath = localRoot.RelativePath ?? localRoot.FileName, RootRevision = requested.RootRevision, Files = files };
+            RootRelativePath = localRoot.RelativePath ?? localRoot.FileName, RootRevision = requested.RootRevision, Files = files,
+            ReferenceIssues = OpenReferenceFindings.Merge(requested.ReferenceIssues), Warnings = requested.Warnings };
         ControlledOpenBoundary.RequireLoadedSources(application, rootPath, manifest);
-        var missingComponents = acquirePermission ? null : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var missingComponents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var search = new ControlledReferenceSearchScope(application, rootPath, manifest))
         {
             ValidateControlledLoadedSources(loaded.Single(), rootPath, manifest, application, missingComponents);
@@ -150,7 +158,7 @@ public sealed partial class PdmAddin
         {
             var node = new CadTreeNode { DocumentId = localRoot.DocumentId, FullPath = rootPath, FileName = localRoot.FileName,
                 Kind = kind, Configuration = localRoot.Configuration, OpenedVersionId = localRoot.VersionId };
-            if (!await TryAcquireReusableWorkingCopyAsync(new[] { new BatchOperationItem(node, 0) }, requested.ProjectId, localRoot.DocumentId))
+            if (!await TryAcquireReusableWorkingCopyCoreAsync(new[] { new BatchOperationItem(node, 0) }, requested.ProjectId, localRoot.DocumentId, false))
                 throw WorkingModelContextMismatch(localRoot.FileName);
         }
         void VerifyCommittedMemory()
@@ -165,7 +173,7 @@ public sealed partial class PdmAddin
         {
             if (OpenOrActivateDocumentOnSolidWorksThread(rootPath, ToSolidWorksDocumentType(kind), localRoot.Configuration) == null)
                 throw new IOException("尚未激活当前PLM工作副本，原窗口和文件已保留：" + localRoot.FileName);
-            if (missingComponents?.Count > 0)
+            if (missingComponents.Count > 0)
             {
                 missingComponents.Clear();
                 ValidateControlledLoadedSources(loaded.Single(), rootPath, manifest, application, missingComponents);
@@ -173,9 +181,10 @@ public sealed partial class PdmAddin
             search.VerifyLoadedSources(missingComponents);
         }
         VerifyCommittedMemory();
+        if (acquirePermission) CompleteRecordedAcquisitions(new[] { localRoot.DocumentId });
         RememberExplicitProjectPath(rootPath, requested.ProjectId);
         ScheduleTreeRefresh();
-        ReportMissingComponentsOnOpen(missingComponents);
+        ReportMissingComponentsOnOpen(missingComponents, acquirePermission ? "已获取权限" : "已打开", rootPath);
         LogOperation("模型复用当前受控工作区 path=" + rootPath + " context=" + context.Key + " files=" + files.Count
             + " committedMemory=" + committedMemoryFiles.Count + " closed=0 downloaded=0 acquire=" + acquirePermission);
         return true;

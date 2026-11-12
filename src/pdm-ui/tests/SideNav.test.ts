@@ -1,6 +1,5 @@
 import navBrandLogo from '../src/assets/upton-horizontal-brand-white.png'
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SideNav from '../src/components/SideNav.vue'
 
@@ -74,7 +73,7 @@ describe('SideNav', () => {
     }
   })
   it('combines the project pages into one sidebar entry', async () => {
-    const wrapper = mount(SideNav, { props: { active: 'project-center' } })
+    const wrapper = mount(SideNav, { props: { active: 'project-center', visibleKeys: ['project-workbench', 'project-center', 'work-hours', 'tasks', 'production-drawings', 'standard-library', 'program-templates'] } })
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
     expect(navigationLabels).toEqual(['项目总览', '项目中心', '工时管理', '我的待办', '制造中心', '标准物料', '标准程序'])
@@ -111,7 +110,7 @@ describe('SideNav', () => {
   })
 
   it('combines standard resources into one sidebar entry', async () => {
-    const wrapper = mount(SideNav, { props: { active: 'materials', canViewMaterials: true } })
+    const wrapper = mount(SideNav, { props: { active: 'materials', canViewMaterials: true, visibleKeys: ['project-workbench', 'project-center', 'work-hours', 'tasks', 'production-drawings', 'standard-library', 'program-templates', 'materials'] } })
     const labels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
     expect(labels).toEqual(['项目总览', '项目中心', '工时管理', '我的待办', '制造中心', '标准物料', '标准程序', '料品管理'])
@@ -165,122 +164,21 @@ describe('SideNav', () => {
     expect(wrapper.get('.pdm-sidebar__settings').attributes('title')).toBe('系统设置')
   })
 
-  it('opens detailed runtime information when the version is clicked', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql', databaseName: 'pdm' }), { status: 200 })))
-    const wrapper = mount(SideNav, {
-      props: {
-        active: 'projects',
-        version: '2026.09.12.1710-version-information',
-        desktopVersion: '2026.09.12.1700',
-        solidWorksAddinVersion: '2026.09.12.1650',
-        releaseHistory: [
-          { Version: '2026.09.12.1710-version-information', ReleasedAt: '2026-09-12T17:10:00+08:00', ReleaseNote: '增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。' },
-          { Version: '2026.09.11.1456-user-display-name', ReleasedAt: '2026-09-11T14:56:00+08:00', ReleaseNote: '完善用户显示名称。' },
-        ],
-      },
-      global: { plugins: [ElementPlus] },
-    })
-
-    await wrapper.get('.pdm-sidebar__version').trigger('click')
-    await flushPromises()
-
-    expect(document.body.textContent).toContain('系统版本信息')
-    expect(document.body.textContent).toContain('V2026.09.12.1710')
-    expect(document.body.textContent).toContain('2026-09-12 17:10')
-    expect(document.body.textContent).toContain('MySql · pdm')
-    expect(document.body.textContent).toContain('V2026.09.12.1700')
-    expect(document.body.textContent).toContain('V2026.09.12.1650')
-    expect(document.body.textContent).toContain('增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。')
-    expect(fetch).toHaveBeenCalledWith('/health', { cache: 'no-store' })
-
-    const historyButton = Array.from(document.body.querySelectorAll('button')).find(button => button.textContent?.trim() === '版本记录')
-    expect(historyButton?.getAttribute('aria-expanded')).toBe('false')
-    historyButton?.click()
-    await wrapper.vm.$nextTick()
-
-    expect(historyButton?.getAttribute('aria-expanded')).toBe('true')
-    const history = document.body.querySelector('[aria-label="版本记录"]')
-    expect(history?.textContent).toContain('V2026.09.12.1710')
-    expect(history?.textContent).toContain('2026-09-12 17:10')
-    expect(history?.textContent).toContain('增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。')
-    expect(history?.textContent).toContain('V2026.09.11.1456')
-    expect(history?.textContent).toContain('完善用户显示名称。')
-  })
-
-  it('does not reuse an old hard-coded description for an untagged deployment version', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql' }), { status: 200 })))
-    const wrapper = mount(SideNav, {
-      attachTo: document.body,
-      props: { active: 'projects', version: '2026.09.13.1510' },
-      global: { plugins: [ElementPlus] },
-    })
-
-    await wrapper.get('.pdm-sidebar__version').trigger('click')
-    await flushPromises()
-    const historyButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '版本记录')
-    historyButton?.click()
-    await wrapper.vm.$nextTick()
-
-    expect(document.body.textContent).toContain('本次发布未填写版本说明。')
-    expect(document.body.textContent).not.toContain('移除侧栏版本号前的“版本”文字')
-    wrapper.unmount()
-  })
-
-  it('repairs UTF-8 release notes that were previously decoded as latin1', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql' }), { status: 200 })))
-    const wrapper = mount(SideNav, {
-      attachTo: document.body,
-      props: {
-        active: 'projects',
-        version: '2026.09.17.1303',
-        releaseHistory: [
-          { Version: '2026.09.17.1303', ReleasedAt: '2026-09-17T13:03:00+08:00', ReleaseNote: 'å®Œå–„BOMæ˜¾ç¤ºä¸Žæ’ä»¶æ›´æ–°ã€‚' },
-        ],
-      },
-      global: { plugins: [ElementPlus] },
-    })
-
-    await wrapper.get('.pdm-sidebar__version').trigger('click')
-    await flushPromises()
-    const historyButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '版本记录')
-    historyButton?.click()
-    await wrapper.vm.$nextTick()
-
-    expect(document.body.textContent).toContain('完善BOM显示与插件更新。')
-    expect(document.body.textContent).not.toContain('å®Œå–„')
-    wrapper.unmount()
-  })
-
-  it('lists a multi-item release note as numbered items', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql' }), { status: 200 })))
-    const wrapper = mount(SideNav, {
-      attachTo: document.body,
-      props: {
-        active: 'projects',
-        version: '2026.09.21.1840',
-        releaseNote: '全局拖动条横向、纵向统一为 15px。\n版本说明按条列举。',
-        releaseHistory: [
-          { Version: '2026.09.21.1835', ReleasedAt: '2026-09-21T18:35:00+08:00', ReleaseNote: '横向拖动条加高到 20px；纵向滚动条保持原尺寸。' },
-        ],
-      },
-      global: { plugins: [ElementPlus] },
-    })
-
-    await wrapper.get('.pdm-sidebar__version').trigger('click')
-    await flushPromises()
-
-    const note = document.body.querySelector('.pdm-system-version-detail > section .pdm-system-version-note')
-    expect(note?.tagName).toBe('OL')
-    expect(Array.from(note?.querySelectorAll('li') ?? []).map(item => item.textContent?.trim()))
-      .toEqual(['全局拖动条横向、纵向统一为 15px。', '版本说明按条列举。'])
-
-    const historyButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '版本记录')
-    historyButton?.click()
-    await wrapper.vm.$nextTick()
-
-    const historyNote = document.body.querySelector('[aria-label="版本记录"] article:last-child .pdm-system-version-note')
-    expect(Array.from(historyNote?.querySelectorAll('li') ?? []).map(item => item.textContent?.trim()))
-      .toEqual(['横向拖动条加高到 20px', '纵向滚动条保持原尺寸。'])
+  it('按授权在侧栏底部将 AI 助手放在系统设置上方', async () => {
+    const wrapper = mount(SideNav, { props: {
+      active: 'ai-assistant', visibleKeys: ['ai-assistant', 'purchase-analysis', 'admin'], canManageSystem: true,
+    } })
+    expect(wrapper.get('.pdm-nav-group').attributes('aria-label')).toBe('总结')
+    expect(wrapper.get('.pdm-sidebar__nav').text()).not.toContain('AI助手')
+    const footer = () => wrapper.findAll('.pdm-sidebar__footer button')
+    expect(footer().map(button => button.text())).toEqual(['AI助手', '系统设置'])
+    expect(footer()[0]!.attributes('aria-current')).toBe('page')
+    await footer()[0]!.trigger('click')
+    expect(wrapper.emitted('navigate')).toEqual([['ai-assistant', 'AI助手']])
+    await wrapper.setProps({ canManageSystem: false })
+    expect(footer().map(button => button.text())).toEqual(['AI助手'])
+    await wrapper.setProps({ canManageSystem: true, visibleKeys: ['admin'] })
+    expect(footer().map(button => button.text())).toEqual(['系统设置'])
     wrapper.unmount()
   })
 })

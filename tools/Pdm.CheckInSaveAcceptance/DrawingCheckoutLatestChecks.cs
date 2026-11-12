@@ -48,7 +48,10 @@ internal static partial class Program
    var appType=plugin.GetType().GetField("application",Flags).FieldType;var interop=appType.Assembly;var modelType=interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
    var constants=System.Reflection.Assembly.LoadFrom(Path.Combine(Path.GetDirectoryName(plugin.GetType().Assembly.Location),"SolidWorks.Interop.swconst.dll"));
    var reloadReason=Convert.ToInt32(Enum.Parse(constants.GetType("SolidWorks.Interop.swconst.swFileCloseNotifyReason_e"),"swFileCloseNotifyReason_CloseForReload"));
-   var part=new Proxy(modelType,call=>call.MethodName=="GetPathName"?fixture.CurrentPath:call.MethodName=="GetTitle"?"PART.SLDPRT":call.MethodName=="GetSaveFlag"?true:throw new Exception("不得操作模型："+call.MethodName)).GetTransparentProxy();
+   var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="ListExternalFileReferences2"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var part=new Proxy(modelType,call=>{
+    switch(call.MethodName){case "GetPathName":return fixture.CurrentPath;case "GetTitle":return "PART.SLDPRT";case "GetSaveFlag":return true;case "GetType":return 1;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;default:throw new Exception("不得操作模型："+call.MethodName);}
+   }).GetTransparentProxy();
    var totalModel=new Proxy(modelType,call=>call.MethodName=="GetPathName"?Get(total,"FullPath"):call.MethodName=="GetTitle"?"TOP.SLDASM":call.MethodName=="GetSaveFlag"?true:throw new Exception("不得操作总装："+call.MethodName)).GetTransparentProxy();
    var viewType=interop.GetType("SolidWorks.Interop.sldworks.View",true);
    object View(bool foreign)=>new AssemblyProxy(viewType,call=>call.MethodName=="get_ReferencedDocument"?(foreign?null:part):call.MethodName=="GetReferencedModelName"?(foreign?Path.Combine(folder,"outside","PART.SLDPRT"):fixture.CurrentPath):throw new Exception(call.MethodName)).GetTransparentProxy();

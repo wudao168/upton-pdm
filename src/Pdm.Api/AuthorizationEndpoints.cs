@@ -126,7 +126,7 @@ public static class AuthorizationEndpoints
             throw new PdmRuleException("权限配置格式无效或超出允许数量。");
         if (settings.Revision != previous.Revision) throw new PdmConflictException("权限配置已被修改，请刷新后重试。");
         if (!settings.Positions.SequenceEqual(previous.Positions)) throw new PdmRuleException("历史项目岗位定义不能通过权限配置覆盖，请使用岗位模板及人员授权。");
-        var permissions = RolePermissionCatalog.Permissions.Where(p => !p.Hidden).Select(p => p.Code).ToHashSet();
+        var permissions = RolePermissionCatalog.Permissions.ToDictionary(p => p.Code);
         var scopes = AuthorizationActions.Scopes.Keys.Concat(settings.Positions.Select(p => p.Key)).ToHashSet();
         if (settings.Templates.Select(t => t.Key).Distinct().Count() != settings.Templates.Count || settings.Assignments.Select(a => a.Id).Distinct().Count() != settings.Assignments.Count)
             throw new PdmRuleException("角色标识或授权记录重复。");
@@ -135,13 +135,27 @@ public static class AuthorizationEndpoints
         var previousRoles = previous.Templates.ToDictionary(t => t.Key);
         foreach (var template in settings.Templates)
         {
-            if (string.IsNullOrWhiteSpace(template.Key) || string.IsNullOrWhiteSpace(template.Name) || template.Name.Length > 80 || template.Description?.Length > 300 || template.Grants is null
-                || template.Grants.Select(g => g.Permission).Distinct().Count() != template.Grants.Count
-                || template.Grants.Any(g => !permissions.Contains(g.Permission) || g.Scopes is null || g.Scopes.Any(s => !scopes.Contains(s))))
-                throw new PdmRuleException("请填写角色名称和说明，并检查重复操作及适用范围。名称最多80字，说明最多300字。");
+            if (string.IsNullOrWhiteSpace(template.Key) || string.IsNullOrWhiteSpace(template.Name) || template.Name.Length > 80)
+                throw new PdmRuleException("请填写角色名称，最多80字。");
+            if (template.Description?.Length > 300)
+                throw new PdmRuleException($"角色「{template.Name}」的说明最多300字。");
+            if (template.Grants is null) throw new PdmRuleException($"角色「{template.Name}」的权限清单无效，请刷新后重试。");
+            var seen = new HashSet<string>();
+            foreach (var grant in template.Grants)
+            {
+                if (grant is null || string.IsNullOrWhiteSpace(grant.Permission) || !permissions.TryGetValue(grant.Permission, out var permission))
+                    throw new PdmRuleException($"角色「{template.Name}」包含无法识别的权限，请刷新权限清单后重试。");
+                if (permission.Hidden)
+                    throw new PdmRuleException($"角色「{template.Name}」包含内部权限「{permission.Name}」。请刷新权限中心后重新勾选。");
+                if (!seen.Add(grant.Permission))
+                    throw new PdmRuleException($"角色「{template.Name}」重复配置了「{permission.Name}」。");
+                if (grant.Scopes is null || grant.Scopes.Any(scope => !scopes.Contains(scope)))
+                    throw new PdmRuleException($"角色「{template.Name}」的「{permission.Name}」适用关系无效，请重新选择。");
+                if (permission.Scope != "project" && grant.Scopes.Any(scope => scope != "company"))
+                    throw new PdmRuleException($"角色「{template.Name}」的「{permission.Name}」是公司级操作，请选择公司范围。");
+            }
             if (template.RoleCode != previousRoles.GetValueOrDefault(template.Key)?.RoleCode)
                 throw new PdmRuleException("角色编码由系统维护，请刷新角色后重试。");
-            if (template.Grants.Any(g => RolePermissionCatalog.Permissions.First(p => p.Code == g.Permission).Scope != "project" && g.Scopes.Any(s => s != "company"))) throw new PdmRuleException("公司级操作不能使用项目关系范围。");
             if (template.ProjectAssignable && template.Grants.Any(BlocksProjectAssignment))
                 throw new PdmRuleException("允许项目分工分配的模板只能包含项目操作，请移除系统管理操作。");
         }

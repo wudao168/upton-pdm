@@ -11,7 +11,7 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
 {
     public async Task<StockedMaterialScope> RequireScopeAsync(string actor, UserRole role, bool manage, CancellationToken ct)
     {
-        if (!await repository.HasUserPermissionAsync(actor, role, manage ? PermissionCodes.StandardLibraryManage : PermissionCodes.StandardLibraryView, ct))
+        if (!await repository.HasUserPermissionAsync(actor, role, manage ? PermissionCodes.StockManage : PermissionCodes.StockView, ct))
             throw new UnauthorizedAccessException("当前角色无权" + (manage ? "维护" : "查看") + "常备件。");
         var company = TenantContext.CompanyId ?? throw new PdmRuleException("请先选择所属公司。");
         var config = await materials.GetIntegrationConfigurationAsync(ct);
@@ -126,20 +126,23 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
     public async Task<StockedMaterialSettingsView> SaveSettingsAsync(StockedMaterialScope scope, StockedMaterialSettings settings,
         long expectedVersion, string actor, UserRole role, CancellationToken ct)
     {
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, ct))
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StockSettingsManage, ct))
             throw new UnauthorizedAccessException("当前角色无权维护常备件同步与提醒设置。");
         if (settings.SyncIntervalMinutes is < 15 or > 1440) throw new PdmRuleException("回读间隔必须在15分钟至24小时之间。");
+        var recipients = (settings.Recipients ?? []).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var options = await RecipientOptionsAsync(scope.CompanyId, ct);
-        if (settings.Recipients?.Count > 100 || (settings.Recipients ?? []).Any(name => !options.Any(user => user.Username.Equals(name, StringComparison.OrdinalIgnoreCase))))
-            throw new PdmRuleException("请选择当前公司的有效接收人员，最多100人。");
-        if (settings.NotifyLowStock && !settings.UseStandardAssistant && settings.Recipients?.Count is not > 0)
+        if (recipients.Length > 100) throw new PdmRuleException("最多可选择100名接收人员。");
+        if (settings.NotifyLowStock && !settings.UseStandardAssistant && recipients.Length == 0)
             throw new PdmRuleException("启用低库存提醒时，请至少选择一名接收人员。");
         await gate.Semaphore.WaitAsync(ct);
         try
         {
             var catalog = await store.ReadAsync(scope, ct);
             if (catalog.RowVersion != expectedVersion) throw new PdmConflictException("常备件设置或回读数据已更新，请刷新后重新保存。");
-            await SaveAsync(catalog with { Settings = settings with { Recipients = (settings.Recipients ?? []).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() } }, ct);
+            var added = recipients.Except(catalog.Settings.Recipients ?? [], StringComparer.OrdinalIgnoreCase);
+            if (added.Any(name => !options.Any(user => user.Username.Equals(name, StringComparison.OrdinalIgnoreCase))))
+                throw new PdmRuleException("新增接收人员须获得当前公司的低库存提醒权限。");
+            await SaveAsync(catalog with { Settings = settings with { Recipients = recipients } }, ct);
             await AuditAsync(actor, "stocked-material.settings", scope, $"回读间隔{settings.SyncIntervalMinutes}分钟；低库存提醒{(settings.NotifyLowStock ? "启用" : "关闭")}。", ct);
         }
         finally { gate.Semaphore.Release(); }
@@ -469,12 +472,11 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
     private async Task<IReadOnlyList<StockedMaterialRecipient>> RecipientOptionsAsync(Guid company, CancellationToken ct)
     {
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
-        var roles = (await repository.GetRolePermissionDirectoryAsync(ct)).Roles.Where(role => role.Role == "StandardizationAssistant" || role.Name == "标准化助理").Select(role => role.Role).ToArray();
         var notificationAuthorization = await repository.GetAuthorizationSettingsAsync(ct);
-        return directory.Users.Where(user => user.IsActive && NotificationRecipientPolicy.CanReceive(notificationAuthorization, user)
+        return directory.Users.Where(user => user.IsActive && NotificationRecipientPolicy.CanReceive(notificationAuthorization, user, PermissionCodes.StockLowInventoryNotify, company)
             && (user.CompanyId == company || user.CompanyId is null && directory.Memberships.Any(member => member.Username.Equals(user.Username, StringComparison.OrdinalIgnoreCase)
                 && directory.Units.Any(unit => unit.Id == member.UnitId && unit.OrganizationId == company && unit.IsActive))))
-            .Select(user => new StockedMaterialRecipient(user.Username, user.DisplayName, roles.Any(role => user.EffectiveRoleCodes.Contains(role, StringComparer.OrdinalIgnoreCase))))
+            .Select(user => new StockedMaterialRecipient(user.Username, user.DisplayName, true))
             .OrderBy(user => user.DisplayName).ToArray();
     }
     private static IReadOnlyList<string> ResolveRecipients(StockedMaterialSettings settings, IReadOnlyList<StockedMaterialRecipient> options) =>

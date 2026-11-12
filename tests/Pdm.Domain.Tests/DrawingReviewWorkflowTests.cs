@@ -156,8 +156,8 @@ public sealed class DrawingReviewWorkflowTests
     public async Task SubmitterCanListEligibleAssignedReviewersWithoutRoleAdministrationPermission()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "submitter", "主设", "unused", UserRole.Engineer, true), default);
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer", "指定审核员", "unused", UserRole.ProcessReviewer, true), default);
+        await repository.UpdateUserAsync("submitter", "主设", UserRole.Engineer, "Engineer", ["Engineer"], true, default);
+        await repository.UpdateUserAsync("reviewer", "指定审核员", UserRole.ProcessReviewer, "ProcessReviewer", ["ProcessReviewer"], true, default);
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "viewer", "只读人员", "unused", UserRole.ProductionViewer, true), default);
 
         var reviewers = await workflow.ListDrawingReviewersAsync(ProjectId, "submitter", UserRole.Engineer, default);
@@ -168,10 +168,10 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
-    public async Task ProjectDesignLeadCanBeAssignedAndReviewWithoutGlobalDrawingReviewPermission()
+    public async Task ProjectDesignLeadRequiresConfiguredProjectScopeBeforeAssignmentAndReview()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "submitter", "发起人", "unused", UserRole.Engineer, true), default);
+        await repository.UpdateUserAsync("submitter", "发起人", UserRole.Engineer, "Engineer", ["Engineer"], true, default);
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "design-lead", "项目主设", "unused", UserRole.Engineer, true), default);
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "other-engineer", "其他工程师", "unused", UserRole.Engineer, true), default);
         await repository.SetMainProjectStaffingAsync(ProjectId,
@@ -179,6 +179,11 @@ public sealed class DrawingReviewWorkflowTests
 
         Assert.False(await repository.HasUserPermissionAsync("design-lead", UserRole.Engineer, PermissionCodes.DrawingReviewDecide, default));
         var reviewers = await workflow.ListDrawingReviewersAsync(ProjectId, "submitter", UserRole.Engineer, default);
+        Assert.DoesNotContain(reviewers, reviewer => reviewer.Username == "design-lead");
+        await PermissionTestUsers.Scope(repository, "Engineer", PermissionCodes.DrawingReviewDecide, "project-lead");
+        var lead = (await repository.FindUserAsync("design-lead", default))!;
+        Assert.False(AuthorizationPolicy.GlobalAllows(await repository.GetAuthorizationSettingsAsync(default), lead, lead.CompanyId, PermissionCodes.DrawingReviewDecide));
+        reviewers = await workflow.ListDrawingReviewersAsync(ProjectId, "submitter", UserRole.Engineer, default);
         Assert.Contains(reviewers, reviewer => reviewer.Username == "design-lead");
         Assert.DoesNotContain(reviewers, reviewer => reviewer.Username == "other-engineer");
 
@@ -469,7 +474,7 @@ public sealed class DrawingReviewWorkflowTests
     public async Task ReenteredSupervisorNodeGetsANewUnreadNotificationAndApprovalNotifiesSubmitter()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "reviewer", "审图员", "unused", UserRole.ProcessReviewer, true), default);
+        await PermissionTestUsers.Ensure(repository, ("reviewer", UserRole.ProcessReviewer));
         var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
         var item = Assert.Single(package.Items);
         async Task ApproveReview() => package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
@@ -508,7 +513,7 @@ public sealed class DrawingReviewWorkflowTests
     public async Task DrawingReviewNotifiesOpenReviewersSupervisorAndSubmitter()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer", "审图员", "unused", UserRole.ProcessReviewer, true), default);
+        await repository.UpdateUserAsync("reviewer", "审图员", UserRole.ProcessReviewer, "ProcessReviewer", ["ProcessReviewer"], true, default);
 
         var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
         Assert.Single(await repository.ListUserNotificationsAsync("reviewer", 50, default));
@@ -616,20 +621,12 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
-    public async Task DeveloperCanReviewOwnDrawing()
+    public async Task ExplicitSelfReviewGrantAllowsDesignerToReviewOwnDrawing()
     {
-        var (_, workflow, _, _) = await PrepareReviewAsync();
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
         var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
         var item = Assert.Single(package.Items);
-        TenantContext.Set(new CurrentTenant(
-            Guid.NewGuid(),
-            Guid.NewGuid(),
-            Guid.NewGuid(),
-            "designer",
-            "developer",
-            true,
-            new HashSet<string>(StringComparer.Ordinal) { PermissionCodes.DrawingReviewDecide }));
-
+        await PermissionTestUsers.Grant(repository, "Administrator", AuthorizationActions.SelfReview);
         try
         {
             package = await workflow.DecideDrawingReviewTargetAsync(
@@ -1160,7 +1157,10 @@ public sealed class DrawingReviewWorkflowTests
 
     private static async Task<(InMemoryPdmRepository Repository, PdmWorkflowService Workflow, PdmDocument Model, PdmDocument Drawing)> PrepareReviewAsync()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("submitter", UserRole.Administrator), ("designer", UserRole.Administrator), ("drawing-reviewer", UserRole.Administrator), ("cad-client", UserRole.Administrator), ("reviewer", UserRole.ProcessReviewer), ("no-department", UserRole.Administrator));
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "developer", "自审授权测试人员", "unused", UserRole.Administrator, true, RoleCode: "developer"), default);
+        await PermissionTestUsers.Grant(repository, "Administrator", AuthorizationActions.BusinessNotifications);
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "manager", "机械主管", "unused", UserRole.Approver, true), default);
         var reviewUnit = await repository.SaveOrganizationUnitAsync(
             new SaveOrganizationUnitCommand(null, Guid.Parse("70000000-0000-0000-0000-000000000001"), null, "DR-REVIEW", "图纸审核测试部门", OrganizationUnitKind.Department, true, 0), default);

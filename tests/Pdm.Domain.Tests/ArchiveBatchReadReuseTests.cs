@@ -13,7 +13,7 @@ public sealed class ArchiveBatchReadReuseTests
     [InlineData(true)]
     public async Task RepeatedInstancesShareReadsButEveryPhysicalFileIsVerified(bool rejectLastFile)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("READS-" + Guid.NewGuid().ToString("N"), "整批读取复用", "admin", "vault", "release"), "admin", default);
         var batch = Guid.NewGuid(); var session = Guid.NewGuid();
         var context = new ArchiveRegistrationContext(batch, session, "QA");

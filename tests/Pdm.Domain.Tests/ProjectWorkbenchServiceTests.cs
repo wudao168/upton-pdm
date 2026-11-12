@@ -134,7 +134,8 @@ public sealed class ProjectWorkbenchServiceTests
         var (service, repository, _, risks) = Setup();
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         await risks.SaveAsync(new(Guid.NewGuid(), project.Id, "内部风险", "影响", "admin", new(2026, 10, 10), "warning", "admin", DateTimeOffset.UtcNow), default);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAsync("manager", "engineer", UserRole.Engineer, default));
+        Assert.Empty((await service.GetAsync("manager", "engineer", UserRole.Engineer, default)).Projects);
+        await PermissionTestUsers.Ensure(repository, ("unknown", UserRole.Engineer));
         var view = await service.GetAsync("engineer", "unknown", UserRole.Engineer, default);
         Assert.Empty(view.Projects);
         Assert.Empty(view.Risks);
@@ -182,7 +183,7 @@ public sealed class ProjectWorkbenchServiceTests
     private static Project Project() => new(Guid.NewGuid(), "P1", "项目", "pm", "vault", "release", true);
     private static (ProjectWorkbenchService, InMemoryPdmRepository, InMemoryProjectPlanningRepository, InMemoryProjectWorkbenchRiskRepository) Setup(IProjectOplRepository? opl = null, TimeProvider? testClock = null)
     {
-        var time = testClock ?? TimeProvider.System; var repository = new InMemoryPdmRepository(time); var planning = new InMemoryProjectPlanningRepository();
+        var time = testClock ?? TimeProvider.System; var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time); var planning = new InMemoryProjectPlanningRepository();
         var procurement = new InMemoryU9ProcurementRepository(); var materials = new InMemoryMaterialRepository(time); var risks = new InMemoryProjectWorkbenchRiskRepository();
         var service = new ProjectWorkbenchService(repository, planning, new InMemoryProjectContactInformationRepository(),
             new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), procurement, time, materials),

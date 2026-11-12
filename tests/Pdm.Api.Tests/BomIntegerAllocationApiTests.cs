@@ -28,7 +28,7 @@ public sealed class BomIntegerAllocationApiTests
         async Task<PdmMaterial> CreateMaterial(string name) => await service.CreateAsync(new(null,name,MaterialKind.Standard,MaterialSupplyMode.Purchase,"001",name+"-MODEL",null,null,"整数测试",null,null,null,CategoryCode:"0102"),"admin",UserRole.Administrator,default);
         var master=await CreateMaterial("整数主料");var accessoryMaster=await CreateMaterial("原配件");
         var sample=new BomItem(Guid.NewGuid(),Guid.Empty,BomKind.Standard,1,master.MaterialCode,master.Name,1,"001",null,master.Specification,"W1",true){Brand=master.Brand};
-        var project=await repo.CreateProjectAsync(new("INTEGER-"+Guid.NewGuid().ToString("N"),"计件数量修复验收","admin","D:/qa","D:/release"),"admin",default);
+        var project=await ApiTestAuthorization.CreateProjectAsync(repo, new("INTEGER-"+Guid.NewGuid().ToString("N"),"计件数量修复验收","admin","D:/qa","D:/release"),"admin",default);
         var sources=Enumerable.Range(0,4).Select(index=> {
             var id=Guid.NewGuid();return sample with {Id=id,ReleaseTrackingId=id,ProjectId=project.Id,Sequence=index+1,Quantity=0.5m,SourceDocumentId=Guid.NewGuid(),SourceInstancePath=$"ASM/PART-{index}",ParentDrawingNumber="ASM",Source="Auto"};
         }).ToArray();

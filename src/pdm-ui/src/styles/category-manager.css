@@ -1,0 +1,23 @@
+.category-manager{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(270px,.85fr);gap:14px;font-size:12px}
+.category-manager .el-button,.category-manager .el-tag,.category-manager .el-form-item__label,.category-manager .el-input__inner,.category-manager .el-select__selected-item,.category-manager .el-switch__label{font-size:12px}
+.category-manager__list,.category-manager__editor{min-width:0;padding:12px;border:1px solid var(--pdm-border-soft);border-radius:8px}
+.category-manager__header{display:flex;margin-bottom:10px;align-items:center;justify-content:space-between;gap:12px}
+.category-manager__header div{display:flex;flex-direction:column;gap:3px}
+.category-manager__header span,.category-manager__placeholder p{color:var(--pdm-muted);font-size:12px}
+.category-manager__rows{max-height:500px;border-top:1px solid var(--pdm-surface-muted);overflow:auto}
+.category-manager__row{display:flex;min-height:42px;padding:6px 4px;border-bottom:1px solid var(--pdm-surface-muted);align-items:center;justify-content:space-between;gap:10px}
+.category-manager__name{display:flex;min-width:0;align-items:center;gap:6px}
+.category-manager__name strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.category-manager__row.is-child .category-manager__name strong{font-weight:400}
+.category-branch{color:var(--pdm-muted)}
+.category-manager__actions{display:flex;flex-shrink:0;align-items:center;gap:1px}
+.category-manager__actions .el-button+.el-button{margin-left:3px}
+.category-manager__empty{padding:40px 12px;color:var(--pdm-muted);text-align:center}
+.category-manager__editor{background:var(--pdm-table-header)}
+.category-manager__editor h3{margin:0 0 14px;font-size:14px}
+.category-manager__editor .el-select{width:100%}
+.category-manager__editor-actions{display:flex;justify-content:flex-end;gap:8px}
+.category-manager__placeholder{padding:34px 10px;text-align:center}
+.category-manager__placeholder p{line-height:1.4}
+@media(max-width:1000px){.category-manager{grid-template-columns:1fr}}
+@media(max-width:480px){.category-manager__row{flex-wrap:wrap}.category-manager__actions{flex-wrap:wrap}}

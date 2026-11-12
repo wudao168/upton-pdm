@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyNameField from './CompanyNameField.vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
@@ -258,7 +259,7 @@ function locateQualityArchive() {
         <fieldset v-if="draft" :disabled="!canEdit || busy || loading || attachmentReads > 0">
           <template v-if="isSample">
             <div class="project-form-fields">
-              <label>公司名称<input :value="index.company" disabled /></label>
+              <label>公司名称<CompanyNameField :name="index.company"><input :value="index.company" disabled /></CompanyNameField></label>
               <label>收货人<input v-model="draft.data.recipient" maxlength="80" /></label>
               <label>联系方式<input v-model="draft.data.contact" maxlength="100" /></label>
               <label class="project-form-wide">收货地址<input v-model="draft.data.address" maxlength="300" /></label>

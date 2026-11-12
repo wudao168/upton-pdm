@@ -7,12 +7,12 @@ import { ElMessage } from '../statusMessage'
 import { stockTime, type StockedMaterialSettingsView } from '../stockedMaterials'
 import { userErrorMessage } from '../userErrorMessage'
 
-const props = defineProps<{ token: string }>()
+const props = defineProps<{ token: string; canSynchronize?: boolean }>()
 const value = ref<StockedMaterialSettingsView | null>(null), loading = ref(false), saving = ref(false), error = ref('')
 const synchronizing = ref(false)
 const savedSettings = ref('')
 const hasUnsavedChanges = computed(() => value.value && JSON.stringify(value.value.settings) !== savedSettings.value)
-const defaultNames = computed(() => value.value?.users.filter(user => user.isDefault).map(user => user.displayName).join('、') || '未找到有效人员，请在用户设置中分配“标准化助理”角色，或改为指定人员')
+const defaultNames = computed(() => value.value?.users.filter(user => user.isDefault).map(user => user.displayName || '姓名待补充').join('、') || '请在权限中心授予「接收低库存提醒」权限。')
 const hours = computed({ get: () => (value.value?.settings.syncIntervalMinutes ?? 240) / 60,
   set: number => { if (value.value) value.value.settings.syncIntervalMinutes = Math.round(number * 60) } })
 async function load() {
@@ -29,7 +29,7 @@ async function save() {
   finally { saving.value = false }
 }
 async function synchronize() {
-  if (!value.value || synchronizing.value || saving.value || loading.value) return
+  if (!props.canSynchronize || !value.value || synchronizing.value || saving.value || loading.value) return
   synchronizing.value = true; error.value = ''
   let failure = ''
   try { await refreshStockedMaterials(props.token) }
@@ -52,7 +52,7 @@ watch(() => props.token, () => void load(), { immediate: true })
 
 <template>
   <section v-loading="loading" class="stocked-settings pdm-panel" aria-label="常备件设置">
-    <header><strong>常备件同步与提醒</strong><div class="stocked-settings__actions"><el-button :loading="loading" :disabled="saving || synchronizing" @click="load">刷新</el-button><el-button type="primary" :loading="synchronizing" :disabled="loading || saving || !value" @click="synchronize">{{ synchronizing ? '同步中…' : '立即同步' }}</el-button></div></header>
+    <header><strong>常备件同步与提醒</strong><div class="stocked-settings__actions"><el-button :loading="loading" :disabled="saving || synchronizing" @click="load">刷新</el-button><el-button v-if="canSynchronize" type="primary" :loading="synchronizing" :disabled="loading || saving || !value" @click="synchronize">{{ synchronizing ? '同步中…' : '立即同步' }}</el-button></div></header>
     <p v-if="error" class="stocked-settings__error" role="alert">{{ error }}</p>
     <p v-if="synchronizing" class="field-help" role="status">正在从U9C回读库存规划、现存量及近3个月请购采购信息，请稍候…</p>
     <el-form v-if="value" label-position="top" :disabled="synchronizing" @submit.prevent="save">
@@ -60,9 +60,9 @@ watch(() => props.token, () => void load(), { immediate: true })
       <p class="field-help">默认每4小时从当前公司对应的U9C企业与组织发现全部常备件，补齐PLM料品主档并收录标准库、常备库，同时回读安全库存量、再订货量、现存量及近3个月请购采购信息。判定条件：料品有效且安全库存量大于0；已有料号及人工分类保留，新增目录按U9C原分类名称和层级收录。工具刀具、包装材料、非金属仅用于常备件管理；标准机加件按标准件管理。</p>
       <el-form-item label="低库存提醒"><el-switch v-model="value.settings.notifyLowStock" aria-label="启用低库存提醒" active-text="启用站内消息" /></el-form-item>
       <el-form-item label="提醒接收人">
-        <el-radio-group v-model="value.settings.useStandardAssistant"><el-radio :value="true">标准化助理（跟随角色人员）</el-radio><el-radio :value="false">指定人员（可多选）</el-radio></el-radio-group>
+        <el-radio-group v-model="value.settings.useStandardAssistant"><el-radio :value="true">所有获授权人员</el-radio><el-radio :value="false">从获授权人员中指定</el-radio></el-radio-group>
         <p v-if="value.settings.useStandardAssistant" class="field-help">{{ defaultNames }}</p>
-        <UserSelect v-else v-model="value.settings.recipients" multiple filterable clearable placeholder="选择接收人员" aria-label="低库存提醒接收人"><el-option v-for="user in value.users" :key="user.username" :value="user.username" :label="user.displayName" /></UserSelect>
+        <UserSelect v-else v-model="value.settings.recipients" multiple filterable clearable placeholder="选择接收人员" aria-label="低库存提醒接收人"><el-option v-for="user in value.users" :key="user.username" :value="user.username" :label="user.displayName || '姓名待补充'" /></UserSelect>
       </el-form-item>
       <p class="field-help">草稿不计入正式常备件，不参与BOM、备料、导出标识和低库存提醒。其他业务模块只读取本地正式常备快照。现存量按当前U9C组织的全部仓库汇总，低于安全库存量时置顶高亮：未请购为红色，已请购未到货为橙色（含尚未采购）；已请购列只统计近3个月未完成的请购，采购、到货数量仅汇总到货少于采购的请购行。每次跌破发一条消息；持续低库存不重复发送，恢复后再次跌破重新提醒。新增接收人会在下次回读时收到仍未恢复的提醒。</p>
       <p class="field-help">上次完整回读：{{ stockTime(value.lastSuccessAt) }}<span v-if="value.lastError">；{{ value.lastError }}</span></p>

@@ -647,7 +647,7 @@ public sealed partial class MySqlPdmRepository
         }
 
         var participants = ApprovalGroupJson.Read(row.ParticipantsJson);
-        if (participants is null && !emergencySubstitute && !string.Equals(row.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+        if (participants is null && !emergencySubstitute && !string.Equals(row.Assignee, actor, StringComparison.OrdinalIgnoreCase))
         {
             throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
         }
@@ -759,8 +759,7 @@ public sealed partial class MySqlPdmRepository
             new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken));
         if (row.DecisionValue is not null || currentTaskId != taskId || row.PackageState is not ("ProcessReview" or "Approval"))
             throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
-        if (!string.Equals(row.Assignee, expectedAssignee, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(expectedAssignee, "admin", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(row.Assignee, expectedAssignee, StringComparison.OrdinalIgnoreCase))
             throw new PdmConflictException("审批任务已转交给其他用户，请刷新后重试。 ");
 
         await connection.ExecuteAsync(new CommandDefinition(

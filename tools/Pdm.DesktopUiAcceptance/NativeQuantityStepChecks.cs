@@ -20,8 +20,10 @@ internal static partial class Program
             }
             if (values["ArrowUp"] != "2.25" || values["ArrowDown"] != "1.25") throw new Exception("桌面数量上下键未按1增减。");
             var box = Json.Deserialize<Dictionary<string, object>>(Json.Deserialize<string>(await Execute(core,
-                "JSON.stringify((()=>{const r=document.getElementById('" + id + "').getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}})())")));
-            var x = Convert.ToDouble(box["x"]) + Convert.ToDouble(box["width"]) - 8;
+                "JSON.stringify((()=>{const i=document.getElementById('" + id + "'),r=i.getBoundingClientRect(),s=getComputedStyle(i);return{x:r.x,y:r.y,width:r.width,height:r.height,paddingRight:parseFloat(s.paddingRight)||0,borderRight:parseFloat(s.borderRightWidth)||0}})())")));
+            // Chromium places the native spinner inside the content box, before the capsule padding.
+            var x = Convert.ToDouble(box["x"]) + Convert.ToDouble(box["width"])
+                - Convert.ToDouble(box["paddingRight"]) - Convert.ToDouble(box["borderRight"]) - 8;
             foreach (var delta in new[] { -4, 4 })
             {
                 var y = Convert.ToDouble(box["y"]) + Convert.ToDouble(box["height"]) / 2 + delta;
@@ -30,7 +32,7 @@ internal static partial class Program
                 await NativeProtocol(core, "Input.dispatchMouseEvent", new { type = "mouseReleased", x, y, button = "left", buttons = 0, clickCount = 1 });
                 values[delta < 0 ? "buttonUp" : "buttonDown"] = Json.Deserialize<string>(await Execute(core, "document.getElementById('" + id + "').value"));
             }
-            if (values["buttonUp"] != "2.25" || values["buttonDown"] != "1.25") throw new Exception("桌面数量按钮未按1增减。");
+            if (values["buttonUp"] != "2.25" || values["buttonDown"] != "1.25") throw new Exception("桌面数量按钮未按1增减，实际结果：" + Json.Serialize(values));
             if (await Execute(core, "document.getElementById('" + id + "').checkValidity()") != "true") throw new Exception("桌面数量小数校验发生变化。");
             Console.WriteLine("PASS native quantity arrows and keys: 1.25 ↔ 2.25; fractional validity retained");
             return values;

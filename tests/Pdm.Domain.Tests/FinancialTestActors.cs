@@ -8,6 +8,17 @@ namespace Upton.Pdm.Tests;
 // Scope denial is covered separately in ProjectFinancialAccessTests.
 internal static class FinancialTestActors
 {
+    public static async Task GrantAsync(InMemoryPdmRepository repository, string roleCode, params AuthorizationGrant[] grants)
+    {
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        await repository.SaveAuthorizationSettingsAsync(settings with
+        {
+            Templates = settings.Templates.Select(role => role.RoleCode == roleCode
+                ? role with { Grants = [.. role.Grants.Where(existing => grants.All(grant => grant.Permission != existing.Permission)), .. grants] }
+                : role).ToArray()
+        }, settings.Revision, default);
+    }
+
     public static async Task ConfigureAsync(InMemoryPdmRepository repository, Guid projectId,
         params (string Name, UserRole Role)[] actors)
     {

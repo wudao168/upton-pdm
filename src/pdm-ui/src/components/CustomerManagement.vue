@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import SearchField from './SearchField.vue'
 import { PlugZap, RefreshCw } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
@@ -105,7 +106,7 @@ async function syncCustomers() {
 
     <section class="pdm-panel pdm-project-list pdm-crm-customer-list">
       <header class="pdm-panel-heading"><div><h2>U9C客户列表</h2><small>仅显示U9C已同步的客户编码和名称；同步不会删除历史项目已使用的客户。</small></div><label class="pdm-inline-search"><SearchField><input v-model="query" aria-label="搜索客户编码或名称" placeholder="搜索客户编码或名称"></SearchField></label></header>
-      <div v-if="filteredCustomers.length" class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>客户编码</th><th>客户名称</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-for="customer in filteredCustomers" :key="customer.id"><td><strong>{{ customer.code }}</strong></td><td>{{ customer.name }}</td><td><span :class="customer.isActive ? 'pdm-status is-ok' : 'pdm-status is-warn'">{{ customer.isActive ? '当前可见' : '历史保留' }}</span></td><td><span class="pdm-status is-ok">U9C</span></td></tr></tbody></table></div>
+      <div v-if="filteredCustomers.length" class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>客户编码</th><th>客户名称</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-for="customer in filteredCustomers" :key="customer.id"><td><strong>{{ customer.code }}</strong></td><td><CompanyName :name="customer.name" /></td><td><span :class="customer.isActive ? 'pdm-status is-ok' : 'pdm-status is-warn'">{{ customer.isActive ? '当前可见' : '历史保留' }}</span></td><td><span class="pdm-status is-ok">U9C</span></td></tr></tbody></table></div>
       <div v-else class="pdm-project-empty"><RefreshCw :size="38" /><h2>暂无U9C客户数据</h2><p>请先到“U9C接口 → 基础设置”维护连接，再测试客户查询并执行“从U9C同步”。</p></div>
     </section>
   </section>

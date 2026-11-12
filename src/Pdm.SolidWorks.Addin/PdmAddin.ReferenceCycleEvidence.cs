@@ -64,6 +64,29 @@ public sealed partial class PdmAddin
         }
     }
 
+    private static IComponent2 FindAssemblyComponent(IAssemblyDoc assembly, string name, IDictionary<string, IComponent2> components = null)
+    {
+        if (assembly == null || string.IsNullOrWhiteSpace(name)) return null;
+        IComponent2 current = null;
+        var prefix = string.Empty;
+        foreach (var segment in name.Split('/'))
+        {
+            var first = current == null;
+            prefix = first ? segment : prefix + "/" + segment;
+            if (components != null && components.TryGetValue(prefix, out var cached))
+            {
+                current = cached;
+                continue;
+            }
+            current = first ? assembly.GetComponentByName(segment) as IComponent2
+                : (current.GetChildren() as Array)?.OfType<IComponent2>().FirstOrDefault(child =>
+                    string.Equals(child.Name2.Split('/').Last(), segment, StringComparison.OrdinalIgnoreCase));
+            if (current == null) return null;
+            if (components != null) components[prefix] = current;
+        }
+        return current;
+    }
+
     private async Task CompleteCycleEvidenceAsync(IReadOnlyList<BatchOperationItem> items, CancellationToken token)
     {
         var groups = ArchiveReferenceCycles.Analyze(items);
@@ -77,22 +100,6 @@ public sealed partial class PdmAddin
         PluginDiagnosticLog.Record("候选引用完整核对", "含环分组=" + groups.Count + "；待核对来源实例=" + owners.Length);
         var assembly = application.ActiveDoc as IAssemblyDoc;
         var components = new Dictionary<string, IComponent2>(StringComparer.OrdinalIgnoreCase);
-        IComponent2 Find(string name)
-        {
-            if (assembly == null || string.IsNullOrWhiteSpace(name)) return null;
-            IComponent2 current = null; var prefix = "";
-            var segments = name.Split('/');
-            for (var i = 0; i < segments.Length; i++)
-            {
-                prefix = i == 0 ? segments[i] : prefix + "/" + segments[i];
-                if (components.TryGetValue(prefix, out var cached)) { current = cached; continue; }
-                current = i == 0 ? assembly.GetComponentByName(segments[i]) as IComponent2
-                    : (current.GetChildren() as Array)?.OfType<IComponent2>().FirstOrDefault(child => string.Equals(child.Name2.Split('/').Last(), segments[i], StringComparison.OrdinalIgnoreCase));
-                if (current == null) return null;
-                components[prefix] = current;
-            }
-            return current;
-        }
         foreach (var instances in owners)
         {
             var owner = instances.First();
@@ -101,7 +108,7 @@ public sealed partial class PdmAddin
             var model = application.GetOpenDocumentByName(owner.FullPath) as IModelDoc2;
             if (model == null)
             {
-                var component = Find(owner.ComponentSelectionName);
+                var component = FindAssemblyComponent(assembly, owner.ComponentSelectionName, components);
                 if (component != null && PathsEqual(component.GetPathName(), owner.FullPath)) model = ResolveReferenceComponent(component, owner);
             }
             if (model != null && PathsEqual(model.GetPathName(), owner.FullPath))

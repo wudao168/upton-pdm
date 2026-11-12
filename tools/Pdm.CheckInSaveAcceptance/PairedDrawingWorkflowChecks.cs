@@ -206,7 +206,7 @@ internal static partial class Program
    else if(path.EndsWith("/documents"))body=new[]{document};
    else if(path.EndsWith("/versions"))
    {
-    if(request.RequestUri.Query!="?take=1")throw new Exception("Drawing acquisition fetched full histories");
+    if(request.RequestUri.Query!="?take=1" && mode!="stale-binding")throw new Exception("Drawing acquisition fetched full histories without a stale binding");
     var id=versions.Keys.Single(key=>path.Contains(key.ToString()));body=new[]{versions[id]};
    }
    else if(path.EndsWith("/checkout"))

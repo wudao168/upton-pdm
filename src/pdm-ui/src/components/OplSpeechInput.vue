@@ -168,7 +168,6 @@ onBeforeUnmount(() => {
       <span v-if="stage === 'stopping'" role="status">正在读取录音…</span>
       <span v-if="stage === 'recognizing'" role="status">正在识别录音…</span>
     </div>
-    <small v-if="!canRecord">此页面可上传录音转写。使用支持麦克风的 HTTPS 页面可直接录音。</small>
     <div v-if="lastUrl" class="opl-speech__actions">
       <audio controls :src="lastUrl" aria-label="回听本次录音"></audio>
       <button v-if="retry && lastFile" type="button" class="pdm-secondary-action" :disabled="busy || disabled" @click="recognize(lastFile)">重试识别</button>

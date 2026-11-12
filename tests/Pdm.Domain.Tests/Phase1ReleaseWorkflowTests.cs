@@ -18,7 +18,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task ResubmittedReleaseNotifiesReviewerAgainEvenWhenOriginalMessageIsRead(ReleaseScope scope)
     {
         var clock = new ReleaseNumberClock();
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         await ConfigureApprovalWorkflowsAsync(repository);
         await repository.UpdateUserAsync("admin", "兼任工程师", UserRole.Administrator, "Administrator", ["Administrator", "Engineer"], true, default);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), clock);
@@ -34,7 +34,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.Null(first.ReadAt);
         Assert.Equal(package.Id, first.ReleasePackageId);
         await repository.MarkUserNotificationReadAsync(first.Id, task.Assignee, clock.GetUtcNow(), default);
-        await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Rejected, "修改后重提", default);
+        await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Rejected, "修改后重提", default);
 
         var resubmitted = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         Assert.Equal(task.Id, resubmitted.ApprovalTasks.OrderBy(item => item.StepOrder).First(item => item.Decision is null).Id);
@@ -55,7 +55,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(ReleaseScope.ElectricalFormal)]
     public async Task GroupApproval_CopiesOnlyAfterAllRequiredSignatures(ReleaseScope scope)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var id = Guid.NewGuid();
@@ -87,7 +87,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ApprovalReminderGoesOnlyToCurrentNodeAndStopsWhenAllNodesAreApproved()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var packageId = Guid.NewGuid();
@@ -96,14 +96,14 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         await repository.CreateReleasePackageAsync(new(packageId, ProjectId, "RP-NOTICE-NODES", ReleasePackageState.ProcessReview,
             null, "N-V01", "E-V01", [firstTask, nextTask], DateTimeOffset.UtcNow, null, null)
             { Scope = ReleaseScope.StandardFormal, LocksDocuments = false }, default);
-        await workflow.DecideAsync(firstTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "通过", default, publishImmediately: false);
+        await workflow.DecideAsync(firstTask.Id, firstTask.Assignee, UserRole.Approver, ApprovalDecision.Approved, "通过", default, publishImmediately: false);
         Assert.DoesNotContain(await repository.ListUserNotificationsAsync(firstTask.Assignee, 200, default), item => item.Category == "ReleaseApprovalPending");
         var notice = Assert.Single(await repository.ListUserNotificationsAsync(nextTask.Assignee, 200, default),
             item => item.Category == "ReleaseApprovalPending");
         Assert.Equal(packageId, notice.ReleasePackageId);
-        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.DecideAsync(firstTask.Id, "admin", UserRole.Administrator,
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.DecideAsync(firstTask.Id, firstTask.Assignee, UserRole.Approver,
             ApprovalDecision.Approved, "重复请求", default, publishImmediately: false));
-        await workflow.DecideAsync(nextTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "通过", default, publishImmediately: false);
+        await workflow.DecideAsync(nextTask.Id, nextTask.Assignee, UserRole.Approver, ApprovalDecision.Approved, "通过", default, publishImmediately: false);
         Assert.Single(await repository.ListUserNotificationsAsync(nextTask.Assignee, 200, default), item => item.Category == "ReleaseApprovalPending");
     }
 
@@ -116,7 +116,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task ScopedPackageNumbersUseFourDigitsAndKeepIncreasingAfterDraftDeletion()
     {
         var clock = new ReleaseNumberClock();
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), clock);
         await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
@@ -137,7 +137,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task SupplementOplLinksPersistThroughDraftChangesAndPublicationWithoutClosingIssues()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var opl = new ProjectOplService(repository, new InMemoryProjectOplRepository(), new LocalProjectOplStorage(), TimeProvider.System);
         var first = await opl.SaveAsync(ProjectId, null, new("第一项变更", "普通", "待处理", "", null, "", 0, [], null), [], "admin", UserRole.Administrator, default);
@@ -149,7 +149,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             ReleaseScope.StandardFormal, CurrentIds(repository, BomKind.Standard), "admin", UserRole.Administrator, default);
         formal = await workflow.SubmitReleasePackageAsync(formal.Id, "admin", UserRole.Administrator, default);
         foreach (var task in formal.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            formal = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            formal = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
         for (var iteration = 0; iteration < 2; iteration++)
         {
             var items = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
@@ -169,7 +169,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             await Assert.ThrowsAsync<PdmConflictException>(() => workflow.UpdateReleasePackageDraftAsync(change.Id, change.ChangeReason, change.SelectedBomItemIds, null,
                 "admin", UserRole.Administrator, default, relatedOplIssueIds: []));
             foreach (var task in change.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-                change = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+                change = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
             Assert.Equal(ReleasePackageState.Published, change.State);
         }
         var view = await opl.GetAsync(ProjectId, "admin", UserRole.Administrator, default);
@@ -181,7 +181,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(false)]
     public async Task NewReleaseNeverExpandsAnEmptySelection(bool nullSelection)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var before = await repository.ListReleasePackagesAsync(ProjectId, default);
@@ -194,7 +194,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task DeletionOnlySupplementRemovesOnlyExplicitlyConfirmedRows()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var seed = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First();
@@ -205,7 +205,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             ReleaseScope.StandardFormal, original.Select(item => item.Id).ToArray(), "admin", UserRole.Administrator, default);
         formal = await workflow.SubmitReleasePackageAsync(formal.Id, "admin", UserRole.Administrator, default);
         foreach (var task in formal.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            formal = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "测试批准", default);
+            formal = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "测试批准", default);
         await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, original.Skip(2).ToArray(), default);
         var change = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null,
             ReleaseScope.StandardSupplement, [], "admin", UserRole.Administrator, default, confirmedRemovedBomItemIds: [original[0].Id]);
@@ -214,7 +214,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.DoesNotContain(change.StandardBomSnapshot, item => item.Id == original[0].Id);
         change = await workflow.SubmitReleasePackageAsync(change.Id, "admin", UserRole.Administrator, default);
         foreach (var task in change.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            change = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "测试批准删除范围", default);
+            change = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "测试批准删除范围", default);
         Assert.Equal(ReleasePackageState.Published, change.State);
         Assert.Single(change.ConfirmedRemovedBomItemIds);
     }
@@ -222,7 +222,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task FrozenReleaseRejectsNewWorkVersionsInsteadOfSilentlySwitchingSources()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
@@ -240,7 +240,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task PublishingSelectedAssemblyDoesNotLockOrPromoteItsUnchangedReferenceFiles()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var dependency = await repository.RegisterDocumentAsync(new(ProjectId, "READ-ONLY-REF", "引用件", "READ-ONLY-REF.SLDPRT", DocumentKind.Part), "admin", default);
         var archived = await CheckInAsync(repository, dependency.Id, "designer", new Dictionary<string, string?>(), 'C');
@@ -270,7 +270,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.Equal(dependencyVersions, (await repository.ListDocumentVersionsAsync(dependency.Id, default)).Count);
         Assert.Contains(await repository.ListReleaseReferenceSourcesAsync(package.Id, default), source => source.SourceVersionId == binding.VersionId);
         foreach (var task in submitted.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            submitted = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "测试图纸发布", default);
+            submitted = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "测试图纸发布", default);
         Assert.Equal(ReleasePackageState.Published, submitted.State);
         Assert.DoesNotContain(await repository.ListDocumentVersionsAsync(modelId, default), version => version.ReleasePackageId == submitted.Id);
     }
@@ -298,7 +298,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task WearPartBom_CollectsMarkedItemsAcrossCategoriesAndKeepsTheirOriginalBomKinds()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var standard = await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
             [new BomItemInput(1, "STD-WEAR", "标准易损件", 2, "001", null, "M1", "W1", true, IsWearPart: true)],
@@ -323,7 +323,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task NoPublish_KeepsBomItemVisibleAndCanRestorePublishing()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var item = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "STD-001", "公共标准件", 2, "001", null, "M1", "W1", true);
         await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [item], default);
@@ -348,7 +348,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ApprovalChain_QueuesPreparedImmutablePackageForBackgroundPublication()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var publisher = new RecordingPublisher();
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -385,12 +385,12 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             Assert.Equal(promotedIds.Contains(document.Id) ? DocumentLifecycleState.InReview : statesBeforeSubmit[document.Id], document.State));
 
         var processTask = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.ProcessReview);
-        package = await workflow.DecideAsync(processTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "工艺可行", default);
+        package = await workflow.DecideAsync(processTask.Id, processTask.Assignee, UserRole.Approver, ApprovalDecision.Approved, "工艺可行", default);
         Assert.Equal(ReleasePackageState.Approval, package.State);
         Assert.Equal(0, publisher.PublishCalls);
 
         var approvalTask = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval);
-        package = await workflow.DecideAsync(approvalTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default, publishImmediately: false);
+        package = await workflow.DecideAsync(approvalTask.Id, approvalTask.Assignee, UserRole.Approver, ApprovalDecision.Approved, "批准发布", default, publishImmediately: false);
         Assert.Equal(ReleasePackageState.Publishing, package.State);
         Assert.Equal(0, publisher.PublishCalls);
 
@@ -414,7 +414,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task PublishSucceedsWhenPreviewConversionFailsAndQueuesPreviewRetry()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var publisher = new RecordingPublisher { PreviewError = "Access to the path '170837DFM-16-50-P-A-GF-111.SLDPRT' is denied." };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -427,9 +427,9 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             ProjectId, null, $"RP-TEST-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         var processTask = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.ProcessReview);
-        package = await workflow.DecideAsync(processTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "工艺可行", default);
+        package = await workflow.DecideAsync(processTask.Id, processTask.Assignee, UserRole.Approver, ApprovalDecision.Approved, "工艺可行", default);
         var approvalTask = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval);
-        package = await workflow.DecideAsync(approvalTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
+        package = await workflow.DecideAsync(approvalTask.Id, approvalTask.Assignee, UserRole.Approver, ApprovalDecision.Approved, "批准发布", default);
 
         // 发布没有被转图失败卡住，转图单独排队并记录原因。
         Assert.Equal(ReleasePackageState.Published, package.State);
@@ -477,7 +477,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task InterruptedPreviewRun_IsRequeuedInsteadOfStuckRunning()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         UseTemporaryPreviewVault(repository);
         var publisher = new RecordingPublisher { PreviewError = "转图服务器未生成图档的预览文件。" };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
@@ -512,7 +512,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task PreviewItemsExposePerItemStatusAndSingleItemRetry()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         UseTemporaryPreviewVault(repository);
         var publisher = new RecordingPublisher { PreviewOnlyDrawings = true, PreviewError = "SolidWorks转换进程失败：SolidWorks打开A01-100.SLDPRT失败。" };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
@@ -576,7 +576,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task PreviewPartialFailurePersistsSuccessAndReportsOnlyTheFailedDocument()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         UseTemporaryPreviewVault(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher { PreviewError = "尚未转换" }, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -617,7 +617,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task PreviewItemsCanBeFilteredByReleasePackage()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var publisher = new RecordingPublisher { PreviewOnlyDrawings = true, PreviewError = "转图失败。" };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -649,7 +649,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task PreviewScope_ExcludesAssembliesAndKeepsDrawingPdf()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var publisher = new RecordingPublisher();
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -702,7 +702,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             await File.WriteAllTextAsync(Path.Combine(publishedPath, "manifest.json"), "{\"files\":[\"nonstandard-parts-bom.xlsx\",\"7080113.00-01.step\"]}");
             await ReleaseDeliveryFiles.WriteChecksumsAsync(publishedPath, default);
 
-            var repository = new InMemoryPdmRepository(TimeProvider.System);
+            var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
             var projectFiles = new InMemoryProjectFileRepository(TimeProvider.System);
             var publisher = new RecordingPublisher { PublishedPath = publishedPath };
             var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System,
@@ -737,7 +737,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task RestartRecovery_RequeuesPreviewRunsStuckInRunning()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var stuck = new ReleasePackage(Guid.NewGuid(), ProjectId, $"RP-{Guid.NewGuid():N}", ReleasePackageState.Published,
             null, string.Empty, string.Empty, [], TimeProvider.System.GetUtcNow(), TimeProvider.System.GetUtcNow(), null)
         {
@@ -760,7 +760,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task CurrentApprovalAssignee_CanRejectWithoutApprovalRolePermission()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await PermissionTestUsers.Ensure(repository, ("designer", UserRole.Engineer));
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var packageId = Guid.NewGuid();
@@ -788,7 +788,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task CurrentApprovalAssignee_CanTransferToEligibleProjectApprover()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await repository.CreateUserAsync(new UserAccount(
             Guid.NewGuid(), "transfer-approver", "转交审批人", "unused", UserRole.Approver, true), default);
@@ -812,51 +812,26 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     }
 
     [Fact]
-    public async Task MechanicalBomPublishing_IsLimitedToMechanicalEngineerAdministratorAndDeveloper()
+    public async Task MechanicalBomPublishingUsesExplicitGrantAndRevocation()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
-        var missingProjectId = Guid.NewGuid();
-
-        try
-        {
-            TenantContext.Set(new CurrentTenant(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "project-manager", "ProjectManager", false,
-                new HashSet<string> { PermissionCodes.ReleaseManage }, ["ProjectManager"]));
-            var blocked = await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.CreateScopedReleasePackageAsync(
-                missingProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
-                ReleaseScope.StandardLongLead, [], "project-manager", UserRole.Engineer, default));
-            Assert.Contains("仅允许机械工程师、系统管理员或开发者", blocked.Message);
-
-            var electricalContinuesToExistingValidation = await Assert.ThrowsAsync<PdmNotFoundException>(() => workflow.CreateScopedReleasePackageAsync(
-                missingProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
-                ReleaseScope.ElectricalLongLead, [], "project-manager", UserRole.Engineer, default));
-            Assert.Contains("项目不存在", electricalContinuesToExistingValidation.Message);
-
-            foreach (var allowed in new[]
-                     {
-                         (Username: "engineer", RoleCode: nameof(UserRole.Engineer), Role: UserRole.Engineer),
-                         (Username: "admin", RoleCode: nameof(UserRole.Administrator), Role: UserRole.Administrator),
-                         (Username: "developer", RoleCode: "developer", Role: UserRole.Administrator)
-                     })
-            {
-                TenantContext.Set(new CurrentTenant(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), allowed.Username, allowed.RoleCode, false,
-                    new HashSet<string> { PermissionCodes.ReleaseManage }, [allowed.RoleCode]));
-                var continuesToExistingValidation = await Assert.ThrowsAsync<PdmNotFoundException>(() => workflow.CreateScopedReleasePackageAsync(
-                    missingProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
-                    ReleaseScope.NonStandardLongLead, [], allowed.Username, allowed.Role, default));
-                Assert.Contains("项目不存在", continuesToExistingValidation.Message);
-            }
-        }
-        finally
-        {
-            TenantContext.Clear();
-        }
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await repository.SetMainProjectStaffingAsync(project.Id, new("engineer", [], ["engineer"]), "admin", default);
+        await PermissionTestUsers.Scope(repository, "Engineer", PermissionCodes.ReleaseManage, "company");
+        await PermissionTestUsers.Revoke(repository, "Engineer", "release.mechanical");
+        Task<ReleasePackage> Create() => workflow.CreateScopedReleasePackageAsync(project.Id, null, "", "", "", "未指定", null,
+            ReleaseScope.StandardLongLead, [], "engineer", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(Create);
+        await PermissionTestUsers.Scope(repository, "Engineer", "release.mechanical", "company");
+        await Assert.ThrowsAsync<PdmRuleException>(Create); // 授权通过后仍拒绝空发布范围。
+        await PermissionTestUsers.Revoke(repository, "Engineer", "release.mechanical");
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(Create);
     }
-
     [Fact]
     public async Task ReleasePackage_RejectsUnclassifiedSourceItems()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await repository.ReplaceBomAsync(ProjectId, BomKind.Unclassified,
         [
@@ -877,7 +852,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ReleasePackage_AllowsDrawingSourceMismatchAndPendingWritebackAsReminder()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
@@ -906,7 +881,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ApprovalLifecycle_RejectWithdrawWhereUsedAndObsolete_AreControlled()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
@@ -921,7 +896,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         var statesBeforeReview = (await repository.ListDocumentsAsync(ProjectId, default)).ToDictionary(document => document.Id,
             document => document.State == DocumentLifecycleState.InReview ? DocumentLifecycleState.Work : document.State);
         var review = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.ProcessReview);
-        package = await workflow.DecideAsync(review.Id, "admin", UserRole.Administrator, ApprovalDecision.Rejected, "结构需修改", default);
+        package = await workflow.DecideAsync(review.Id, review.Assignee, UserRole.Approver, ApprovalDecision.Rejected, "结构需修改", default);
         Assert.Equal(ReleasePackageState.Rejected, package.State);
         Assert.All(await repository.ListDocumentsAsync(ProjectId, default), document => Assert.Equal(statesBeforeReview[document.Id], document.State));
 
@@ -941,6 +916,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         var childId = root!.Children.Select(child => child.DocumentId).First(id => id.HasValue)!.Value;
         Assert.NotEmpty(await workflow.ListWhereUsedAsync(childId, "admin", UserRole.Administrator, default));
 
+        await PermissionTestUsers.Scope(repository, "Administrator", ProductionMobilePermissions.Obsolete, "company");
         var obsolete = await workflow.ObsoleteDocumentAsync(childId, "admin", UserRole.Administrator, "零件停用", default);
         Assert.Equal(DocumentLifecycleState.Obsolete, obsolete.State);
         await Assert.ThrowsAsync<PdmConflictException>(() => workflow.CheckoutAsync(childId, "admin", UserRole.Administrator, default));
@@ -949,7 +925,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task EmptyBom_IsAutomaticallyTreatedAsNoSuchMaterials()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
 
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
@@ -968,7 +944,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomSave_RequiresNonStandardMaterialAndElectricalDoesNotRequireIt()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var project = await repository.CreateProjectAsync(
             new CreateProjectCommand($"STATUS-{Guid.NewGuid():N}", "BOM资料状态", "admin", @"D:\PDM\Status", @"D:\Release\Status"),
@@ -998,7 +974,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomImpactStage_IsSingleSelectAndCanBeCleared()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
             [new BomItemInput(1, "STD-IMPACT", "影响阶段测试", 1, "001", null, "M8", "W1", true, ImpactStage: ProjectPlanStage.Assembly)],
@@ -1022,7 +998,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomDataStatus_UsesConfiguredRulesAndKeepsCoreFieldsRequired()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var current = await repository.GetSystemSettingsAsync(default);
         var savedSettings = await workflow.UpdateSystemSettingsAsync(current with
@@ -1053,7 +1029,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomDuplicateMaterialCode_PreservesSeparateRowsAndStableIds()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
 
         var created = await workflow.ReplaceBomAsync(
@@ -1089,7 +1065,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task MechanicalBom_SourceItemCannotBeDeletedByFullReplacement()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var sourceItem = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "CAD-SOURCE", "图纸来源物料", 1, "件", null, "M1", "W1", true)
         {
@@ -1108,7 +1084,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomReplace_ZeroQuantityMovesExistingItemToRecycleBinAndPreservesItsQuantity()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var removed = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "ZERO-DELETE", "数量归零物料", 3, "件", "6061", "M3", "W1", true)
         {
@@ -1139,7 +1115,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomReplace_RejectsZeroQuantityForANewItem()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
 
         var exception = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ReplaceBomAsync(
@@ -1153,7 +1129,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomRecycleBin_PreservesManualAndSourceItemsAndRestoresManualSnapshot()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var manual = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 1, "MANUAL-DELETE", "人工物料", 1, "件", null, null, "W1", true);
         var keep = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 2, "MANUAL-KEEP", "保留物料", 1, "件", null, null, "W1", true);
@@ -1215,7 +1191,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomRecycleBin_PermanentlyDeletesOnlyRecycledManualItemsAndAuditsTheAction()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var manual = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 1, "MANUAL-DELETE", "人工删除项", 1, "件", null, null, "W1", true)
         {
@@ -1254,7 +1230,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomRecycleBin_AllowsEmptyReasonAndDuplicateMaterialCodeRestore()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var active = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 1, "DUPLICATE", "当前物料", 1, "001", null, null, "W1", true);
         var recycled = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 2, "DUPLICATE", "回收站物料", 1, "001", null, null, "W1", true)
@@ -1283,7 +1259,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomReplace_DoesNotMistakeAnActiveSourceRowForARecycledRowAndNamesTheRealConflict()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var sourceDocumentId = Guid.NewGuid();
         var active = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "ACTIVE-001", "当前在用物料", 1, "001", "6061", "M1", "W1", true)
@@ -1324,7 +1300,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task OrganizationHierarchy_RejectsMoreThanTenLevels()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
         Guid? parentUnitId = null;
@@ -1348,7 +1324,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task OrganizationCode_UsesParentPathAndOnlyFinalCodeMustBeUnique()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
         var t1 = await workflow.SaveOrganizationUnitAsync(
@@ -1387,7 +1363,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ProjectExecutionUnit_RequiresManufacturingDepartment()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
         var ordinaryDepartment = await workflow.SaveOrganizationUnitAsync(
@@ -1412,11 +1388,9 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task OrganizationManagers_CanBeAssignedToChildUnitAndBecomeMembers()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
-        await repository.CreateUserAsync(
-            new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true),
-            default);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
         var division = await workflow.SaveOrganizationUnitAsync(
             new SaveOrganizationUnitCommand(null, organizationId, null, "MANAGER-DIV", "负责人测试事业部", OrganizationUnitKind.BusinessDivision, true, 0),
@@ -1436,7 +1410,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task MechanicalBomPreview_KeepsUnclassifiedAndManualUnmatchedItemsWithoutMutatingStoredBom()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var storedBefore = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).ToArray();
 
@@ -1463,7 +1437,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task SavingSameCodeManualBomItem_AutomaticallyFlagsConflictAndMergesToLatestSource()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var sourceDocument = await repository.FindDocumentAsync(Guid.Parse("22222222-2222-2222-2222-222222222223"), default)
             ?? throw new InvalidOperationException();
@@ -1529,7 +1503,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task MechanicalBomSource_PreservesEmptyCardFieldsWithoutLegacyNamesOrConfigurationFallback()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var sourceDocument = await repository.FindDocumentAsync(
             Guid.Parse("22222222-2222-2222-2222-222222222223"), default) ?? throw new InvalidOperationException();
@@ -1575,7 +1549,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task MechanicalBomReconcile_PreservesManuallyClassifiedDrawingItems()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification);
@@ -1599,7 +1573,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(BomKind.ComponentDrawing)]
     public async Task MechanicalBom_SourceOnlyClassificationRemainsOnlyInSourceData(BomKind kind)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
@@ -1641,7 +1615,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task MechanicalBom_ComponentDrawingMigratesPendingItemAndPreservesChildHierarchy()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var before = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var assemblyId = Guid.Parse("22222222-2222-2222-2222-222222222223");
@@ -1674,7 +1648,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task DrawingSource_CanOnlyBeClassifiedAsStandardOrNonStandard()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
@@ -1692,7 +1666,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task MechanicalReconcile_PreservesIndependentElectricalBomAndRawSourceExcludesIt()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var electrical = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 1, "EL-INDEPENDENT", "独立电气件", 1, "件", null, "E1", "W1", true)
         {
@@ -1711,7 +1685,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomSourceView_ReportsQuantityDifferenceAgainstReferenceTree()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
@@ -1744,7 +1718,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task NonStandardReconciliation_IgnoresNameAndReportsMaterialDifference()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
@@ -1781,7 +1755,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(true)]
     public async Task MechanicalBom_BlankCadCodePreservesAssignedNonStandardCode(bool recoverReleasedCode)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
@@ -1816,7 +1790,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomReleaseConfirmation_ExcludesOnlyConfirmedWorkFromRelease()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -1845,7 +1819,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData("drawing-change")]
     public async Task BomReleaseConfirmation_IsLimitedToConfirmedContent(string scenario)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var relation = (await repository.ListDocumentRelationsAsync(ProjectId, default)).First();
         var item = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "02041009999", "测试零件", 1, "001", "钢", "TEST", "W1", true)
@@ -1885,7 +1859,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ApplyingMaterialCode_IgnoresSourceCodeAndBlankSourceModelAndBrand()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
@@ -1930,7 +1904,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ApplyingMaterialCode_ReportsOnlyNonBlankSourceModelAndBrandDifferences()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
@@ -1968,7 +1942,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ApplyingMaterialCode_ClearsStaleMismatch_WhenCodeModelAndBrandMatchApprovedMaster()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(
             repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System,
@@ -2008,7 +1982,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task MechanicalBomReconcile_ReportsCanonicalBrandMismatch_WhenApprovedMasterDoesNotMatch()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(
             repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System,
@@ -2036,7 +2010,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task CadPropertyWriteback_IsQueuedOnlyAfterBomIsExplicitlySaved()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
@@ -2075,7 +2049,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BatchWearPartUpdate_KeepsManualRowsLocalAndRequiresAnExplicitValue()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var manual = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "MANUAL-WEAR", "人工易损件", 1, "001", null, "M1", "W1", true)
         {
@@ -2099,7 +2073,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task RestoreBomItemsFromSource_RestoresDrawingFieldsAndKeepsClassificationAndOrder()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
@@ -2125,7 +2099,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.Equal(classified.Sequence, restored.Sequence);
         Assert.Equal(source.Name, restored.Name);
         Assert.Equal(source.Material, restored.Material);
-        Assert.Equal(source.Quantity, restored.Quantity);
+        Assert.Equal(source.Quantity + 3, restored.Quantity);
         Assert.Equal(source.Revision, restored.Revision);
         Assert.True(restored.IsManuallyOverridden);
         Assert.Equal("SourceMatched", restored.ReconciliationStatus);
@@ -2137,7 +2111,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task RestoreBomItemsFromSource_RejectsManualItemsWithoutDrawingSource()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var standard = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).ToList();
         var manual = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, standard.Count + 1,
@@ -2154,7 +2128,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ReclassifyBomItemsFromSource_PreviewsThenAtomicallyMovesAndRestoresSourceFields()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
@@ -2185,7 +2159,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task CadPropertyWritebackQueue_SupersedesPendingRequestAndTracksCompletion()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var bomItem = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First();
         var document = (await repository.ListDocumentsAsync(ProjectId, default)).First();
         var first = new CadPropertyWriteback(Guid.NewGuid(), ProjectId, bomItem.Id, document.Id, "默认", Guid.NewGuid(), "W1",
@@ -2207,7 +2181,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task IndependentBomVersions_OnlyChangedBomAdvancesAndBaselinePinsAllThree()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
@@ -2257,7 +2231,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task EcnReview_LocksAllThreeBomsUntilWithdrawn()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
@@ -2286,7 +2260,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedEmergencyRoles_AreIndependentAndFrozenWhenPackageIsCreated()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var settings = await repository.GetSystemSettingsAsync(default);
         await repository.UpdateSystemSettingsAsync(settings with { ApprovalWorkflows = settings.ApprovalWorkflows with {
@@ -2313,7 +2287,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedStandardReview_UsesVersionedStandardChainAndLocksOnlyStandardBom()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var package = await workflow.CreateScopedReleasePackageAsync(
@@ -2349,7 +2323,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         package = await workflow.EmergencyDecideAsync(mainDesigner.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "长交期采购窗口即将关闭", default);
         Assert.True(package.ApprovalTasks.Single(task => task.Id == mainDesigner.Id).IsEmergencySubstitute);
         var supervisor = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.MechanicalSupervisor);
-        package = await workflow.DecideAsync(supervisor.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "机械主管批准", default);
+        package = await workflow.DecideAsync(supervisor.Id, supervisor.Assignee, UserRole.Approver, ApprovalDecision.Approved, "机械主管批准", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Empty(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
 
@@ -2362,7 +2336,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ReleasedSnapshot_RefreshesStaleCompletenessFlag()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         // 模拟旧数据：工作区行本身资料齐全，但库里存着过期的 is_complete=false（校验口径调整前写入的旧值）。
@@ -2390,7 +2364,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedFormal_UnnumberedItemsCanBeSelectedIndependently()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -2410,7 +2384,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedStandardFormal_SelectsWholeMaterialGroupsAndDefersTheRestToSupplement()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
@@ -2443,7 +2417,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
 
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
 
         var supplement = await workflow.CreateScopedReleasePackageAsync(
@@ -2458,7 +2432,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(BomKind.Electrical, ReleaseScope.ElectricalFormal, ReleaseScope.ElectricalSupplement)]
     public async Task SupplementSelectsOnlyChangedInstancesAndRetainsQuantitiesAcrossLaterReleases(BomKind kind, ReleaseScope formalScope, ReleaseScope changeScope)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var old = (await repository.GetBomAsync(ProjectId, kind, default)).First() with { Quantity = 1, EngineeringKitReferenceId = Guid.NewGuid() };
@@ -2488,7 +2462,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomMultiplierIsVersionedAndRequiresAllChangesBeforeCreatingOrSubmittingSupplement()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var first = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First() with { Quantity = 1 };
@@ -2518,7 +2492,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomMultiplierDefaultsToCurrentProjectQuantityAndManualOverrideSurvivesLaterSaves()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var parent = await repository.CreateNumberedProjectAsync(new(
             Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 2,
             Guid.Parse("c0046500-0000-0000-0000-000000000001"), "倍率主项目", null, null, 7, "engineer", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
@@ -2544,7 +2518,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task LongLeadUsesBomTotalCapacityAndFormalOnlyIssuesTheRemainingTotal()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var first = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First() with { Quantity = 0.5m };
@@ -2568,7 +2542,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedStandardReview_IgnoresTransientReconciliationStateWhenSubmitting()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var package = await workflow.CreateScopedReleasePackageAsync(
@@ -2596,7 +2570,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedStandardReview_IgnoresAuxiliaryWearPartAndImpactChangesWhenSubmitting()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var package = await workflow.CreateScopedReleasePackageAsync(
@@ -2626,7 +2600,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task PublishedBom_AuxiliaryEditsDoNotCreateSecondReleaseVersion()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var package = await workflow.CreateScopedReleasePackageAsync(
@@ -2634,7 +2608,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             ReleaseScope.StandardFormal, CurrentIds(repository, BomKind.Standard), "admin", UserRole.Administrator, default);
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         var versionsBefore = (await repository.ListBomVersionsAsync(ProjectId, BomKind.Standard, default))
             .Select(version => (version.Id, version.State)).OrderBy(version => version.Id).ToArray();
@@ -2670,7 +2644,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedStandardReview_IgnoresDatabaseOrderForOtherwiseIdenticalItemsWhenSubmitting()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var items = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default))
@@ -2690,7 +2664,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedStandardReview_IgnoresEquivalentQuantityDecimalScaleWhenSubmitting()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var items = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default))
@@ -2711,7 +2685,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedStandardReview_StillBlocksRealBomChangesWhenSubmitting()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var package = await workflow.CreateScopedReleasePackageAsync(
@@ -2731,7 +2705,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task ApprovedCategoryBom_AutomaticallyCreatesCategoryAndMasterCodeApplications()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await ConfigureApprovalWorkflowsAsync(repository);
         await ConfigureU9ReadOnlyAsync(materials, time);
@@ -2747,7 +2721,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
 
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
 
         Assert.Equal(ReleasePackageState.Published, package.State);
         await headerService.ProcessAutomaticQueueAsync(default);
@@ -2771,7 +2745,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task ScopedSupplement_GeneratesReadOnlyChangeNumber()
     {
         var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-02T18:30:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time);
 
@@ -2780,7 +2754,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             ReleaseScope.StandardFormal, CurrentIds(repository, BomKind.Standard), "admin", UserRole.Administrator, default);
         formal = await workflow.SubmitReleasePackageAsync(formal.Id, "admin", UserRole.Administrator, default);
         foreach (var task in formal.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            formal = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            formal = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
 
         var invalid = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, string.Empty, string.Empty, "未配置原因", "SHOULD-NOT-APPLY", null,
@@ -2802,7 +2776,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task CustomReasons_AreSelectableAndRemainFrozenAfterRemoval()
     {
         var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-02T18:30:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time);
 
@@ -2811,7 +2785,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             ReleaseScope.StandardFormal, CurrentIds(repository, BomKind.Standard), "admin", UserRole.Administrator, default);
         formal = await workflow.SubmitReleasePackageAsync(formal.Id, "admin", UserRole.Administrator, default);
         foreach (var task in formal.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            formal = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            formal = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
 
         var settings = await repository.GetSystemSettingsAsync(default);
         const string key = "物料问题 / custom-inventory";
@@ -2833,7 +2807,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task FormalSupplement_RequiresSpecificReasonsAndEnforcesSnapshottedCount()
     {
         var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-09-02T18:30:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time);
         var settings = await repository.GetSystemSettingsAsync(default);
@@ -2884,7 +2858,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task FormalSupplement_TimeLimitDoesNotBlockActualIssueReasons()
     {
         var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-09-02T18:30:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time);
         var settings = await repository.GetSystemSettingsAsync(default);
@@ -2913,7 +2887,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task NonStandardFormalRelease_AsksToRefreshDraftWhenBomChangedAfterDraftCreation()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
@@ -2947,7 +2921,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(BomKind.Electrical, ReleaseScope.ElectricalFormal, ReleaseScope.ElectricalSupplement)]
     public async Task ManualQuantityChangePublishesNormallyWithoutChangingCad(BomKind kind, ReleaseScope formalScope, ReleaseScope changeScope)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -2993,7 +2967,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task NonStandardFormalRelease_SubmitsWhileDrawingPropertiesAreStillWritingBack()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
@@ -3011,7 +2985,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ScopedRelease_AppliesSelectionToElectricalFormalAndSupplement()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
@@ -3055,7 +3029,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ElectricalReview_ResolvesDepartmentAndParentManagersWhenDraftIsCreated()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
@@ -3075,7 +3049,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task LongLeadStandardRelease_PublishesSelectedControlledOutputWithoutManufacturingBaseline()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await ConfigureApprovalWorkflowsAsync(repository);
         await ConfigureU9ReadOnlyAsync(materials, time);
@@ -3094,7 +3068,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.False(package.CreatesManufacturingBaseline);
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Empty(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
         await headerService.ProcessAutomaticQueueAsync(default);
@@ -3108,7 +3082,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task LongLeadStandardRelease_RejectsOverlappingActiveItemsButAllowsDifferentItems()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
@@ -3146,7 +3120,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task LongLeadStandardRelease_AllowsRemainingQuantityAfterPartialPublicationButRejectsOverRelease()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
@@ -3196,7 +3170,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task LongLeadStandardRelease_FormalPublicationBlocksCreateEditAndSubmit()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
@@ -3221,7 +3195,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task LongLeadStandardRelease_DraftCanUpdatePartialQuantityAndDeleteWithoutConflictingWithItself()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var publisher = new RecordingPublisher();
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
@@ -3258,7 +3232,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task NonStandardRelease_AddsEarlyBomAndSupplementWithStandardRules()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
@@ -3322,7 +3296,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         ReleaseScope earlyScope,
         ReleaseScope formalScope)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var project = await repository.CreateProjectAsync(
@@ -3367,7 +3341,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ReleasePackage_NonDraftCannotBeDeleted()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var publisher = new RecordingPublisher();
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
@@ -3391,7 +3365,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(ReleaseScope.ElectricalLongLead, BomKind.Electrical, "electrical-release", 2)]
     public async Task ScopedRelease_UsesIndependentBomWorkflowAndFreezesIt(ReleaseScope scope, BomKind kind, string code, int count)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -3446,7 +3420,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomWorkflowSettings_RejectInvalidChainsAndPreserveNewTemplatesForOldClients()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var settings = await repository.GetSystemSettingsAsync(default);
         var template = settings.ApprovalWorkflows.Standard!;
@@ -3480,7 +3454,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(BomKind.Electrical, ApprovalAssigneeSource.FixedUnitManager)]
     public async Task BomWorkflow_FixedTargetsAreResolvedAndFrozen(BomKind kind, ApprovalAssigneeSource source)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -3528,7 +3502,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task BomWorkflowSettings_RejectUnavailableFixedTargets()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var settings = await repository.GetSystemSettingsAsync(default);
@@ -3552,7 +3526,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     private static async Task ConfigureApprovalWorkflowsAsync(InMemoryPdmRepository repository)
     {
         if (await repository.FindUserAsync("admin", default) is null)
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
+            await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         if (await repository.FindUserAsync("mechanical-supervisor", default) is null)
             await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "mechanical-supervisor", "机械主管", "unused", UserRole.Approver, true), default);
         if (await repository.FindUserAsync("standardization-supervisor", default) is null)
@@ -3578,6 +3552,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow, bool completePropertyWriteback = true,
         IReadOnlyList<DocumentReferenceNode>? modelChildren = null)
     {
+        await PermissionTestUsers.Ensure(repository, ("submitter", UserRole.Administrator), ("designer", UserRole.Administrator), ("drawing-reviewer", UserRole.Administrator), ("cad-client", UserRole.Administrator));
         foreach (var held in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(held.Id, "admin", "隔离测试准备", default);
         if (await repository.FindUserAsync("mechanical-supervisor", default) is null)
@@ -3757,7 +3732,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ProductionDrawings_ListOnlyReleasedCurrentAndKeepDeliverySeparateFromVersion()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
@@ -3805,7 +3780,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task ProductionDrawings_MarksModelStepPendingWhenThePackageHasNoStepPreview()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(),
             new RecordingPublisher { PreviewOnlyDrawings = true }, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -3826,7 +3801,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task DrawingPublication_ConversionFailureWaitsAndCanResumeWithoutReapproval()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var publisher = new RecordingPublisher { ConversionUnavailable = true };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -3851,7 +3826,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task DrawingPublication_StopsAutomaticRetriesAndPreservesApprovalUntilExplicitRetry()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var publisher = new RecordingPublisher { ConversionUnavailable = true };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -3889,7 +3864,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [Fact]
     public async Task DrawingPublication_StopsWithoutAFormalSourceAndDoesNotCreatePartialVersions()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(),
             new RecordingPublisher { OmitFormalDrawings = true }, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -3909,7 +3884,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(true)]
     public async Task FailedPublicationCanReturnToDraftOnlyBeforeFormalVersionsExist(bool hasFormalVersions)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(),
             new RecordingPublisher { OmitFormalDrawings = true }, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -4021,7 +3996,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     {
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
         return package;
     }
 

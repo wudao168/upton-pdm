@@ -1,9 +1,11 @@
 import approvedAppIcon from '../src/assets/plm-app-icon.svg'
-import { flushPromises as flushVuePromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises as flushVuePromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessageBox, ElSelect } from 'element-plus'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App.vue'
 import { ElMessage, globalStatus } from '../src/statusMessage'
+
+enableAutoUnmount(afterEach)
 
 async function flushPromises() {
   await flushVuePromises()
@@ -52,6 +54,8 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     if (url.endsWith('/api/approval-tasks/mine')) return json([])
     if (url.endsWith('/api/project-activities/mine')) return json([])
     if (url.endsWith('/api/workbench')) return json({ projects: [], summary: {}, upcoming: [], overdue: [] })
+    if (url.endsWith('/api/project-report')) return json({ workbench: { projects: [], notes: [], risks: [], scope: 'company', companyName: '测试公司' }, details: [], canViewCompany: true, scopeLabel: '当前公司' })
+    if (url.endsWith('/api/authorization-center')) return json({ settings: { revision: 1, migratedAt: '', templates: [], assignments: [], positions: [] }, permissions: roleDirectory.permissions, scopes: { company: '授权公司' }, users: [], projects: [], departments: [], canEdit: true })
     if (url.endsWith('/bom-headers')) return json([])
     if (url.endsWith('/bom-headers/overview')) return json([])
     if (url.endsWith('/api/standard-structures')) return json({ catalog: { companyId: 'company', categories: [], structures: [], storageRoot: '', rowVersion: 0 }, canManage: false, canArchive: false, canConfigureStorage: false })
@@ -429,7 +433,7 @@ describe('PLM client workspace', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each([false, true].flatMap(desktop => [false, true].map(delegated => ({ desktop, delegated }))))('非管理员不显示系统设置且不能恢复或进入页面（$desktop，授权设置权限：$delegated）', async ({ desktop, delegated }) => {
+  it.each([false, true].flatMap(desktop => [false, true].map(delegated => ({ desktop, delegated }))))('系统设置入口及恢复按实际授权决定（桌面：$desktop，授权：$delegated）', async ({ desktop, delegated }) => {
     installApiMock([], ['Engineer'], delegated ? ['project.view', 'settings.storage.manage', 'system.role.view', 'audit.view'] : undefined)
     Object.defineProperty(window, 'chrome', { configurable: true, value: desktop ? { webview: { postMessage: vi.fn(), addEventListener: vi.fn() } } : undefined })
     window.localStorage.setItem('upton-pdm-active-navigation', 'admin')
@@ -437,12 +441,11 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     try {
       await login(wrapper, false)
-      expect(wrapper.findAll('.pdm-sidebar__footer button').some(button => button.text().includes('系统设置'))).toBe(false)
-      expect(wrapper.find('.pdm-admin-workspace').exists()).toBe(false)
+      expect(wrapper.findAll('.pdm-sidebar__footer button').some(button => button.text().includes('系统设置'))).toBe(delegated)
       wrapper.getComponent({ name: 'SideNav' }).vm.$emit('navigate', 'admin', '系统设置')
       await flushPromises()
-      expect(wrapper.find('.pdm-admin-workspace').exists()).toBe(false)
-      expect(wrapper.find('[aria-label="项目列表"]').exists()).toBe(true)
+      expect(wrapper.find('.pdm-admin-workspace').exists()).toBe(delegated)
+      if (!delegated) expect(wrapper.find('[aria-label="项目列表"]').exists()).toBe(true)
     } finally { wrapper.unmount() }
   })
 
@@ -471,24 +474,32 @@ describe('PLM client workspace', () => {
     } finally { wrapper.unmount() }
   })
 
-  it('在系统管理上方显示网页发布版本', async () => {
+  it('进入系统设置后显示网页发布版本', async () => {
+    const originalFetch = fetch
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/project-report')) return Promise.resolve(json({
+        workbench: { projects: [], risks: [], updatedAt: '2026-09-12T00:00:00Z' }, details: [],
+      }))
+      return originalFetch(input, init)
+    }))
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     try {
-      await login(wrapper, false)
+      await login(wrapper, false, 'admin')
+      expect(wrapper.find('.pdm-sidebar__version').exists()).toBe(false)
+      await buttonByText(wrapper, '系统设置').trigger('click')
       await flushPromises()
-      expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
-      expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
+      const version = wrapper.get('.pdm-admin-workspace .pdm-system-version-trigger')
+      expect(version.text()).toBe('版本 V2026.09.12.1234')
+      expect(version.attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
     } finally { wrapper.unmount() }
-  })
+  }, 30000)
 
-  it('空项目保留设计树、预览区和受权限控制的存档入口，存档后可刷新显示图档', async () => {
+  it('空项目保留设计树和预览区，并可刷新显示图档，项目网页存档入口已移除', async () => {
     const originalFetch = fetch
     let empty = true
-    let enabled = true
-    let canArchive = true
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes('/api/browser-archives/capabilities')) return Promise.resolve(json({ enabled, canArchive, canConfigure: false }))
+      if (url.includes('/api/browser-archives/capabilities')) return Promise.resolve(json({ enabled: true, canArchive: true, canConfigure: false }))
       if (empty && /\/(documents|folder-documents|document-relations)$/.test(url)) return Promise.resolve(json([]))
       if (empty && url.endsWith('/reference-tree')) return Promise.resolve(json(null))
       return originalFetch(input, init)
@@ -499,18 +510,8 @@ describe('PLM client workspace', () => {
       expect(wrapper.get('.pdm-tree-empty').text()).toContain('当前项目暂无图档')
       expect(wrapper.find('[aria-label="工作区命令栏"]').exists()).toBe(true)
       expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('项目尚未关联CAD图纸')
-      expect(wrapper.get('.pdm-tree-legend .browser-cad-entry').text()).toBe('存档')
-      await wrapper.get('.browser-cad-entry').trigger('click')
-      await flushPromises()
-      expect(document.querySelector('[aria-label="图档存档"]')?.textContent).toContain('选择文件')
-      canArchive = false
-      window.dispatchEvent(new Event('pdm-browser-archive-settings'))
-      await flushPromises()
-      expect(wrapper.get('.browser-cad-entry').attributes('disabled')).toBeDefined()
-      enabled = false
-      window.dispatchEvent(new Event('pdm-browser-archive-settings'))
-      await flushPromises()
-      expect(wrapper.find('.browser-cad-entry').exists()).toBe(false)
+      expect(wrapper.find('.pdm-tree-legend .browser-cad-entry').exists()).toBe(false)
+      expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/browser-archives/capabilities?projectId='), expect.anything())
       empty = false
       await wrapper.get('[aria-label="刷新设计树"]').trigger('click')
       await flushPromises()
@@ -636,7 +637,7 @@ describe('PLM client workspace', () => {
     } finally { wrapper.unmount() }
   })
 
-  it('keeps new workflow actions visible to the fixed administrator before a stale session permission list is renewed', async () => {
+  it('does not grant a new workflow action from an administrator name or stale session permissions', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await openLogin(wrapper)
     await wrapper.get('input[name="username"]').setValue('admin')
@@ -651,7 +652,7 @@ describe('PLM client workspace', () => {
     await wrapper.get('button[aria-label="展开图纸审核栏"]').trigger('click')
     expect(wrapper.get('[aria-label="图纸审核面板"]').classes()).not.toContain('is-collapsed')
     await flushPromises()
-    expect(buttonByText(wrapper, '选择范围并发起审核').exists()).toBe(true)
+    expect(wrapper.findAll('button').some(button => button.text().trim() === '选择范围并发起审核')).toBe(false)
     wrapper.unmount()
   })
 
@@ -732,6 +733,42 @@ describe('PLM client workspace', () => {
     await wrapper.get('button[aria-label="展开图纸审核栏"]').trigger('click')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('REAL-ASM-001')
     expect(wrapper.text()).not.toContain('当前角色未配置执行此操作的权限。')
+    wrapper.unmount()
+  })
+
+  it.each([false, true].flatMap(desktop => ['granted', 'ungranted', 'revoked', 'other-project'].map(scope => ({ desktop, scope }))))('图纸审核入口按审核单项目授权更新，主设名单不授予权限（桌面：$desktop，范围：$scope）', async ({ desktop, scope }) => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', { configurable: true, value: desktop ? { webview: { postMessage, addEventListener: vi.fn() } } : undefined })
+    installApiMock([], undefined, ['project.view', 'project.content.view', 'drawing-review.decide'])
+    let projectPermissions = scope === 'ungranted' ? [] : ['drawing-review.decide']
+    const project = () => ({ id: projectId, code: 'PRJ-REAL-001', name: '审核权限项目', owner: 'engineer', primaryProjectManager: 'engineer', designLeads: ['engineer'], designers: [], vaultLocation: 'D:/PDM', releaseLocation: 'D:/Release', isActive: true, quantity: 1, serialNumbers: [], canReadContent: true, effectiveProjectPermissions: projectPermissions })
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      const path = String(input).split('?')[0]
+      if (path.endsWith('/api/projects')) return Promise.resolve(json([project()]))
+      if (path.endsWith(`/api/projects/${projectId}`)) return Promise.resolve(json(project()))
+      return originalFetch(input, init)
+    })
+    drawingReviewsResponse = [{ id: 'review-permission', projectId: scope === 'other-project' ? 'ungranted-other-project' : projectId, number: 'DR-PERMISSION', state: 'InReview', createdBy: 'designer', createdAt: '2026-11-11T00:00:00Z', assignedReviewers: ['engineer'], markups: [], items: [{ id: 'review-item-permission', drawingDocumentId: 'doc-drawing', drawingNumber: 'REAL-ASM-001', drawingState: 'Pending', modelState: 'NotRequired', drawingCreatedBy: 'designer' }] }]
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    const expectPermission = (allowed: boolean) => {
+      if (desktop) {
+        const states = postMessage.mock.calls.map(([message]) => message).filter(message => message.type === 'review-overlay-state')
+        expect(states.at(-1)?.payload).toMatchObject({ canDecide: allowed })
+      } else {
+        expect(wrapper.getComponent({ name: 'DrawingReviewPanel' }).props('canDecide')).toBe(allowed)
+        for (const card of wrapper.findAllComponents({ name: 'DrawingReviewAnnotationCard' })) expect(card.props('canDecide')).toBe(allowed)
+      }
+    }
+    expectPermission(scope === 'granted' || scope === 'revoked')
+    if (scope === 'revoked') {
+      projectPermissions = []
+      if (desktop) window.dispatchEvent(new Event('pdm-refresh-current-bom'))
+      else await wrapper.get('[aria-label="刷新设计树"]').trigger('click')
+      await flushPromises()
+      expectPermission(false)
+    }
     wrapper.unmount()
   })
 
@@ -1213,12 +1250,7 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
-    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['V2026.09.12.1234'])
-    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
-    window.dispatchEvent(new CustomEvent('pdm-client-version', { detail: { version: '2026.09.12.1200-desktop-client' } }))
-    await wrapper.vm.$nextTick()
-    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
-    expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
+    expect(wrapper.find('.pdm-system-version-trigger').exists()).toBe(false)
     expect(wrapper.find('.pdm-admin-workspace').exists()).toBe(false)
     expect(wrapper.findAll('button').some(button => button.text().includes('客户端设置'))).toBe(false)
 
@@ -1283,6 +1315,10 @@ describe('PLM client workspace', () => {
     await flushPromises()
     const orange = [...document.querySelectorAll<HTMLElement>('.personal-theme-group .el-radio')]
       .find(item => item.textContent?.includes(label))!
+    if (orange.querySelector<HTMLInputElement>('input')!.checked) {
+      const other = [...document.querySelectorAll<HTMLInputElement>('.personal-theme-group .el-radio input')].find(input => !input.checked)!
+      other.click(); await flushPromises(); vi.mocked(fetch).mockClear()
+    }
     orange.querySelector<HTMLInputElement>('input')!.click()
     await flushPromises()
 
@@ -1554,10 +1590,10 @@ describe('PLM client workspace', () => {
 
     await buttonByText(wrapper, '系统设置').trigger('click')
     await flushPromises()
-    await buttonByText(wrapper, 'U9C接口').trigger('click')
+    await buttonByText(wrapper, '系统接口').trigger('click')
     await flushPromises()
     expect(wrapper.find('.u9-integration-page > .pdm-pagebar').exists()).toBe(false)
-    expect(wrapper.get('[aria-label="U9C接口管理"]').text()).toContain('基础设置')
+    expect(wrapper.get('[aria-label="系统接口"]').text()).toContain('基础设置')
     const customerTab = wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('客户查询'))
     await customerTab!.trigger('click')
     await flushPromises()
@@ -1590,20 +1626,10 @@ describe('PLM client workspace', () => {
     await buttonByText(wrapper, '系统设置').trigger('click')
     await buttonByText(wrapper, '用户设置').trigger('click')
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
-    await buttonByText(wrapper, '角色权限').trigger('click')
-    expect(wrapper.get('[aria-label="角色权限设置"]').text()).toContain('工程师')
-    const engineerRoleRow = wrapper.findAll('.el-table__row').find(row => row.text().includes('Engineer'))
-    expect(engineerRoleRow).toBeDefined()
-    await engineerRoleRow!.findAll('button').find(button => button.text().trim() === '权限设置')!.trigger('click')
-    await buttonByText(wrapper, '项目分工').trigger('click')
-    expect(wrapper.text()).toContain('分配子项目设计人员')
-    await buttonByText(wrapper, '项目内容').trigger('click')
-    const documentPermission = wrapper.findAll('.pdm-permission-cell').find(item => item.text().includes('document.edit'))
-    expect(documentPermission).toBeDefined()
-    await documentPermission!.get('input[type="checkbox"]').setValue(false)
-    await buttonByText(wrapper, '保存并立即生效').trigger('click')
+    await buttonByText(wrapper, '权限中心').trigger('click')
     await flushPromises()
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(expect.stringMatching(/\/api\/role-permissions\/Engineer$/), expect.objectContaining({ method: 'PUT' }))
+    expect(wrapper.findComponent({ name: 'PermissionCenter' }).exists()).toBe(true)
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(expect.stringMatching(/\/api\/authorization-center$/), expect.anything())
 
     await buttonByText(wrapper, '编号与存储').trigger('click')
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
@@ -1617,7 +1643,8 @@ describe('PLM client workspace', () => {
     expect(wrapper.text()).toContain('设备类型设置')
     expect(wrapper.text()).toContain('00–99')
 
-    await buttonByText(wrapper, '文件夹模板').trigger('click')
+    await wrapper.get('.el-tabs__item#tab-folder-templates').trigger('click')
+    await flushPromises()
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
     expect(wrapper.get('.pdm-template-toolbar').text()).toContain('保存模板')
 
@@ -1640,11 +1667,13 @@ describe('PLM client workspace', () => {
     await flushPromises()
     await projectTabByText(wrapper, '图档').trigger('click')
     await flushPromises()
-    await wrapper.get('input[type="search"]').setValue('REAL-PRT-001')
+    await wrapper.get('[aria-label="项目设计树"] input[aria-label="搜索图号或名称"]').setValue('REAL-PRT-001')
+    await wrapper.get('[aria-label="项目设计树"] form').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('REAL-PRT-001')
     expect(wrapper.text()).not.toContain('PRJ-2026-018')
-    await wrapper.get('input[type="search"]').setValue('不存在的图号')
+    await wrapper.get('[aria-label="项目设计树"] input[aria-label="搜索图号或名称"]').setValue('不存在的图号')
+    await wrapper.get('[aria-label="项目设计树"] form').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('没有匹配的图档')
   })
@@ -1762,6 +1791,7 @@ describe('PLM client workspace', () => {
   })
 
   it('orders grouped tabs and restores the last page when returning to each group', async () => {
+    installApiMock([], ['Engineer'], ['project.view', 'project.content.view', 'standard-library.view', 'program-template.view', 'stock.view'])
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
     await navigateTo(wrapper, '项目日历')
@@ -2215,6 +2245,8 @@ describe('PLM client workspace', () => {
     await new Promise(resolve => window.setTimeout(resolve, 20))
     await flushPromises()
     const properties = wrapper.get('[aria-label="图档属性"]')
+    expect(properties.findAll('dt').map(item => item.text())).toEqual(['物料编码', '名称', '型号', '品牌', '材质', '表面处理', '热处理', '图纸版本', '发布版本', '最近存档'])
+    await buttonByText(wrapper, '收起属性').trigger('click')
     expect(properties.findAll('dt').map(item => item.text())).toEqual(['物料编码', '名称', '图纸版本', '发布版本'])
     await buttonByText(wrapper, '更多属性').trigger('click')
     expect(properties.text()).toContain('型号10mm')

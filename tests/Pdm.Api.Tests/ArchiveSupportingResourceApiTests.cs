@@ -35,7 +35,7 @@ public sealed class ArchiveSupportingResourceApiTests
             client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));
             var repository = factory.Services.GetRequiredService<IPdmRepository>();
             Assert.Contains("InMemory", repository.GetType().Name);
-            var project = await repository.CreateProjectAsync(new("AUX-HTTP-" + Guid.NewGuid().ToString("N"), "HTTP随附资源", "admin", folder, folder), "admin", default);
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("AUX-HTTP-" + Guid.NewGuid().ToString("N"), "HTTP随附资源", "admin", folder, folder), "admin", default);
             var batch = Guid.NewGuid(); var session = Guid.NewGuid();
             var bytes = Encoding.UTF8.GetBytes("isolated resource fixture bytes"); var hash = Convert.ToHexString(SHA256.HashData(bytes));
             async Task<PdmDocument> Reserve(string name, DocumentKind kind)
@@ -99,10 +99,11 @@ public sealed class ArchiveSupportingResourceApiTests
         }
     }
 
-    private sealed class AuxiliaryFactory(string folder) : WebApplicationFactory<Program>
+    private sealed class AuxiliaryFactory(string folder) : PdmApiFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseContentRoot(AppContext.BaseDirectory);
             builder.UseEnvironment("Development");
             builder.ConfigureLogging(logging => logging.ClearProviders());

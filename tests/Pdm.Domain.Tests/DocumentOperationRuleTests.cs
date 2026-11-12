@@ -28,7 +28,7 @@ public sealed class DocumentOperationRuleTests
     [InlineData(true, 2)]
     public async Task NativeInventoryCompanionsTravelButOldFeatureDiscoveryDoesNotExpandTreeScope(bool nativeInventory, int fileCount)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("QA-SCOPE-" + nativeInventory, "文件范围", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var companion = await ArchiveBatchTests.Register(repository, project, "CONTEXT", DocumentKind.Part, session);
@@ -45,7 +45,7 @@ public sealed class DocumentOperationRuleTests
     [Fact]
     public async Task PartialIndexArchivesFileAndFinishesFollowupWithoutRemovingExistingBom()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("QA-PARTIAL", "结构待补全", "admin", "vault", "release"), "admin", default);
         var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, "KEEP", "既有物料", 3, "个", null, null, "W1", true);
         await repository.ReplaceBomAsync(project.Id, BomKind.Standard, [item], default);
@@ -70,7 +70,7 @@ public sealed class DocumentOperationRuleTests
     [Fact]
     public async Task Pure2dDrawingCanArchiveAndReopenWithoutInventingAModelRelation()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("QA-2D", "纯二维规则验收", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var drawing = await repository.RegisterDocumentAsync(new(project.Id, "2D", "纯二维", "2D.SLDDRW", DocumentKind.Drawing), "admin", default);
@@ -89,7 +89,7 @@ public sealed class DocumentOperationRuleTests
     [Fact]
     public async Task AuxiliaryDrawingFailureDoesNotBlockModelButExplicitDrawingStillFails()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("QA-AUX", "辅助工程图", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var part = await ArchiveBatchTests.Register(repository, project, "PART", DocumentKind.Part, session);
@@ -108,7 +108,7 @@ public sealed class DocumentOperationRuleTests
     [Fact]
     public async Task RemovingOccurrenceDoesNotDeleteIndependentPartOrDrawing()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("QA-REMOVE", "删除装配引用", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var part = await ArchiveBatchTests.Register(repository, project, "PART", DocumentKind.Part, session);

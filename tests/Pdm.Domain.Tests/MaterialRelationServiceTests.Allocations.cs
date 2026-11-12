@@ -10,7 +10,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task Allocations_SeparateSingleChoicesPreserveTotalsAndFrozenSnapshot()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var store = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(store, materials, pdm, TimeProvider.System);
@@ -55,7 +55,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task Allocations_OneUnreviewedCombinationBlocksReleaseAndFixedOptionCountsPerCombination()
     {
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var store = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(store, materials, pdm, TimeProvider.System);

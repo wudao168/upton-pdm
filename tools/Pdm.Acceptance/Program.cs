@@ -12,19 +12,20 @@ var baseConnection = Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_CONNECTI
 var password = Environment.GetEnvironmentVariable("PDM_DB_PASSWORD")
     ?? throw new InvalidOperationException("PDM_DB_PASSWORD未设置。");
 var builder = new MySqlConnectionStringBuilder(baseConnection) { Password = password };
+var restoredSnapshot = args.Contains("--restored-snapshot", StringComparer.Ordinal);
 var options = Options.Create(new PdmDatabaseOptions
 {
     Provider = "MySql",
-    RunMigrations = true,
+    RunMigrations = !restoredSnapshot,
     ConnectionString = builder.ConnectionString
 });
 var runner = new MySqlMigrationRunner(options, NullLogger<MySqlMigrationRunner>.Instance, TimeProvider.System);
-await runner.RunAsync(CancellationToken.None);
+if (!restoredSnapshot) await runner.RunAsync(CancellationToken.None);
 
 await using var connection = new MySqlConnection(builder.ConnectionString);
 await connection.OpenAsync();
 long? financialBatchMilliseconds = null;
-if (string.Equals(Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_SEED"), "1", StringComparison.Ordinal))
+if (!restoredSnapshot && string.Equals(Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_SEED"), "1", StringComparison.Ordinal))
 {
     await SeedAsync(connection);
     financialBatchMilliseconds = await VerifyFinancialStorageAsync(connection, options);
@@ -35,6 +36,14 @@ var projectFileTables = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*
 var projectFileTriggers = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE() AND trigger_name IN ('trg_project_file_version_no_update','trg_project_file_version_no_delete')");
 var tableCountRows = await connection.QueryAsync<DatabaseTableCount>("SELECT 'project' AS TableName,COUNT(*) AS RowCount FROM project UNION ALL SELECT 'document',COUNT(*) FROM document UNION ALL SELECT 'document_version',COUNT(*) FROM document_version UNION ALL SELECT 'reference_snapshot',COUNT(*) FROM reference_snapshot UNION ALL SELECT 'bom_item',COUNT(*) FROM bom_item UNION ALL SELECT 'release_package',COUNT(*) FROM release_package UNION ALL SELECT 'audit_entry',COUNT(*) FROM audit_entry");
 var tableCounts = tableCountRows.ToDictionary(row => row.TableName, row => row.RowCount, StringComparer.Ordinal);
+if (restoredSnapshot)
+{
+    // 恢复完整性按原备份快照核对，不运行会追加审计记录的升级迁移。
+    Console.WriteLine(JsonSerializer.Serialize(new { database = builder.Database, migrations,
+        expectedMigrationApplied = migrations.Contains("004_phase1_bom_release_workflow", StringComparer.Ordinal),
+        releaseColumns, tableCounts, readOnlyVerification = true }));
+    return;
+}
 var projectCompanies = (await connection.QueryAsync("SELECT code,organization_id FROM project ORDER BY code")).ToArray();
 var projectReferenceRoots = (await connection.QueryAsync<ProjectReferenceRootRow>("""
     SELECT p.code AS ProjectCode,

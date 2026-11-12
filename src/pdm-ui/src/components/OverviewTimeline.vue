@@ -5,11 +5,11 @@ import type { ProjectPlan } from '../types'
 const props = defineProps<{ plan: ProjectPlan | null; baseline: ProjectPlan | null; baselineUnavailable: boolean; progressTone?: 'success' | 'warning' | 'danger' }>()
 const emit = defineEmits<{ openTask: [taskId?: string] }>()
 const phases = [
-  { name: '设计', codes: ['Design'], color: '#9ae600' },
-  { name: '备料', codes: ['MaterialPreparation'], color: '#3392ff' },
-  { name: '装配', codes: ['Assembly'], color: '#c27aff' },
-  { name: '调试', codes: ['Commissioning', 'ClientCommissioning'], color: '#fb64b6' },
-  { name: '验收', codes: ['AcceptanceProgress', 'FinalAcceptance'], color: '#fdc700' },
+  { name: '设计', codes: ['Design'], color: '#9ae600', baselineColor: '#85bf32' },
+  { name: '备料', codes: ['MaterialPreparation'], color: '#3392ff', baselineColor: '#4d8bd1' },
+  { name: '装配', codes: ['Assembly'], color: '#c27aff', baselineColor: '#aa78d0' },
+  { name: '调试', codes: ['Commissioning', 'ClientCommissioning'], color: '#fb64b6', baselineColor: '#dc70aa' },
+  { name: '验收', codes: ['AcceptanceProgress', 'FinalAcceptance'], color: '#fdc700', baselineColor: '#d8ad28' },
 ]
 const today = new Date().toLocaleDateString('sv-SE')
 const progressLabel = computed(() => props.progressTone === 'danger' ? '已滞后' : props.progressTone === 'warning' ? '有风险' : props.progressTone === 'success' ? '正常' : '进度状态未知')
@@ -59,7 +59,7 @@ const rows = computed(() => ['actual', 'planned', 'baseline'].map(kind => {
     const barFinish = kind === 'actual' ? plannedFinishes[plannedFinishes.length - 1] || finish : finish
     const fullWidth = Math.max(.6, position(barFinish) - position(barStart) + 100 / (bounds.value.finish - bounds.value.start))
     const taskId = [...members].sort((a, b) => a.sortOrder - b.sortOrder)[0]?.id
-    return [{ ...phase, start, finish, completion, taskId, left: position(barStart), width: fullWidth * (kind === 'actual' ? Math.min(100, completion) / 100 : 1) }]
+    return [{ ...phase, color: kind === 'baseline' ? phase.baselineColor : phase.color, start, finish, completion, taskId, left: position(barStart), width: fullWidth * (kind === 'actual' ? Math.min(100, completion) / 100 : 1) }]
   })
   return { kind, label: kind === 'actual' ? '实际进度' : kind === 'planned' ? '当前计划' : '初始基线', segments,
     empty: kind === 'actual' ? '未开始 / 未填报实际日期' : kind === 'baseline' ? props.baselineUnavailable ? '初始基线读取失败或历史缺失' : '未建立基线' : '未排程' }

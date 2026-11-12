@@ -124,8 +124,12 @@ internal static partial class Program
             Require(((IList)Get(root, "Children")).Contains(pendingDrawing) && ((IList)Get(pendingDrawing, "ReferencedModels")).Count == 0, "pure 2D drawing was removed or given a fake reference");
             Require(cwd == "original working directory", "empty drawing reference changed working directory");
             Pass("pure 2D drawing remains eligible for native archive without a 3D reference");
+            // The in-memory diagnostic ring retains only its last 200 entries. Record a fresh
+            // native-path failure after the long suite before checking the export contract.
+            ExpectPathFailure(() => InvokeStatic("ArchiveReferencePath", "Resolve", folder + "\\坏\0引用.SLDPRT", folder, "识别结构内原生引用", rootPath, "ROOT/PART-1", "CFG-A"));
             var report = (string)InvokeStatic("PluginDiagnosticLog", "BuildReport", "QA", folder);
-            Require(report.Contains("路径诊断") && report.Contains("U+0000") && report.Contains("\\u0000") && report.Contains("结构内原生引用"), "exported report lost raw path diagnostics");
+            File.WriteAllText(Path.Combine(folder, "diagnostic-report.txt"), report);
+            Require(report.Contains("路径诊断") && report.Contains("U+0000") && report.Contains("\\u0000") && report.Contains("结构内原生引用"), "exported report lost raw path diagnostics: " + string.Join(",", new[] { "路径诊断", "U+0000", "\\u0000", "结构内原生引用" }.Select(value => value + "=" + report.Contains(value))));
             Require(File.ReadAllText(rootPath) == "unchanged assembly bytes" && File.ReadAllText(partPath) == "unchanged part bytes", "source bytes changed");
             File.WriteAllText(Path.Combine(folder, "diagnostic-report.txt"), report);
             Pass("exported diagnostic report retains escaped paths and unchanged source bytes");
@@ -150,7 +154,7 @@ internal static partial class Program
             Pass("outside saved alias cannot affect tree archive: " + mode);
         }
         Set(part, "FullPath", Path.Combine(folder, "missing-real-part.SLDPRT"));
-        ExpectInvalid(() => InvokeStatic("NativeArchiveManifest", "Validate", root, new[] { rootPath, old }), "树内图档缺失");
+        ExpectInvalid(() => InvokeStatic("NativeArchiveManifest", "Validate", root, new[] { rootPath, old }), "实际引用文件缺失");
         Pass("existing old alias cannot substitute a missing actual tree file");
     }
 
@@ -359,7 +363,7 @@ internal static partial class Program
         {
             var root=Node(rootPath,"Assembly");var missing=Node(Path.Combine(folder,"缺失树内文件."+(kind=="Part"?"SLDPRT":"SLDDRW")),kind);
             ((IList)Get(root,"Children")).Add(missing);
-            ExpectInvalid(()=>InvokeStatic("NativeArchiveManifest","Validate",root,new[]{rootPath}),"树内图档缺失");
+            ExpectInvalid(()=>InvokeStatic("NativeArchiveManifest","Validate",root,new[]{rootPath}),"实际引用文件缺失");
             Pass("missing in-tree file blocks even when omitted from native manifest: "+kind);
         }
         var legacy=Node(rootPath,"Assembly");var part=Node(partPath,"Part");Set(legacy,"DocumentId",Guid.NewGuid());Set(part,"DocumentId",Guid.NewGuid());

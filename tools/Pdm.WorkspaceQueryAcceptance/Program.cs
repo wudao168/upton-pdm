@@ -80,9 +80,9 @@ internal static class Program
         public int Count;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
         {
-            if(!request.RequestUri.AbsolutePath.EndsWith("/versions"))throw new Exception("意外接口："+request.RequestUri.AbsolutePath);
+            if(request.Method != HttpMethod.Post || !request.RequestUri.AbsolutePath.EndsWith("/version-verifications"))throw new Exception("意外接口："+request.RequestUri.AbsolutePath);
             Interlocked.Increment(ref Count);await Task.Delay(75,token);
-            var value=new[]{new{id=version,documentId=document,sha256=new string('F',64),revision=new{display="W1"},propertySnapshot=new Dictionary<string,string>()}};
+            var value=new[]{new{documentId=document,accessible=true,latest=new{id=version,documentId=document,sha256=new string('F',64),revision="W1",fileLength=20}}};
             return new(HttpStatusCode.OK){Content=new StringContent(new JavaScriptSerializer().Serialize(value),Encoding.UTF8,"application/json")};
         }
     }

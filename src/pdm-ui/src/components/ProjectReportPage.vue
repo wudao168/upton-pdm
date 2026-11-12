@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import { Building2, CalendarCheck, FilePenLine, FolderKanban, PencilRuler, TriangleAlert, Wallet } from '@lucide/vue'
+import DepartmentSelectField from './DepartmentSelectField.vue'
+import DepartmentName from './DepartmentName.vue'
+import CompanyName from './CompanyName.vue'
+import CompanyNameField from './CompanyNameField.vue'
 import PersonName from './PersonName.vue'
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import ProjectReportChart from './ProjectReportChart.vue'
@@ -25,6 +30,7 @@ const options=(key:'unit'|'customer'|'manager'|'stage')=>computed(()=>[...new Se
 const units=options('unit'),customers=options('customer'),managers=options('manager'),stages=options('stage')
 const rows=computed(()=>all.value.filter(r=>(!unit.value||r.unit===unit.value)&&(!customer.value||r.customer===customer.value)&&(!manager.value||r.manager===manager.value)&&(!stage.value||r.stage===stage.value)&&(!search.value||`${r.code} ${r.name}`.toLowerCase().includes(search.value.toLowerCase()))))
 const settlement=computed(()=>knownSum(rows.value.map(r=>r.finance?.settlement))),customerCount=computed(()=>new Set(rows.value.map(r=>r.customerKey).filter(Boolean)).size)
+const settlementCount=computed(()=>rows.value.filter(r=>r.finance?.settlement!=null).length)
 const delivery=computed(()=>rate(rows.value,'deliveryResult')),design=computed(()=>rate(rows.value,'designResult')),drawings=computed(()=>drawingStats(rows.value,from.value,to.value))
 const expenseSample=computed(()=>rows.value.filter(r=>r.finance?.budget!=null&&r.finance.actual!=null))
 const overruns=computed(()=>expenseSample.value.filter(r=>r.finance!.actual!>r.finance!.budget!))
@@ -71,18 +77,43 @@ function selectQuality(value:string,key:string){stage.value=value;focus('quality
 
 <template>
 <section class="report-page" aria-label="项目经营总览" :aria-busy="loading">
- <header class="report-heading"><h1>项目经营总览 <span :title="companyName">{{data?.scopeLabel||'授权范围'}}</span></h1><div class="report-actions"><button @click="methodDialog?.showModal()">统计口径</button><button @click="focus('')" :disabled="!data">项目明细</button><button :disabled="loading" @click="refresh" :title="data?'更新于 '+new Date(data.workbench.updatedAt).toLocaleString('zh-CN'):''">{{loading?'正在更新…':'刷新'}}</button></div></header>
- <div class="report-filters"><select v-model="unit" aria-label="事业部"><option value="">{{data?.canViewCompany?'公司全部事业部':'所属事业部'}}</option><option v-for="v in units" :key="v">{{v}}</option></select><select v-model="customer" aria-label="客户"><option value="">全部客户</option><option v-for="v in customers" :key="v">{{v}}</option></select><select v-model="manager" aria-label="负责人"><option value="">全部负责人</option><option v-for="v in managers" :key="v" :value="v">{{displayUserName(v)}}</option></select><select v-model="stage" aria-label="阶段筛选"><option value="">全部阶段</option><option v-for="v in stages" :key="v">{{v}}</option></select><label><input v-model="from" type="date" aria-label="统计开始日期"><span>—</span><input v-model="to" type="date" aria-label="统计结束日期" :max="day"></label><input v-model="search" type="search" placeholder="搜索项目" aria-label="搜索项目"></div>
+ <div class="report-filters"><DepartmentSelectField :name="unit"><select v-model="unit" aria-label="事业部"><option value="">{{data?.canViewCompany?'公司全部事业部':'所属事业部'}}</option><option v-for="v in units" :key="v">{{v}}</option></select></DepartmentSelectField><CompanyNameField :name="customer"><select v-model="customer" aria-label="客户"><option value="">全部客户</option><option v-for="v in customers" :key="v">{{v}}</option></select></CompanyNameField><select v-model="manager" aria-label="负责人"><option value="">全部负责人</option><option v-for="v in managers" :key="v" :value="v">{{displayUserName(v)}}</option></select><select v-model="stage" aria-label="阶段筛选"><option value="">全部阶段</option><option v-for="v in stages" :key="v">{{v}}</option></select><label><input v-model="from" type="date" aria-label="统计开始日期"><span>—</span><input v-model="to" type="date" aria-label="统计结束日期" :max="day"></label><div class="report-actions"><button @click="methodDialog?.showModal()">统计口径</button><button @click="focus('')" :disabled="!data">项目明细</button><button :disabled="loading" @click="refresh" :title="data?'更新于 '+new Date(data.workbench.updatedAt).toLocaleString('zh-CN'):''">{{loading?'正在更新…':'刷新'}}</button></div><input v-model="search" type="search" placeholder="搜索项目" aria-label="搜索项目"></div>
  <p v-if="error||invalidDates" class="report-error" role="alert">{{error||'请选择有效的统计起止日期。'}}</p>
  <template v-if="data&&!invalidDates">
  <div class="report-kpis">
-  <button class="report-card report-kpi" @click="focus('')" :title="'结算金额（元）：'+money(settlement)+'；'+rows.filter(r=>r.finance?.settlement!=null).length+'/'+rows.length+' 个项目有数据'"><span>结算金额 <em>元</em></span><strong>{{settlement==null?'—':money(settlement)}}</strong></button>
-  <button class="report-card report-kpi" @click="focus('')" title="按主项目去重，子项目不重复计入"><span>项目数</span><strong>{{rows.length}}</strong></button>
-  <button class="report-card report-kpi" @click="focus('')" title="按客户编码去重；未填写客户编码不计入"><span>客户数</span><strong>{{customerCount}}</strong></button>
-  <button class="report-card report-kpi" @click="focus('delivery','交付与设计')" :title="'交货准时 / 已到期：'+delivery.onTime+' / '+delivery.total"><span>交货准时率</span><strong>{{percent(delivery.value)}}</strong></button>
-  <button class="report-card report-kpi" @click="focus('design','交付与设计')" :title="'设计准时 / 已到期：'+design.onTime+' / '+design.total"><span>设计准时率</span><strong>{{percent(design.value)}}</strong></button>
-  <button class="report-card report-kpi" @click="focus('over','预算控制')" :title="'实际超预算 / 可比较项目：'+overruns.length+' / '+expenseSample.length"><span>超预算项目</span><strong :class="{'report-danger':overruns.length}">{{expenseSample.length?overruns.length:'—'}}</strong></button>
-  <button class="report-card report-kpi" @click="focus('drawing','图纸变更')" :title="'发生变更 / 已发布图纸：'+drawings.changed+' / '+drawings.total"><span>图纸修改率</span><strong>{{percent(drawings.value)}}</strong></button>
+  <button type="button" class="pdm-stat-card report-kpi report-kpi--amount" @click="focus('')">
+   <span class="pdm-stat-card__label"><span class="pdm-stat-card__icon" aria-hidden="true"><Wallet :size="16" /></span>结算金额</span>
+   <strong>{{settlement==null?'—':money(settlement)}}<small>元</small></strong>
+   <em class="pdm-stat-card__detail">{{settlementCount}} / {{rows.length}} 个项目有数据</em>
+  </button>
+  <button type="button" class="pdm-stat-card report-kpi" @click="focus('')" title="按主项目去重，子项目不重复计入">
+   <span class="pdm-stat-card__label"><span class="pdm-stat-card__icon" aria-hidden="true"><FolderKanban :size="16" /></span>项目数</span>
+   <strong>{{rows.length}}</strong>
+  </button>
+  <button type="button" class="pdm-stat-card report-kpi" @click="focus('')" title="按客户编码去重；未填写客户编码不计入">
+   <span class="pdm-stat-card__label"><span class="pdm-stat-card__icon" aria-hidden="true"><Building2 :size="16" /></span>客户数</span>
+   <strong>{{customerCount}}</strong>
+  </button>
+  <button type="button" class="pdm-stat-card report-kpi" @click="focus('delivery','交付与设计')">
+   <span class="pdm-stat-card__label"><span class="pdm-stat-card__icon" aria-hidden="true"><CalendarCheck :size="16" /></span>交货准时率</span>
+   <strong>{{percent(delivery.value)}}</strong>
+   <em class="pdm-stat-card__detail">准时 {{delivery.onTime}} / 到期 {{delivery.total}}</em>
+  </button>
+  <button type="button" class="pdm-stat-card report-kpi" @click="focus('design','交付与设计')">
+   <span class="pdm-stat-card__label"><span class="pdm-stat-card__icon" aria-hidden="true"><PencilRuler :size="16" /></span>设计准时率</span>
+   <strong>{{percent(design.value)}}</strong>
+   <em class="pdm-stat-card__detail">准时 {{design.onTime}} / 到期 {{design.total}}</em>
+  </button>
+  <button type="button" class="pdm-stat-card report-kpi" :class="{'is-danger':overruns.length}" @click="focus('over','预算控制')">
+   <span class="pdm-stat-card__label"><span class="pdm-stat-card__icon" aria-hidden="true"><TriangleAlert :size="16" /></span>超预算项目</span>
+   <strong>{{expenseSample.length?overruns.length:'—'}}</strong>
+   <em class="pdm-stat-card__detail">{{expenseSample.length}} 个项目可比较</em>
+  </button>
+  <button type="button" class="pdm-stat-card report-kpi" @click="focus('drawing','图纸变更')">
+   <span class="pdm-stat-card__label"><span class="pdm-stat-card__icon" aria-hidden="true"><FilePenLine :size="16" /></span>图纸修改率</span>
+   <strong>{{percent(drawings.value)}}</strong>
+   <em class="pdm-stat-card__detail">变更 {{drawings.changed}} / 已发布 {{drawings.total}}</em>
+  </button>
  </div>
  <div class="report-chart-grid">
   <section class="report-panel report-span-4" aria-label="项目阶段分布"><div class="report-panel-heading"><h2>项目阶段分布</h2><div class="report-segment"><button v-for="m in ['项目数','金额','客户数']" :key="m" :aria-pressed="metric===m" @click="metric=m">{{m}}</button></div></div><ProjectReportChart :active="active!==false" kind="columns" label="项目阶段分布" :data="stageData" @select="selectStage" /></section>
@@ -96,7 +127,7 @@ function selectQuality(value:string,key:string){stage.value=value;focus('quality
   <section class="report-panel report-span-4" aria-label="阶段停留分布"><div class="report-panel-heading"><h2>阶段停留分布</h2><span class="report-mini-value">{{stageDuration.length}} 个项目 · 天</span></div><ProjectReportChart :active="active!==false" kind="scatter" label="各项目当前阶段停留天数" :data="stageDuration" @select="focus('project:'+$event)" /></section>
   <section class="report-panel report-span-4" aria-label="数据完整性"><div class="report-panel-heading"><h2>数据完整性</h2><span class="report-mini-value">阶段 × 字段</span></div><div class="report-quality" data-chart="heatmap"><div class="report-quality-row report-quality-head"><span></span><span v-for="f in qualityFields" :key="f.key">{{f.label}}</span></div><div v-for="r in qualityData" :key="r.label" class="report-quality-row"><span :title="r.label">{{r.label}}</span><button v-for="c in r.cells" :key="c.key" class="report-heat-cell" :style="heat(c.value)" :title="r.label+' · '+c.label+'：'+c.count+'/'+c.total+' 个项目数据可用；点击查看缺项'" @click="selectQuality(r.label,c.key)">{{Math.round(c.value)}}%</button></div><div v-if="!qualityData.length" class="report-empty">暂无数据</div></div><div class="report-heat-legend"><span>可用数据占比</span><span>0% <i v-for="n in [0,25,50,75,100]" :key="n" :style="heat(n)"></i> 100%</span></div></section>
  </div>
- <dialog ref="detailDialog" class="report-dialog" aria-label="项目明细" @click="closeOnBackdrop"><header class="report-dialog-heading"><strong>项目明细</strong><button aria-label="关闭项目明细" @click="detailDialog?.close()">关闭</button></header><article id="report-detail" class="report-table-panel"><div class="report-card-title"><h2>项目明细 <span>{{filtered.length}} 个项目</span></h2><div class="report-table-tools"><button v-if="drill" @click="drill=''">{{drillLabel}} ×</button><select v-model="stage" aria-label="项目阶段"><option value="">全部阶段</option><option v-for="s in stages" :key="s">{{s}}</option></select><select v-model="sort" aria-label="项目排序"><option value="code">按项目编号</option><option value="amount">金额从高到低</option><option value="due">交期从近到远</option><option value="days">阶段停留从长到短</option></select></div></div><div class="report-table-scroll"><table><thead><tr><th>项目编号 / 名称</th><th>客户 / 事业部</th><th>阶段</th><th>结算金额（元）</th><th>交货 / 设计日期</th><th>负责人</th><th>关注事项</th><th>操作</th></tr></thead><tbody><tr v-for="r in visible" :key="r.id"><td><b>{{r.code}}</b><small>{{r.name}}</small></td><td>{{r.customer}}<small>{{r.unit}}</small></td><td><span class="report-stage-label">{{r.stage}}</span><small v-if="r.stageDays!=null">{{r.stageDays}} 天</small></td><td>{{money(r.finance?.settlement)}}</td><td>{{r.deliveryDate||'待补充'}}<small>设计 {{r.designResult.due||'待补充'}}</small></td><td><PersonName :name="displayUserName(r.manager,'待分配')" /></td><td><span :class="{'report-danger':r.riskLabels.length}">{{r.riskLabels.join('、')||(r.issues.length?'数据待完善':'暂无异常')}}</span></td><td><button class="report-link" @click="openProject(r.id)">查看详情 →</button></td></tr><tr v-if="!visible.length"><td colspan="8" class="report-empty">暂无符合筛选条件的项目</td></tr></tbody></table></div><footer class="report-pagination"><span>第 {{page}} / {{pages}} 页 · 每页 10 条</span><div><button :disabled="page<=1" @click="page--">上一页</button><button :disabled="page>=pages" @click="page++">下一页</button></div></footer></article>
+ <dialog ref="detailDialog" class="report-dialog" aria-label="项目明细" @click="closeOnBackdrop"><header class="report-dialog-heading"><strong>项目明细</strong><button aria-label="关闭项目明细" @click="detailDialog?.close()">关闭</button></header><article id="report-detail" class="report-table-panel"><div class="report-card-title"><h2>项目明细 <span>{{filtered.length}} 个项目</span></h2><div class="report-table-tools"><button v-if="drill" @click="drill=''">{{drillLabel}} ×</button><select v-model="stage" aria-label="项目阶段"><option value="">全部阶段</option><option v-for="s in stages" :key="s">{{s}}</option></select><select v-model="sort" aria-label="项目排序"><option value="code">按项目编号</option><option value="amount">金额从高到低</option><option value="due">交期从近到远</option><option value="days">阶段停留从长到短</option></select></div></div><div class="report-table-scroll"><table><thead><tr><th>项目编号 / 名称</th><th>客户 / 事业部</th><th>阶段</th><th>结算金额（元）</th><th>交货 / 设计日期</th><th>负责人</th><th>关注事项</th><th>操作</th></tr></thead><tbody><tr v-for="r in visible" :key="r.id"><td><b>{{r.code}}</b><small>{{r.name}}</small></td><td><CompanyName :name="r.customer" /><small><DepartmentName :name="r.unit" /></small></td><td><span class="report-stage-label">{{r.stage}}</span><small v-if="r.stageDays!=null">{{r.stageDays}} 天</small></td><td>{{money(r.finance?.settlement)}}</td><td>{{r.deliveryDate||'待补充'}}<small>设计 {{r.designResult.due||'待补充'}}</small></td><td><PersonName :name="displayUserName(r.manager,'待分配')" /></td><td><span :class="{'report-danger':r.riskLabels.length}">{{r.riskLabels.join('、')||(r.issues.length?'数据待完善':'暂无异常')}}</span></td><td><button class="report-link" @click="openProject(r.id)">查看详情 →</button></td></tr><tr v-if="!visible.length"><td colspan="8" class="report-empty">暂无符合筛选条件的项目</td></tr></tbody></table></div><footer class="report-pagination"><span>第 {{page}} / {{pages}} 页 · 每页 10 条</span><div><button :disabled="page<=1" @click="page--">上一页</button><button :disabled="page>=pages" @click="page++">下一页</button></div></footer></article>
  </dialog>
  </template><div v-else-if="loading" class="report-empty" role="status">正在读取授权项目数据…</div>
  <dialog ref="methodDialog" class="report-dialog report-method-dialog" aria-label="统计口径" @click="closeOnBackdrop"><header class="report-dialog-heading"><strong>统计口径</strong><button @click="methodDialog?.close()">关闭</button></header><div class="report-method"><p>主项目按唯一编号汇总；金额采用主项目预算模块中的结算金额，不累加子项目以免重复。客户按客户编码去重，各阶段客户数不可直接相加。</p><p>交货以参与交期计算的生效计划任务全部完成为依据，优先采用项目约定交期；设计以设计阶段及设计审核节点全部完成为依据。实际完成日期缺失时不计准时；已到期未完成计入分母。取消、终止项目不计准时率。未设置交付节点的项目列为数据缺项。</p><p>预算只比较预算与实际成本均有值的同一批项目；缺失或无权查看不计为零。预计成本沿用预算模块算法。未授权项目不会由报表接口返回。</p><p>图纸仅统计正式发布的工程图；发布前存档不计修改，首次发布不计修改，同一正式修订重复发布去重。原因来自发布包，是UPLM统计机制；不代表逐张图纸均已独立登记原因。</p></div><p class="report-method">趋势图固定展示截至所选结束日期的最近六个月，空白月份不连线。风险按类型计次，项目可重复涉及不同风险；阶段散点仅包含可确认进入日期的项目。数据完整性表示当前账号可用数据比例，未授权与缺失均不计为可用。金额单位均为人民币元。帕累托折线以全部原因次数为分母，展示前六类的累计占比。</p></dialog>

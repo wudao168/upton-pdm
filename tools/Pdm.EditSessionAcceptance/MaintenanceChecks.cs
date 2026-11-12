@@ -79,13 +79,20 @@ internal static partial class Program
             SetField(plugin,"authenticatedUsername","tester");SetField(plugin,"editJournal",journal);
             SetField(plugin,"editJournalScope",(string)Get(client,"EditJournalScope")+"|tester");
             var node=New("CadTreeNode");Set(node,"DocumentId",id);Set(node,"FullPath",path);Set(node,"FileName","PART.SLDPRT");
-            var loaded=true;var closes=0;var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+            var loaded=true;var closes=0;var reopens=0;var restoredReadOnly=false;var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
             var model=new Proxy(appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{
                 switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return "PART.SLDPRT";case "GetType":return 1;
-                    case "GetSaveFlag":return true;case "IsOpenedReadOnly":return false;default:throw new Exception(call.MethodName);}
+                    case "GetSaveFlag":return !restoredReadOnly;case "IsOpenedReadOnly":return restoredReadOnly;case "get_Visible":return true;case "get_ConfigurationManager":return null;default:throw new Exception(call.MethodName);}
             }).GetTransparentProxy();
             SetField(plugin,"application",new Proxy(appType,call=>{
                 if(call.MethodName=="GetDocuments")return loaded?new[]{model}:Array.Empty<object>();
+                if(call.MethodName=="get_ActiveDoc")return loaded?model:null;
+                if(call.MethodName=="OpenDoc6")
+                {
+                    Require((string)call.Args[0]==path&&((int)call.Args[2]&2)==2,"Discard reopened a different file or allowed editing");
+                    Require(File.ReadAllBytes(path).SequenceEqual(baseline),"Discard reopened before restoring verified bytes");
+                    call.Args[4]=0;call.Args[5]=0;loaded=true;restoredReadOnly=true;reopens++;return model;
+                }
                 if(call.MethodName=="GetDocumentDependencies2")return Array.Empty<string>();
                 if(call.MethodName=="CloseDoc"){loaded=false;closes++;return null;}throw new Exception(call.MethodName);
             }).GetTransparentProxy());
@@ -142,7 +149,7 @@ internal static partial class Program
                 File.SetAttributes(readOnlyPath,FileAttributes.ReadOnly);
             }
             await (Task)Invoke(plugin,"RestoreDiscardedEditsAsync",manifest);
-            Require(!loaded&&closes==1&&File.ReadAllBytes(path).SequenceEqual(expectedBytes),"Discard did not replace actual working bytes");
+            Require(loaded&&restoredReadOnly&&closes==1&&reopens==1&&File.ReadAllBytes(path).SequenceEqual(expectedBytes),"Discard did not restore verified bytes and the original window read-only");
             Require(File.ReadAllBytes(secondPath).SequenceEqual(expectedBytes),"Discard left another recorded workspace modified");
             Require(((IEnumerable)Invoke(journal,"ReadAll")).Cast<object>().All(e=>!(bool)Get(e,"DiscardPending")&&!(bool)Get(e,"RestoreOnOpen")),
                 "Completed discard could restore old drafts");

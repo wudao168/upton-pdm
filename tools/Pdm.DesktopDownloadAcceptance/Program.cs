@@ -136,7 +136,7 @@ internal static class Program
         timeout.Start();
         app.Run();
         var report = new { succeeded = failure == null, passed = Passed, failure = failure?.ToString(), root,
-            dialogInteraction = "路径选择使用测试桩；真实系统另存为窗口的按钮交互未自动化，原生UI工具初始化失败。" };
+            dialogInteraction = "使用真实WebView2下载事件，路径选择由测试桩提供；未自动化系统另存为窗口按钮交互。" };
         File.WriteAllText(Path.Combine(root, "result.json"), Json.Serialize(report), new UTF8Encoding(false));
         Console.WriteLine(Json.Serialize(report));
         return failure == null ? 0 : 1;

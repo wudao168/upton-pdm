@@ -4,7 +4,7 @@ import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, canViewTab } = useProjectCenterAccess()
 import ProjectTodoFields from './ProjectTodoFields.vue'
 import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, TriangleAlert } from '@lucide/vue'
-import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, readProjectOverviewRecords, listProjectPlanVersions, readProjectPlanPortfolio, readProjectRiskOverview, readProjectValidationPlan } from '../api'
+import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, readProjectOverviewRecords, readProjectOpl, listProjectPlanVersions, readProjectPlanPortfolio, readProjectRiskOverview, readProjectValidationPlan } from '../api'
 import OverviewTimeline from './OverviewTimeline.vue'
 import { chinaToday } from '../projectCalendar'
 import { projectRiskRows, type ProjectAttentionDetail, type ProjectRiskOverviewProject } from '../projectAttention'
@@ -24,6 +24,7 @@ const props = withDefaults(defineProps<{
   modelCount: number
   drawingCount: number
   bomPendingCount: number
+  pendingBomItems?: import('../types').BomItem[]
   standardCount: number
   nonStandardCount: number
   electricalCount: number
@@ -39,7 +40,7 @@ const props = withDefaults(defineProps<{
   canAddManagerNote: boolean
 }>(), { active: true })
 
-const emit = defineEmits<{ documents: []; bom: []; projectPlan: [taskId?: string]; openPortfolioPlan: [projectId: string]; validationPlan: []; release: [];
+const emit = defineEmits<{ documents: []; bom: [kind?: import('../types').BomKind]; opl: []; projectPlan: [taskId?: string]; openPortfolioPlan: [projectId: string]; validationPlan: []; release: [];
   openRisk: [projectId: string, tab: ProjectAttentionDetail['tab']] }>()
 
 const activeProject = computed(() => props.projects.find(item => item.id === props.project.id) ?? props.project)
@@ -47,11 +48,17 @@ const rootProject = computed(() => {
   const rootId = activeProject.value.rootProjectId ?? activeProject.value.parentProjectId
   return rootId ? props.projects.find(item => item.id === rootId) ?? activeProject.value : activeProject.value
 })
+const canReadOpl = computed(() => activeProject.value.canReadContent && canViewTab('opl')
+  && activeProject.value.effectiveProjectPermissions?.includes('project.opl.view') === true)
 
 const recordProjects = computed(() => [...new Map([rootProject.value, ...props.projects, activeProject.value]
   .filter(item => item.id === rootProject.value.id || item.parentProjectId === rootProject.value.id || item.rootProjectId === rootProject.value.id)
   .map(item => [item.id, item])).values()])
 const projectRecordError = ref('')
+const oplPendingCount = ref(0)
+const oplSummaryFailed = ref(false)
+const alertDetail = ref<'attention' | 'approval'>()
+const alertDetailOpen = computed({ get: () => !!alertDetail.value, set: open => { if (!open) alertDetail.value = undefined } })
 const planPortfolio = ref<ProjectPlanPortfolio | null>(null)
 const initialBaseline = ref<ProjectPlan | null>(null)
 const baselineUnavailable = ref(false)
@@ -134,7 +141,7 @@ async function fetchOperationalSummary() {
   const requestId = ++overviewRequestId, token = props.token
   if (!token) {
     initialBaseline.value = null; baselineUnavailable.value = false; planPortfolio.value = null
-    validationPlan.value = null; relationCompleteness.value = null
+    validationPlan.value = null; relationCompleteness.value = null; oplPendingCount.value = 0; oplSummaryFailed.value = false
     managerNotes.value = []; projectRecordHistory.value = []; projectRecordError.value = ''
     return
   }
@@ -161,10 +168,10 @@ async function fetchOperationalSummary() {
       } else { initialBaseline.value = null; baselineUnavailable.value = false }
     } else { initialBaseline.value = null; baselineUnavailable.value = false }
   })()
-  const validationRead = readProjectValidationPlan(activeProject.value.id, token).then(value => {
+  const validationRead = (activeProject.value.canReadContent && canViewTab('validation-plan') ? readProjectValidationPlan(activeProject.value.id, token) : Promise.resolve(null)).then(value => {
     if (requestId === overviewRequestId) validationPlan.value = value
   }, () => { if (requestId === overviewRequestId) validationPlan.value = null })
-  const relationRead = (projectWritable.value ? getMaterialRelationCompleteness(activeProject.value.id, token) : Promise.resolve(null)).then(value => {
+  const relationRead = (activeProject.value.canReadContent && canViewTab('bom') && projectWritable.value ? getMaterialRelationCompleteness(activeProject.value.id, token) : Promise.resolve(null)).then(value => {
     if (requestId === overviewRequestId) relationCompleteness.value = value
   }, () => { if (requestId === overviewRequestId) relationCompleteness.value = null })
   const recordsRead = (canViewTab('records') ? readProjectOverviewRecords(activeProject.value.id, token) : Promise.resolve([])).then(records => {
@@ -176,7 +183,13 @@ async function fetchOperationalSummary() {
     projectRecordHistory.value = projectAudits.filter(isProjectRecordHistoryEntry).slice(0, 50)
     projectRecordError.value = ''
   }, () => { if (requestId === overviewRequestId) projectRecordError.value = '项目记录读取失败，请刷新项目概览重试。' })
-  await Promise.all([planRead, validationRead, relationRead, recordsRead])
+  const oplRead = (canReadOpl.value ? readProjectOpl(activeProject.value.id, token, false) : Promise.resolve(null)).then(value => {
+    if (requestId !== overviewRequestId) return
+    oplPendingCount.value = (value?.rows ?? []).filter(row => !['已完成', '已作废'].includes(row.issue.status)
+      && (activeProject.value.id === rootProject.value.id || row.issue.relatedProjectId === activeProject.value.id)).length
+    oplSummaryFailed.value = false
+  }, () => { if (requestId === overviewRequestId) { oplPendingCount.value = 0; oplSummaryFailed.value = true } })
+  await Promise.all([planRead, validationRead, relationRead, recordsRead, oplRead])
 }
 
 const refreshingOverview = ref(false)
@@ -187,9 +200,11 @@ async function loadOperationalSummary() {
   try { await fetchOperationalSummary() }
   finally { if (requestId === overviewRequestId) refreshingOverview.value = false }
 }
-watch([() => props.project.id, () => props.token, () => recordProjects.value.map(item => item.id).join('|')], () => {
+watch([() => props.project.id, () => props.token, () => recordProjects.value.map(item => item.id).join('|'), () => ['bom', 'opl', 'validation-plan'].map(tab => canViewTab(tab)).join('|'), () => activeProject.value.canReadContent, canReadOpl], () => {
   managerNotes.value = []; projectRecordHistory.value = []; projectRecordError.value = ''
   managerNoteDialogOpen.value = false; managerNoteTarget.value = null
+  alertDetail.value = undefined; oplPendingCount.value = 0; oplSummaryFailed.value = false
+  validationPlan.value = null; relationCompleteness.value = null
   initialBaseline.value = null
   baselineUnavailable.value = false
   return loadOperationalSummary()
@@ -436,18 +451,47 @@ const todoRecipientCandidates = computed(() => props.users
   .filter(user => user.isActive)
   .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN')))
 
-const latestReleasePackage = computed(() => props.releasePackage ?? [...props.releasePackages]
-  .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''))[0] ?? null)
-const approvalCount = computed(() => {
-  const drawing = props.drawingReviews.some(item => ['InReview', 'WritingProperties'].includes(item.state)) ? 1 : 0
-  const validation = validationPlan.value?.state === 'PendingApproval' ? 1 : 0
-  const releases = props.releasePackages.filter(item => /审批|Pending|Submitted|InReview/i.test(item.state)).length
-  return drawing + validation + releases
+type AlertItem = { key: string; label: string; count: number; tab: string; open: () => void }
+const bomLabels = { Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气件BOM', Unclassified: 'BOM分类' }
+const visibleAlertItems = (items: AlertItem[]) => activeProject.value.canReadContent
+  ? items.filter(item => item.count > 0 && canViewTab(item.tab) && (item.tab !== 'opl' || canReadOpl.value)) : []
+const attentionItems = computed(() => {
+  const rows = props.pendingBomItems?.filter(item => !item.manuallyExcluded) ?? []
+  const items: AlertItem[] = (['Standard', 'NonStandard', 'Electrical', 'Unclassified'] as const).map(kind => ({
+    key: kind, label: bomLabels[kind], tab: 'bom',
+    count: props.pendingBomItems ? rows.filter(item => (!item.pendingClassification && item.kind && item.kind in bomLabels ? item.kind : 'Unclassified') === kind).length
+      : kind === 'Unclassified' ? props.bomPendingCount : 0,
+    open: () => emit('bom', kind),
+  }))
+  items.push({ key: 'relations', label: '关联物料', count: relationCompleteness.value?.incompleteGroupCount ?? 0, tab: 'bom', open: () => emit('bom') },
+    { key: 'opl', label: 'OPL', count: oplPendingCount.value, tab: 'opl', open: () => emit('opl') })
+  return visibleAlertItems(items)
 })
-const attentionCount = computed(() => props.bomPendingCount + (relationCompleteness.value?.incompleteGroupCount ?? 0))
+const approvalItems = computed(() => {
+  const items: AlertItem[] = [
+    { key: 'drawing', label: '图档审核', count: props.drawingReviews.filter(item => ['InReview', 'PendingSupervisorApproval', 'WritingProperties'].includes(item.state)).length, tab: 'documents', open: () => emit('documents') },
+    { key: 'validation', label: '质量计划', count: validationPlan.value?.state === 'PendingApproval' ? 1 : 0, tab: 'validation-plan', open: () => emit('validationPlan') },
+  ]
+  const releases = [...props.releasePackages]
+  if (props.releasePackage && !releases.some(item => item.id === props.releasePackage!.id)) releases.push(props.releasePackage)
+  const counts = new Map<string, number>()
+  for (const item of releases.filter(item => ['审批中', '工艺审核', '待批准', 'ProcessReview', 'Approval', 'Pending', 'Submitted', 'InReview'].includes(item.state))) {
+    const label = item.scope?.startsWith('NonStandard') ? '非标件BOM' : item.scope?.startsWith('Standard') ? '标准件BOM' : item.scope?.startsWith('Electrical') ? '电气件BOM' : item.scope === 'Nameplate' ? '铭牌' : '发布审批'
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  for (const [label, count] of counts) items.push({ key: label, label, count, tab: 'release', open: () => emit('release') })
+  return visibleAlertItems(items)
+})
+const alertDetailLabel = computed(() => alertDetail.value === 'approval' ? '审批中' : '待处理')
+const alertDetailItems = computed(() => alertDetail.value === 'approval' ? approvalItems.value : attentionItems.value)
+function openAlertItem(item: AlertItem) {
+  if (!activeProject.value.canReadContent || !canViewTab(item.tab) || item.tab === 'opl' && !canReadOpl.value) return
+  alertDetail.value = undefined
+  item.open()
+}
 const overviewAlerts = computed(() => [
-  { key: 'attention', label: '待处理', value: attentionCount.value, tone: attentionCount.value ? 'warning' : 'neutral', open: () => emit('bom') },
-  { key: 'approval', label: '审批中', value: approvalCount.value, tone: approvalCount.value ? 'info' : 'neutral', open: () => latestReleasePackage.value ? emit('release') : validationPlan.value?.state === 'PendingApproval' ? emit('validationPlan') : emit('documents') },
+  { key: 'attention' as const, label: '待处理', value: attentionItems.value.length, tone: attentionItems.value.length ? 'warning' : 'neutral' },
+  { key: 'approval' as const, label: '审批中', value: approvalItems.value.length, tone: approvalItems.value.length ? 'info' : 'neutral' },
 ])
 
 </script>
@@ -465,7 +509,7 @@ const overviewAlerts = computed(() => [
         <header><span><ListTodo :size="18" /></span><h2>项目待办与风险</h2></header>
           <div class="pdm-overview-alerts">
             <article class="pdm-overview-shipping" :class="`is-${shippingCountdownState.tone}`" aria-label="发货倒计时"><span>{{ shippingCountdownState.label }}</span><strong>{{ shippingCountdownState.value }}<small v-if="shippingDate">天</small></strong><em>{{ shippingCountdownState.detail }}</em></article>
-            <button v-for="alert in overviewAlerts" :key="alert.key" type="button" :class="`is-${alert.tone}`" :aria-label="`查看${alert.label}`" @click="alert.open">
+            <button v-for="alert in overviewAlerts" :key="alert.key" type="button" :class="`is-${alert.tone}`" :aria-label="`查看${alert.label}`" @click="alertDetail = alert.key">
               <span>{{ alert.label }}</span><strong>{{ alert.value }}</strong><em>查看{{ alert.label }} <ChevronRight :size="13" /></em>
             </button>
           </div>
@@ -512,6 +556,19 @@ const overviewAlerts = computed(() => [
       </div>
     </div>
 
+    <el-drawer v-model="alertDetailOpen" :title="`${alertDetailLabel}事项 · ${alertDetailItems.length}项`" size="min(520px, calc(100vw - 24px))" append-to-body>
+      <p class="overview-alert-help">每个有事项的类别计为1项，下表显示各类别的明细数量。</p>
+      <table class="overview-alert-details" :aria-label="`${alertDetailLabel}事项明细`">
+        <thead><tr><th scope="col">事项</th><th scope="col">状态</th><th scope="col">明细数量</th><th scope="col">操作</th></tr></thead>
+        <tbody>
+          <tr v-for="item in alertDetailItems" :key="item.key"><td>{{ item.label }}</td><td>{{ alertDetailLabel }}</td><td>{{ item.count }}</td><td><button type="button" class="pdm-text-action" :aria-label="`查看${item.label}${alertDetailLabel}明细`" @click="openAlertItem(item)">查看明细</button></td></tr>
+          <tr v-if="!alertDetailItems.length"><td colspan="4">{{ refreshingOverview ? '正在读取事项…' : `暂无${alertDetailLabel}事项` }}</td></tr>
+        </tbody>
+      </table>
+      <p v-if="alertDetail === 'attention' && oplSummaryFailed" role="status" class="overview-alert-help">OPL事项读取失败，请刷新项目概览后重试。</p>
+      <template #footer><button type="button" class="pdm-secondary-action" @click="alertDetailOpen = false">关闭</button></template>
+    </el-drawer>
+
     <el-drawer v-model="riskDetailOpen" title="项目风险详情" size="min(480px, calc(100vw - 24px))" append-to-body>
       <template v-if="selectedRisk">
         <section class="risk-detail" aria-label="风险明细">
@@ -554,6 +611,11 @@ const overviewAlerts = computed(() => [
 </template>
 
 <style scoped>
+.overview-alert-help { color:var(--pdm-muted); font-size:12px; line-height:1.6; }
+.overview-alert-details { width:100%; border-collapse:collapse; font-size:13px; }
+.overview-alert-details th,.overview-alert-details td { padding:10px 4px; text-align:center; vertical-align:middle; border-bottom:1px solid var(--pdm-border-soft); }
+.overview-alert-details th { color:var(--pdm-muted); font-weight:500; }
+.overview-alert-details button { white-space:nowrap; }
 .pdm-overview-project-risks {
   min-width: 0;
   min-height: 0;

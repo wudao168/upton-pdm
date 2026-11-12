@@ -94,10 +94,10 @@ describe('网页存档入口', () => {
     expect(document.querySelector('.browser-cad-error')).toBeNull()
     expect(footerButton('存档').disabled).toBe(false)
   })
-  it('administrator setting controls both entries and is absent for ordinary users', async () => {
+  it('administrator setting controls standard structure archives and is absent for ordinary users', async () => {
     api.setBrowserCadEnabled.mockResolvedValue({ enabled: false })
     wrapper = mount(BrowserCadArchiveSettings, { props: { token: 'token' } }); await flushPromises()
-    expect(wrapper.text()).toContain('不影响SolidWorks插件存档')
+    expect(wrapper.text()).toContain('控制标准结构页面的“存档”按钮')
     await wrapper.get('input[type="checkbox"]').setValue(false); await wrapper.get('button').trigger('click'); await flushPromises()
     expect(api.setBrowserCadEnabled).toHaveBeenCalledWith(false, 'token')
     wrapper.unmount(); api.readBrowserCadCapability.mockResolvedValue({ enabled: true, canArchive: true, canConfigure: false })

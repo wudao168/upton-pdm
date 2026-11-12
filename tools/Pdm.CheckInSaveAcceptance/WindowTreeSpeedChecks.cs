@@ -28,8 +28,118 @@ internal static partial class Program
   host.ClientSize=new Size(800,1000);
   await WindowCachedContextScenario(host);
   await WindowViewStateScenario(host);
+  await IndexedComponentSelectionScenario(host);
   await WindowBaseMetadataScenario(host);
   WindowPreviewFlagsScenario();
+ }
+ static async Task IndexedComponentSelectionScenario(Form host)
+ {
+  using(var pane=(Control)New("PdmTaskPaneControl","结构索引选择联动"))
+  {
+   pane.Dock=DockStyle.Fill;host.Controls.Add(pane);pane.CreateControl();
+   var path=@"H:\QA-selection\ROOT.SLDASM";
+   var root=WindowModel(path,1);
+   object Occurrence(object parent,string file,string instance,string kind)
+   {
+    var node=New("CadTreeNode");
+    Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),kind));
+    Set(node,"FileName",file);Set(node,"DisplayName",file);Set(node,"InstancePath",instance);
+    Set(node,"LocalStructureDeferred",true);
+    ((IList)Get(parent,"Children")).Add(node);
+    return node;
+   }
+   var left=Occurrence(root,"FRAME.SLDASM","存档总装/FRAME-1","Assembly");
+   var right=Occurrence(root,"FRAME.SLDASM","存档总装/FRAME-2","Assembly");
+   var leftPart=Occurrence(left,"BOLT.SLDPRT","存档总装/FRAME-1/FRAME-1/BOLT-1","Part");
+   var rightPart=Occurrence(right,"BOLT.SLDPRT","存档总装/FRAME-2/FRAME-2/BOLT-1","Part");
+   DiscardCall(pane,"SetTree",root);await WindowReady(pane,root);
+   var tree=(TreeView)Field(pane,"structureTree");
+   var checkedPaths=(HashSet<string>)Field(pane,"checkedCheckInPaths");
+   checkedPaths.Add(@"H:\QA-selection\CHECKED.SLDPRT");
+   var plugin=New("PdmAddin");
+   SetField(plugin,"currentTree",root);SetField(plugin,"taskPaneControl",pane);
+   var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+   var interop=appType.Assembly;
+   var componentName="FRAME-2";var selectGeometry=false;var selectedCount=1;var activePath=path;
+   var componentType=interop.GetType("SolidWorks.Interop.sldworks.Component2",true);
+   var component=new Proxy(componentType,call=>
+      call.MethodName=="get_Name2"?componentName:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var nativeSelections=new List<string>();var commandActive=false;var clearCount=0;
+   void Select() => DiscardCall(plugin,"OnSolidWorksSelectionChanged");
+   object NativeComponent(string name,object child=null) => new Proxy(componentType,call=>
+   {
+    switch(call.MethodName)
+    {
+     case "get_Name2":return name;
+     case "GetPathName":return @"H:\QA-selection\BOLT.SLDPRT";
+     case "GetChildren":return child==null?Array.Empty<object>():new[]{child};
+     case "Select4":nativeSelections.Add(name);return !(bool)call.Args[0]&&!(bool)call.Args[2];
+     default:throw new Exception(call.MethodName);
+    }
+   }).GetTransparentProxy();
+   var leftNative=NativeComponent("FRAME-1",NativeComponent("FRAME-1/BOLT-1"));
+   var rightNative=NativeComponent("FRAME-2",NativeComponent("FRAME-2/BOLT-1"));
+   var selection=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.SelectionMgr",true),call=>
+   {
+    switch(call.MethodName)
+    {
+     case "GetSelectedObjectCount2":return selectedCount;
+     case "GetSelectedObjectsComponent4":return selectGeometry?component:null;
+     case "GetSelectedObject6":return selectGeometry?null:component;
+     case "CreateSelectData":return null;
+     default:throw new Exception(call.MethodName);
+    }
+   }).GetTransparentProxy();
+   var model=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>
+   {
+    switch(call.MethodName)
+    {
+     case "GetPathName":return activePath;
+     case "GetType":return 2;
+     case "get_SelectionManager":return selection;
+     case "GetComponentByName":return (string)call.Args[0]=="FRAME-1"?leftNative:(string)call.Args[0]=="FRAME-2"?rightNative:null;
+     case "ClearSelection2":clearCount++;Select();return null;
+     default:throw new Exception(call.MethodName);
+    }
+   }).GetTransparentProxy();
+   SetField(plugin,"application",new Proxy(appType,call=>
+   {
+    if(call.MethodName=="get_ActiveDoc")return model;
+    if(call.MethodName=="GetRunningCommandInfo")return new System.Runtime.Remoting.Messaging.ReturnMessage(null,
+     new object[]{commandActive?13:-3,"",commandActive},3,call.LogicalCallContext,call);
+    throw new Exception(call.MethodName);
+   }).GetTransparentProxy());
+   var nodeSelected=pane.GetType().GetEvent("NodeSelected",Flags);
+   nodeSelected.AddEventHandler(pane,Delegate.CreateDelegate(nodeSelected.EventHandlerType,plugin,Type("PdmAddin").GetMethod("OnNodeSelected",Flags)));
+   Select();
+   TreeCheck(ReferenceEquals(tree.SelectedNode?.Tag,right),"左侧设计树选中同一装配的第二个实例");
+   selectGeometry=true;componentName="FRAME-1/BOLT-1";Select();
+   TreeCheck(ReferenceEquals(tree.SelectedNode?.Tag,leftPart)&&tree.SelectedNode.Parent.IsExpanded,"3D 面选择定位折叠层级中的正确实例");
+   componentName="FRAME-2/BOLT-1";Select();
+   TreeCheck(ReferenceEquals(tree.SelectedNode?.Tag,rightPart)&&tree.SelectedNode.Parent.IsExpanded,"同一零件的另一个装配实例分别定位");
+   TreeCheck(nativeSelections.Count==0,"SolidWorks推送的高亮不回写原生选择");
+   var leftRow=tree.Nodes[0].Nodes[0].Nodes[0];
+   var rightRow=tree.SelectedNode;
+   tree.SelectedNode=leftRow;
+   TreeCheck(nativeSelections.SequenceEqual(new[]{"FRAME-1/BOLT-1"})&&ReferenceEquals(tree.SelectedNode,leftRow),"选插件左分支实例并屏蔽回流");
+   tree.SelectedNode=rightRow;
+   TreeCheck(nativeSelections.LastOrDefault()=="FRAME-2/BOLT-1"&&nativeSelections.Count==2,"选插件右分支的同名实例");
+   var rowClick=new MouseEventArgs(MouseButtons.Left,1,tree.ClientSize.Width-12,rightRow.Bounds.Top+4,0);
+   tree.GetType().GetMethod("OnMouseDown",Flags).Invoke(tree,new object[]{rowClick});
+   TreeCheck(nativeSelections.Count==3&&nativeSelections.Last()=="FRAME-2/BOLT-1","再次点击已高亮项仍同步到SolidWorks");
+   commandActive=true;tree.SelectedNode=leftRow;commandActive=false;
+   TreeCheck(nativeSelections.Count==3,"当前命令运行中保留原生选择");
+   Set(rightPart,"FullPath",@"H:\QA-selection\OLD-BOLT.SLDPRT");tree.SelectedNode=rightRow;
+   TreeCheck(clearCount==3&&nativeSelections.Count==3,"索引已过期时不选同名的替换文件");
+   activePath=@"H:\QA-selection\OTHER.SLDASM";componentName="FRAME-1/BOLT-1";Select();
+   TreeCheck(ReferenceEquals(tree.SelectedNode?.Tag,rightPart),"切换窗口期间旧设计树不接受其他装配的选择");
+   tree.SelectedNode=leftRow;
+   TreeCheck(clearCount==3&&nativeSelections.Count==3,"切换窗口期间不更改另一装配的选择");
+   activePath=path;selectedCount=0;Select();
+   TreeCheck(ReferenceEquals(tree.SelectedNode?.Tag,root)&&checkedPaths.SetEquals(new[]{@"H:\QA-selection\CHECKED.SLDPRT"}),"取消选择回到根节点且保留批量勾选");
+   Console.WriteLine("PASS: 结构索引左侧选择、3D几何选择、折叠分支、同名实例和窗口隔离");
+   Console.WriteLine("PASS: 反向选择精确定位同名实例，重复点击、反馈抑制、过期结构及命令保护通过");
+  }
  }
  static async Task WindowReady(object pane,object root)
  {
@@ -71,7 +181,7 @@ internal static partial class Program
        new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),n=>n.MethodName=="get_Name"?"Default":throw new Exception(n.MethodName)).GetTransparentProxy():throw new Exception(c.MethodName)).GetTransparentProxy():throw new Exception("Unexpected native scan "+call.MethodName)).GetTransparentProxy();
     var subPath=Path.Combine(directory,"SUB.SLDASM");var sub=WindowModel(subPath,1);((IList)Get(root,"Children")).Add(sub);
     var subKey=subPath+"\nDefault";DiscardCall(plugin,"CacheActiveTree",key,root,project);DiscardCall(plugin,"CacheActiveTree",subKey,sub,project);SetField(plugin,"currentTree",sub);SetField(plugin,"currentTreeCacheKey",subKey);
-    SetField(plugin,"application",new Proxy(appType,c=>c.MethodName=="get_ActiveDoc"?Model(subPath):throw new Exception(c.MethodName)).GetTransparentProxy());
+    SetField(plugin,"application",new Proxy(appType,c=>c.MethodName=="get_ActiveDoc"?Model(subPath):c.MethodName=="GetDocuments"?new object[]{Model(subPath)}:throw new Exception(c.MethodName)).GetTransparentProxy());
     SetField(plugin,"pendingTreeRefreshForceScan",0);DiscardCall(plugin,"OnAssemblyTreeChanged");DiscardCall(plugin,"CacheCurrentTreeContext");
     var cache=(IDictionary)Field(plugin,"activeTreeCache");if(cache.Contains(key)||cache.Contains(subKey))throw new Exception("Structural invalidation resurrected stale active/owning assembly trees");
     Console.WriteLine("PASS: nested assembly structural change invalidates owner and child; window switch cannot reinsert dirty tree");
@@ -147,6 +257,8 @@ internal static partial class Program
   {
    await fixture.WaitForTree();
    var identity=Type("PdmDocumentIdentityStore");var field=identity.GetField("bindingDirectory",Flags);var previous=field.GetValue(null);
+   var resolver=identity.GetField("workspaceRootResolver",Flags);var previousRoot=resolver.GetValue(null);
+   resolver.SetValue(null,new Func<string>(()=>Path.GetDirectoryName(fixture.Path)));
    var bindingPath=Path.Combine(Path.GetDirectoryName(fixture.Path),"bindings");field.SetValue(null,bindingPath);
    try
    {
@@ -157,12 +269,12 @@ internal static partial class Program
     {
      var refresh=(Task)DiscardCall(fixture.Plugin,"RefreshMetadataAsync",fixture.Project,System.Threading.CancellationToken.None);
      await TreeWait(()=>fixture.Handler.Blocked,"Base metadata did not reach guarded relation boundary");
-     if((Guid?)Get(fixture.Root,"OpenedVersionId")!=version||(string)Get(fixture.Root,"OpenedRevision")!="W2"||fixture.NativeCalls!=0)throw new Exception("Cached base did not update from the physical binding without hashing/native scans");
+     if((Guid?)Get(fixture.Root,"OpenedVersionId")!=version||(string)Get(fixture.Root,"OpenedRevision")!="W2"||fixture.NativeCalls!=0)throw new Exception("Cached base did not update from the physical binding without hashing/native scans; version="+Get(fixture.Root,"OpenedVersionId")+"; expected="+version+"; revision="+Get(fixture.Root,"OpenedRevision")+"; nativeCalls="+fixture.NativeCalls);
      SetField(fixture.Plugin,"batchDialogInProgress",1);fixture.Handler.Resume.SetResult(true);await refresh;
     }
     Console.WriteLine("PASS: background base binding refresh reflects W2 while CAD bytes are locked, before guarded node/permission metadata update");
    }
-   finally{field.SetValue(null,previous);}
+   finally{field.SetValue(null,previous);resolver.SetValue(null,previousRoot);}
   }
  }
  static void WindowPreviewFlagsScenario()

@@ -10,7 +10,7 @@ public sealed class U9MaterialIntegrationServiceTests
     public async Task TestConnection_DecryptsSecretButDoesNotReturnToken()
     {
         var timeProvider = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(timeProvider);
+        var repository = BusinessTestRepository.Create(timeProvider);
         var materials = new InMemoryMaterialRepository(timeProvider);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:secret-value",
@@ -30,7 +30,7 @@ public sealed class U9MaterialIntegrationServiceTests
     public async Task TestConnection_RequiresSavedSecret()
     {
         var timeProvider = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(timeProvider);
+        var repository = BusinessTestRepository.Create(timeProvider);
         var materials = new InMemoryMaterialRepository(timeProvider);
         var service = new U9MaterialIntegrationService(materials, repository, new TestProtector(), new RecordingClient(), timeProvider);
 
@@ -44,7 +44,7 @@ public sealed class U9MaterialIntegrationServiceTests
     public async Task QueryByCode_IsReadOnlyAndWorksWhileWritesAreDisabled()
     {
         var timeProvider = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(timeProvider);
+        var repository = BusinessTestRepository.Create(timeProvider);
         var materials = new InMemoryMaterialRepository(timeProvider);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:secret-value",
@@ -473,7 +473,7 @@ public sealed class U9MaterialIntegrationServiceTests
     private static async Task<ExecutionFixture> CreateApprovedTaskAsync(bool writeEnabled)
     {
         var timeProvider = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(timeProvider);
+        var repository = BusinessTestRepository.Create(timeProvider);
         var materials = new InMemoryMaterialRepository(timeProvider);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:secret-value",
@@ -592,7 +592,7 @@ public sealed class U9MaterialIntegrationServiceTests
     private static async Task<ExecutionFixture> CreateSampleFixtureAsync()
     {
         var timeProvider = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(timeProvider);
+        var repository = BusinessTestRepository.Create(timeProvider);
         var materials = new InMemoryMaterialRepository(timeProvider);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:secret-value",

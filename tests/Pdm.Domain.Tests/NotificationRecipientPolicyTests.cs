@@ -37,10 +37,10 @@ public sealed class NotificationRecipientPolicyTests
     }
 
     [Theory]
-    [InlineData("Administrator", false)]
+    [InlineData("Administrator", true)]
     [InlineData("Approver", false)]
     [InlineData("Engineer", true)]
-    public async Task MixedAdministratorInboxDoesNotUseTheAdministratorRoleForEmergencyApproval(string emergencyRole, bool expected)
+    public async Task MixedAccountUsesExplicitEmergencyTemplatePolicy(string emergencyRole, bool expected)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "mixed", "兼任工程师", "unused", UserRole.Administrator, true,

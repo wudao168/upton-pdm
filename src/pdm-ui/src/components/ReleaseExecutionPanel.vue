@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DepartmentName from './DepartmentName.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable } = useProjectCenterAccess()
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
@@ -62,7 +63,7 @@ const eventLabel = (event: string) => notificationEvents[event as keyof typeof n
       <details v-if="view.versionBindings?.length"><summary>本次固定的图纸版本（{{ view.versionBindings.filter(item => item.publish).length }} 项发布，其余仅用于完整打开）</summary><div class="execution-table"><table><thead><tr><th>图档</th><th>上一正式版</th><th>本次源版本 / 发布版</th><th>本次处理</th></tr></thead><tbody><tr v-for="item in view.versionBindings" :key="item.documentId"><td>{{ item.fileName || item.documentId }}</td><td>{{ item.previousReleasedRevision || '—' }}</td><td>{{ item.revision }}{{ item.targetRevision ? ` / ${item.targetRevision}` : '' }}</td><td>{{ item.publish ? item.requiresPromotion === false ? '复用已审核正式图纸' : '发布该版本' : '保留引用，不随本次升版' }}</td></tr></tbody></table></div></details>
       <p v-if="view.confirmedRemovedBomItemIds.length" class="execution-hint">本次已明确确认删除 {{ view.confirmedRemovedBomItemIds.length }} 项；未确认的删除项保留上一正式值。</p>
       <div v-if="progress?.departments.length" class="execution-table"><table><thead><tr><th>通知部门 / 事件</th><th>接收情况</th><th>执行情况</th><th>部门确认</th></tr></thead><tbody>
-        <tr v-for="item in progress.departments" :key="item.id"><td>{{ item.departmentName }}<small>{{ eventLabel(item.event) }}</small></td><td>{{ !item.recipients.length ? '无具有项目权限的接收人员' : item.receivedAt ? `已接收 · ${item.receivedBy}` : '待部门确认接收' }}</td><td>{{ item.executedAt ? `已执行 · ${item.executedBy}` : item.requireExecution ? '待执行确认' : '不要求执行回执' }}<small v-if="item.executionNote">{{ item.executionNote }}</small></td><td>
+        <tr v-for="item in progress.departments" :key="item.id"><td><DepartmentName :name="item.departmentName" /><small>{{ eventLabel(item.event) }}</small></td><td>{{ !item.recipients.length ? '无具有项目权限的接收人员' : item.receivedAt ? `已接收 · ${item.receivedBy}` : '待部门确认接收' }}</td><td>{{ item.executedAt ? `已执行 · ${item.executedBy}` : item.requireExecution ? '待执行确认' : '不要求执行回执' }}<small v-if="item.executionNote">{{ item.executionNote }}</small></td><td>
           <template v-if="projectWritable && view.acknowledgementIds.includes(item.id)"><button v-if="!item.receivedAt" type="button" :disabled="pending" @click="acknowledge(item.id, false)">确认接收</button><template v-if="item.requireExecution && !item.executedAt"><textarea v-model="notes[item.id]" :aria-label="`${item.departmentName}执行说明`" placeholder="说明变更执行情况及旧物料、旧图纸的处理结果" maxlength="1000" /><button type="button" :disabled="pending || !notes[item.id]?.trim()" @click="acknowledge(item.id, true)">确认执行</button></template></template><span v-else>由该部门成员确认</span>
         </td></tr>
       </tbody></table></div>

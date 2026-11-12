@@ -149,7 +149,7 @@ internal static class NativeChecks
      }
      OwnedPid=pid;OwnedStart=Process.GetProcessById(pid).StartTime.ToUniversalTime().Ticks;
      File.WriteAllText(Path.Combine(Stage,"owned-solidworks-"+args[1]+".json"),Json.Serialize(new{pid,start=OwnedStart,mode=args[1]}));
-     if(args[1].StartsWith("registeredstartupsmoke",StringComparison.Ordinal)){await RegisteredStartupSmoke(args[1]=="registeredstartupsmokeautomation",args[1]=="registeredstartupsmokecom",args[1]=="registeredstartupsmokejournal");return;}
+     if(args[1].StartsWith("registeredstartupsmoke",StringComparison.Ordinal)){await RegisteredStartupSmoke(args[1]=="registeredstartupsmokeautomation",args[1]=="registeredstartupsmokecom",args[1]=="registeredstartupsmokejournal",args[1]=="registeredstartupsmokeonly");return;}
      if(args[1]=="managedreopen")
      {
       var readerJob=Path.Combine(Path.GetTempPath(),"UPTON-PDM","native-isolation","jobs",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(readerJob);
@@ -572,7 +572,7 @@ internal static class NativeChecks
    finally{var current=Current() as string;if(owned.Contains(current)||owned.Any(path=>path.Replace(profile,symbolic)==current)||current==concurrent)key.SetValue(valueName,original,kind);}
   }
  }
- static async Task RegisteredStartupSmoke(bool automationProbe=false,bool comProbe=false,bool journalProbe=false)
+ static async Task RegisteredStartupSmoke(bool automationProbe=false,bool comProbe=false,bool journalProbe=false,bool startupOnly=false)
  {
   App.UserControl=true;
   var until=Stopwatch.StartNew();while(!App.StartupProcessCompleted&&until.Elapsed<TimeSpan.FromSeconds(60))await Task.Delay(200);
@@ -596,6 +596,11 @@ internal static class NativeChecks
   if(startupLog==null)throw new Exception("正常SolidWorks未记录已部署插件成功启动，未执行业务测试");
   if(App.GetDocumentCount()!=0)throw new Exception("启动核对会话意外载入了其他图档，未继续");
   File.Copy(startupLog,Path.Combine(Stage,"registered-normal-startup.jsonl"));
+  if(startupOnly)
+  {
+   File.WriteAllText(Path.Combine(Stage,"registered-startup-results.json"),Json.Serialize(new{passed=true,installed,loadedPath,startupLog,version,sha256=expected,normalProcessId=OwnedPid,normalProcessStarted=OwnedStart,normalPluginActuallyLoaded=true,noCadDocumentsOpened=true,readerStarted=false,sharedJournalSettingsNotWritten=true}));
+   Console.WriteLine("PASS: 独立正常启动已加载部署插件，哈希及成功日志一致；零图档，未启动读取子进程或修改共享日志设置");return;
+  }
   var job=Path.Combine(Path.GetTempPath(),"UPTON-PDM","native-isolation","jobs",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(job);
   var exe=App.GetExecutablePath();if(Directory.Exists(exe))exe=Path.Combine(exe,"SLDWORKS.exe");
   File.WriteAllText(Path.Combine(job,"native-isolation-request.json"),Json.Serialize(new{JobId=Path.GetFileName(job),CallerSolidWorksId=OwnedPid,SolidWorksExecutable=exe,Inventory=new string[0],Requested=new Dictionary<string,string>()}));

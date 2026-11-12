@@ -33,7 +33,9 @@ public static class AuthorizationMigration
         foreach (var role in directory.Roles)
         {
             var grants = new Dictionary<string, HashSet<string>>();
-            var codes = FunctionPermissionCatalog.Expand(role.Permissions);
+            // 仓储目录已解析旧权限；显示用目录不保留格式标记，且可能包含兼容别名。
+            // 再次展开会把已关闭的页签和粒度操作恢复为授权，迁移必须保留解析结果。
+            var codes = role.Permissions.ToHashSet(StringComparer.Ordinal);
             var admin = role.BaseRole == UserRole.Administrator;
             var platform = role.Role is "platform_admin" or "developer";
             void Add(string permission, params string[] scopes)

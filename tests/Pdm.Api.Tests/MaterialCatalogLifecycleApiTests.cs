@@ -25,7 +25,7 @@ public sealed class MaterialCatalogLifecycleApiTests
         client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "料品操作测试员", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "admin", "料品操作测试员", "unused", UserRole.Administrator, true, CompanyId: company), default);
         var relations = factory.Services.GetRequiredService<IMaterialRelationRepository>();
         var kits = factory.Services.GetRequiredService<IEngineeringKitRepository>();
         var now = DateTimeOffset.UtcNow;

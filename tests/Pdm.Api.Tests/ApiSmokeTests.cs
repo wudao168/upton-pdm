@@ -63,13 +63,13 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             {
                 var account = new UserAccount(Guid.NewGuid(), "qa-open-" + Guid.NewGuid().ToString("N"), "缺件查看验收",
                     passwords.Hash(password), role, true, RoleCode: roleCode, CompanyId: companyId);
-                await repository.CreateUserAsync(account, default);
+                await ApiTestAuthorization.CreateUserAsync(repository, account, default);
                 return account;
             }
             var admin = await CreateUserAsync(UserRole.Administrator);
             Project project;
             TenantContext.Set(new CurrentTenant(admin.Id, companyId, companyId, admin.Username, admin.EffectiveRoleCode, false, new HashSet<string>()));
-            try { project = await repository.CreateProjectAsync(new("QA-MISSING-OPEN", "缺件只读打开", "admin", directory, directory), "admin", default); }
+            try { project = await ApiTestAuthorization.CreateProjectAsync(repository, new("QA-MISSING-OPEN", "缺件只读打开", "admin", directory, directory), "admin", default); }
             finally { TenantContext.Clear(); }
             var session = Guid.NewGuid();
             var root = await repository.RegisterDocumentAsync(new(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
@@ -96,6 +96,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             }
             await SignInAsync(await CreateUserAsync(UserRole.ProductionViewer, "QA-No-Document-Access"));
             Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(url, readOnly)).StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(url, new { forEdit = true, allowMissingComponents = true })).StatusCode);
             await SignInAsync(admin);
             foreach (var versionId in new Guid?[] { null, version.Id })
             {
@@ -106,7 +107,13 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
                 Assert.Contains(manifest.Warnings, warning => warning.Contains("MISSING.SLDPRT"));
             }
             Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(url, new { versionId = version.Id })).StatusCode);
-            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(url, new { forEdit = true, allowMissingComponents = true })).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(url, new { forEdit = true })).StatusCode);
+            var edit = await client.PostAsJsonAsync(url, new { forEdit = true, allowMissingComponents = true });
+            Assert.True(edit.IsSuccessStatusCode, await edit.Content.ReadAsStringAsync());
+            var editManifest = (await edit.Content.ReadFromJsonAsync<ControlledOpenManifest>())!;
+            Assert.Equal(root.Id, Assert.Single(editManifest.Files).DocumentId);
+            Assert.Contains(editManifest.Warnings, warning => warning.Contains("MISSING.SLDPRT"));
+            Assert.Null((await repository.FindDocumentAsync(root.Id, default))!.CheckedOutBy);
         }
         finally
         {
@@ -134,7 +141,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var directory = Path.Combine(Path.GetTempPath(), "pdm-atomic-api-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(directory, ".versions"));
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand("ATOMIC-" + Guid.NewGuid().ToString("N"), "整批接口", "admin", directory, directory), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("ATOMIC-" + Guid.NewGuid().ToString("N"), "整批接口", "admin", directory, directory), "admin", default);
         var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "ROOT", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
         var part = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "PART", "PART", "PART.SLDPRT", DocumentKind.Part), "admin", default);
         var session = Guid.NewGuid();
@@ -178,7 +185,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Directory.CreateDirectory(Path.Combine(directory, ".versions"));
         try
         {
-            var project = await repository.CreateProjectAsync(new CreateProjectCommand("NATIVE-DEP-" + Guid.NewGuid().ToString("N"),
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("NATIVE-DEP-" + Guid.NewGuid().ToString("N"),
                 "原生文件依赖整批验收", "admin", directory, directory), "admin", default);
             var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
             var used = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "USED", "装配零件", "USED.SLDPRT", DocumentKind.Part), "admin", default);
@@ -263,7 +270,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Directory.CreateDirectory(Path.Combine(directory, ".versions"));
         try
         {
-            var project = await repository.CreateProjectAsync(new CreateProjectCommand("SIX-" + Guid.NewGuid().ToString("N"),
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("SIX-" + Guid.NewGuid().ToString("N"),
                 "六张工程图整批存档", "admin", directory, directory), "admin", default);
             var documents = new List<PdmDocument>();
             foreach (var index in Enumerable.Range(0, 8))
@@ -330,7 +337,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Directory.CreateDirectory(Path.Combine(directory, ".versions"));
         try
         {
-            var project = await repository.CreateProjectAsync(new CreateProjectCommand("PLANNED-" + Guid.NewGuid().ToString("N"),
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("PLANNED-" + Guid.NewGuid().ToString("N"),
                 "首次整批引用", "admin", directory, directory), "admin", default);
             var names = new[] { "F700XX.00.SLDASM", "F700XX.01.SLDASM", "旋转按钮组件.SLDASM", "PSU-08OG-20250301014805833.SLDPRT", "HR-100-20220321105016532.SLDPRT" };
             var documents = new List<PdmDocument>(); var session = Guid.NewGuid(); var batch = Guid.NewGuid();
@@ -413,10 +420,10 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
         foreach (var mode in new[] { "missing-id", "unknown-id", "other-project", "other-session", "other-user", "outside-plan" })
         {
-            var project = await repository.CreateProjectAsync(new CreateProjectCommand("DEFERRED-" + Guid.NewGuid().ToString("N"), "延后绑定校验", "admin", "vault", "release"), "admin", default);
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("DEFERRED-" + Guid.NewGuid().ToString("N"), "延后绑定校验", "admin", "vault", "release"), "admin", default);
             var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "ROOT", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
             var childProject = mode == "other-project"
-                ? await repository.CreateProjectAsync(new CreateProjectCommand("DEFERRED-OTHER-" + Guid.NewGuid().ToString("N"), "其他项目", "admin", "vault", "release"), "admin", default)
+                ? await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("DEFERRED-OTHER-" + Guid.NewGuid().ToString("N"), "其他项目", "admin", "vault", "release"), "admin", default)
                 : project;
             var part = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(childProject.Id,
                 "PART", "PART", "PART.SLDPRT", DocumentKind.Part), "admin", default);
@@ -442,7 +449,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task MultiConfigurationPreflightAllowsOnlyOwnedPlannedFilesAndRejectsMissingInstanceIdentity()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand("MULTI-" + Guid.NewGuid().ToString("N"), "多配置预检", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("MULTI-" + Guid.NewGuid().ToString("N"), "多配置预检", "admin", "vault", "release"), "admin", default);
         var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
         var part = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "PART", "配置件", "PART.SLDPRT", DocumentKind.Part), "admin", default);
         var session = Guid.NewGuid();
@@ -472,7 +479,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task RegistrationPreflight_ReportsOwnedUnarchivedRetryWithoutCreatingAnotherDocument()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand("PENDING-" + Guid.NewGuid().ToString("N"),
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("PENDING-" + Guid.NewGuid().ToString("N"),
             "首次存档重试", "admin", "vault", "release"), "admin", default);
         var document = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM",
             DocumentKind.Assembly, SourceSha256: new string('A', 64)), "admin", default);
@@ -496,7 +503,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var key = Guid.NewGuid().ToString("N");
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"EDIT-{key}", "自动收尾测试", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand($"EDIT-{key}", "自动收尾测试", "admin", "vault", "release"), "admin", default);
         var document = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "EDIT-" + key, "关闭测试", "edit.SLDPRT", DocumentKind.Part), "admin", default);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
         var sessionId = Guid.NewGuid();
@@ -518,7 +525,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var key = Guid.NewGuid().ToString("N");
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"BOM-{key}", "保存快照测试", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand($"BOM-{key}", "保存快照测试", "admin", "vault", "release"), "admin", default);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
         using var materialScope = factory.Services.CreateScope();
         var master = await materialScope.ServiceProvider.GetRequiredService<MaterialService>().CreateAsync(new(
@@ -569,14 +576,14 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var storage = scope.ServiceProvider.GetRequiredService<IFileStorage>();
         var key = Guid.NewGuid().ToString("N");
-        var directory = await repository.CreateRoleAsync($"上传权限测试-{key}", "隔离接口测试", "ProductionViewer", CancellationToken.None);
+        var directory = await ApiTestAuthorization.CreateRoleAsync(repository, $"上传权限测试-{key}", "隔离接口测试", "ProductionViewer", CancellationToken.None);
         var role = directory.Roles.Single(item => item.Name == $"上传权限测试-{key}");
         await repository.SetRolePermissionsAsync(role.Role,
             canRead ? [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView] : [], CancellationToken.None);
         var username = $"upload-reader-{key}";
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "上传权限测试", "unused",
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), username, "上传权限测试", "unused",
             UserRole.ProductionViewer, true, RoleCode: role.Role), CancellationToken.None);
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"UPLOAD-{key}", "上传隔离测试", "admin",
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand($"UPLOAD-{key}", "上传隔离测试", "admin",
             Path.GetTempPath(), Path.GetTempPath()), "admin", CancellationToken.None);
         var session = await storage.StartUploadAsync(project.Id, "qa.txt", 3,
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("abc"))), CancellationToken.None);
@@ -605,9 +612,9 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var key = Guid.NewGuid().ToString("N");
         var username = $"quality-uploader-{key}";
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "检验上传测试", "unused",
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), username, "检验上传测试", "unused",
             UserRole.ProductionViewer, true, RoleCode: "QualityInspector"), CancellationToken.None);
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"QUALITY-UPLOAD-{key}", "检验上传隔离测试", "admin",
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand($"QUALITY-UPLOAD-{key}", "检验上传隔离测试", "admin",
             Path.GetTempPath(), Path.GetTempPath()), "admin", CancellationToken.None);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("abc")));
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(username, "ProductionViewer"));
@@ -652,7 +659,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var key = Guid.NewGuid().ToString("N");
         var vault = Path.Combine(AppContext.BaseDirectory, ".data", "quality-archive-tests", key);
         const string uploader = "acceptance-uploader";
-        await repository.CreateUserAsync(new(Guid.NewGuid(), uploader, "验收上传测试", "unused", UserRole.Engineer, true,
+        await ApiTestAuthorization.CreateUserAsync(repository, new(Guid.NewGuid(), uploader, "验收上传测试", "unused", UserRole.Engineer, true,
             RoleCode: "acceptance-test", CompanyId: company), default);
         var project = await repository.CreateNumberedProjectAsync(new(company, "P", 2, customer, "验收资料归档测试", null, null, 1,
             uploader, vault, Path.Combine(vault, "release")), default);
@@ -702,7 +709,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task ProductionDrawingArchive_RejectsUnknownOrInvalidSelection()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"DRAW-ZIP-{Guid.NewGuid():N}", "生产图纸打包权限验证", "admin", Path.GetTempPath(), Path.GetTempPath()),
             "admin", CancellationToken.None);
         var path = $"/api/projects/{project.Id}/production-drawings/archive";
@@ -723,7 +730,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task ProjectWithoutReferenceTree_ReturnsNoContentInsteadOfNotFound()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"EMPTY-{Guid.NewGuid():N}", "空引用结构接口验收", "admin", @"D:\PDM\QA", @"D:\PDM\QA-Release"),
             "admin",
             CancellationToken.None);
@@ -739,8 +746,8 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         if (await repository.FindUserAsync("admin", CancellationToken.None) is null)
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), CancellationToken.None);
-        var project = await repository.CreateProjectAsync(
+            await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), CancellationToken.None);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"TODO-{Guid.NewGuid():N}", "项目待办接口验收", "admin", @"D:\PDM\QA", @"D:\PDM\QA-Release"),
             "admin", CancellationToken.None);
         await repository.SetMainProjectStaffingAsync(project.Id, new SetMainProjectStaffingCommand("admin", [], []), "admin", CancellationToken.None);
@@ -767,10 +774,10 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var username = $"record-admin-{Guid.NewGuid():N}";
-        await repository.CreateUserAsync(new UserAccount(
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(
             Guid.NewGuid(), username, "记录管理员", "unused", UserRole.Engineer, true,
             RoleCode: nameof(UserRole.Engineer), RoleCodes: [nameof(UserRole.Engineer), nameof(UserRole.Administrator)]), CancellationToken.None);
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"RECORD-{Guid.NewGuid():N}", "项目记录权限验收", "admin", @"D:\PDM\QA", @"D:\PDM\QA-Release"),
             "admin", CancellationToken.None);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(username, nameof(UserRole.Engineer)));
@@ -787,7 +794,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var testRoot = Path.Combine(Path.GetTempPath(), "upton-pdm-markup-tests", Guid.NewGuid().ToString("N"));
         try
         {
-            var project = await repository.CreateProjectAsync(
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository,
                 new CreateProjectCommand($"MARKUP-{Guid.NewGuid():N}", "批注文件接口验收", "admin", testRoot, Path.Combine(testRoot, "release")),
                 "admin",
                 CancellationToken.None);
@@ -825,7 +832,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task PreviewSourceVersionApi_DoesNotReturnLargeVersionSnapshots()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"PREVIEW-SOURCE-{Guid.NewGuid():N}", "预览轻量版本接口验收", "admin", Path.GetTempPath(), Path.GetTempPath()),
             "admin",
             CancellationToken.None);
@@ -890,7 +897,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var passwords = factory.Services.GetRequiredService<IPasswordService>();
         var username = $"profile-{Guid.NewGuid():N}";
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "个人设置测试", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), username, "个人设置测试", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
         var loginResponse = await client.PostAsJsonAsync("/api/auth/login", new { username, password = "OldPassword1" });
         Assert.Equal(HttpStatusCode.OK, loginResponse.StatusCode);
         var login = await loginResponse.Content.ReadFromJsonAsync<LoginSessionResponse>();
@@ -944,7 +951,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var passwords = factory.Services.GetRequiredService<IPasswordService>();
         var username = $"theme-{Guid.NewGuid():N}";
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "主题测试", passwords.Hash("ThemeTest1"), UserRole.Engineer, true), CancellationToken.None);
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), username, "主题测试", passwords.Hash("ThemeTest1"), UserRole.Engineer, true), CancellationToken.None);
         var loginResponse = await client.PostAsJsonAsync("/api/auth/login", new { username, password = "ThemeTest1" });
         var login = await loginResponse.Content.ReadFromJsonAsync<LoginSessionResponse>();
         Assert.NotNull(login);
@@ -965,7 +972,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var passwords = factory.Services.GetRequiredService<IPasswordService>();
         var username = $"reset-{Guid.NewGuid():N}";
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "重置测试用户", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), username, "重置测试用户", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
 
         var loginResponse = await client.PostAsJsonAsync("/api/auth/login", new { username, password = "OldPassword1" });
         Assert.Equal(HttpStatusCode.OK, loginResponse.StatusCode);
@@ -999,12 +1006,12 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var operatorUsername = $"reset-effective-admin-{Guid.NewGuid():N}";
         var ordinaryUsername = $"reset-ordinary-planner-{Guid.NewGuid():N}";
         var targetUsername = $"reset-target-{Guid.NewGuid():N}";
-        await repository.CreateUserAsync(new UserAccount(
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(
             Guid.NewGuid(), operatorUsername, "附加系统管理员", passwords.Hash("OperatorPassword1"), UserRole.PlanningManager, true,
             RoleCodes: [nameof(UserRole.PlanningManager), nameof(UserRole.Administrator)]), CancellationToken.None);
-        await repository.CreateUserAsync(new UserAccount(
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(
             Guid.NewGuid(), ordinaryUsername, "普通计划管理员", passwords.Hash("PlannerPassword1"), UserRole.PlanningManager, true), CancellationToken.None);
-        await repository.CreateUserAsync(new UserAccount(
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(
             Guid.NewGuid(), targetUsername, "待重置用户", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
 
         client.DefaultRequestHeaders.Authorization = null;
@@ -1060,7 +1067,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task EditSessionApi_RequiresMatchingSessionForHeartbeatAndRelease()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"LOCK-{Guid.NewGuid():N}", "编辑会话接口验收", "admin", @"D:\PDM\Lock", @"D:\Release\Lock"),
             "admin",
             CancellationToken.None);
@@ -1091,7 +1098,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task EditSessionApi_ReclaimsLegacySessionWithoutMachine()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"RECLAIM-{Guid.NewGuid():N}", "本机过期会话验收", "admin", @"D:\PDM\Reclaim", @"D:\Release\Reclaim"),
             "admin",
             CancellationToken.None);
@@ -1123,7 +1130,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task BomReconciliation_WriteModeReachesWorkflowValidation()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"BOM-READONLY-{Guid.NewGuid():N}", "BOM只读对账验收", "admin", @"D:\PDM\BomReadonly", @"D:\Release\BomReadonly"),
             "admin",
             CancellationToken.None);
@@ -1141,7 +1148,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task BomResolve_AcceptsStringTargetKindFromWebClient()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"BOM-{Guid.NewGuid():N}", "BOM分类接口验收", "admin", @"D:\PDM\Bom", @"D:\Release\Bom"),
             "admin",
             CancellationToken.None);
@@ -1167,7 +1174,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task BomBatchUpdate_ValidatesAllRowsAndUpdatesSelectedPropertiesTogether()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"BATCH-{Guid.NewGuid():N}", "BOM批量编辑验收", "admin", @"D:\PDM\Batch", @"D:\Release\Batch"),
             "admin",
             CancellationToken.None);
@@ -1200,7 +1207,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task BomBatchDelete_PersistentlyExcludesDrawingRowsAndClassificationRestoresThem()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"DELETE-{Guid.NewGuid():N}", "BOM批量删除验收", "admin", @"D:\PDM\Delete", @"D:\Release\Delete"),
             "admin",
             CancellationToken.None);
@@ -1229,7 +1236,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task BomNoPublish_RemainsVisibleAndCanBeRestoredThroughApi()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"NO-PUBLISH-{Guid.NewGuid():N}", "BOM不发布验收", "admin", @"D:\PDM\NoPublish", @"D:\Release\NoPublish"),
             "admin",
             CancellationToken.None);
@@ -1442,9 +1449,9 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var originalPermissions = engineer.Permissions;
         try
         {
-            var response = await client.PutAsJsonAsync("/api/role-permissions/Engineer", new { permissions = new[] { PermissionCodes.DocumentEdit } });
+            var response = await SetRolePermissionsThroughCenterAsync("Engineer", [PermissionCodes.DocumentEdit]);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            var updated = await response.Content.ReadFromJsonAsync<RolePermissionDirectoryResponse>();
+            var updated = await client.GetFromJsonAsync<RolePermissionDirectoryResponse>("/api/role-permissions");
             var updatedEngineer = Assert.Single(updated!.Roles, role => role.Role == nameof(UserRole.Engineer));
             Assert.Contains("document.register", updatedEngineer.Permissions);
             Assert.Contains("document.checkout", updatedEngineer.Permissions);
@@ -1455,7 +1462,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         }
         finally
         {
-            await client.PutAsJsonAsync("/api/role-permissions/Engineer", new { permissions = originalPermissions });
+            (await SetRolePermissionsThroughCenterAsync("Engineer", originalPermissions)).EnsureSuccessStatusCode();
         }
 
         var removedEndpoint = await client.PutAsJsonAsync("/api/projects/11111111-1111-1111-1111-111111111111/responsibles", new { usernames = new[] { "admin" } });
@@ -1468,29 +1475,23 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
         var roleName = $"自定义角色-{Guid.NewGuid():N}";
 
-        var createdResponse = await client.PostAsJsonAsync("/api/role-permissions", new
-        {
-            name = roleName,
-            description = "复制工程师角色用于验证",
-            sourceRoleCode = nameof(UserRole.Engineer)
-        });
-
-        Assert.Equal(HttpStatusCode.Created, createdResponse.StatusCode);
-        var createdDirectory = await createdResponse.Content.ReadFromJsonAsync<RolePermissionDirectoryResponse>();
+        var roleCode = await CreateRoleThroughCenterAsync(roleName);
+        var createdDirectory = await client.GetFromJsonAsync<RolePermissionDirectoryResponse>("/api/role-permissions");
         var created = Assert.Single(createdDirectory!.Roles, role => role.Name == roleName);
         Assert.False(created.IsSystem);
-        Assert.Equal(nameof(UserRole.Engineer), created.BaseRole);
+        Assert.Equal(roleCode, created.Role);
         Assert.Contains(PermissionCodes.ProjectView, created.Permissions);
 
-        var deletedResponse = await client.DeleteAsync($"/api/role-permissions/{Uri.EscapeDataString(created.Role)}");
+        var settings = await factory.Services.GetRequiredService<IPdmRepository>().GetAuthorizationSettingsAsync(default);
+        var deletedResponse = await client.PutAsJsonAsync("/api/authorization-center", settings with { Templates = settings.Templates.Where(template => template.RoleCode != roleCode).ToArray() });
         Assert.Equal(HttpStatusCode.OK, deletedResponse.StatusCode);
-        var deletedDirectory = await deletedResponse.Content.ReadFromJsonAsync<RolePermissionDirectoryResponse>();
+        var deletedDirectory = await client.GetFromJsonAsync<RolePermissionDirectoryResponse>("/api/role-permissions");
         Assert.DoesNotContain(deletedDirectory!.Roles, role => role.Role == created.Role);
 
         var protectedResponse = await client.DeleteAsync("/api/role-permissions/Administrator");
         Assert.False(protectedResponse.IsSuccessStatusCode);
         Assert.Contains((await client.GetFromJsonAsync<RolePermissionDirectoryResponse>("/api/role-permissions"))!.Roles,
-            role => role.Role == nameof(UserRole.Administrator) && role.IsSystemAdministrator);
+            role => role.Role == nameof(UserRole.Administrator) && role.IsSystem);
     }
 
     [Fact]
@@ -1500,19 +1501,13 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var username = $"role-content-{Guid.NewGuid():N}";
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
 
-        var createdResponse = await client.PostAsJsonAsync("/api/role-permissions", new
-        {
-            name = $"内容权限验收-{Guid.NewGuid():N}",
-            description = "验证项目页签只跟随角色权限",
-            sourceRoleCode = nameof(UserRole.Engineer)
-        });
-        Assert.Equal(HttpStatusCode.Created, createdResponse.StatusCode);
-        var createdDirectory = await createdResponse.Content.ReadFromJsonAsync<RolePermissionDirectoryResponse>();
+        await CreateRoleThroughCenterAsync($"内容权限验收-{Guid.NewGuid():N}");
+        var createdDirectory = await client.GetFromJsonAsync<RolePermissionDirectoryResponse>("/api/role-permissions");
         var role = Assert.Single(createdDirectory!.Roles, item => item.Name.StartsWith("内容权限验收-", StringComparison.Ordinal));
 
-        var metadataOnly = await client.PutAsJsonAsync($"/api/role-permissions/{role.Role}", new { permissions = new[] { PermissionCodes.ProjectView } });
+        var metadataOnly = await SetRolePermissionsThroughCenterAsync(role.Role, [PermissionCodes.ProjectView]);
         Assert.Equal(HttpStatusCode.OK, metadataOnly.StatusCode);
-        await repository.CreateUserAsync(new UserAccount(
+        await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(
             Guid.NewGuid(), username, "内容权限验收用户", "unused", UserRole.Engineer, true,
             RoleCode: role.Role, CompanyId: Guid.Parse("70000000-0000-0000-0000-000000000001")), CancellationToken.None);
 
@@ -1523,10 +1518,8 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/projects/11111111-1111-1111-1111-111111111111/folder-documents")).StatusCode);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
-        var contentEnabled = await client.PutAsJsonAsync($"/api/role-permissions/{role.Role}", new
-        {
-            permissions = new[] { PermissionCodes.ProjectView, PermissionCodes.ProjectContentView }
-        });
+        var contentEnabled = await SetRolePermissionsThroughCenterAsync(role.Role, [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView,
+            ProjectCenterPermissions.Tab("documents"), "document.view"]);
         Assert.Equal(HttpStatusCode.OK, contentEnabled.StatusCode);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(username, "Engineer"));
@@ -1540,7 +1533,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     public async Task Administrator_DeletesOnlyProjectsWithoutBusinessData()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"DELETE-{Guid.NewGuid():N}", "管理员删除验收", "admin", @"D:\PDM\Delete", @"D:\Release\Delete"),
             "admin",
             CancellationToken.None);
@@ -1625,7 +1618,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         if (await repository.FindUserAsync("admin", default) is null)
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
+            await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
         var project = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 2,
             Guid.Parse("c0046500-0000-0000-0000-000000000001"), "协同项目经理授权验收", null, new(2026, 10, 3), 1, "admin", "D:/test", "D:/release"), default);
         var division = await repository.SaveOrganizationUnitAsync(new(null, project.OrganizationId!.Value, null,
@@ -1633,7 +1626,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         await repository.SetProjectExecutionUnitAsync(project.Id, division.Id, "admin", default);
         foreach (var user in new[] { "staffing-manager", "staffing-collaborator" })
         {
-            await repository.CreateUserAsync(new(Guid.NewGuid(), user, user, "unused", UserRole.ProductionViewer, true), default);
+            await ApiTestAuthorization.CreateUserAsync(repository, new(Guid.NewGuid(), user, user, "unused", UserRole.ProductionViewer, true), default);
             await repository.SetOrganizationMembershipsAsync(user, [division.Id], division.Id, default);
         }
 
@@ -1664,16 +1657,16 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             new UserAccount(Guid.NewGuid(), "designer-own", "本事业部设计", "unused", UserRole.Engineer, true),
             new UserAccount(Guid.NewGuid(), "designer-other", "跨事业部设计", "unused", UserRole.Engineer, true),
             new UserAccount(Guid.NewGuid(), "production-user", "生产人员", "unused", UserRole.ProductionViewer, true),
-            new UserAccount(Guid.NewGuid(), "legacy-procurement", "采购人员", "unused", UserRole.Engineer, true)
+            new UserAccount(Guid.NewGuid(), "legacy-procurement", "采购人员", "unused", UserRole.Engineer, true, RoleCode: "ProcurementSpecialist")
         })
         {
             if (await repository.FindUserAsync(user.Username, CancellationToken.None) is null)
-                await repository.CreateUserAsync(user, CancellationToken.None);
+                await ApiTestAuthorization.CreateUserAsync(repository, user, CancellationToken.None);
         }
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
         if (await repository.FindUserAsync("admin", CancellationToken.None) is null)
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), CancellationToken.None);
+            await ApiTestAuthorization.CreateUserAsync(repository, new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), CancellationToken.None);
 
         var division = await CreateUnitAsync("DIV-A-" + Guid.NewGuid().ToString("N")[..6], "自动化事业部");
         var otherDivision = await CreateUnitAsync("DIV-B-" + Guid.NewGuid().ToString("N")[..6], "机器人事业部");
@@ -1864,7 +1857,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var originalSettings = await repository.GetSystemSettingsAsync(CancellationToken.None);
         var testRoot = Path.GetFullPath(Path.Combine(".data", "api-tests", Guid.NewGuid().ToString("N")));
-        var project = await repository.CreateProjectAsync(
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository,
             new CreateProjectCommand($"FILE-{Guid.NewGuid():N}", "项目文件全流程验收", "admin", testRoot, Path.Combine(testRoot, "release")),
             "admin",
             CancellationToken.None);
@@ -2101,7 +2094,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         {
             using var scope = factory.Services.CreateScope();
             var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
-            var project = await repository.CreateProjectAsync(new CreateProjectCommand("QA-" + Guid.NewGuid().ToString("N"), "验证计划上传测试", "admin", vault, vault), "admin", default);
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("QA-" + Guid.NewGuid().ToString("N"), "验证计划上传测试", "admin", vault, vault), "admin", default);
             var service = quality ? scope.ServiceProvider.GetRequiredKeyedService<ValidationPlanService>("quality") : scope.ServiceProvider.GetRequiredService<ValidationPlanService>();
             var plans = quality ? scope.ServiceProvider.GetRequiredKeyedService<IValidationPlanRepository>("quality") : scope.ServiceProvider.GetRequiredService<IValidationPlanRepository>();
             var plan = await service.SavePlanAsync(project.Id, new(null, null, [new(null, "验证上传", null, null, null, null, null, null, 1)]), "admin", UserRole.Administrator, default);
@@ -2131,8 +2124,33 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         }
     }
 
-    private static string CreateToken(string username, string role)
+    private async Task<HttpResponseMessage> SetRolePermissionsThroughCenterAsync(string role, IReadOnlyList<string> permissions)
     {
+        var settings = await factory.Services.GetRequiredService<IPdmRepository>().GetAuthorizationSettingsAsync(default);
+        return await client.PutAsJsonAsync("/api/authorization-center", AuthorizationPolicy.UpdateRole(settings, role, permissions));
+    }
+
+    private async Task<string> CreateRoleThroughCenterAsync(string name)
+    {
+        var settings = await factory.Services.GetRequiredService<IPdmRepository>().GetAuthorizationSettingsAsync(default);
+        var code = "api-role-" + Guid.NewGuid().ToString("N");
+        var source = settings.Templates.Single(template => template.RoleCode == "Engineer");
+        var response = await client.PutAsJsonAsync("/api/authorization-center", settings with
+        {
+            Templates = settings.Templates.Append(source with { Key = code, RoleCode = null, Name = name }).ToArray()
+        });
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        var saved = (await response.Content.ReadFromJsonAsync<AuthorizationSettings>())!;
+        return saved.Templates.Single(template => template.Key == code).RoleCode!;
+    }
+
+    private string CreateToken(string username, string role)
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        if (repository.FindUserAsync(username, default).GetAwaiter().GetResult() is null)
+            repository.CreateUserAsync(new(Guid.NewGuid(), username, "接口验收人员", "unused",
+                Enum.TryParse<UserRole>(role, out var parsed) ? parsed : UserRole.Engineer, true,
+                CompanyId: Guid.Parse("70000000-0000-0000-0000-000000000001")), default).GetAwaiter().GetResult();
         var credentials = new SigningCredentials(
             new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")),
             SecurityAlgorithms.HmacSha256);
@@ -2171,20 +2189,41 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     private sealed record AuditResponse(Guid Id, DateTimeOffset OccurredAt, string Actor, string Action, string EntityType, Guid EntityId, string Detail);
 }
 
-public sealed class PdmApiFactory : WebApplicationFactory<Program>
+public class PdmApiFactory : WebApplicationFactory<Program>
 {
+    protected override IHost CreateHost(IHostBuilder builder)
+    {
+        var host = builder.Build();
+        using var scope = host.Services.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+        if (repository is not Upton.Pdm.Infrastructure.InMemoryPdmRepository)
+            throw new InvalidOperationException("接口回归必须使用隔离的内存仓库。");
+        // 业务接口测试必须使用已注册账号，不能依靠 JWT 中的角色名称取得权限。
+        var company = Guid.Parse("70000000-0000-0000-0000-000000000001");
+        // 历史内存样例早于多公司功能；测试宿主补齐样例数据公司，正式仓库不受影响。
+        var projects = (System.Collections.Concurrent.ConcurrentDictionary<Guid, Project>)typeof(Upton.Pdm.Infrastructure.InMemoryPdmRepository)
+            .GetField("projects", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(repository)!;
+        var seedProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        projects[seedProjectId] = projects[seedProjectId] with { OrganizationId = company };
+        foreach (var (name, role) in new[] { ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer), ("viewer", UserRole.ProductionViewer) })
+            if (repository.FindUserAsync(name, default).GetAwaiter().GetResult() is null)
+                repository.CreateUserAsync(new(Guid.NewGuid(), name, "接口验收人员", "unused", role, true, CompanyId: company), default).GetAwaiter().GetResult();
+        host.Start();
+        return host;
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        builder.UseContentRoot(AppContext.BaseDirectory);
         builder.UseEnvironment("Development");
         builder.ConfigureLogging(logging => { logging.ClearProviders(); logging.AddConsole(); });
         builder.ConfigureServices(services =>
         {
-            // Endpoint tests drive synchronization explicitly; the polling worker must not consume their queued U9 responses.
+            // Endpoint tests drive background work explicitly; polling/recovery workers must not mutate their fixtures.
+            // Worker tests instantiate the worker under test themselves. Keep startup initialization enabled.
             foreach (var registration in services.Where(service =>
-                service.ImplementationType == typeof(Upton.Pdm.Api.MaterialU9SyncBatchHostedService) || service.ImplementationType == typeof(Upton.Pdm.Api.DingTalkStreamService)
-                || service.ImplementationType == typeof(Upton.Pdm.Api.EditCollaborationHostedService)
-                || service.ImplementationType == typeof(Upton.Pdm.Api.BrowserCadArchiveHostedService)
-                || service.ImplementationType == typeof(Upton.Pdm.Api.ReleaseDeliveryHostedService)).ToArray())
+                service.ServiceType == typeof(IHostedService) && service.ImplementationType?.Namespace == "Upton.Pdm.Api"
+                && service.ImplementationType != typeof(Upton.Pdm.Api.PdmBootstrapHostedService)).ToArray())
                 services.Remove(registration);
             services.AddDataProtection().UseEphemeralDataProtectionProvider();
             // Existing endpoint fixtures use these registered brands, as historical data does after migration.

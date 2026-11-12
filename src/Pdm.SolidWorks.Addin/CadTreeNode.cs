@@ -40,6 +40,9 @@ internal enum CadWorkState
 
 internal sealed class CadTreeNode
 {
+    public DocumentOperationAccessDto OperationAccess { get; set; }
+    public bool HasCurrentEditSession { get; set; }
+    public List<OpenReferenceIssueDto> OpenReferenceIssues { get; set; } = new List<OpenReferenceIssueDto>();
     internal ISet<string> ConfirmedArchivePaths { get; set; }
     // Display/cache state only. Never use a deferred tree as native archive evidence.
     public bool LocalStructureDeferred { get; set; }

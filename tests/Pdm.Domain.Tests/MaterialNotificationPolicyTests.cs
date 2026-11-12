@@ -15,7 +15,7 @@ public sealed class MaterialNotificationPolicyTests
     [InlineData("MechanicalManager", UserRole.Approver, false)]
     [InlineData("ProductionManager", UserRole.Approver, false)]
     [InlineData("Administrator", UserRole.Administrator, false)]
-    [InlineData("developer", UserRole.Administrator, false)]
+    [InlineData("developer", UserRole.Administrator, true)]
     public async Task OnlyStandardizationBusinessRolesReceiveByDefault(string code, UserRole role, bool expected)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -27,12 +27,14 @@ public sealed class MaterialNotificationPolicyTests
     public async Task NotificationSwitchDoesNotGrantMaterialManagementAndCanBeRevoked()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.MaterialView], default);
         Assert.False(await MaterialNotificationPolicy.CanReceiveAsync(repository, "engineer", UserRole.Engineer, default));
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.MaterialNotify], default);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.MaterialNotify, AuthorizationActions.BusinessNotifications], default);
         Assert.True(await MaterialNotificationPolicy.CanReceiveAsync(repository, "engineer", UserRole.Engineer, default));
         Assert.True(await repository.HasUserPermissionAsync("engineer", UserRole.Engineer, PermissionCodes.MaterialView, default));
         Assert.False(await repository.HasUserPermissionAsync("engineer", UserRole.Engineer, PermissionCodes.MaterialManage, default));
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.MaterialView], default);
         Assert.False(await MaterialNotificationPolicy.CanReceiveAsync(repository, "engineer", UserRole.Engineer, default));
     }

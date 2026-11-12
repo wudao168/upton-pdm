@@ -130,13 +130,15 @@ public sealed class NameplateWorkflowTests
     private sealed record Fixture(InMemoryPdmRepository Repository, Project Project, ProjectNameplateService Service, ProductionTrackingService Tracking);
     private static async Task<Fixture> FixtureAsync()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2,
             Guid.Parse("c0046500-0000-0000-0000-000000000001"), "铭牌生产", null, new(2026, 10, 2), 2, "admin", "D:/test", "D:/release"), Ct);
         await repository.SetChildProjectDesignersAsync(project.Id, ["engineer"], "admin", Ct);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "hardware", "硬件工程师", "unused", UserRole.Engineer, true, RoleCode: "HardwareEngineer"), Ct);
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], Ct);
-        await repository.SetRolePermissionsAsync("HardwareEngineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], Ct);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit, "project.nameplate.execution.edit"], Ct);
+        await PermissionTestUsers.Scope(repository, "Engineer", "project.nameplate.execution.edit", "current-designer");
+        await repository.SetRolePermissionsAsync("HardwareEngineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit, "project.nameplate.hardware.edit"], Ct);
+        await PermissionTestUsers.Scope(repository, "HardwareEngineer", "project.nameplate.hardware.edit", "current-hardware");
         await repository.SetProjectPhaseOwnersAsync(project.Id, new Dictionary<string, string> { ["ElectricalHardware"] = "hardware" }, "admin", Ct);
         var store = new InMemoryProductionTrackingStore(DateTimeOffset.UtcNow.AddDays(-1));
         var tracking = new ProductionTrackingService(repository, store, TimeProvider.System, new(repository));

@@ -174,6 +174,7 @@ describe('ProjectWorkspaceHeader', () => {
   it('选中子项目后左侧显示子项目型号和序列号，右侧不再重复显示项目摘要', () => {
     const wrapper = mount(ProjectWorkspaceHeader, {
       props: { project: childProject, projects: [rootProject, childProject, drawingChild], activeTab: 'overview', currentUsername: 'engineer' },
+      global: { provide: { [userDisplayNameKey as symbol]: (username?: string | null, emptyText = '—') => (({ 'project-manager': '张经理', 'design-lead': '李主设', 'child-engineer': '王工程师', 'drawing-engineer': '赵工程师', 'other-user': '陈工程师' } as Record<string, string>)[username || ''] || (username ? '姓名待补充' : emptyText)) } },
     })
 
     const sidebar = wrapper.get('[aria-label="项目基本信息与全部项目号"]')
@@ -193,10 +194,10 @@ describe('ProjectWorkspaceHeader', () => {
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('AK-1-C00003-001-01')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('70000002')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('自动化事业部')
-    expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('project-manager')
-    expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('design-lead')
-    expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('child-engineer')
-    expect(sidebar.get('.pdm-project-sidebar__summary').text()).not.toContain('drawing-engineer')
+    expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('张经理')
+    expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('李主设')
+    expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('王工程师')
+    expect(sidebar.get('.pdm-project-sidebar__summary').text()).not.toContain('赵工程师')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).not.toContain('中山联合光电科技有限公司')
     expect(wrapper.findAll('.pdm-project-family__list button')).toHaveLength(3)
     expect(wrapper.get('[aria-label="选择项目号 P700002-1"]').classes()).toContain('is-active')
@@ -209,7 +210,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.text()).not.toContain('图纸审核')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('可编辑')
     expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__state').text()).toBe('正常')
-    expect(sidebar.get('[aria-label="选择项目号 P700002-2"] .pdm-project-family__state').text()).toBe('other-user编辑中')
+    expect(sidebar.get('[aria-label="选择项目号 P700002-2"] .pdm-project-family__state').text()).toBe('陈工程师编辑中')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').text()).toBe('21')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').attributes('aria-label')).toBe('3D图档 2，2D图档 1')
     expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__document-counts').text()).toBe('00')
@@ -237,6 +238,7 @@ describe('ProjectWorkspaceHeader', () => {
   it('默认选中主项目时左侧显示主项目管理信息', () => {
     const wrapper = mount(ProjectWorkspaceHeader, {
       props: { project: rootProject, projects: [rootProject, childProject, drawingChild], activeTab: 'overview', currentUsername: 'engineer' },
+      global: { provide: { [userDisplayNameKey as symbol]: (username?: string | null, emptyText = '—') => (({ 'project-manager': '张经理', 'design-lead': '李主设', 'child-engineer': '王工程师', 'drawing-engineer': '赵工程师', 'other-user': '陈工程师' } as Record<string, string>)[username || ''] || (username ? '姓名待补充' : emptyText)) } },
     })
 
     const summary = wrapper.get('.pdm-project-sidebar__summary')
@@ -246,7 +248,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(summary.text()).toContain('AK-1-C00003-001-00')
     expect(summary.text()).toContain('70000001')
     expect(summary.text()).toContain('自动化事业部')
-    expect(summary.text()).toContain('child-engineer、drawing-engineer')
+    expect(summary.text()).toContain('王工程师、赵工程师')
     expect(wrapper.get('.pdm-project-sidebar__overview').text()).toContain('3图档')
     expect(wrapper.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').text()).toBe('21')
   })

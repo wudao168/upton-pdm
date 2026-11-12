@@ -14,7 +14,7 @@ namespace Upton.Pdm.Api.Tests;
 public sealed class ProjectFolderPermissionTests
 {
     [Fact]
-    public async Task ManagerNeedsRolePositionAndDirectoryPermissionToCreateFolder()
+    public async Task ManagerNeedsUnifiedActionAndDirectoryPermissionToCreateFolder()
     {
         await using var factory = new PdmApiFactory();
         using var client = factory.CreateClient();
@@ -37,8 +37,7 @@ public sealed class ProjectFolderPermissionTests
         var url = $"/api/projects/{project.Id}/folders/{folder.Id}/children";
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(url, new { name = "岗位尚未授权" })).StatusCode);
 
-        rules[ProjectPermissionPositions.MainManager] = ["project.file.create"];
-        await repository.UpdateProjectPermissionSettingsAsync(new(rules, [], 2), default);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "ProjectManager", "project.file.create", "project.file.view", ProjectCenterPermissions.Tab("files"), ProjectCenterPermissions.Write);
         var created = await client.PostAsJsonAsync(url, new { name = "经理创建目录" });
         Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync());
         Assert.Contains(await repository.ListProjectFoldersAsync(project.Id, manager, UserRole.Engineer, default), item => item.Name == "经理创建目录");

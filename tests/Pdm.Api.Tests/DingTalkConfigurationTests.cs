@@ -32,8 +32,8 @@ public sealed partial class DingTalkConfigurationTests
         using var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var companies = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.Where(x => x.IsActive).ToArray();
-        var company = companies[0].Id;
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
+        var company = (await repository.FindProjectAsync(RootId, default))!.OrganizationId!.Value;
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
         await repository.SetUserCompanyScopeAsync("admin", company, false, [], "admin", default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("admin", "Administrator")); client.DefaultRequestHeaders.Add("X-Company-Id", company.ToString());
         var initial = await client.GetFromJsonAsync<JsonElement>("/api/settings/dingtalk");
@@ -73,7 +73,7 @@ public sealed partial class DingTalkConfigurationTests
         Assert.Contains("groupId="+groupId,bound.GetProperty("entryUrl").GetString());
         Assert.Contains("提交入口卡片已发到群内",bound.GetProperty("entryMessage").GetString());
         Assert.Equal(HttpStatusCode.OK,(await client.PostAsync($"/api/projects/{RootId}/dingtalk/entry",null)).StatusCode);
-        var second = await repository.CreateProjectAsync(new CreateProjectCommand("DING-SECOND", "第二项目", "admin", "unused", "unused"), "admin", default);
+        var second = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand("DING-SECOND", "第二项目", "admin", "unused", "unused"), "admin", default);
         var duplicate = await client.PutAsJsonAsync($"/api/projects/{second.Id}/dingtalk", new { groupId, expectedRowVersion = 3 });
         Assert.Equal(HttpStatusCode.BadRequest, duplicate.StatusCode);
         var root = (await repository.FindProjectAsync(RootId, default))!;
@@ -122,7 +122,7 @@ public sealed partial class DingTalkConfigurationTests
         Assert.Equal("改名后的项目群",renamed.Groups[groupId].Name);
         Assert.Equal("改名后的项目群",renamed.Groups[alias].Name);
         Assert.Equal(groupId,renamed.Bindings[second.Id]);
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "other", "普通用户", "unused", UserRole.Engineer, true), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "other", "普通用户", "unused", UserRole.Engineer, true), default);
         await repository.SetUserCompanyScopeAsync("other", company, false, [], "admin", default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("other", "Engineer"));
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/settings/dingtalk")).StatusCode);
@@ -130,7 +130,9 @@ public sealed partial class DingTalkConfigurationTests
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("admin", "Administrator"));
         if (companies.Length > 1)
         {
-            client.DefaultRequestHeaders.Remove("X-Company-Id"); client.DefaultRequestHeaders.Add("X-Company-Id", companies[1].Id.ToString());
+            var otherCompany = companies.First(item => item.Id != company).Id;
+            await repository.SetUserCompanyScopeAsync("admin", company, true, [company, otherCompany], "admin", default);
+            client.DefaultRequestHeaders.Remove("X-Company-Id"); client.DefaultRequestHeaders.Add("X-Company-Id", otherCompany.ToString());
             var other = await client.GetFromJsonAsync<JsonElement>("/api/settings/dingtalk");
             Assert.False(other.GetProperty("hasAppSecret").GetBoolean()); Assert.Empty(other.GetProperty("groups").EnumerateArray());
         }

@@ -21,6 +21,7 @@ public sealed class StockedMaterialApiTests
         var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
         await repository.CreateUserAsync(new(Guid.NewGuid(), "cancel-admin", "取消常备管理员", "unused", UserRole.Administrator, true, CompanyId: company), default);
         await repository.SetUserCompanyScopeAsync("cancel-admin", company, false, [], "admin", default);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Administrator", PermissionCodes.StockManage);
         var materials = factory.Services.GetRequiredService<IMaterialRepository>();
         var config = await materials.GetIntegrationConfigurationAsync(default);
         await materials.SaveIntegrationConfigurationAsync(config with { BaseUrl = "http://u9.test", ClientSecretCiphertext = "protected:test", WriteEnabled = true }, default);
@@ -55,6 +56,8 @@ public sealed class StockedMaterialApiTests
             await repository.SetUserCompanyScopeAsync(username, company, false, [], "admin", default);
         }
         client.DefaultRequestHeaders.Add("X-Company-Id", company.ToString());
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Engineer", PermissionCodes.StockView);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Administrator", PermissionCodes.StockManage, PermissionCodes.StockSettingsManage);
         Authenticate(client, "stock-engineer", "Engineer");
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/stocked-materials/")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/stocked-materials/memberships", new { categoryIds = new[] { Guid.NewGuid() }, materialIds = new[] { Guid.NewGuid() } })).StatusCode);
@@ -81,8 +84,11 @@ public sealed class StockedMaterialApiTests
         using var factory = new PdmApiFactory(); using var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
-        var roles = await repository.CreateRoleAsync("普通标准库维护", "同步权限测试", "StandardizationAssistant", default);
+        var roles = await ApiTestAuthorization.CreateRoleAsync(repository, "普通标准库维护", "同步权限测试", "StandardizationAssistant", default);
         var managerRole = roles.Roles.Single(item => item.Name == "普通标准库维护").Role;
+        await repository.SetRolePermissionsAsync(managerRole, [PermissionCodes.StandardLibraryManage, PermissionCodes.StockView], default);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "StandardizationAssistant", PermissionCodes.StockView, AuthorizationActions.StockSynchronize);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Administrator", PermissionCodes.StockView, PermissionCodes.StockSettingsManage, AuthorizationActions.StockSynchronize);
         foreach (var (name, role, code) in new[] { ("sync-manager", UserRole.Engineer, managerRole), ("sync-assistant", UserRole.Engineer, "StandardizationAssistant"), ("sync-admin", UserRole.Administrator, "Administrator") })
         {
             await repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", role, true, RoleCode: code, CompanyId: company), default);
@@ -100,7 +106,7 @@ public sealed class StockedMaterialApiTests
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/api/stocked-materials/refresh", null)).StatusCode); // 授权通过，测试环境尚未配置U9C密钥。
         Authenticate(client, "sync-admin", "Administrator");
         var admin = await client.GetFromJsonAsync<JsonElement>("/api/stocked-materials/");
-        Assert.False(admin.GetProperty("canSynchronize").GetBoolean());
+        Assert.True(admin.GetProperty("canSynchronize").GetBoolean());
         Assert.True(admin.GetProperty("canManageSettings").GetBoolean());
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/api/stocked-materials/refresh", null)).StatusCode);
     }

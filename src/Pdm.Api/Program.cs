@@ -131,6 +131,7 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IProjectNameplateRepository, MySqlProjectNameplateRepository>();
     builder.Services.AddScoped<IProjectContactInformationRepository, MySqlProjectContactInformationRepository>();
     builder.Services.AddScoped<IProjectOplRepository, MySqlProjectOplRepository>();
+    builder.Services.AddScoped<IQualityReviewStore, MySqlQualityReviewStore>();
     builder.Services.AddScoped<IDingTalkConfigurationRepository, MySqlDingTalkConfigurationRepository>();
     builder.Services.AddScoped<IMobileOfficeLayoutRepository, MySqlMobileOfficeLayoutRepository>();
     builder.Services.AddScoped<IReleaseDeliveryStore, MySqlReleaseDeliveryStore>();
@@ -168,6 +169,7 @@ else
     builder.Services.AddSingleton<IProjectNameplateRepository, InMemoryProjectNameplateRepository>();
     builder.Services.AddSingleton<IProjectContactInformationRepository, InMemoryProjectContactInformationRepository>();
     builder.Services.AddSingleton<IProjectOplRepository, InMemoryProjectOplRepository>();
+    builder.Services.AddSingleton<IQualityReviewStore, InMemoryQualityReviewStore>();
     builder.Services.AddSingleton<IDingTalkConfigurationRepository, InMemoryDingTalkConfigurationRepository>();
     builder.Services.AddSingleton<IMobileOfficeLayoutRepository, InMemoryMobileOfficeLayoutRepository>();
     builder.Services.AddSingleton<IReleaseDeliveryStore, InMemoryReleaseDeliveryStore>();
@@ -214,6 +216,11 @@ builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => cli
 builder.Services.AddScoped<PdmWorkflowService>();
 builder.Services.AddScoped<ISparePartStore>(provider => (ISparePartStore)provider.GetRequiredService<IPdmRepository>());
 builder.Services.AddScoped<SparePartService>();
+builder.Services.AddScoped<IPurchaseAnalysisStore>(provider => (IPurchaseAnalysisStore)provider.GetRequiredService<IPdmRepository>());
+builder.Services.AddScoped<PurchaseAnalysisService>();
+builder.Services.AddPdmAi();
+builder.Services.AddSingleton<PurchaseAnalysisSyncCoordinator>();
+builder.Services.AddHostedService<PurchaseAnalysisSyncHostedService>();
 builder.Services.AddScoped<ProjectCopyService>();
 builder.Services.AddScoped<ReleaseItemCommentService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
@@ -269,6 +276,9 @@ builder.Services.AddScoped<WorkHoursService>();
 builder.Services.AddSingleton<IWorkHoursCalendar, WorkHoursCalendar>();
 builder.Services.AddHostedService<WorkHoursReminderHostedService>();
 builder.Services.AddScoped<ProjectOplService>();
+builder.Services.AddScoped<QualityReviewService>();
+builder.Services.AddScoped<IQualityIssueGate>(provider => provider.GetRequiredService<QualityReviewService>());
+builder.Services.AddHostedService<QualityReviewReminderHostedService>();
 builder.Services.AddSingleton<ProjectOplViewState>();
 builder.Services.Configure<DingTalkOplOptions>(builder.Configuration.GetSection("DingTalkOpl"));
 builder.Services.Configure<OplSpeechOptions>(builder.Configuration.GetSection("Pdm:OplSpeech"));
@@ -444,6 +454,7 @@ app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =
     await context.Response.WriteAsJsonAsync(new ProblemDetails
     {
         Status = status,
+        Type = exception is PdmReferenceVersionConfirmationException ? "urn:uplm:reference-version-confirmation" : null,
         Title = status == 500 ? "PLM服务发生内部错误" : exception?.Message,
         Detail = status == 500 && !app.Environment.IsDevelopment() ? null : exception?.Message
     });
@@ -505,6 +516,9 @@ app.MapPreviewWorkbench();
 app.MapPdmMaterialEndpoints();
 app.MapBomFileEndpoints();
 app.MapSparePartEndpoints();
+app.MapPurchaseAnalysisEndpoints();
+app.MapPdmAi();
+app.MapQualityReviewEndpoints();
 app.MapPdmInventoryEndpoints();
 app.MapPdmProcurementEndpoints();
 app.MapStandardLibraryEndpoints();

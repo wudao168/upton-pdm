@@ -36,7 +36,7 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
         if (await repository.FindUserAsync("admin", default) is null)
             await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
         await repository.SetUserCompanyScopeAsync("admin", company, false, [], "admin", default);
-        var project = await repository.CreateProjectAsync(new("SCAN-INCREMENT-" + Guid.NewGuid().ToString("N"), "扫码增量接口", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("SCAN-INCREMENT-" + Guid.NewGuid().ToString("N"), "扫码增量接口", "admin", "vault", "release"), "admin", default);
         var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "NS-INCREMENT", "接口模拟件", 10, "件", "钢", "MODEL-INCREMENT", "B", true);
         var original = new ReleasePackage(Guid.NewGuid(), project.Id, "ORIGINAL-10", ReleasePackageState.Published, null, "B", "B", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "release")
             { Scope = ReleaseScope.NonStandardWithDrawing, NonStandardBomSnapshot = [item], SelectedBomItemIds = [item.Id] };
@@ -78,7 +78,7 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
                 await repository.CreateUserAsync(new(Guid.NewGuid(), username, username, "unused", role, true), default);
             await repository.SetUserCompanyScopeAsync(username, company, false, [], "admin", default);
         }
-        var project = await repository.CreateProjectAsync(new("PROD-API-" + Guid.NewGuid().ToString("N"),
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("PROD-API-" + Guid.NewGuid().ToString("N"),
             "生产接口", "admin", "vault", "release"), "admin", default);
         var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1,
             "NS-API-1", "夹持座", 2, "件", "45钢", "7002541.00-02", "B", true);
@@ -138,7 +138,7 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
         Assert.DoesNotContain("contact", await traceOptions.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/production-suppliers")).StatusCode);
         var blockedRoleName = "无项目内容" + Guid.NewGuid().ToString("N");
-        var blockedRole = (await repository.CreateRoleAsync(blockedRoleName, "追溯权限验证", "Engineer", default)).Roles.Single(item => item.Name == blockedRoleName);
+        var blockedRole = (await ApiTestAuthorization.CreateRoleAsync(repository, blockedRoleName, "追溯权限验证", "Engineer", default)).Roles.Single(item => item.Name == blockedRoleName);
         await repository.SetRolePermissionsAsync(blockedRole.Role, [], default);
         var blockedUser = "blocked-" + Guid.NewGuid().ToString("N");
         await repository.CreateUserAsync(new(Guid.NewGuid(), blockedUser, "无项目内容", "unused", UserRole.Engineer, true, CompanyId: company, RoleCode: blockedRole.Role), default);

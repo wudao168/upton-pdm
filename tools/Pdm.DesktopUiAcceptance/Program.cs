@@ -94,7 +94,7 @@ internal static partial class Program
                     string page;
                     try
                     {
-                        page = await Execute(core, "JSON.stringify({url:location.href,visibleVersion:document.body.innerText.includes('V" + configurationVersion + "'),observedVersion:(document.body.innerText.match(/V\\d{4}\\.\\d{2}\\.\\d{2}\\.\\d{4,6}/)||[])[0],scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
+                        page = await Execute(core, "JSON.stringify({url:location.href,versionMatches:new URL(location.href).searchParams.get('configuration')==='" + configurationVersion + "',pageReady:document.readyState==='complete'&&!!document.querySelector('.pdm-sidebar')&&document.body.innerText.length>100,observedVersion:new URL(location.href).searchParams.get('configuration'),scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
                     }
                     catch (TimeoutException)
                     {
@@ -103,15 +103,15 @@ internal static partial class Program
                     }
                     if (page == "null") continue;
                     result = Json.DeserializeObject(Json.Deserialize<string>(page)) as System.Collections.Generic.Dictionary<string, object>;
-                    if ((bool)result["visibleVersion"]) break;
+                    if ((bool)result["versionMatches"] && (bool)result["pageReady"]) break;
                 }
                 Console.WriteLine("Native main page inspected");
                 result.TryGetValue("observedVersion", out var observedVersion);
-                Console.WriteLine("Native visible version: " + observedVersion);
-                if (!(bool)result["visibleVersion"])
+                Console.WriteLine("Native loaded configuration version: " + observedVersion);
+                if (!(bool)result["versionMatches"] || !(bool)result["pageReady"])
                 {
                     Console.WriteLine("Native page state: " + await Execute(core, "JSON.stringify({title:document.title,text:document.body.innerText.slice(0,1200)})"));
-                    throw new Exception("原生客户端可见版本号不一致。");
+                    throw new Exception("原生客户端未加载指定版本，或主页面尚未就绪。");
                 }
                 if (quantityStepEnabled)
                     result["quantityStep"] = await CheckNativeQuantityStep(core);
@@ -150,31 +150,39 @@ internal static partial class Program
                 // Exercise the real menu without modifying the test account's saved preferences.
                 await Execute(core, "window.__acceptanceFetch=window.fetch;window.fetch=(input,options)=>String(typeof input==='string'?input:input.url).endsWith('/api/auth/profile')&&options?.method==='PUT'?Promise.resolve(new Response(JSON.stringify({...JSON.parse(options.body),username:JSON.parse(localStorage.getItem('upton-pdm-session')).username}),{status:200,headers:{'Content-Type':'application/json'}})):window.__acceptanceFetch(input,options)");
                 var themeChecks = new System.Collections.Generic.List<string>();
+                var themeDetails = new System.Collections.Generic.List<object>();
                 var paletteType = assembly.GetType("Upton.Pdm.Desktop.EDrawingsPreviewControl+PreviewButtonTheme", true);
                 try
                 {
-                foreach (var palette in new[] { new[] { "a", "1d4ed8" }, new[] { "c", "0f766e" }, new[] { "p", "6d28d9" }, new[] { "o", "a84b08" }, new[] { "g", "52525b" } })
+                foreach (var palette in new[] { new[] { "a", "1d4ed8" }, new[] { "c", "0f766e" }, new[] { "g", "52525b" } })
                 {
                     var themeId = palette[0];
                     await SelectTheme(core, themeId);
+                    var expectedAccent = Json.Deserialize<string>(await Execute(core, "getComputedStyle(document.documentElement).getPropertyValue('--pdm-theme-accent').trim()"));
+                    var expectedScheme = Json.Deserialize<string>(await Execute(core, "document.documentElement.dataset.pdmColorScheme"));
+                    var systemDark = await Execute(core, "matchMedia('(prefers-color-scheme: dark)').matches") == "true";
+                    if (expectedScheme != (themeId == "c" || themeId == "a" && systemDark ? "dark" : "light"))
+                        throw new Exception("主界面颜色模式未符合所选主题：" + themeId);
                     if ((string)nativeTheme.GetValue(window) != themeId) throw new Exception("原生客户端未保留主题：" + themeId);
                     var resolved = paletteType.GetMethod("Resolve", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { themeId });
                     var iconColor = paletteType.GetProperty("IconColor", Flags).GetValue(resolved);
                     if (!((string)iconColor.GetType().GetProperty("Name").GetValue(iconColor)).EndsWith(palette[1], StringComparison.OrdinalIgnoreCase))
-                        throw new Exception("原生预览按钮与网页主色不一致：" + themeId);
+                        throw new Exception("原生预览按钮兼容调色板发生变化：" + themeId);
                     System.Collections.Generic.Dictionary<string, object> colors = null;
                     for (var attempt = 0; attempt < 20; attempt++)
                     {
                         await Task.Delay(250);
-                        colors = Json.DeserializeObject(Json.Deserialize<string>(await Execute(reviewCore, "JSON.stringify({theme:document.documentElement.dataset.pdmTheme,accent:getComputedStyle(document.documentElement).getPropertyValue('--pdm-theme-accent').trim()})"))) as System.Collections.Generic.Dictionary<string, object>;
-                        if ((string)colors["theme"] == themeId && string.Equals((string)colors["accent"], "#" + palette[1], StringComparison.OrdinalIgnoreCase)) break;
+                        colors = Json.DeserializeObject(Json.Deserialize<string>(await Execute(reviewCore, "JSON.stringify({theme:document.documentElement.dataset.pdmTheme,scheme:document.documentElement.dataset.pdmColorScheme,accent:getComputedStyle(document.documentElement).getPropertyValue('--pdm-theme-accent').trim()})"))) as System.Collections.Generic.Dictionary<string, object>;
+                        if ((string)colors["theme"] == themeId && (string)colors["scheme"] == expectedScheme && string.Equals((string)colors["accent"], expectedAccent, StringComparison.OrdinalIgnoreCase)) break;
                     }
-                    if ((string)colors["theme"] != themeId || !string.Equals((string)colors["accent"], "#" + palette[1], StringComparison.OrdinalIgnoreCase))
+                    if ((string)colors["theme"] != themeId || (string)colors["scheme"] != expectedScheme || !string.Equals((string)colors["accent"], expectedAccent, StringComparison.OrdinalIgnoreCase))
                         throw new Exception("审核浮层主题未与主界面同步：" + themeId + "（实际主题=" + colors["theme"] + "，主色=" + colors["accent"] + "）");
                     themeChecks.Add(themeId);
+                    themeDetails.Add(new { theme = themeId, scheme = expectedScheme, mainAccent = expectedAccent, reviewAccent = colors["accent"], nativePreviewIcon = iconColor.GetType().GetProperty("Name").GetValue(iconColor) });
+                    Console.WriteLine("PASS native theme " + themeId + ": main and review use " + expectedScheme + ", accent " + expectedAccent);
                 }
                 // A delayed initialization continuation must not send its older state after a newer call.
-                await SelectTheme(core, "o");
+                await SelectTheme(core, "c");
                 var initialization = overlay.GetType().GetField("initializationTask", Flags);
                 var originalInitialization = initialization.GetValue(overlay);
                 var delayedInitialization = new TaskCompletionSource<bool>();
@@ -185,18 +193,23 @@ internal static partial class Program
                     initialization.SetValue(overlay, delayedInitialization.Task);
                     var delayed = (Task)publish.Invoke(overlay, state("a"));
                     initialization.SetValue(overlay, Task.CompletedTask);
-                    await (Task)publish.Invoke(overlay, state("o"));
+                    await (Task)publish.Invoke(overlay, state("c"));
                     delayedInitialization.SetResult(true);
                     await delayed;
                     await Task.Delay(300);
-                    if (Json.Deserialize<string>(await Execute(reviewCore, "document.documentElement.dataset.pdmTheme")) != "o")
+                    if (Json.Deserialize<string>(await Execute(reviewCore, "document.documentElement.dataset.pdmTheme")) != "c")
                         throw new Exception("旧的浮层初始化等待覆盖了较新的主题。");
                     result["delayedReviewStateVerified"] = true;
                 }
                 finally { delayedInitialization.TrySetResult(true); initialization.SetValue(overlay, originalInitialization); }
                 }
-                finally { await SelectTheme(core, originalTheme); }
+                finally
+                {
+                    try { await SelectTheme(core, originalTheme); }
+                    finally { await Execute(core, "window.fetch=window.__acceptanceFetch;delete window.__acceptanceFetch"); }
+                }
                 result["nativeThemesVerified"] = themeChecks;
+                result["themeDetails"] = themeDetails;
                 if (args.Length > 3)
                 {
                     var extra = Json.DeserializeObject(File.ReadAllText(args[3])) as System.Collections.Generic.Dictionary<string, object>;
@@ -246,15 +259,27 @@ internal static partial class Program
     }
     static async Task SelectTheme(object core, string theme)
     {
-        var labels = new System.Collections.Generic.Dictionary<string, string> { ["a"] = "海湾蓝", ["c"] = "松石青", ["p"] = "鸢尾紫", ["o"] = "琥珀橙", ["g"] = "石墨灰" };
-        await Execute(core, "document.querySelector('.pdm-theme-trigger').click()");
-        await Task.Delay(150);
-        await Execute(core, "[...document.querySelectorAll('.pdm-theme-menu .el-dropdown-menu__item')].find(item=>item.textContent.includes(" + Json.Serialize(labels[theme]) + ")).click()");
-        for (var attempt = 0; attempt < 20; attempt++)
+        var labels = new System.Collections.Generic.Dictionary<string, string> { ["a"] = "系统", ["c"] = "深色", ["g"] = "浅色" };
+        var opened = await Execute(core, "(()=>{const trigger=[...document.querySelectorAll('.pdm-theme-trigger')].find(node=>node.checkVisibility());if(!trigger)return false;if(trigger.getAttribute('aria-expanded')!=='true')trigger.click();return true})()");
+        if (opened != "true") throw new Exception("主题菜单入口不可见。");
+        var clicked = false;
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            var selected = await Execute(core, "(()=>{const item=[...document.querySelectorAll('.pdm-theme-menu .el-dropdown-menu__item')].find(node=>node.checkVisibility()&&!node.closest('[aria-hidden=\"true\"]')&&node.textContent.trim()===" + Json.Serialize(labels[theme]) + ");if(!item||item.getAttribute('aria-disabled')==='true')return false;item.click();return true})()");
+            if (selected == "true") { clicked = true; break; }
+            await Task.Delay(100);
+        }
+        if (!clicked)
+        {
+            Console.WriteLine("Native unavailable theme menu: " + await Execute(core, "JSON.stringify([...document.querySelectorAll('.pdm-theme-menu .el-dropdown-menu__item')].map(node=>({text:node.textContent,visible:node.checkVisibility()})))"));
+            throw new Exception("主题菜单中没有可操作的选项：" + labels[theme]);
+        }
+        for (var attempt = 0; attempt < 30; attempt++)
         {
             await Task.Delay(100);
-            if (Json.Deserialize<string>(await Execute(core, "document.documentElement.dataset.pdmTheme")) == theme) return;
+            if (await Execute(core, "document.documentElement.dataset.pdmTheme===" + Json.Serialize(theme) + "&&document.querySelector('.pdm-theme-trigger')?.getAttribute('aria-expanded')!=='true'&&![...document.querySelectorAll('.pdm-theme-menu')].some(node=>node.checkVisibility())") == "true") return;
         }
+        Console.WriteLine("Native theme menu after " + theme + ": " + await Execute(core, "JSON.stringify({theme:document.documentElement.dataset.pdmTheme,items:[...document.querySelectorAll('.pdm-theme-menu .el-dropdown-menu__item')].map(node=>({text:node.textContent,visible:node.checkVisibility()}))})"));
         throw new Exception("主界面未应用所选主题：" + theme);
     }
     static async Task VerifyWorkspaceRecovery(Assembly assembly, Window window, System.Collections.Generic.Dictionary<string, object> fixture)

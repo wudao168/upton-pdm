@@ -46,7 +46,7 @@ public sealed class ArchiveReferenceWarningsApiTests
         Directory.CreateDirectory(Path.Combine(directory, ".versions"));
         try
         {
-            var project = await repository.CreateProjectAsync(new("WARNING-" + Guid.NewGuid().ToString("N"), "引用提示接口", "admin", directory, directory), "admin", default);
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("WARNING-" + Guid.NewGuid().ToString("N"), "引用提示接口", "admin", directory, directory), "admin", default);
             var part = await repository.RegisterDocumentAsync(new(project.Id, "PART", "PART", "PART.SLDPRT", DocumentKind.Part), "admin", default);
             var session = Guid.NewGuid();
             part = await repository.CheckoutAsync(part.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);

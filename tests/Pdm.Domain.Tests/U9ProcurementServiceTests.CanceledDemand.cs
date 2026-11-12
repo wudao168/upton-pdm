@@ -13,7 +13,7 @@ public sealed partial class U9ProcurementServiceTests
     [InlineData(BomKind.Electrical, true)]
     public async Task PublishedRemovalRetainsCanceledDemandAndOriginalProcurementHistory(BomKind kind, bool removeAll)
     {
-        var clock=TimeProvider.System;var repository=new InMemoryPdmRepository(clock);
+        var clock=TimeProvider.System;var repository=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var procurement=new InMemoryU9ProcurementRepository();var project=Assert.Single(await repository.ListProjectsAsync(default));var now=clock.GetUtcNow();
         var file=new BomFileReference(Guid.NewGuid(),Guid.NewGuid(),"Drawing2D","已发布采购图.pdf",1,10,new string('A',64),"标准化",now,"标准物料","图纸");
         var removed=new BomItem(Guid.NewGuid(),project.Id,kind,1,"REMOVED","取消购买物料",2,"001",null,"MODEL","W1",true){Files=[file]};
@@ -64,7 +64,7 @@ public sealed partial class U9ProcurementServiceTests
     [Fact]
     public async Task ReplacingMaterialCodeOnTheSameBomRowRetainsTheOldMaterialAsCanceled()
     {
-        var clock=TimeProvider.System;var repository=new InMemoryPdmRepository(clock);var project=Assert.Single(await repository.ListProjectsAsync(default));var now=clock.GetUtcNow();
+        var clock=TimeProvider.System;var repository=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);var project=Assert.Single(await repository.ListProjectsAsync(default));var now=clock.GetUtcNow();
         var old=new BomItem(Guid.NewGuid(),project.Id,BomKind.Standard,1,"OLD","原物料",2,"001",null,null,"W1",true);
         foreach(var (number,item,at) in new[]{("RP-OLD",old,now.AddMinutes(-2)),("RP-NEW",old with {DrawingNumber="NEW",Name="替代物料",Quantity=1},now)})
             await repository.CreateReleasePackageAsync(new(Guid.NewGuid(),project.Id,number,ReleasePackageState.Published,null,"","",[],at.AddMinutes(-1),at,null){Scope=ReleaseScope.StandardFormal,StandardBomSnapshot=[item]},default);

@@ -13,6 +13,7 @@ public sealed class ReleaseItemCommentTests
     {
         var clock = new MutableTimeProvider(new DateTimeOffset(2026, 9, 3, 6, 0, 0, TimeSpan.Zero));
         var repository = new InMemoryPdmRepository(clock);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "approver", "审批测试人员", "unused", UserRole.Engineer, true), default);
         var service = new ReleaseItemCommentService(repository, clock);
         var packageId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -46,22 +47,32 @@ public sealed class ReleaseItemCommentTests
     {
         var clock = new MutableTimeProvider(new DateTimeOffset(2026, 9, 3, 6, 0, 0, TimeSpan.Zero));
         var repository = new InMemoryPdmRepository(clock);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "other-user", "非当前审批人", "unused", UserRole.Engineer, true), default);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
         var service = new ReleaseItemCommentService(repository, clock);
         var packageId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
         var item = Item(Guid.NewGuid(), 1, "根装配/传感器-1");
         await repository.CreateReleasePackageAsync(new ReleasePackage(
             packageId, ProjectId, "RP-COMMENT-002", ReleasePackageState.ProcessReview, Guid.NewGuid(), "W1", "W1",
-            [new ApprovalTask(Guid.NewGuid(), packageId, ApprovalStage.ProcessReview, "assigned-user", null, null, null, null) { StepOrder = 1 }],
+            [new ApprovalTask(taskId, packageId, ApprovalStage.ProcessReview, "assigned-user", null, null, null, null) { StepOrder = 1 }],
             clock.GetUtcNow(), null, null)
         {
             Scope = ReleaseScope.StandardFormal,
-            StandardBomSnapshot = [item]
+            StandardBomSnapshot = [item],
+            EmergencyRoleCodes = []
         }, default);
 
         var exception = await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
             service.AddAsync(packageId, item.Id, "不应写入", "other-user", UserRole.Engineer, default));
 
         Assert.Contains("当前审批人", exception.Message);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.AddAsync(packageId, item.Id, "管理员不能以固定账号跳过代批规则", "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() =>
+            repository.DecideApprovalAsync(taskId, "admin", ApprovalDecision.Approved, "同意", false, null, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() =>
+            repository.TransferApprovalAsync(taskId, "admin", "other-user", default));
         Assert.Empty(await repository.ListReleaseItemCommentsAsync(packageId, default));
     }
 

@@ -29,7 +29,7 @@ public sealed class BomGroupingApiTests
         var material = await materialService.CreateAsync(new(null, "汇总测试物料", MaterialKind.Standard, MaterialSupplyMode.Purchase,
             "001", "QA-GROUP", null, null, "测试", null, null, null, CategoryCode: "0102"), "admin", UserRole.Administrator, default);
         var sample = new BomItem(Guid.NewGuid(), Guid.Empty, BomKind.Standard, 1, material.MaterialCode, material.Name, 1, "001", null, material.Specification, "W1", true) { Brand = material.Brand };
-        var project = await repo.CreateProjectAsync(new("GROUP-API-" + Guid.NewGuid().ToString("N"), "BOM汇总接口测试", "admin", "D:/qa", "D:/qa-release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repo, new("GROUP-API-" + Guid.NewGuid().ToString("N"), "BOM汇总接口测试", "admin", "D:/qa", "D:/qa-release"), "admin", default);
         var main = sample with { Id = Guid.NewGuid(), ProjectId = project.Id, Sequence = 1, Quantity = 1, Source = "Manual", SourceDocumentId = null, Revision = "W1" };
         var ownerA = Guid.NewGuid(); var ownerB = Guid.NewGuid();
         var first = main with { Id = Guid.NewGuid(), Sequence = 2, Quantity = 2, Source = "MaterialRelation", RelationMainBomItemId = ownerA };

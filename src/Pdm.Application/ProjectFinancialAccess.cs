@@ -3,7 +3,7 @@ using Upton.Pdm.Domain;
 namespace Upton.Pdm.Application;
 
 public sealed record ProjectFinancialAccess(bool Budget, bool Actual, IReadOnlySet<Guid> Departments,
-    bool? BudgetMaintenance = null, bool? ActualMaintenance = null)
+    bool? BudgetMaintenance = null, bool? ActualMaintenance = null, bool CanMaintainAssessment = false)
 {
     public bool CanMaintainBudget => BudgetMaintenance ?? Budget;
     public bool CanMaintainActual => ActualMaintenance ?? Actual;
@@ -81,7 +81,8 @@ public static class ProjectFinancialAccessPolicy
         var authorization = await AuthorizationPolicy.CreateContextAsync(repository, project.Id, actor, ct);
         if (authorization is null) return denied;
         var settings = await repository.GetAuthorizationSettingsAsync(ct);
-        bool Allows(string code) => AuthorizationPolicy.Decide(settings, authorization, code).Allowed;
+        var allowed = AuthorizationPolicy.Decisions(settings, authorization).Where(decision => decision.Allowed).Select(decision => decision.Permission).ToHashSet();
+        bool Allows(string code) => allowed.Contains(code);
         var departmentRole = Allows(AuthorizationActions.FinancialDepartmentRead);
         var departments = new HashSet<Guid>();
         if (departmentRole)
@@ -96,7 +97,7 @@ public static class ProjectFinancialAccessPolicy
                 }
             }
         return new(Allows(AuthorizationActions.FinancialBudgetRead), Allows(AuthorizationActions.FinancialActualRead), departments,
-            Allows(AuthorizationActions.FinancialBudgetMaintain), Allows(AuthorizationActions.FinancialActualMaintain));
+            Allows(AuthorizationActions.FinancialBudgetMaintain), Allows(AuthorizationActions.FinancialActualMaintain), Allows(PermissionCodes.ProjectBudgetAssessmentEdit));
     }
 
     private static bool Same(string? left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);

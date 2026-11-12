@@ -13,7 +13,7 @@ public sealed class BomSavePerformanceTests
     public async Task ChangedInstancesShareLightweightVersionReadAndEnqueueOneBatch(BomKind kind)
     {
         var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var documents = Enumerable.Range(0, 17).Select(_ => Guid.NewGuid()).ToArray();
         var rows = Enumerable.Range(1, 1000).Select(index => new BomItem(Guid.NewGuid(), projectId, kind,
             index, "MAT-1", "物料", 1, "001", "钢", "M1", "W1", true)
@@ -51,7 +51,7 @@ public sealed class BomSavePerformanceTests
     {
         var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var documentId = Guid.NewGuid();
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var rows = Enumerable.Range(1, 1000).Select(index => new BomItem(
             Guid.NewGuid(), projectId, BomKind.Standard, index, "MAT-1", "物料", index, "001", null, "M1", "W1", true)
         {
@@ -84,7 +84,7 @@ public sealed class BomSavePerformanceTests
     public async Task MissingArchivedVersionDoesNotCreateWritebacksOrReadFullSnapshots(BomKind kind)
     {
         var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var row = new BomItem(Guid.NewGuid(), projectId, kind, 1, "", "未存档物料", 1, "001", null, "M1", "W1", false)
         { Source = "Auto", SourceDocumentId = Guid.NewGuid(), SourceInstancePath = "root/part" };
         await repository.ReplaceBomAsync(projectId, kind, [row], default);

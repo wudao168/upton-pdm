@@ -7,7 +7,7 @@ public sealed class ProjectAssignmentNotificationTests
     [Fact]
     public async Task AssignmentNotifiesOnlyDivisionAndThreeTeamLeadersAndResolvesManagerTask()
     {
-        var repo = new InMemoryPdmRepository(TimeProvider.System);
+        var repo = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var company = Guid.Parse("70000000-0000-0000-0000-000000000001");
         var division = await repo.SaveOrganizationUnitAsync(new(null, company, null, "NTEST", "通知测试事业部", OrganizationUnitKind.BusinessDivision, true, 1, true), default);
         var other = await repo.SaveOrganizationUnitAsync(new(null, company, null, "NOTHER", "另一事业部", OrganizationUnitKind.BusinessDivision, true, 2, true), default);

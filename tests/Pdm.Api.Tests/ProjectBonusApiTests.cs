@@ -17,7 +17,8 @@ public sealed class ProjectBonusApiTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/settings/project-bonus")).StatusCode);
         var repo = factory.Services.GetRequiredService<IPdmRepository>();
         var project = (await repo.ListProjectsAsync(default)).First();
-        var company = (await repo.GetOrganizationDirectoryAsync(default)).Organizations.First(o => o.IsActive).Id;
+        var company = project.OrganizationId!.Value;
+        await ApiTestAuthorization.GrantRoleAsync(repo, "Administrator", PermissionCodes.ProjectBonusView);
         if (await repo.FindUserAsync("bonus-admin", default) is null)
             await repo.CreateUserAsync(new(Guid.NewGuid(), "bonus-admin", "奖金管理员", "unused", UserRole.Administrator, true, CompanyId: company), default);
         Login(client, "bonus-admin", "Administrator");

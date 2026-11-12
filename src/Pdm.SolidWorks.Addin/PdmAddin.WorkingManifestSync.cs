@@ -11,7 +11,8 @@ public sealed partial class PdmAddin
     private static ControlledOpenManifestDto WithWorkingFiles(ControlledOpenManifestDto source, IReadOnlyList<ControlledOpenFileDto> files) =>
         new ControlledOpenManifestDto { Id = source.Id, ProjectId = source.ProjectId, ProjectCode = source.ProjectCode,
             RootDocumentId = source.RootDocumentId, RootVersionId = source.RootVersionId, RootRevision = source.RootRevision,
-            RootRelativePath = source.RootRelativePath, ForEdit = source.ForEdit, Files = files.ToList(), Warnings = source.Warnings };
+            RootRelativePath = source.RootRelativePath, ForEdit = source.ForEdit, Files = files.ToList(), Warnings = source.Warnings,
+            ReferenceIssues = OpenReferenceFindings.Merge(source.ReferenceIssues) };
 
     private static ControlledOpenManifestDto WorkingAcquisitionScope(ControlledOpenManifestDto source, ISet<Guid> drawings) =>
         WithWorkingFiles(source, source.Files.Where(file => DocumentKindFromPath(file.FileName) != CadDocumentKind.Drawing
@@ -114,7 +115,8 @@ public sealed partial class PdmAddin
         {
             try
             {
-                var latest = await apiClient.CreateControlledOpenManifestAsync(context.Value.RootDocumentId, null, false, true, lifetime.Token);
+                var latest = await apiClient.CreateControlledOpenManifestAsync(context.Value.RootDocumentId, null, false, true, lifetime.Token,
+                    allowMissingComponents: true);
                 var reconciled = ReconcileRequestedWorkingArchives(context.Key, context.Value, latest, new HashSet<Guid>());
                 controlledOpenManifests[context.Key] = await ReconcileStoredWorkingMembershipAsync(context.Key, reconciled, latest,
                     new HashSet<Guid>()); // A baseline update does not acquire or update any drawing.

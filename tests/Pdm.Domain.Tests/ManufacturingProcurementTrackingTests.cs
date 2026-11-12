@@ -90,7 +90,7 @@ public sealed class ManufacturingProcurementTrackingTests
 
     private static async Task<FixtureData> Fixture()
     {
-        var time=TimeProvider.System;var repository=new InMemoryPdmRepository(time);var project=Assert.Single(await repository.ListProjectsAsync(default));
+        var time=TimeProvider.System;var repository=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);var project=Assert.Single(await repository.ListProjectsAsync(default));
         var item=new BomItem(Guid.NewGuid(),project.Id,BomKind.NonStandard,1,"02040001","冻结的加工件",10,"个","钢","CUSTOM-42","A",true){ImpactStage=ProjectPlanStage.Assembly};
         var now=time.GetUtcNow();var package=new ReleasePackage(Guid.NewGuid(),project.Id,"RP-MFG",ReleasePackageState.Published,null,"","",[],now.AddMinutes(-1),now,"D:/Release")
         {Scope=ReleaseScope.NonStandardWithDrawing,NonStandardBomSnapshot=[item],DrawingRequiredOn=DateOnly.FromDateTime(now.DateTime).AddDays(3)};

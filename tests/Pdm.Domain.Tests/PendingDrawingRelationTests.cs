@@ -236,7 +236,7 @@ public sealed class PendingDrawingRelationTests
 
     private static async Task<(InMemoryPdmRepository Repository, Project Project, Guid Session)> Setup()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("QA-PENDING-REL-" + Guid.NewGuid().ToString("N"),
             "部分工程图关联", "admin", "vault", "release"), "admin", default);
         return (repository, project, Guid.NewGuid());

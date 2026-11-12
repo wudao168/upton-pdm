@@ -7,11 +7,87 @@ namespace Pdm.Domain.Tests;
 
 public sealed class ProjectCopyServiceTests
 {
+    private static async Task ConfigureCopyActorAsync(InMemoryPdmRepository repository)
+    {
+        if (await repository.FindUserAsync("admin", default) is null)
+            await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "复制验收人员", "unused", UserRole.Administrator, true), default);
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        var actor = (await repository.FindUserAsync("admin", default))!;
+        var codes = new HashSet<string> { PermissionCodes.ProjectCreate, PermissionCodes.ProjectView, PermissionCodes.ProjectContentView,
+            PermissionCodes.DocumentEdit, PermissionCodes.ValidationPlanEdit, AuthorizationActions.FolderView, AuthorizationActions.FolderDownload, AuthorizationActions.FolderUpload };
+        var pending = new Queue<string>(codes);
+        while (pending.TryDequeue(out var code))
+            foreach (var dependency in RolePermissionCatalog.Permissions.Single(item => item.Code == code).Dependencies)
+                if (codes.Add(dependency)) pending.Enqueue(dependency);
+        await repository.SaveAuthorizationSettingsAsync(settings with { Templates = settings.Templates.Select(template => template.RoleCode == actor.EffectiveRoleCode
+            ? template with { Grants = [.. template.Grants.Where(grant => !codes.Contains(grant.Permission)), .. codes.Select(code => new AuthorizationGrant(code, ["company"]))] }
+            : template).ToArray() }, settings.Revision, default);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExecuteAsync_PreservesAllModelsOfMultiModelDrawing(bool formalDrawing)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureCopyActorAsync(repository);
+        var root = Path.Combine(Path.GetTempPath(), "pdm-copy-multi-model", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var source = await repository.CreateProjectAsync(new("MULTI-SOURCE", "多模型源", "admin", Path.Combine(root, "source"), Path.Combine(root, "source-release")), "admin", default);
+            var target = await repository.CreateProjectAsync(new("MULTI-TARGET", "多模型目标", "admin", Path.Combine(root, "target"), Path.Combine(root, "target-release")), "admin", default);
+            var first = await repository.RegisterDocumentAsync(new(source.Id, "P1", "零件一", "P1.SLDPRT", DocumentKind.Part), "admin", default);
+            var second = await repository.RegisterDocumentAsync(new(source.Id, "P2", "零件二", "P2.SLDPRT", DocumentKind.Part), "admin", default);
+            var drawing = await repository.RegisterDocumentAsync(new(source.Id, "D1", "多模型图", "D1.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: first.Id), "admin", default);
+            await repository.RegisterDocumentAsync(new(source.Id, "D1", "多模型图", "D1.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: second.Id), "admin", default);
+            DocumentReferenceNode Node(PdmDocument document) => new(Guid.NewGuid(), document.Id, document.FileName, document.FileName, document.Name, document.Kind, "Default", 1, ReferenceNodeStatus.Normal, RevisionLabel.InitialWork(), null, []);
+            foreach (var document in new[] { first, second, drawing })
+            {
+                var relative = formalDrawing && document.Kind == DocumentKind.Drawing
+                    ? Path.Combine(".release-formal", Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N") + ".slddrw")
+                    : Path.Combine(".versions", document.Id.ToString("N"), "W1", document.FileName);
+                var file = Path.Combine(source.VaultLocation, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+                var bytes = System.Text.Encoding.UTF8.GetBytes(document.FileName);
+                await File.WriteAllBytesAsync(file, bytes);
+                File.SetAttributes(file, FileAttributes.ReadOnly);
+                var node = Node(document) with { Children = document.Kind == DocumentKind.Drawing ? [Node(first), Node(second)] : [] };
+                await repository.CheckoutAsync(document.Id, "admin", default);
+                await repository.CheckInVersionAsync(document.Id, "admin", new(new(relative, bytes.Length, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)), DateTimeOffset.UtcNow),
+                    "建立复制源", new Dictionary<string, string?>(), new(Guid.NewGuid(), source.Id, document.Id, DateTimeOffset.UtcNow, "admin", node, new string('A', 64)), [], []), default);
+            }
+            var options = Options.Create(new PdmStorageOptions { UploadTempRoot = Path.Combine(root, "uploads") });
+            var service = new ProjectCopyService(repository, new LocalFileStorage(options, repository, TimeProvider.System), new InMemoryProjectFileRepository(TimeProvider.System),
+                new LocalProjectFileStorage(options, TimeProvider.System), new InMemoryValidationPlanRepository(), TimeProvider.System);
+            var copied = await service.ExecuteAsync(source.Id, target.Id, new(true, true, false, false, []), "admin", UserRole.Administrator, default);
+            Assert.Equal(3, copied.DocumentCount);
+            var documents = await repository.ListDocumentsAsync(target.Id, default);
+            var copiedDrawing = Assert.Single(documents, item => item.Kind == DocumentKind.Drawing);
+            var relations = await repository.ListDocumentRelationsAsync(target.Id, default);
+            Assert.Equal(2, relations.Count);
+            Assert.All(relations, relation => Assert.Equal(copiedDrawing.Id, relation.DrawingDocumentId));
+            Assert.Equal(documents.Where(item => item.Kind == DocumentKind.Part).Select(item => item.Id).Order(), relations.Select(item => item.ModelDocumentId).Order());
+            var version = Assert.Single(await repository.ListDocumentVersionsAsync(copiedDrawing.Id, default));
+            Assert.StartsWith(".versions", version.StorageRelativePath);
+            Assert.True(File.GetAttributes(Path.Combine(target.VaultLocation, version.StorageRelativePath)).HasFlag(FileAttributes.ReadOnly));
+            Assert.All(version.ReferenceSnapshot.Children, child => Assert.Contains(documents, item => item.Id == child.DocumentId));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+                Directory.Delete(root, true);
+            }
+        }
+    }
+
     [Fact]
     public async Task ExecuteAsync_CopiesOnlyValidationCheckItems()
     {
         var clock = TimeProvider.System;
         var repository = new InMemoryPdmRepository(clock);
+        await ConfigureCopyActorAsync(repository);
         var projectFiles = new InMemoryProjectFileRepository(clock);
         var validationPlans = new InMemoryValidationPlanRepository();
         var root = Path.Combine(Path.GetTempPath(), "pdm-project-copy-test", Guid.NewGuid().ToString("N"));

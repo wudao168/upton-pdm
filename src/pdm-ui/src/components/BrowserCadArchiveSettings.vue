@@ -12,4 +12,4 @@ async function save() {
   finally { busy.value = false }
 }
 </script>
-<template><section v-if="canConfigure || error" class="pdm-panel pdm-manager-panel"><header class="pdm-manager-heading"><div><h2>网页存档入口</h2><p>统一控制项目图档和标准结构页面的“存档”按钮；不影响SolidWorks插件存档。</p></div></header><label v-if="canConfigure"><input v-model="enabled" type="checkbox" :disabled="busy">允许网页存档</label><p v-if="error" role="alert">{{ error }}</p><div v-if="canConfigure" class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="busy" @click="save">保存入口设置</button></div></section></template>
+<template><section v-if="canConfigure || error" class="pdm-panel pdm-manager-panel"><header class="pdm-manager-heading"><div><h2>网页存档入口</h2><p>控制标准结构页面的“存档”按钮。</p></div></header><label v-if="canConfigure"><input v-model="enabled" type="checkbox" :disabled="busy">允许网页存档</label><p v-if="error" role="alert">{{ error }}</p><div v-if="canConfigure" class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="busy" @click="save">保存入口设置</button></div></section></template>

@@ -22,14 +22,17 @@ public sealed class ProjectNameplateApiTests(PdmApiFactory factory) : IClassFixt
         var project = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2,
             Guid.Parse("c0046500-0000-0000-0000-000000000001"), "铭牌接口验收", null, new(2026, 10, 1), 1, "admin", "D:/test", "D:/release"), default);
         await repository.SetChildProjectDesignersAsync(project.Id, ["engineer"], "admin", default);
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "nameplate-hardware", "铭牌硬件", "unused", UserRole.Engineer, true, RoleCode: "HardwareEngineer"), default);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "nameplate-hardware", "铭牌硬件", "unused", UserRole.Engineer, true, RoleCode: "HardwareEngineer", CompanyId: project.OrganizationId), default);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], default);
         await repository.SetRolePermissionsAsync("HardwareEngineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], default);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Engineer", PermissionCodes.ProjectNameplateEdit, "project.nameplate.execution.edit", ProjectCenterPermissions.Write, ProjectCenterPermissions.Tab("information"));
+        await ApiTestAuthorization.GrantRoleAsync(repository, "HardwareEngineer", PermissionCodes.ProjectNameplateEdit, "project.nameplate.hardware.edit", ProjectCenterPermissions.Write, ProjectCenterPermissions.Tab("information"));
         await repository.SetProjectPhaseOwnersAsync(project.Id, new Dictionary<string, string> { ["ElectricalHardware"] = "nameplate-hardware" }, "admin", default);
         var url = $"/api/projects/{project.Id}/nameplate";
         Authorize(client, "engineer", "Engineer");
         var command = new SaveProjectNameplateCommand(true, "", "1500mm x 1800mm x 2200mm", "0.5~0.7 MPa", "12000 kg", new(2026, 10, 1), 0);
-        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync(url, command)).StatusCode);
+        var executionSaved = await client.PutAsJsonAsync(url, command);
+        Assert.True(executionSaved.IsSuccessStatusCode, await executionSaved.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(url + "/confirm", new ConfirmProjectNameplateCommand(1))).StatusCode);
         Authorize(client, "nameplate-hardware", "Engineer");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync(url, command with { Weight = "1 kg", ExpectedRowVersion = 1 })).StatusCode);

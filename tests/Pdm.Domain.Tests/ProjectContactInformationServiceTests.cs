@@ -9,7 +9,7 @@ public sealed class ProjectContactInformationServiceTests
     [Fact]
     public async Task MultipleShippingAddressesAndContactsWithoutAddressesArePersisted()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         var store = new InMemoryProjectContactInformationRepository();
         var service = new ProjectContactInformationService(repository, store, TimeProvider.System);
@@ -35,7 +35,7 @@ public sealed class ProjectContactInformationServiceTests
     [Fact]
     public async Task LegacyCustomerAndShippingFieldsBecomeSeparateRows()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         var store = new InMemoryProjectContactInformationRepository();
         await store.SaveAsync(new(root.Id, "客户联系人", "电话", "地址", "收货人", "收货电话"), 0, default);
@@ -56,7 +56,7 @@ public sealed class ProjectContactInformationServiceTests
     [Fact]
     public async Task ContactInformationIsSharedByTheFamilyAndRejectsStaleWrites()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var root = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "联系信息验证", null, new(2026, 10, 2), 1, "admin", "D:/test", "D:/release"), default);
         var child = await repository.CreateSubprojectAsync(new(root.Id, "子项目", null, 1), default);
         var store = new InMemoryProjectContactInformationRepository();
@@ -74,7 +74,7 @@ public sealed class ProjectContactInformationServiceTests
     [Fact]
     public async Task ContactInformationEditingUsesIndependentRolePermission()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await PermissionTestUsers.Ensure(repository, ("pm", UserRole.Engineer), ("co-pm", UserRole.Engineer), ("designer", UserRole.Engineer));
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.SetMainProjectStaffingAsync(root.Id, new("pm", ["co-pm"], ["designer"]), "admin", default);
@@ -95,7 +95,7 @@ public sealed class ProjectContactInformationServiceTests
     [Fact]
     public async Task InvalidLengthsAndMissingProjectsAreRejected()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         var service = new ProjectContactInformationService(repository, new InMemoryProjectContactInformationRepository(), TimeProvider.System);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new(new string('x', 101), "", "", "", "", 0), "admin", UserRole.Administrator, default));

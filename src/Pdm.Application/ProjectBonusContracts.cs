@@ -29,7 +29,7 @@ public sealed record BonusApplicationView(BonusApplication Application, bool Can
     bool CanPay, IReadOnlyList<BonusScoringTask> MyScoringTasks);
 public sealed record ProjectBonusView(Guid ProjectId, string ProjectCode, string ProjectName, long RowVersion,
     decimal? Pool, bool Frozen, bool CanCreate, string Actor, IReadOnlyList<BonusApplicationView> Applications,
-    ProjectBonusSettings? Settings, IReadOnlyList<BonusUserOption> Users);
+    ProjectBonusSettings? Settings, IReadOnlyList<BonusUserOption> Users, bool CanViewHistory = false);
 public sealed record BonusUserOption(string Username, string Name);
 public sealed record SaveBonusDraft(long ExpectedRowVersion, IReadOnlyList<BonusPerson> People,
     IReadOnlyList<BonusEvidence> Evidence, string MilestoneEvidence, bool StartScoring);

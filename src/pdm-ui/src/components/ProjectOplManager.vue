@@ -18,6 +18,7 @@ import { useUserDisplayName } from '../userDisplay'
 import { downloadOplWorkbook } from '../oplWorkbook'
 
 const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
+const QualityIssuePanel = defineAsyncComponent(() => import('./QualityIssuePanel.vue'))
 const props = defineProps<{ project: ProjectSummary; token: string; mobile?: boolean; requestedIssueId?: string }>()
 const emit = defineEmits<{ openRelease: [projectId: string, releasePackageId: string]; issueRequestHandled: []; saved: [] }>()
 const displayUserName = useUserDisplayName()
@@ -287,13 +288,13 @@ void load()
       </el-form>
       <section v-if="editing" class="opl-release-history" aria-label="关联发布记录">
         <strong>关联发布记录（{{ releases(editing).length }} 次）</strong>
-        <p>每条记录的图纸数量为该发布包的图纸总数。</p>
         <div class="opl-release-scroll"><table v-if="releases(editing).length"><thead><tr><th>发布单号</th><th>BOM类型</th><th>图纸数量</th><th>发布日期</th></tr></thead><tbody><tr v-for="record in releases(editing)" :key="record.releasePackageId"><td><button type="button" class="pdm-text-action" @click="openRelease(record)">{{ record.packageNumber }}</button></td><td>{{ record.bomType }}</td><td>{{ record.drawingCount }}</td><td>{{ date(record.publishedAt) }}</td></tr></tbody></table><p v-else>暂无成功关联的发布记录。</p></div>
       </section>
       <section class="opl-upload"><strong>图片和附件</strong><label v-if="!readonly" class="opl-file-picker">上传图片 / 附件<input type="file" multiple :disabled="saving" aria-label="上传图片和附件" @change="selectFiles"></label><small v-if="!readonly">最多10个附件，单个不超过10MB，单次总大小不超过30MB。</small><div v-for="file in retained" :key="file.id" class="opl-file"><button class="pdm-text-action" @click="editing && attachment(editing, file)">{{ file.name }}</button><button v-if="!readonly" class="pdm-text-action" :disabled="saving" @click="retained = retained.filter(item => item.id !== file.id)">移除</button></div><div v-for="(file, index) in files" :key="index" class="opl-file"><span>{{ file.name }}</span><button class="pdm-text-action" :disabled="saving" @click="files.splice(index, 1)">移除</button></div><span v-if="readonly && !retained.length">暂无附件</span></section>
       <label v-if="mobile && !readonly" class="opl-file-picker">拍照添加图片<input type="file" accept="image/*" capture="environment" :disabled="saving" aria-label="拍照添加问题图片" @change="selectFiles"></label>
       <p v-if="editing && !detailMode" class="opl-meta">提交人：<PersonName :name="editing.issue.createdByDisplayName || name(editing.issue.createdBy)" /> · 提交日期：{{ date(editing.issue.createdAt) }} · 最近更新：<PersonName :name="editing.issue.updatedBy === editing.issue.createdBy ? (editing.issue.createdByDisplayName || name(editing.issue.updatedBy)) : name(editing.issue.updatedBy)" /></p>
       <el-alert v-if="formError" :title="formError" type="error" :closable="false" />
+      <QualityIssuePanel v-if="drawer && editing && project.effectiveProjectPermissions?.includes('project.quality.view')" :key="editing.issue.id" :project-id="editing.issue.relatedProjectId || editing.issue.projectId" :issue-id="editing.issue.id" :token="token" @updated="load" />
       <template #footer><el-checkbox v-if="editing && !readonly" v-model="notifyUpdates" :disabled="saving">保存后通知钉钉群</el-checkbox><el-button :disabled="saving || speechBusy" @click="close()">{{ readonly ? '关闭' : '取消' }}</el-button><el-button v-if="!readonly" type="primary" :loading="saving" :disabled="speechBusy" @click="save">保存问题</el-button></template>
     </el-drawer>
     <el-dialog :model-value="!!previewUrl" :title="previewName" width="min(1000px, 95vw)" append-to-body @close="closePreview"><PdfDrawingViewer v-if="previewUrl && previewKind === 'pdf'" :url="previewUrl" /><audio v-else-if="previewUrl && previewKind === 'audio'" :src="previewUrl" controls aria-label="回听OPL录音" style="width:100%"></audio><img v-else-if="previewUrl" :src="previewUrl" alt="问题附件预览" style="display:block;max-width:100%;max-height:75vh;margin:auto"><template #footer><a v-if="projectDownload" :href="previewUrl" :download="previewName">下载附件</a></template></el-dialog>
@@ -326,16 +327,17 @@ void load()
 :global(.opl-drawer .el-drawer__body) { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
 :global(.opl-drawer .el-drawer__header) { margin-bottom: 0; flex: 0 0 auto; }
 :global(.opl-drawer .el-drawer__footer) { flex: 0 0 auto; }
+.opl-drawer .quality-review { flex: 0 0 auto; overflow: visible; }
 .opl-form { min-height: 0; flex: 0 0 auto; display: grid; grid-template-rows: auto auto auto auto; gap: 8px; }
 .opl-project-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .opl-form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .opl-form :deep(.el-form-item) { min-width: 0; min-height: 0; margin-bottom: 0; display: flex; flex-direction: column; }
 .opl-form :deep(.el-form-item__label) { padding: 0; margin-bottom: 4px; height: auto; line-height: 20px; }
 .opl-form :deep(.el-form-item__content) { min-width: 0; min-height: 0; flex: 1; }
-.opl-form :deep(.el-textarea) { height: 100px; }
-.opl-form :deep(.el-textarea__inner) { height: 100px; min-height: 100px !important; resize: none; }
+.opl-form :deep(.el-textarea) { height: 60px; }
+.opl-form :deep(.el-textarea__inner) { height: 60px; min-height: 60px !important; resize: none; }
 .opl-form :deep(.el-select), .opl-form :deep(.el-input) { min-width: 0; width: 100%; }
-.opl-upload { flex: 0 1 auto; min-height: 0; max-height: min(180px, 25vh); overflow: auto; gap: 6px; }
+.opl-upload { flex: 0 0 auto; min-height: 0; gap: 6px; }
 .opl-file-picker { padding: 8px; gap: 6px; }
 .opl-meta { flex: 0 0 auto; margin: 0; font-size: 11px; }
 .opl-release-history{flex:0 1 auto;min-height:90px;display:flex;flex-direction:column;gap:4px}.opl-release-history>p{margin:0;color:var(--pdm-muted);font-size:11px}.opl-release-scroll{min-height:0;max-height:180px;overflow:auto}.opl-release-history table{width:100%;border-collapse:collapse;table-layout:fixed}.opl-release-history th,.opl-release-history td{padding:6px;border:1px solid var(--pdm-border);text-align:center;overflow-wrap:anywhere}.opl-release-history th:first-child{width:40%}.opl-release-history th{position:sticky;top:0;background:var(--pdm-surface-soft)}

@@ -25,7 +25,7 @@ public sealed class MaterialRelationAllocationApiTests
         var relations = factory.Services.GetRequiredService<IMaterialRelationRepository>();
         var seed = (await repository.ListProjectsAsync(default)).First();
         var example = (await repository.GetBomAsync(seed.Id, BomKind.Standard, default)).First();
-        var project = await repository.CreateProjectAsync(new("AL-API-" + Guid.NewGuid().ToString("N"), "组合接口测试", "admin", "D:/test", "D:/release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("AL-API-" + Guid.NewGuid().ToString("N"), "组合接口测试", "admin", "D:/test", "D:/release"), "admin", default);
         var main = example with { Id = Guid.NewGuid(), ProjectId = project.Id, Quantity = 2, Sequence = 1, Source = "Manual" };
         await repository.ReplaceBomAsync(project.Id, BomKind.Standard, [main], default);
         var group = new MaterialRelationGroup(Guid.NewGuid(), "附件", false, MaterialRelationSelectionMode.Single, 0, 1, false, 1, []);

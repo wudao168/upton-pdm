@@ -71,7 +71,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         var service = scope.ServiceProvider.GetRequiredService<ProjectPlanningService>();
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
         var customer = (await repository.ListCustomersAsync(true, default))[0];
-        var project = await repository.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "交付后排期接口测试", null,
+        var project = await repository.CreateNumberedProjectAsync(new((await repository.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "交付后排期接口测试", null,
             new DateOnly(2026, 9, 10), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
         project = await AssignProjectManager(repository, project);
         var template = (await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default))[0];
@@ -107,7 +107,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         var planning = scope.ServiceProvider.GetRequiredService<IProjectPlanningRepository>();
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
         var customer = (await repository.ListCustomersAsync(true, default))[0];
-        var root = await repository.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "删除计划接口测试", null,
+        var root = await repository.CreateNumberedProjectAsync(new((await repository.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "删除计划接口测试", null,
             new DateOnly(2026, 9, 10), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
         root = await AssignProjectManager(repository, root);
         var child = isChild ? await repository.CreateSubprojectAsync(new(root.Id, "子项目", null, 1), default) : root;
@@ -116,6 +116,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         using var client = factory.CreateClient();
         var url = $"/api/projects/{child.Id}/plan";
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.DeleteAsync($"{url}?expectedRowVersion={draft.RowVersion}")).StatusCode);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "other-engineer", "未获授权人员", "unused", UserRole.Engineer, true), default);
         Authorize(client, "other-engineer", "Engineer");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"{url}?expectedRowVersion={draft.RowVersion}")).StatusCode);
         AuthorizeAdmin(client);
@@ -134,7 +135,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         var planning = scope.ServiceProvider.GetRequiredService<IProjectPlanningRepository>();
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
         var customer = (await repository.ListCustomersAsync(true, default))[0];
-        var project = await repository.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "补充阶段接口测试", null,
+        var project = await repository.CreateNumberedProjectAsync(new((await repository.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "补充阶段接口测试", null,
             new DateOnly(2026, 9, 10), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
         project = await AssignProjectManager(repository, project);
         var template = (await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default))[0];
@@ -159,7 +160,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         var planning = scope.ServiceProvider.GetRequiredService<IProjectPlanningRepository>();
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
         var customer = (await repository.ListCustomersAsync(true, default))[0];
-        var root = await repository.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "显式同步接口测试", null,
+        var root = await repository.CreateNumberedProjectAsync(new((await repository.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "显式同步接口测试", null,
             new DateOnly(2026, 9, 10), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
         root = await AssignProjectManager(repository, root);
         var template = (await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default))[0];
@@ -204,7 +205,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         var planning = scope.ServiceProvider.GetRequiredService<IProjectPlanningRepository>();
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
         var customer = (await repository.ListCustomersAsync(true, default))[0];
-        var project = await repository.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "计划变更申请接口测试", null,
+        var project = await repository.CreateNumberedProjectAsync(new((await repository.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "计划变更申请接口测试", null,
             new DateOnly(2026, 9, 10), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
         project = await AssignProjectManager(repository, project);
         var template = (await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default))[0];

@@ -18,14 +18,30 @@ var repository = new MySqlPdmRepository(Options.Create(new PdmDatabaseOptions
 var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
 var customers = await repository.ListCustomersAsync(false, CancellationToken.None);
 var customer = customers.SingleOrDefault(item => string.Equals(item.Code, "C00465", StringComparison.OrdinalIgnoreCase))
-    ?? customers.FirstOrDefault()
-    ?? throw new InvalidOperationException("验收数据库中不存在可用客户。");
+    ?? customers.FirstOrDefault();
+if (customer is null || !string.Equals(customer.SourceSystem, "u9c", StringComparison.OrdinalIgnoreCase))
+{
+    if (!connectionBuilder.Database.StartsWith("pdm_atomic_qa_", StringComparison.Ordinal))
+        throw new InvalidOperationException("验收数据库中不存在可用U9C客户。");
+    await repository.SaveCrmIntegrationConfigurationAsync(
+        (await repository.GetCrmIntegrationConfigurationAsync(CancellationToken.None)) with { AutoSyncEnabled = false }, "qa_engineer", CancellationToken.None);
+    customer = (await repository.ApplyCrmCustomerSyncAsync([new("C00465", "隔离编号验收客户")], DateTimeOffset.UtcNow, CancellationToken.None))
+        .Single(item => item.Code == "C00465");
+}
+var owner = await repository.FindUserAsync("qa_engineer", CancellationToken.None)
+    ?? (connectionBuilder.Database.StartsWith("pdm_atomic_qa_", StringComparison.Ordinal)
+        ? await repository.FindUserAsync("qa", CancellationToken.None) : null)
+    ?? throw new InvalidOperationException("验收数据库中不存在项目负责人账号。");
 
 var parent = await repository.CreateNumberedProjectAsync(Command("主项目", 1), CancellationToken.None);
 var firstChild = await repository.CreateSubprojectAsync(new(parent.Id, "子项目一", null, 2), CancellationToken.None);
 var secondChild = await repository.CreateSubprojectAsync(new(parent.Id, "子项目二", null, 1), CancellationToken.None);
 var concurrent = await Task.WhenAll(Enumerable.Range(1, 10).Select(index =>
     repository.CreateNumberedProjectAsync(Command($"并发项目{index}", 2), CancellationToken.None)));
+if (concurrent.Select(item => item.Code).Distinct().Count() != concurrent.Length
+    || concurrent.Select(item => item.CustomerProjectSequence).Distinct().Count() != concurrent.Length
+    || concurrent.SelectMany(item => item.SerialNumbers).Distinct().Count() != concurrent.Sum(item => item.Quantity))
+    throw new InvalidOperationException("并发项目号、客户序号或设备序列号发生重复。");
 
 Console.WriteLine(JsonSerializer.Serialize(new
 {
@@ -48,6 +64,6 @@ CreateNumberedProjectCommand Command(string name, int quantity) => new(
     null,
     new DateOnly(2026, 8, 13),
     quantity,
-    "qa_engineer",
+    owner.Username,
     @"D:\PDM\Vault",
     @"D:\PDM\Release");

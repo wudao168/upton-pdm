@@ -68,7 +68,7 @@ public sealed class MaterialRelationCategoryTests
     private sealed class Fixture
     {
         public DateTimeOffset Now { get; } = DateTimeOffset.UtcNow;
-        public InMemoryPdmRepository Pdm { get; } = new(TimeProvider.System);
+        public InMemoryPdmRepository Pdm { get; } = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         public InMemoryMaterialRepository Materials { get; } = new(TimeProvider.System);
         public InMemoryMaterialRelationRepository Relations { get; } = new();
         public InMemoryStandardLibraryRepository Library { get; } = new();

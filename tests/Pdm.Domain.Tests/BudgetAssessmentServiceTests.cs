@@ -85,7 +85,13 @@ public sealed class BudgetAssessmentServiceTests
     public async Task ChildProjectManagerCannotUseAssignmentToGainBudgetAssessmentAccess()
     {
         var (service, repository, store, root) = await Setup();
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView], default);
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        await repository.SaveAuthorizationSettingsAsync(settings with
+        {
+            Templates = settings.Templates.Select(role => role.RoleCode == "Engineer"
+                ? role with { Grants = [new(PermissionCodes.ProjectView, ["company"]), new(PermissionCodes.ProjectContentView, ["company"]), new(PermissionCodes.ProjectBudgetView, ["company"])] }
+                : role).ToArray()
+        }, settings.Revision, default);
         var child = await repository.CreateSubprojectAsync(new(root.Id, "负责的子项目", null, 1), default);
         var sibling = await repository.CreateSubprojectAsync(new(root.Id, "其他子项目", null, 1), default);
         await repository.SetChildProjectManagerAsync(child.Id, "child-manager", "admin", default);
@@ -181,8 +187,15 @@ public sealed class BudgetAssessmentServiceTests
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var organization = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First();
         foreach (var (name, role) in new[] { ("engineer", UserRole.Engineer), ("planner", UserRole.PlanningManager), ("admin", UserRole.Administrator),
-            ("manager", UserRole.Engineer), ("collaborator", UserRole.Engineer), ("child-manager", UserRole.Engineer), ("unassigned", UserRole.Administrator) })
+            ("manager", UserRole.Engineer), ("collaborator", UserRole.Engineer), ("child-manager", UserRole.Engineer), ("unassigned-manager", UserRole.Engineer), ("unassigned", UserRole.Administrator) })
             await repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", role, true, CompanyId: organization.Id), default);
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        await repository.SaveAuthorizationSettingsAsync(settings with
+        {
+            Templates = settings.Templates.Select(role => role.RoleCode is "Engineer" or "PlanningManager" or "Administrator"
+                ? role with { Grants = [.. role.Grants, new(PermissionCodes.ProjectBudgetAssessmentEdit, ["MainDesigner"])] }
+                : role).ToArray()
+        }, settings.Revision, default);
         var customer = (await repository.ListCustomersAsync(false, default)).First();
         var root = await repository.CreateNumberedProjectAsync(new(organization.Id, "P", 1, customer.Id, "评估", null, new DateOnly(2026, 10, 1), 1, "engineer", @"D:\Vault", @"D:\Release"), default);
         root = await repository.SetMainProjectStaffingAsync(root.Id, new("manager", ["collaborator", "planner"], ["engineer", "planner", "admin"]), "admin", default);

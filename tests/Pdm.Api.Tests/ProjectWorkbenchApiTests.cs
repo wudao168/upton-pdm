@@ -39,6 +39,10 @@ public sealed class ProjectWorkbenchApiTests(PdmApiFactory factory) : IClassFixt
     public async Task WorkbenchRequiresLoginAndRejectsUnauthorizedViews()
     {
         using var client = factory.CreateClient();
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var authorization = await repository.GetAuthorizationSettingsAsync(default);
+        await repository.SaveAuthorizationSettingsAsync(authorization with { Templates = authorization.Templates.Select(t => t.RoleCode == "Engineer"
+            ? t with { Grants = t.Grants.Where(g => g.Permission != "workbench.view.manager").ToArray() } : t).ToArray() }, authorization.Revision, default);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/workbench")).StatusCode);
         Authorize(client, "engineer", "Engineer");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/workbench?view=manager")).StatusCode);

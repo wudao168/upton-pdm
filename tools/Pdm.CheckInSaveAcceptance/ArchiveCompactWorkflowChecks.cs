@@ -19,6 +19,9 @@ internal static partial class Program
   {
    var embedded=BitConverter.ToString(hash.ComputeHash(stream)).Replace("-","");
    var icon=Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(assembly.Location)),"frozen-source","src","pdm-ui","src","assets","pdm-client-icon.png");
+   if(!File.Exists(icon))
+    for(var candidate=Path.GetDirectoryName(assembly.Location);candidate!=null;candidate=Path.GetDirectoryName(candidate))
+    {var shared=Path.Combine(candidate,"src","pdm-ui","src","assets","pdm-client-icon.png");if(File.Exists(shared)){icon=shared;break;}}
    TreeCheck(embedded==WorkingReuseHash(icon),"插件没有嵌入最新统一图标资源");
    Console.WriteLine("PASS: embedded plugin branding exactly matches the verified shared icon asset");
   }
@@ -59,7 +62,9 @@ internal static partial class Program
      var windowSize=window.Size;var treeSize=tree.Size;TreeCall(form,"ToggleShowCheckedOnly");TreeCall(form,"ToggleShowCheckedOnly");TreeCheck(window.Size==windowSize&&tree.Size==treeSize,"筛选改变了窗口或列表大小");
      Console.WriteLine("PASS: checked-only filtering changes only tree rows, not window or list geometry");
      var flags=buttons.Select(b=>b.Enabled).ToArray();foreach(var b in buttons)b.Enabled=false;
-     TreeCheck(buttons.All(b=>b.BackColor==buttons.Last().BackColor&&b.ForeColor==buttons.Last().ForeColor&&b.FlatAppearance.BorderColor==buttons.Last().FlatAppearance.BorderColor),"禁用按钮颜色未统一");for(var i=0;i<buttons.Length;i++)buttons[i].Enabled=flags[i];
+     TreeCheck(buttons.All(b=>b.BackColor==buttons.Last().BackColor&&b.ForeColor==buttons.Last().ForeColor&&b.FlatAppearance.BorderColor==buttons.Last().FlatAppearance.BorderColor),"禁用按钮颜色未统一："+string.Join("; ",buttons.Select(b=>b.Text+"="+b.BackColor+"/"+b.ForeColor+"/"+b.FlatAppearance.BorderColor)));
+     using(var bitmap=new Bitmap(window.Width,window.Height)){window.DrawToBitmap(bitmap,new Rectangle(Point.Empty,bitmap.Size));bitmap.Save(Path.Combine(output,"native-disabled-commands.png"));}
+     for(var i=0;i<buttons.Length;i++)buttons[i].Enabled=flags[i];
      Console.WriteLine("PASS: every disabled command, including cancel, uses the same gray palette");
      using(var bitmap=new Bitmap(window.Width,window.Height)){window.DrawToBitmap(bitmap,new Rectangle(Point.Empty,bitmap.Size));bitmap.Save(Path.Combine(output,"native-compact-selection.png"));}
      return true;

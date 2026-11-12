@@ -20,7 +20,7 @@ public sealed class BomFilePermissionApiTests(PdmApiFactory factory) : IClassFix
         using var scope=factory.Services.CreateScope();
         var services=scope.ServiceProvider;
         var repository=services.GetRequiredService<IPdmRepository>();
-        var project=await repository.CreateProjectAsync(new("FILES-PERM-"+Guid.NewGuid().ToString("N"),"附件权限验收","admin","vault","release"),"admin",default);
+        var project=await ApiTestAuthorization.CreateProjectAsync(repository, new("FILES-PERM-"+Guid.NewGuid().ToString("N"),"附件权限验收","admin","vault","release"),"admin",default);
         await repository.SetChildProjectDesignersAsync(project.Id,["engineer"],"admin",default);
         var material=await services.GetRequiredService<MaterialService>().CreateAsync(new(null,"标准库附件权限",MaterialKind.Standard,MaterialSupplyMode.Purchase,
             "001","PERM-"+Guid.NewGuid(),null,null,"UPTON",null,null,null,CategoryCode:"0102"),"admin",UserRole.Administrator,default);

@@ -9,6 +9,7 @@ internal static partial class Program
 {
     static void NativeFileOpenSafetyScenario(string output)
     {
+        CompletedNativeOpenScenario(output);
         ReturnedFileOpenScenario(output);
         Directory.CreateDirectory(output);
         var calls = new List<string>();
@@ -134,6 +135,47 @@ internal static partial class Program
         TreeCall(addin, "UnwireSolidWorksEvents");
         Check(calls.Contains("remove_FileOpenPreNotify") && calls.Contains("remove_FileOpenPostNotify"), "插件退出时完整解绑新增事件");
         Check(calls.Contains("remove_CommandCloseNotify"), "插件退出时解绑命令结束通知");
+    }
+
+    static void CompletedNativeOpenScenario(string directory)
+    {
+        var interop = Type("PdmAddin").GetField("application", Flags).FieldType.Assembly;
+        foreach (var mode in new[] { "complete", "active", "blocked", "no-event", "no-idle", "new-epoch", "stamp-changed" })
+        {
+            var addin = New("PdmAddin"); var path = Path.Combine(directory, "普通原生装配.SLDASM"); var stamp = 7;
+            var model = new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call =>
+            {
+                switch (call.MethodName)
+                {
+                    case "GetPathName": return path;
+                    case "GetBlockingState": return mode == "blocked" ? 6 : 0;
+                    case "GetUpdateStamp": return mode == "stamp-changed" ? stamp++ : stamp;
+                    default: throw new Exception(call.MethodName);
+                }
+            }).GetTransparentProxy();
+            var app = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.SldWorks", true), call =>
+            {
+                switch (call.MethodName)
+                {
+                    case "get_StartupProcessCompleted": return true;
+                    case "get_CommandInProgress": return false;
+                    case "GetRunningCommandInfo": return new ReturnMessage(null, new object[] { 2, "打开", mode == "active" }, 3, call.LogicalCallContext, call);
+                    case "get_ActiveDoc": return model;
+                    case "GetDocumentCount": return 3;
+                    case "GetOpenDocumentByName":
+                        if (mode == "new-epoch") SetField(addin, "nativeLoadEpoch", 2);
+                        return model;
+                    default: throw new Exception(call.MethodName);
+                }
+            }).GetTransparentProxy();
+            SetField(addin, "application", app); SetField(addin, "nativeFileOpenInProgress", 1);
+            SetField(addin, "nativeFileOpenCommandId", 2); SetField(addin, "nativeLoadEpoch", 1);
+            SetField(addin, "pendingOpenPath", path); SetField(addin, "pendingOpenIdleEpoch", mode == "no-idle" ? -1 : 1);
+            if (mode != "no-event") TreeCall(addin, "OnNativeCommandClosed", 2, -2);
+            var completed = (bool)TreeCall(addin, "TryCompleteFinishedNativeOpen");
+            TreeCheck(completed == (mode == "complete"), "匹配结束事件及稳定文档才能解除加载：" + mode);
+            Console.WriteLine("PASS: 缺少打开后事件的安全恢复 " + mode);
+        }
     }
 
     static void ReturnedFileOpenScenario(string directory)

@@ -4,6 +4,14 @@ namespace Upton.Pdm.Application;
 
 public sealed partial class PdmWorkflowService
 {
+    // Query-only consumers must not refresh attachment captures or write BOM metadata.
+    public async Task<IReadOnlyList<BomItem>> GetReadOnlyBomAsync(Guid projectId, BomKind kind, string actor, UserRole role, CancellationToken ct)
+    {
+        if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, ct))
+            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        return await BomDrawingRevision.CurrentAsync(repository, await ReadCurrentBomAsync(projectId, kind, ct), ct);
+    }
+
     private async Task<IReadOnlyList<BomItem>> ReadCurrentBomAsync(Guid projectId, BomKind kind, CancellationToken ct)
     {
         var items = await repository.GetBomAsync(projectId, kind, ct);

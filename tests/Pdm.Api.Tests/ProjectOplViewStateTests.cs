@@ -18,10 +18,11 @@ namespace Upton.Pdm.Api.Tests;
 
 public sealed class ProjectOplViewStateTests
 {
-    private sealed class Factory : WebApplicationFactory<Program>
+    private sealed class Factory : PdmApiFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseEnvironment("Development");
             builder.ConfigureLogging(logging => logging.ClearProviders());
             builder.ConfigureServices(services => {
@@ -33,6 +34,8 @@ public sealed class ProjectOplViewStateTests
     private static HttpClient Client(Factory factory, string username)
     {
         var client = factory.CreateClient();
+        ApiTestAuthorization.EnsureUserAsync(factory.Services.GetRequiredService<IPdmRepository>(),
+            new(Guid.NewGuid(), username, "阅读验收人员", "unused", UserRole.Administrator, true), default).GetAwaiter().GetResult();
         var token = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name, username), new(ClaimTypes.Role, "Administrator")],
             expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
         client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
@@ -63,8 +66,9 @@ public sealed class ProjectOplViewStateTests
         using var otherUser = Client(factory, "someone-else");
         Assert.False(await IsNew(otherClient, project.Id, issue.Id));
         Assert.True(await IsNew(otherUser, project.Id, issue.Id));
-        var unchanged = (await service.GetAsync(project.Id, "admin", UserRole.Administrator, default)).Rows.Single().Issue;
-        Assert.Equal(issue, unchanged);
+        var unchanged = (await client.GetFromJsonAsync<OplView>($"/api/projects/{project.Id}/opl"))!.Rows.Single().Issue;
+        Assert.Equal(issue.Attachments, unchanged.Attachments);
+        Assert.Equal(issue with { Attachments = unchanged.Attachments }, unchanged);
         await service.SaveAsync(project.Id, issue.Id, new("修改内容", "高", "处理中", "", null, "已有处理措施", issue.RowVersion, []), [], "admin", UserRole.Administrator, default);
         Assert.False(await IsNew(otherClient, project.Id, issue.Id));
     }
@@ -77,7 +81,7 @@ public sealed class ProjectOplViewStateTests
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
         var customer = (await repository.ListCustomersAsync(true, default))[0];
-        var root = await repository.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "标记范围测试", null, null, 1, "admin", "D:/test", "D:/release"), default);
+        var root = await repository.CreateNumberedProjectAsync(new((await repository.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "标记范围测试", null, null, 1, "admin", "D:/test", "D:/release"), default);
         var child = await repository.CreateSubprojectAsync(new(root.Id, "子项目", null, 1), default);
         var sibling = await repository.CreateSubprojectAsync(new(root.Id, "同级子项目", null, 1), default);
         var issue = await scope.ServiceProvider.GetRequiredService<ProjectOplService>().SaveAsync(root.Id, null, new("子项目问题", "普通", "待处理", "", null, "", 0, [], child.Id), [], "admin", UserRole.Administrator, default);

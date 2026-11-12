@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 
 internal static partial class Program
 {
- static async Task AcquireWindowRecoveryScenario(bool failureOnly)
+ static async Task AcquireWindowRecoveryScenario(bool failureOnly, bool missingOnly = false)
  {
   var directory=Path.Combine(Path.GetTempPath(),"pdm-acquire-window-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(directory);
   var identity=Type("PdmDocumentIdentityStore");var bindingField=identity.GetField("bindingDirectory",Flags);var rootField=identity.GetField("workspaceRootResolver",Flags);
@@ -20,11 +20,14 @@ internal static partial class Program
   bindingField.SetValue(null,Path.Combine(directory,"bindings"));rootField.SetValue(null,new Func<string>(()=>directory));
   try
   {
-   foreach(var mode in failureOnly?new[]{"prepare-lock","native-open-failure","native-invalid-source","fresh-success","dirty-fallback"}:
+   foreach(var mode in missingOnly?new[]{"missing-reuse","missing-reuse-multi","missing-reuse-second-denied","missing-reuse-release-retry","missing-fallback","missing-fallback-native-failure"}:failureOnly?new[]{"prepare-lock","native-open-failure","native-invalid-source","fresh-success","dirty-fallback"}:
     new[]{"child-clean","child-readonly-dirty","child-writable-dirty","child-server-changed","prepare-lock","native-open-failure","native-invalid-source","fresh-success","dirty-fallback"})
    {
     var folder=Path.Combine(directory,mode);var original=Path.Combine(folder,"View","QA","original");Directory.CreateDirectory(original);
-    var childMode=mode.StartsWith("child-");var rootName=childMode||mode=="native-invalid-source"?"ROOT.SLDASM":"ROOT.SLDPRT";
+    var childMode=mode.StartsWith("child-");var missingFallback=mode.StartsWith("missing-fallback");var missingReuse=mode.StartsWith("missing-reuse");
+    var partialFailure=mode=="missing-reuse-second-denied"||mode=="missing-reuse-release-retry";
+    var reuseMultiple=mode=="missing-reuse-multi"||partialFailure;var missingNativeFailure=mode=="missing-fallback-native-failure";
+    var rootName=childMode||mode=="native-invalid-source"||missingOnly?"ROOT.SLDASM":"ROOT.SLDPRT";
     var bytes=Encoding.UTF8.GetBytes("immutable archived geometry "+mode);var rootPath=Path.Combine(original,rootName);var childPath=Path.Combine(original,"PART.SLDPRT");
     File.WriteAllBytes(rootPath,bytes);File.WriteAllBytes(childPath,bytes);var hash=WorkingReuseHash(rootPath);
     var plugin=New("PdmAddin");var project=Guid.NewGuid();var rootId=Guid.NewGuid();var childId=Guid.NewGuid();var rootVersion=Guid.NewGuid();var childVersion=Guid.NewGuid();
@@ -68,16 +71,23 @@ internal static partial class Program
        case "SetReadOnlyState":readOnly[path]=(bool)call.Args[0];return true;
        case "GetComponents":
         var part=mode=="native-invalid-source"&&path!=rootPath?childPath:Path.Combine(Path.GetDirectoryName(path),"PART.SLDPRT");
-        return new[]{new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),component=>{
+        var known=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),component=>{
          switch(component.MethodName){case "GetPathName":return part;case "get_Name2":return "PART-1";case "get_ReferencedConfiguration":return "Default";case "get_IsVirtual":return false;case "GetModelDoc2":return Model(part);case "GetChildren":return new object[0];case "GetSuppression":return 3;default:throw new Exception(component.MethodName);}
-        }).GetTransparentProxy()};
+        }).GetTransparentProxy();
+        if(!missingOnly)return new[]{known};
+        var missing=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),component=>{
+         switch(component.MethodName){case "GetPathName":return Path.Combine(folder,"legacy","MISSING.SLDPRT");case "get_Name2":return "MISSING-1";case "get_IsVirtual":return false;case "GetModelDoc2":return null;case "IsSuppressed":return true;case "get_ReferencedConfiguration":return "Default";default:throw new Exception(component.MethodName);}
+        }).GetTransparentProxy();
+        return new[]{known,missing};
        default:throw new Exception("Unexpected model mutation: "+call.MethodName);
       }
      };
      var proxy=path.EndsWith(".SLDASM")?new AssemblyProxy(modelType,dispatch).GetTransparentProxy():new Proxy(modelType,dispatch).GetTransparentProxy();
      loaded.Add(path,proxy);return proxy;
     }
-    Model(rootPath);Model(childPath);Model(unrelated);
+    if(!missingFallback){Model(rootPath);Model(childPath);}
+    Model(unrelated);
+    if(missingFallback)active=unrelated;
     FileStream sharingLock=null;var search="";var searchToggle=false;
     SetField(plugin,"application",new Proxy(appType,call=>{
      switch(call.MethodName)
@@ -88,7 +98,7 @@ internal static partial class Program
        foreach(var path in loaded.Keys.Where(path=>Path.GetFileName(path)==title).ToArray()){closed.Add(path);loaded.Remove(path);if(path==rootPath&&childMode)loaded.Remove(childPath);if(active==path)active=null;}return null;
       case "OpenDoc6":
        var target=(string)call.Args[0];opened.Add(target);
-       if(mode=="native-open-failure"&&target!=rootPath&&target.EndsWith(rootName))throw new IOException("模拟原生打开失败");
+       if((mode=="native-open-failure"||missingNativeFailure)&&target!=rootPath&&target.EndsWith(rootName))throw new IOException("模拟原生打开失败");
        active=target;return Model(target);
       case "ActivateDoc3":active=loaded.Keys.Single(path=>Path.GetFileName(path)==(string)call.Args[0]);return loaded[active];
       case "GetDocumentDependencies2":return mode=="prepare-lock"&&((string)call.Args[0]).EndsWith(rootName)?new[]{"PART.SLDPRT",Path.Combine(folder,"old","PART.SLDPRT")}:new string[0];
@@ -107,33 +117,63 @@ internal static partial class Program
     using(var pane=(System.Windows.Forms.Control)New("PdmTaskPaneControl","获取窗口回归"))
     {
      http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");
+     handler.FailCheckoutAt=partialFailure?2:0;handler.FailDiscard=mode=="missing-reuse-release-retry";
      SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);
      SetField(plugin,"apiClient",client);SetField(plugin,"controlledWorkspace",New("ControlledWorkspaceManager",client,folder));SetField(plugin,"lifetime",lifetime);
      SetField(plugin,"taskPaneControl",pane);SetField(plugin,"authenticatedUsername","tester");
      SetField(plugin,"editJournalScope",(string)Get(client,"EditJournalScope")+"|tester");SetField(plugin,"editJournal",New("EditDraftJournal",Path.Combine(folder,"journal"),"fixture"));
      object originalDraft=null;
-     if(!childMode)
+     if(!childMode&&!missingOnly)
      {
-      originalDraft=New("LocalEditDraft");Set(originalDraft,"DocumentId",rootId);Set(originalDraft,"ProjectId",project);Set(originalDraft,"SessionId",Guid.NewGuid());Set(originalDraft,"SourcePath",rootPath);Set(originalDraft,"RestoreOnOpen",true);
+      originalDraft=New("LocalEditDraft");Set(originalDraft,"DocumentId",Guid.NewGuid());Set(originalDraft,"ProjectId",project);Set(originalDraft,"SessionId",Guid.NewGuid());Set(originalDraft,"SourcePath",unrelated);Set(originalDraft,"RestoreOnOpen",true);
       Type("EditDraftJournal").GetMethod("Save",Flags).Invoke(Field(plugin,"editJournal"),new[]{originalDraft});
-      ((IDictionary)Field(plugin,"localEdits"))[rootId]=originalDraft;
+      ((IDictionary)Field(plugin,"localEdits"))[(Guid)Get(originalDraft,"DocumentId")]=originalDraft;
      }
      var failed=false;bool success=false;
      try
      {
       Task task;
-      if(childMode)
+      if(childMode||missingReuse)
       {
-       var selected=Array.CreateInstance(Type("BatchOperationItem"),1);selected.SetValue(New("BatchOperationItem",node,0),0);
+       var selected=Array.CreateInstance(Type("BatchOperationItem"),reuseMultiple?2:1);selected.SetValue(New("BatchOperationItem",node,0),0);
+       if(reuseMultiple)
+       {
+        var child=New("CadTreeNode");Set(child,"FullPath",childPath);Set(child,"FileName","PART.SLDPRT");Set(child,"DocumentId",childId);
+        Set(child,"Configuration","Default");Set(child,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));
+        selected.SetValue(New("BatchOperationItem",child,1),1);
+       }
        task=(Task)Type("PdmAddin").GetMethod("AcquireExplicitlyFromPlmAsync",Flags).Invoke(plugin,new object[]{selected,project,null});
       }
-      else task=(Task)Type("PdmAddin").GetMethod("ExecuteControlledOpenAsync",Flags).Invoke(plugin,new object[]{project,rootId,Enum.Parse(Type("ControlledOpenMode"),"LatestEdit"),null,rootId,new[]{rootId},false});
-      await task;success=childMode||((bool)Get(task,"Result"));
+      // Select both files to exercise workspace preparation and native reopening,
+      // rather than the independently tested single-file in-place reuse shortcut.
+      else task=(Task)Type("PdmAddin").GetMethod("ExecuteControlledOpenAsync",Flags).Invoke(plugin,new object[]{project,rootId,Enum.Parse(Type("ControlledOpenMode"),"LatestEdit"),null,rootId,new[]{rootId,childId},false});
+      await task;success=childMode||missingReuse||((bool)Get(task,"Result"));
      }
-     catch(InvalidOperationException){failed=true;}
+     catch(InvalidOperationException error){failed=true;Console.WriteLine("Acquisition result " + mode + ": " + error.Message);}
      finally{sharingLock?.Dispose();}
+     if(mode=="prepare-lock") await (Task)Type("PdmAddin").GetMethod("RecoverRecordedAcquisitionsAsync",Flags).Invoke(plugin,null);
      var blocked=mode=="child-writable-dirty"||mode=="child-server-changed";
-     if(childMode)
+     if(partialFailure)
+     {
+      if(!failed||success||handler.Checkouts!=2||!readOnly[rootPath]||!readOnly[childPath]||opened.Count!=0||closed.Count!=0)
+       throw new Exception("Partial failure changed windows or permission scope: "+mode);
+      var entries=((IEnumerable)Type("EditDraftJournal").GetMethod("ReadAll",Flags).Invoke(Field(plugin,"editJournal"),null)).Cast<object>().ToArray();
+      if(mode=="missing-reuse-release-retry")
+      {
+       if(!entries.Any(entry=>(bool)Get(entry,"AcquisitionRollbackPending")))throw new Exception("Failed release has no durable retry record");
+       handler.FailDiscard=false;
+       await (Task)Type("PdmAddin").GetMethod("RecoverRecordedAcquisitionsAsync",Flags).Invoke(plugin,null);
+       entries=((IEnumerable)Type("EditDraftJournal").GetMethod("ReadAll",Flags).Invoke(Field(plugin,"editJournal"),null)).Cast<object>().ToArray();
+      }
+      if(entries.Any(entry=>(bool)Get(entry,"AcquisitionRollbackPending")))throw new Exception("Rollback retry did not finish");
+     }
+     else if(missingReuse)
+     {
+      if(!success||failed||opened.Count!=0||closed.Count!=0||handler.Checkouts!=(reuseMultiple?2:1)||handler.Discards!=0
+       ||readOnly[rootPath]||readOnly[childPath]==reuseMultiple||!((System.Windows.Forms.Control)Field(pane,"checkoutReminder")).Text.Contains("MISSING.SLDPRT"))
+       throw new Exception("Missing reference prevented in-place checkout or changed the requested permission scope: "+mode);
+     }
+     else if(childMode)
      {
       if(blocked!=failed||success==blocked||closed.Count!=0||opened.Count!=0||active!=childPath||!loaded.ContainsKey(rootPath)||!loaded.ContainsKey(childPath))throw new Exception("Child window acquisition reopened/closed context: "+mode);
       if(!blocked&&(readOnly[childPath]||handler.Checkouts!=1||handler.Downloads!=0||!readOnly[rootPath]))throw new Exception("Wrong child permission scope: "+mode);
@@ -142,22 +182,30 @@ internal static partial class Program
      }
      else
      {
-      var expected=mode=="fresh-success";
-      if(success!=expected||!loaded.ContainsKey(unrelated))throw new Exception("Unexpected controlled-open result: "+mode);
-      if(!expected&&(!loaded.ContainsKey(rootPath)||active!=rootPath))throw new Exception("Original window not preserved/restored: "+mode);
-      if((mode=="prepare-lock"||mode=="dirty-fallback")&&closed.Count!=0)throw new Exception("Window closed before preparation or dirty guard: "+mode);
+      var expected=mode=="fresh-success"||missingFallback&&!missingNativeFailure;
+      if(success!=expected||!loaded.ContainsKey(unrelated))throw new Exception("Unexpected controlled-open result: "+mode+"; "+Field(plugin,"controlledOpenFailureMessage"));
+      if(!expected&&!missingNativeFailure&&(!loaded.ContainsKey(rootPath)||active!=rootPath))throw new Exception("Original window not preserved/restored: "+mode);
+      if(mode=="dirty-fallback"&&closed.Count!=0)throw new Exception("Window closed before dirty guard: "+mode);
+      if(mode=="prepare-lock"&&closed.Count>0&&!opened.Contains(rootPath))throw new Exception("Preparation failure did not restore original window");
       if(mode=="native-open-failure"&&(!closed.Contains(rootPath)||!opened.Contains(rootPath)))throw new Exception("Native failure did not restore original window; closed="+string.Join(";",closed)+"; opened="+string.Join(";",opened)+"; reason="+Field(plugin,"controlledOpenFailureMessage"));
-      if(!expected&&handler.Discards!=1)throw new Exception("New checkout not rolled back: "+mode);
+      if(!expected&&handler.Discards!=handler.Checkouts)throw new Exception("New checkout not rolled back: "+mode);
       if(!expected&&contexts.Count!=1)throw new Exception("Failed workspace retained as an active context: "+mode);
       if(!expected&&opened.Any(path=>path==childPath))throw new Exception("Hidden child was opened as an extra window: "+mode);
-      var recorded=((IEnumerable)Type("EditDraftJournal").GetMethod("ReadAll",Flags).Invoke(Field(plugin,"editJournal"),null)).Cast<object>().Single(entry=>(Guid)Get(entry,"SessionId")== (Guid)Get(originalDraft,"SessionId"));
-      if((bool)Get(recorded,"Closed")!=expected)throw new Exception("Failed open retired original recovery record: "+mode);
+      if(originalDraft!=null)
+      {
+       var recorded=((IEnumerable)Type("EditDraftJournal").GetMethod("ReadAll",Flags).Invoke(Field(plugin,"editJournal"),null)).Cast<object>().Single(entry=>(Guid)Get(entry,"SessionId")== (Guid)Get(originalDraft,"SessionId"));
+       if((bool)Get(recorded,"Closed"))throw new Exception("Open retired unrelated recovery record: "+mode);
+      }
+      if(missingFallback&&expected&&(handler.Checkouts!=2||handler.Discards!=0||!((System.Windows.Forms.Control)Field(pane,"checkoutReminder")).Text.Contains("MISSING.SLDPRT")))
+       throw new Exception("Missing reference blocked the selected checkouts or was not reported");
+      if(missingNativeFailure&&(handler.Checkouts!=2||handler.Discards!=2||active!=unrelated||opened.Count!=1||closed.Count!=0))
+       throw new Exception("Native open failure did not roll back both new checkouts or changed an unrelated window");
       if(expected)
       {
        var currentDraft=New("LocalEditDraft");Set(currentDraft,"DocumentId",rootId);Set(currentDraft,"ProjectId",project);Set(currentDraft,"SessionId",session);Set(currentDraft,"SourcePath",active);
        Type("EditDraftJournal").GetMethod("Save",Flags).Invoke(Field(plugin,"editJournal"),new[]{currentDraft});((IDictionary)Field(plugin,"localEdits"))[rootId]=currentDraft;
        Type("PdmAddin").GetMethod("RetireLocalRecoveryForPlmOpenCore",Flags).Invoke(plugin,new[]{manifest,(object)Path.GetDirectoryName(active)});
-       var preserved=((IEnumerable)Type("EditDraftJournal").GetMethod("ReadAll",Flags).Invoke(Field(plugin,"editJournal"),null)).Cast<object>().Single(entry=>(Guid)Get(entry,"SessionId")==session);
+       var preserved=((IEnumerable)Type("EditDraftJournal").GetMethod("ReadAll",Flags).Invoke(Field(plugin,"editJournal"),null)).Cast<object>().Single(entry=>(Guid)Get(entry,"SessionId")==session && (Guid)Get(entry,"DocumentId")==rootId);
        if((bool)Get(preserved,"Closed")||!((IDictionary)Field(plugin,"localEdits")).Contains(rootId))throw new Exception("Successful open retired its new recovery record");
       }
      }
@@ -179,6 +227,7 @@ internal static partial class Program
   readonly object manifest;readonly byte[] bytes;readonly Guid session;readonly bool changed;readonly JavaScriptSerializer json=new JavaScriptSerializer();
   readonly Dictionary<Guid,object> documents=new Dictionary<Guid,object>();
   public int Checkouts,Downloads,Discards;
+  public int FailCheckoutAt;public bool FailDiscard;
   public AcquireWindowHandler(object manifest,byte[] bytes,Guid session,bool changed)
   {
    this.manifest=manifest;this.bytes=bytes;this.session=session;this.changed=changed;
@@ -207,8 +256,8 @@ internal static partial class Program
     var snapshot=new{documentId=id,fileName=Get(file,"FileName"),kind=((string)Get(file,"FileName")).EndsWith(".SLDASM")?2:1,configuration="Default",children=((string)Get(file,"FileName")).EndsWith(".SLDASM")?new object[]{new{documentId=Get(child,"DocumentId"),fileName=Get(child,"FileName"),kind=1,configuration="Default",children=new object[0]}}:new object[0]};
     result=new[]{new{id=Get(file,"VersionId"),sha256=Get(file,"Sha256"),fileLength=Get(file,"FileLength"),referenceSnapshot=snapshot}};
    }
-   else if(path.EndsWith("/checkout")){Checkouts++;result=documents[id];Set(result,"CheckedOutBy","tester");Set(result,"CheckoutSessionId",session);}
-   else if(path.EndsWith("/discard-checkout")){Discards++;result=documents[id];Set(result,"CheckedOutBy",null);Set(result,"CheckoutSessionId",null);}
+   else if(path.EndsWith("/checkout")){Checkouts++;if(Checkouts==FailCheckoutAt)return new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("第二个文件未获授权")};result=documents[id];Set(result,"CheckedOutBy","tester");Set(result,"CheckoutSessionId",session);}
+   else if(path.EndsWith("/discard-checkout")){Discards++;if(FailDiscard)throw new HttpRequestException("模拟释放响应中断");result=documents[id];Set(result,"CheckedOutBy",null);Set(result,"CheckoutSessionId",null);}
    else throw new Exception("Unexpected business request: "+path);
    return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(json.Serialize(result))};
   }

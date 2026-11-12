@@ -64,7 +64,7 @@ internal static class Program
                 {
                     tabs.SelectedTab = tab; Pump();
                     var key = "pane-" + width + "-" + tabs.SelectedIndex;
-                    VerifyControls(pane, key, true);
+                    VerifyControls(pane, key, true, 30);
                     if (tab.Text == "设计树")
                     {
                         Assert(primary.All(button => button.Height == 30), "primary button heights differ");
@@ -96,7 +96,7 @@ internal static class Program
         var root = Node("总装配体.SLDASM", 0);
         var items = Array.CreateInstance(T("BatchOperationItem"), 1); items.SetValue(New("BatchOperationItem", root, 0), 0);
         var projects = Array.CreateInstance(T("ProjectDto"), 0);
-        using (var dialog = (Form)New("BatchOperationDialog", root, items, projects, null, "tester", Enum.ToObject(T("BatchOperationKind"), 1), null, null, null))
+        using (var dialog = (Form)New("BatchOperationDialog", root, items, projects, null, "tester", Enum.ToObject(T("BatchOperationKind"), 1), null, null, null, false, false, 0))
         {
             dialog.Opacity = 0; dialog.ShowInTaskbar = false; dialog.Show(host); dialog.TopMost = false; Pump();
             foreach (var width in new[] { 1050, 1230 })
@@ -111,7 +111,7 @@ internal static class Program
         {
             Console.WriteLine("Inspect settings layout");
             dialog.Opacity = 0; dialog.ShowInTaskbar = false; dialog.Show(host); Pump();
-            VerifyControls(dialog, "settings", true); Save(dialog, "settings"); dialog.Close();
+            VerifyControls(dialog, "settings", true, 30); Save(dialog, "settings"); dialog.Close();
         }
     }
 
@@ -128,7 +128,7 @@ internal static class Program
         return Expression.Lambda(delegateType, Expression.Constant(value, returnType), invoke.GetParameters().Select(parameter => Expression.Parameter(parameter.ParameterType))).Compile();
     }
 
-    static void VerifyControls(Control root, string name, bool visibleOnly, int buttonHeight = 30)
+    static void VerifyControls(Control root, string name, bool visibleOnly, int buttonHeight = 28)
     {
         foreach (var control in Descendants(root).Where(control => !visibleOnly || control.Visible))
         {
@@ -137,8 +137,8 @@ internal static class Program
             measurements.Add(new { View = name, Type = control.GetType().Name, Text = control.Text.Length > 100 ? control.Text.Substring(0, 100) : control.Text, bounds.X, bounds.Y, control.Width, control.Height });
             Assert(control.Width > 0 && control.Height > 0, name + ": collapsed " + control.Text);
             Assert(control.Right <= control.Parent.ClientSize.Width + 1 && control.Left >= 0, name + ": horizontally clipped " + control.Text);
-            Assert(control.Bottom <= control.Parent.ClientSize.Height + 1 && control.Top >= 0, name + ": vertically clipped " + control.Text);
-            if (control is Button) Assert(Math.Abs(control.Height - buttonHeight) <= (buttonHeight == 30 ? 0 : 1), name + ": button height " + control.Text + "=" + control.Height);
+            Assert(control.Bottom <= control.Parent.ClientSize.Height + 1 && control.Top >= 0, name + ": vertically clipped " + control.GetType().Name + " " + control.Name + " bounds=" + control.Bounds + "; parent=" + control.Parent.GetType().Name + " " + control.Parent.Name + " size=" + control.Parent.ClientSize);
+            if (control is Button) Assert(Math.Abs(control.Height - buttonHeight) <= (buttonHeight == 28 ? 0 : 1), name + ": button height " + control.Text + "=" + control.Height);
         }
     }
     static IEnumerable<Control> Descendants(Control root) { foreach (Control child in root.Controls) { yield return child; foreach (var nested in Descendants(child)) yield return nested; } }

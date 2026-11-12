@@ -35,16 +35,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
     public Task<IReadOnlyList<Project>> ListProjectHeadersAsync(CancellationToken ct) => ReadProjectsAsync(null, ct, includeStatistics: false);
 
-    public async Task<IReadOnlyList<Project>> ListProjectHeadersForUserAsync(string actor, UserRole role, CancellationToken ct)
-    {
-        if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, ct)) return [];
-        var headers = await ListProjectHeadersAsync(ct);
-        var user = await FindUserAsync(actor, ct);
-        var result = new List<Project>();
-        foreach (var project in headers)
-            if (await CommercialProjectAccess.CanReadAsync(project, user, actor, role, projectContacts, ct)) result.Add(project);
-        return result;
-    }
+    // 项目选单与项目导航使用相同的资源授权。销售、售前范围从已配置的适用关系读取。
+    public Task<IReadOnlyList<Project>> ListProjectHeadersForUserAsync(string actor, UserRole role, CancellationToken ct)
+        => ListProjectNavigationForUserAsync(actor, role, ct);
 
     private async Task<IReadOnlyList<Project>> ReadProjectsAsync(Guid? projectId, CancellationToken cancellationToken, bool includeStatistics = true)
     {
@@ -85,8 +78,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         projects = visibleProjects;
         var permissions = await GetUserPermissionsAsync(actor, role, cancellationToken);
         var projectPermissions = await GetProjectPermissionSettingsAsync(cancellationToken);
-        await using var connection = await OpenAsync(cancellationToken);
-        var capabilities = await ApplyCapabilitiesAsync(connection, projects, actor, permissions, projectPermissions, cancellationToken);
+        var capabilities = await ApplyCapabilitiesAsync(projects, actor, permissions, projectPermissions, cancellationToken);
         return capabilities;
     }
 
@@ -111,8 +103,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         }
         var permissions = await GetUserPermissionsAsync(actor, role, ct);
         var settings = await GetProjectPermissionSettingsAsync(ct);
-        await using var connection = await OpenAsync(ct);
-        var capability = (await ApplyCapabilitiesAsync(connection, scope, actor, permissions, settings, ct)).FirstOrDefault(item => item.Id == projectId);
+        var capability = (await ApplyCapabilitiesAsync(scope, actor, permissions, settings, ct)).FirstOrDefault(item => item.Id == projectId);
         return capability;
     }
 
@@ -124,12 +115,6 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         return await AuthorizationPolicy.CanAsync(this, projectId, actor, PermissionCodes.ProjectContentView, cancellationToken);
-    }
-
-    private async Task<bool> HasCommercialProjectAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
-    {
-        var project = await FindProjectAsync(projectId, ct);
-        return project is not null && await CommercialProjectAccess.CanReadAsync(project, await FindUserAsync(actor, ct), actor, role, projectContacts, ct);
     }
 
     private async Task<bool> IsProjectInActiveCompanyAsync(Guid projectId, CancellationToken cancellationToken)
@@ -1727,7 +1712,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         CanSubmitArchive = true
     };
 
-    private async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(DbConnection connection, IReadOnlyList<Project> projects, string actor, IReadOnlySet<string> permissions, ProjectPermissionSettings projectPermissions, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(IReadOnlyList<Project> projects, string actor, IReadOnlySet<string> permissions, ProjectPermissionSettings projectPermissions, CancellationToken cancellationToken)
     {
         var user = await FindUserAsync(actor, cancellationToken);
         if (user is null || !user.IsActive) return [];

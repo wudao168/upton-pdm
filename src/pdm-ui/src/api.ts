@@ -207,7 +207,17 @@ export function saveNameplateTemplate(value: NameplateTemplate, token: string) {
   return requestJson<NameplateTemplate>('/api/nameplate-template', { method: 'PUT', body: JSON.stringify(value) }, token)
 }
 
-const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (import.meta.env.MODE === 'test' ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
+export const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (import.meta.env.MODE === 'test' ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
+
+export async function exportPurchaseAnalysis(filter: import('./purchaseAnalysis').PurchaseFilter, token: string): Promise<void> {
+  const headers = authenticatedHeaders(token)
+  headers.set('Content-Type', 'application/json')
+  const response = await fetch(`${apiBase}/api/purchase-analysis/export`, { method: 'POST', headers, body: JSON.stringify(filter) })
+  if (!response.ok) throw new PdmApiError('采购分析导出失败，请核对权限和筛选范围。', response.status)
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a'); link.href = url; link.download = '采购分析.xlsx'; link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
 
 export const readStandardStructures = (token: string) => requestJson<import('./standardStructure').StructureView>('/api/standard-structures', {}, token)
 export const changeStandardStructureState = (id: string, action: 'Disable' | 'Enable' | 'Delete' | 'Restore', expectedRowVersion: number, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/${id}/state`, { method: 'POST', body: JSON.stringify({ action, expectedRowVersion }) }, token)
@@ -739,7 +749,7 @@ async function performJsonRequest<T>(path: string, init: RequestInit, token?: st
   return (responseBody ? JSON.parse(responseBody) : null) as T
 }
 
-function authenticatedHeaders(token: string): Headers {
+export function authenticatedHeaders(token: string): Headers {
   const headers = new Headers({ Authorization: `Bearer ${token}` })
   const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
   if (activeCompanyId) headers.set('X-Company-Id', activeCompanyId)

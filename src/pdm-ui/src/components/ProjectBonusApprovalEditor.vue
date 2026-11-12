@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DepartmentSelectField from './DepartmentSelectField.vue'
 import { computed, ref, watch } from 'vue'
 import ApprovalFlowCanvas from './ApprovalFlowCanvas.vue'
 import { moveGraphNode } from '../approvalFlowGraph'
@@ -72,19 +73,19 @@ function changeMode(event: Event) {
         <label>审批人来源<select aria-label="审批人来源" :value="current.parallel ? 'parallel' : 'department'" @change="changeMode">
           <option value="department">指定部门成员</option><option value="parallel">多部门并行审批</option>
         </select></label>
-        <label v-if="!current.parallel">指定部门<select aria-label="指定部门" :value="current.departmentKeys[0] ?? ''" @change="current.departmentKeys = [($event.target as HTMLSelectElement).value]">
+        <label v-if="!current.parallel">指定部门<DepartmentSelectField :name="departmentName(current.departmentKeys[0] ?? '')"><select aria-label="指定部门" :value="current.departmentKeys[0] ?? ''" @change="current.departmentKeys = [($event.target as HTMLSelectElement).value]">
           <option value="" disabled>请选择部门</option>
           <option v-if="current.departmentKeys[0] && !departments.some(department => department.key === current!.departmentKeys[0])" :value="current.departmentKeys[0]" disabled>原部门已移除，请重新选择</option>
           <option v-for="department in departments" :key="department.key" :value="department.key">{{ department.name }}</option>
-        </select></label>
+        </select></DepartmentSelectField></label>
         <div v-else class="bonus-parallel-departments">
           <p class="bonus-muted">每个部门独立处理，全部部门通过后流转；任一部门退回则整单退回。同一人负责多个部门时逐部门确认。</p>
           <label v-for="(key, index) in current.departmentKeys" :key="index">并行部门 {{ index + 1 }}
-            <select v-model="current.departmentKeys[index]" aria-label="并行审批部门">
+            <DepartmentSelectField :name="departmentName(key)"><select v-model="current.departmentKeys[index]" aria-label="并行审批部门">
               <option value="" disabled>请选择部门</option>
               <option v-if="key && !departments.some(department => department.key === key)" :value="key" disabled>原部门已移除，请重新选择</option>
               <option v-for="department in departments" :key="department.key" :value="department.key" :disabled="department.key !== key && current.departmentKeys.includes(department.key)">{{ department.name }}</option>
-            </select>
+            </select></DepartmentSelectField>
             <button type="button" class="pdm-secondary-action" @click="current.departmentKeys.splice(index, 1)">移除部门</button>
           </label>
           <button type="button" class="pdm-secondary-action" :disabled="current.departmentKeys.length >= 12" @click="current.departmentKeys.push('')">添加并行部门</button>

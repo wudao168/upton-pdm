@@ -305,10 +305,14 @@ onBeforeUnmount(() => { sequence++; clearPreview() })
       aria-label="项目目录" all-label="全部项目" @update:model-value="selectProject" />
     <div class="spare-parts__workspace">
       <div v-if="pageData" class="spare-parts__metrics">
-        <article><span>可查项目</span><strong>{{ projects.length }}</strong></article>
-        <article><span>备件记录</span><strong>{{ pageData.total }}</strong></article>
-        <article><span>待定价</span><strong>{{ pageData.missingPrice }}</strong></article>
-        <article v-if="pageData.canPreview"><span>机加件待补图纸</span><strong>{{ pageData.missingDrawing }}</strong></article>
+        <article class="pdm-stat-card"><span>可查项目</span><strong>{{ projects.length }}</strong></article>
+        <article class="pdm-stat-card"><span>备件记录</span><strong>{{ pageData.total }}</strong></article>
+        <article class="pdm-stat-card" :class="{ 'is-warning': pageData.missingPrice > 0 }">
+          <span>待定价</span><strong>{{ pageData.missingPrice }}</strong>
+        </article>
+        <article v-if="pageData.canPreview" class="pdm-stat-card" :class="{ 'is-warning': pageData.missingDrawing > 0 }">
+          <span>机加件待补图纸</span><strong>{{ pageData.missingDrawing }}</strong>
+        </article>
       </div>
       <section class="pdm-panel spare-parts__list" aria-label="备件清单">
         <div class="pdm-toolbar spare-parts__toolbar">
@@ -493,10 +497,6 @@ onBeforeUnmount(() => { sequence++; clearPreview() })
 .spare-parts__filters { min-width: 0; }
 .spare-parts__list-actions { margin-inline-start: auto; justify-content: flex-end; }
 .spare-parts__list-notice { padding-inline: 10px; }
-.spare-parts__metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 10px; }
-.spare-parts__metrics article { display: grid; padding: 14px; gap: 4px; border-radius: 16px; background: var(--el-bg-color); box-shadow: 0 4px 14px #00000014; transition: transform .18s ease; }
-.spare-parts__metrics article:hover { transform: translateY(-3px); }
-.spare-parts__metrics strong { font-size: 24px; font-variant-numeric: tabular-nums; }
 .spare-parts__list { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .spare-parts__filters :deep(.pdm-search-field) { width: min(300px, 100%); }
 .spare-parts__table-wrap { min-height: 0; overflow: auto; }
@@ -531,5 +531,4 @@ onBeforeUnmount(() => { sequence++; clearPreview() })
 .spare-parts__image { max-width: 100%; max-height: 60vh; object-fit: contain; }
 .spare-parts__pdf { height: 55vh; }
 @media (max-width: 750px) { .spare-parts { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); } .spare-parts__projects { max-height: 160px; } }
-@media (prefers-reduced-motion: reduce) { .spare-parts__metrics article { transition: none; } .spare-parts__metrics article:hover { transform: none; } }
 </style>

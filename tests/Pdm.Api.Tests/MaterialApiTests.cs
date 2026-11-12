@@ -20,6 +20,8 @@ public sealed partial class MaterialApiTests : IClassFixture<PdmApiFactory>
     {
         this.factory = factory;
         client = factory.CreateClient();
+        ApiTestAuthorization.EnsureUserAsync(factory.Services.GetRequiredService<IPdmRepository>(),
+            new(Guid.NewGuid(), "production", "只读验收人员", "unused", Upton.Pdm.Domain.UserRole.ProductionViewer, true), default).GetAwaiter().GetResult();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
     }
 

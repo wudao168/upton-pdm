@@ -12,7 +12,7 @@ public sealed class StorageHistoryTests
     public async Task OplAttachments_KeepOriginalLocationAfterChangingGlobalAndAttachmentRoots()
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-opl-history-" + Guid.NewGuid().ToString("N"));
-        var projects = new InMemoryPdmRepository(TimeProvider.System);
+        var projects = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var issues = new InMemoryProjectOplRepository();
         var storage = new LocalProjectOplStorage();
         var project = (await projects.ListProjectsAsync(default))[0];

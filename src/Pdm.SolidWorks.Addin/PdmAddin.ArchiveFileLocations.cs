@@ -17,6 +17,8 @@ public sealed partial class PdmAddin
         var restore = new List<Action>();
         var inventories = new Dictionary<string, Tuple<string[], string[]>>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<CadTreeNode>();
+        var context = controlledOpenManifests.FirstOrDefault(pair => root != null && IsPathWithinDirectory(root.FullPath, pair.Key));
+        var known = context.Value?.Files.ToDictionary(file => file.FileName, StringComparer.OrdinalIgnoreCase);
         Tuple<string[], string[]> Inventory(CadTreeNode owner)
         {
             if (inventories.TryGetValue(owner.FullPath, out var cached)) return cached;
@@ -40,24 +42,34 @@ public sealed partial class PdmAddin
         void Visit(CadTreeNode node, CadTreeNode owner)
         {
             if (node == null || !visited.Add(node)) return;
+            string controlledPath = null;
+            if (owner != null && known != null && IsPathWithinDirectory(owner.FullPath, context.Key)
+                && known.TryGetValue(node.FileName ?? string.Empty, out var file))
+            {
+                var expected = ControlledReferenceMaterializer.LocalPath(context.Key, file);
+                if (CanUseDeferredArchiveCopy(node, file, expected)) controlledPath = expected;
+            }
             if (owner != null && node.Role != CadReferenceRole.ExternalFileDependency
                 && node.Status != CadReferenceStatus.Virtual && !node.IsStoredImport
-                && !string.IsNullOrWhiteSpace(node.FullPath) && !File.Exists(node.FullPath)
+                && !string.IsNullOrWhiteSpace(node.FullPath) && (controlledPath != null || !File.Exists(node.FullPath))
                 && !NativeArchiveManifest.IsInterconnectCachePath(node.FullPath)
                 && !IsSolidWorksTemporaryVirtualComponentPath(node.FullPath) && File.Exists(owner.FullPath))
             {
                 var old = node.FullPath;
-                var inventory = Inventory(owner);
-                var matches = inventory.Item2.Where(path => string.Equals(Path.GetFileName(path), node.FileName, StringComparison.OrdinalIgnoreCase)).ToArray();
-                if (matches.Length > 1)
-                    throw new InvalidOperationException("所属图档的原生引用解析出多个同名文件，未自动替换：" + owner.FileName + " → " + node.FileName);
-                var actual = matches.SingleOrDefault();
-                // For a moved local design, a recorded reference can be found beside its
-                // actual owner even if native search returns the obsolete saved spelling.
-                var peer = Path.Combine(Path.GetDirectoryName(owner.FullPath), Path.GetFileName(old));
-                if (actual == null && (PathsEqual(node.SourceReferencePath, old)
-                    || inventory.Item1.Any(path => PathsEqual(path, old) || PathsEqual(path, node.SourceReferencePath)))
-                    && File.Exists(peer)) actual = peer;
+                var actual = controlledPath;
+                if (actual == null)
+                {
+                    var inventory = Inventory(owner);
+                    var matches = inventory.Item2.Where(path => string.Equals(Path.GetFileName(path), node.FileName, StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (matches.Length > 1)
+                        throw new InvalidOperationException("所属图档的原生引用解析出多个同名文件，未自动替换：" + owner.FileName + " → " + node.FileName);
+                    actual = matches.SingleOrDefault();
+                    // A moved local design may keep the saved spelling beside its owner.
+                    var peer = Path.Combine(Path.GetDirectoryName(owner.FullPath), Path.GetFileName(old));
+                    if (actual == null && (PathsEqual(node.SourceReferencePath, old)
+                        || inventory.Item1.Any(path => PathsEqual(path, old) || PathsEqual(path, node.SourceReferencePath)))
+                        && File.Exists(peer)) actual = peer;
+                }
                 if (actual != null && node.DocumentId.HasValue
                     && PdmDocumentIdentityStore.TryReadLocalMetadata(actual, out var actualBinding)
                     && actualBinding.DocumentId != node.DocumentId)

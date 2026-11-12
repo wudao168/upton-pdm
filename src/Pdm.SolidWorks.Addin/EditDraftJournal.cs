@@ -34,6 +34,9 @@ public sealed class LocalEditDraft
     public bool Closed { get; set; }
     public bool RestoreOnOpen { get; set; }
     public bool DiscardPending { get; set; }
+    public bool CheckoutSessionLost { get; set; }
+    public bool AcquisitionRollbackPending { get; set; }
+    public string AcquisitionBaseSha256 { get; set; }
     public string DiscardBackupPath { get; set; }
     public int ProcessId { get; set; }
     public long ProcessStartedUtcTicks { get; set; }

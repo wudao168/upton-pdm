@@ -280,7 +280,7 @@ internal sealed partial class BatchOperationDialog : Form
             Height = 60,
             ColumnCount = 10,
             RowCount = 3,
-            Margin = new Padding(0, 0, 0, 6)
+            Margin = new Padding(0, 0, 0, 4)
         };
         operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 4));
@@ -397,8 +397,7 @@ internal sealed partial class BatchOperationDialog : Form
         standardLibraryTip.SetToolTip(showUncheckedOnly, "显示未勾选图档并展开定位路径；筛选不改变勾选数量或存档范围。");
         foreach (var button in new[] { selectAll, clear, selectChanged, supplement, showCheckedOnly, showUncheckedOnly, cancel, recheck, execute })
             ArchiveCommandAppearance.Apply(button, button == execute ? Color.FromArgb(21, 126, 77)
-                : button == cancel ? Color.FromArgb(230, 126, 34) : (Color?)null,
-                button == execute || button == cancel ? Color.FromArgb(224, 224, 224) : (Color?)null);
+                : button == cancel ? Color.FromArgb(230, 126, 34) : (Color?)null);
         foreach (var button in new[] { selectAll, clear, selectChanged, supplement, showCheckedOnly, cancel, recheck }) button.Margin = new Padding(0, 0, 6, 0);
         selectionButtons.Controls.Add(selectAll);
         selectionButtons.Controls.Add(clear);

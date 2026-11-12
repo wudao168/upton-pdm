@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DepartmentSelectField from './DepartmentSelectField.vue'
 import SearchField from './SearchField.vue'
 import UserSelect from './UserSelect'
 import { readTablePreference, tablePreferenceVersion, writeTablePreference } from '../tablePreferences'
@@ -304,7 +305,7 @@ onMounted(() => { restoreColumns(); void refresh() })
       <SearchField><input v-model="query" class="production-drawings__query" type="search" placeholder="搜索项目、型号、图号或发布包" aria-label="搜索生产图纸"></SearchField>
       <input v-model="publishedOnFilter" class="production-drawings__published-on" type="date" aria-label="按发布日期筛选">
       <UserSelect v-model="publisherFilter" aria-label="按发布人筛选"><option value="">全部发布人</option><option v-for="name in publishers" :key="name" :value="name">{{ displayUserName(name) }}</option></UserSelect>
-      <select v-model="divisionFilter" aria-label="按事业部筛选"><option value="">全部事业部</option><option v-for="name in divisions" :key="name" :value="name">{{ name }}</option></select>
+      <DepartmentSelectField :name="divisionFilter"><select v-model="divisionFilter" aria-label="按事业部筛选"><option value="">全部事业部</option><option v-for="name in divisions" :key="name" :value="name">{{ name }}</option></select></DepartmentSelectField>
       <UserSelect v-model="managerFilter" aria-label="按项目经理筛选"><option value="">全部项目经理</option><option v-for="name in managers" :key="name" :value="name">{{ displayUserName(name) }}</option></UserSelect>
       <label><input v-model="history" type="checkbox"> 查看历史正式版</label>
       <form @submit.prevent="locateScan"><input v-model="scan" placeholder="扫描图纸二维码" aria-label="扫描图纸二维码"><button type="submit" class="pdm-primary-action">定位</button></form>

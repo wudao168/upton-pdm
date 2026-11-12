@@ -14,7 +14,7 @@ public sealed class BomHeaderServiceTests
     public async Task HierarchySummaryMatchesCurrentCountsAndRejectsInvisibleProjects()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time, repository);
         var service = new BomHeaderService(repository, materials, new MaterialService(materials, repository, new TestProtector(), new AvailableCodeClient(), time), null!, time);
         var visible = await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default);
@@ -46,7 +46,7 @@ public sealed class BomHeaderServiceTests
     public async Task HeaderDirectory_IsReadOnly_AndOrdinaryPagingUsesActualLinks()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time, repository);
         var client = new AvailableCodeClient();
         var materialService = new MaterialService(materials, repository, new TestProtector(), client, time);
@@ -486,7 +486,7 @@ public sealed class BomHeaderServiceTests
         TimeProvider? clock = null)
     {
         var time = clock ?? TimeProvider.System;
-        repository = new InMemoryPdmRepository(time);
+        repository = BusinessTestRepository.Create(time);
         materials = new InMemoryMaterialRepository(time);
         materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -611,7 +611,7 @@ public sealed class BomHeaderServiceTests
     public async Task ProjectBomU9Sync_CreatesEmptyBomBeforeApprovalAndSyncsReleasedComponentsAfterApproval()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -669,7 +669,7 @@ public sealed class BomHeaderServiceTests
     public async Task ProjectBomU9Sync_UsesPublishedLongLeadTotalsUntilFormalReleaseBecomesAuthoritative()
     {
         var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-03T08:00:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -746,7 +746,7 @@ public sealed class BomHeaderServiceTests
         bool usePackage, int multiplier, decimal existingTotal, decimal approvedTotal, decimal expectedDelta)
     {
         var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-07T08:00:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -795,7 +795,7 @@ public sealed class BomHeaderServiceTests
     public async Task U9BomWritePreview_UsesOnlyTheMissingApprovedQuantity()
     {
         var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-05T08:00:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -826,7 +826,7 @@ public sealed class BomHeaderServiceTests
     public async Task U9BomWritePreview_BlocksWhenU9TotalExceedsTheApprovedQuantity()
     {
         var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-05T08:00:00Z"));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -1162,7 +1162,7 @@ public sealed class BomHeaderServiceTests
     private static async Task<(U9BomWriteService, BomWriteState, InMemoryPdmRepository)> ControlledService()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new("http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
             U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
@@ -1216,7 +1216,7 @@ public sealed class BomHeaderServiceTests
     public async Task ProjectBomDates_ChildCategoriesInheritConfirmedRootDate(ProjectBomHeaderKind kind, BomKind bomKind)
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         var project = await repository.CreateNumberedProjectAsync(new(
             Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 2,
@@ -1246,7 +1246,7 @@ public sealed class BomHeaderServiceTests
     public async Task ProjectBomU9Sync_MasterDependsOnCategoryHeaderInsteadOfCategoryItems()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -1291,7 +1291,7 @@ public sealed class BomHeaderServiceTests
     public async Task ProjectBomU9Sync_RootWithChildrenUsesChildRootsAndAppendsOnlyNewChild()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         var root = await repository.CreateNumberedProjectAsync(new(
             Guid.Parse("70000000-0000-0000-0000-000000000001"),
@@ -1358,7 +1358,7 @@ public sealed class BomHeaderServiceTests
     public async Task ApprovalAutomation_WaitsForFirstReleasedComponentThenCreatesA1Bom()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
@@ -1419,7 +1419,7 @@ public sealed class BomHeaderServiceTests
     public async Task ApprovalAutomation_WaitsWithoutWritingWhenAComponentHasNoOfficialU9Code()
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var materials = new InMemoryMaterialRepository(time);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",

@@ -6,9 +6,9 @@ const users = [
 ] as any
 
 describe('resolveUserDisplayName', () => {
-  it('业务界面优先显示姓名，并为未知账号保留可识别兜底', () => {
+  it('业务界面优先显示姓名，未知账号提示姓名待补充', () => {
     expect(resolveUserDisplayName(users, 'LIUPENGBO')).toBe('刘鹏搏')
-    expect(resolveUserDisplayName(users, 'unknown-user')).toBe('unknown-user')
+    expect(resolveUserDisplayName(users, 'unknown-user')).toBe('姓名待补充')
     expect(resolveUserDisplayName(users, '', '待分配')).toBe('待分配')
   })
 })

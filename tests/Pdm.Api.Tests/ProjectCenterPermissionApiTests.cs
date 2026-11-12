@@ -96,8 +96,9 @@ public sealed class ProjectCenterPermissionApiTests
         using var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("admin", "Administrator"));
-        var response = await client.PutAsJsonAsync("/api/role-permissions/AssemblyFitter", new { schemaVersion = 3,
-            permissions = new[] { PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("documents"), "document.view" } });
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        var response = await client.PutAsJsonAsync("/api/authorization-center", AuthorizationPolicy.UpdateRole(settings, "AssemblyFitter",
+            [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("documents"), "document.view"]));
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         var permissions = await repository.GetRolePermissionDirectoryAsync(default);
         var role = permissions.Roles.Single(item => item.Role == "AssemblyFitter");

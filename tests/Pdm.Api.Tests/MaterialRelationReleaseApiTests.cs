@@ -27,7 +27,7 @@ public sealed class MaterialRelationReleaseApiTests
         var relations = factory.Services.GetRequiredService<IMaterialRelationRepository>();
         var seed = (await repository.ListProjectsAsync(default)).First();
         var example = (await repository.GetBomAsync(seed.Id, BomKind.Standard, default)).First();
-        var project = await repository.CreateProjectAsync(new("REL-API-" + Guid.NewGuid().ToString("N"), "关联发布接口测试", "admin", "D:/test", "D:/release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("REL-API-" + Guid.NewGuid().ToString("N"), "关联发布接口测试", "admin", "D:/test", "D:/release"), "admin", default);
         var main = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, example.DrawingNumber, example.Name, 1, "001", example.Material, example.Specification, "W1", true) { Brand = example.Brand, Source = "Manual" };
         await repository.ReplaceBomAsync(project.Id, BomKind.Standard, [main], default);
         var group = new MaterialRelationGroup(Guid.NewGuid(), "发布必查配件", required, MaterialRelationSelectionMode.Single, required ? 1 : 0, 1, false, 1, []);

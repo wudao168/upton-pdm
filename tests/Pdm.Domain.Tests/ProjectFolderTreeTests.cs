@@ -12,7 +12,7 @@ public sealed class ProjectFolderTreeTests
     public async Task NonStandardReminderTracksActualSupplyReceiptsAcrossAllEligiblePackages()
     {
         var store = new InMemoryProductionTrackingStore(DateTimeOffset.UtcNow.AddDays(-7));
-        var repository = new InMemoryPdmRepository(TimeProvider.System, productionTracking: store);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System, productionTracking: store);
         var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default));
         ReleasePackage Package(string number, DateTimeOffset published) => new(Guid.NewGuid(), project.Id, number,
             ReleasePackageState.Published, null, "", "", [], published, published, "release")
@@ -55,7 +55,7 @@ public sealed class ProjectFolderTreeTests
     [InlineData(ReleaseScope.NonStandardSupplement, ReleasePackageState.Draft, ReleasePreviewState.None, false)]
     public async Task ProjectListContainsReleaseAttentionAndFormalPublicationTime(ReleaseScope scope, ReleasePackageState state, string previewState, bool attention)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default));
         var published = DateTimeOffset.Parse("2026-10-27T12:00:00Z");
         var package = new ReleasePackage(Guid.NewGuid(), project.Id, "RP-ATTENTION", state, null, "", "", [], published.AddDays(-1),
@@ -76,7 +76,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task MainAndChildProjectsHaveMatchingMechanicalAndElectricalContainers()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var main = await repository.CreateNumberedProjectAsync(Command("主项目"), CancellationToken.None);
         var child = await repository.CreateSubprojectAsync(new(main.Id, "子项目一", null, 1), CancellationToken.None);
 
@@ -96,7 +96,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task DefaultFolderTemplateDoesNotContainNameplateFolder()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var main = await repository.CreateNumberedProjectAsync(Command("默认目录模板"), CancellationToken.None);
 
         var template = await repository.ListFolderTemplateAsync(CancellationToken.None);
@@ -109,7 +109,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task RegistrationDefaultsToMechanicalAndRejectsAnotherProjectsFolder()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var main = await repository.CreateNumberedProjectAsync(Command("主项目"), CancellationToken.None);
         var child = await repository.CreateSubprojectAsync(new(main.Id, "子项目一", null, 1), CancellationToken.None);
         var folders = await repository.ListProjectFoldersAsync(main.Id, "engineer", UserRole.Administrator, CancellationToken.None);
@@ -128,7 +128,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task ProjectFolderCanOverrideRolePermissionsIndependently()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var main = await repository.CreateNumberedProjectAsync(Command("权限项目"), CancellationToken.None);
         var folders = await repository.ListProjectFoldersAsync(main.Id, "engineer", UserRole.Administrator, CancellationToken.None);
         var release = folders.Single(item => item.TemplateKey == "mechanical.release");
@@ -143,7 +143,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task FolderPermissionsMatchTheUsersActualRoleCode()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "electrical", "电气工程师", "unused", UserRole.Engineer, true, RoleCode: "ElectricalEngineer"), CancellationToken.None);
         var main = await repository.CreateNumberedProjectAsync(Command("实际角色目录权限"), CancellationToken.None);
         var template = await repository.ListFolderTemplateAsync(CancellationToken.None);
@@ -161,7 +161,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task ProjectFolderPermissionsGateDocumentReadAndEditAccess()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         var main = await repository.CreateNumberedProjectAsync(Command("目录权限项目"), CancellationToken.None);
         await repository.SetMainProjectStaffingAsync(main.Id, new("project-manager", [], ["engineer"]), "admin", CancellationToken.None);
@@ -183,7 +183,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task ProjectListReportsReferenceAndStandaloneDocumentCountsForAuthorizedUsers()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
 
         var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, CancellationToken.None));
 
@@ -199,7 +199,7 @@ public sealed class ProjectFolderTreeTests
     [Fact]
     public async Task ProjectListIgnoresCheckoutOnNonRootDocumentForProjectStatus()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, CancellationToken.None));
         var snapshot = await repository.GetLatestReferenceSnapshotAsync(project.Id, CancellationToken.None);
         Assert.NotNull(snapshot);

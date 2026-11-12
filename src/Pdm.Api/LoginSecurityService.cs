@@ -189,8 +189,9 @@ public sealed class LoginSecurityService(LoginSecurityStore store, TimeProvider 
         var current = await store.ReadAsync<LoginUserState>(Key(username), ct);
         var validationError = Validate(current, false);
         if (validationError is not null || current.Sessions.Find(s => s.Id == sessionId)!.LastSeenAt >= now.AddSeconds(-30)) return validationError;
-        // 只有心跳到期才进入写事务；事务内再次验证，避免管理员下线被心跳覆盖。
-        return await store.UpdateAsync<LoginUserState, string?>(Key(username), state => Validate(state, true), ct);
+        // 心跳写入不等待其他请求持有的行锁；延后时仍读取最新状态，保持下线和设备限制生效。
+        var heartbeat = await store.TryHeartbeatAsync(Key(username), state => Validate(state, true), ct);
+        return heartbeat.Completed ? heartbeat.Error : Validate(await store.ReadAsync<LoginUserState>(Key(username), ct), false);
 
         string? Validate(LoginUserState state, bool heartbeat)
         {

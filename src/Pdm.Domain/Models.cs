@@ -503,6 +503,7 @@ public sealed record PdmDocument(
     string? CheckedOutBy,
     DateTimeOffset UpdatedAt)
 {
+    public DocumentOperationAccess? OperationAccess { get; init; }
     public long RowVersion { get; init; } = 1;
 
     public Guid? FolderId { get; init; }

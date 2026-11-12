@@ -6,6 +6,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -89,21 +90,25 @@ public sealed class BrowserCadArchiveTests
     }
 
     [Fact]
-    public async Task DisabledEntryRejectsDirectUploadAndQueuedCommitWithoutCreatingDocuments()
+    public async Task RemovedProjectEntryRejectsDirectUploadAndStartWhileQueuedWorkCanFinish()
     {
         using var fixture = new Fixture(); await fixture.Setup();
         var target = new BrowserCadArchiveTarget(fixture.Project.Id);
         var staged = await fixture.Stage(target, new() { ["PART.SLDPRT"] = "part" });
-        Assert.Equal(HttpStatusCode.OK, (await fixture.Client.PutAsJsonAsync("/api/browser-archives/settings", new { enabled = false })).StatusCode);
         var capability = (await fixture.Client.GetFromJsonAsync<BrowserCadArchiveCapability>($"/api/browser-archives/capabilities?projectId={fixture.Project.Id}"))!;
         Assert.False(capability.Enabled); Assert.False(capability.CanArchive);
-        Assert.Equal(HttpStatusCode.BadRequest, (await fixture.Client.PostAsJsonAsync($"/api/browser-archives/{staged.Id}/start", new { rootPath = "PART.SLDPRT" })).StatusCode);
+        var start = await fixture.Client.PostAsJsonAsync($"/api/browser-archives/{staged.Id}/start", new { rootPath = "PART.SLDPRT" });
+        Assert.Equal(HttpStatusCode.BadRequest, start.StatusCode);
+        Assert.Contains("项目网页存档已停用", await start.Content.ReadAsStringAsync());
         using var upload = Fixture.Content(target, new() { ["PART.SLDPRT"] = "part" });
-        Assert.Equal(HttpStatusCode.BadRequest, (await fixture.Client.PostAsync($"/api/browser-archives/{Guid.NewGuid()}/files?projectId={fixture.Project.Id}", upload)).StatusCode);
-        fixture.Tenant();
-        await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ProcessAsync(fixture.Queue.Read(staged.Id)!, "admin", UserRole.Administrator, default));
-        Assert.Empty(await fixture.Repository.ListDocumentsAsync(fixture.Project.Id, default));
-        Assert.True(File.Exists(fixture.Queue.Under(staged.Id, "input/PART.SLDPRT")));
+        var uploadId = Guid.NewGuid();
+        var response = await fixture.Client.PostAsync($"/api/browser-archives/{uploadId}/files?projectId={fixture.Project.Id}", upload);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("项目网页存档已停用", await response.Content.ReadAsStringAsync());
+        Assert.Null(fixture.Queue.Read(uploadId));
+        Assert.Equal("Ready", fixture.Queue.Read(staged.Id)!.State);
+        await fixture.Process(staged.Id, "PART.SLDPRT");
+        Assert.Single(await fixture.Repository.ListDocumentsAsync(fixture.Project.Id, default));
     }
 
     [Fact]
@@ -111,13 +116,14 @@ public sealed class BrowserCadArchiveTests
     {
         using var fixture = new Fixture(); await fixture.Setup();
         var target = new BrowserCadArchiveTarget(fixture.Project.Id); var staged = await fixture.Stage(target, new() { ["PART.SLDPRT"] = "part" });
-        await fixture.Repository.CreateUserAsync(new(Guid.NewGuid(), "viewer", "只读用户", "unused", UserRole.ProductionViewer, true), default);
+        await ApiTestAuthorization.EnsureUserAsync(fixture.Repository, new(Guid.NewGuid(), "viewer", "只读用户", "unused", UserRole.ProductionViewer, true), default);
         Fixture.Auth(fixture.Client, "viewer", "ProductionViewer");
         Assert.False((await fixture.Client.GetFromJsonAsync<BrowserCadArchiveCapability>($"/api/browser-archives/capabilities?projectId={fixture.Project.Id}"))!.CanArchive);
         Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Client.GetAsync($"/api/browser-archives/{staged.Id}")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Client.PutAsJsonAsync("/api/browser-archives/settings", new { enabled = false })).StatusCode);
         using var content = Fixture.Content(target, new() { ["PART.SLDPRT"] = "part" });
-        Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Client.PostAsync($"/api/browser-archives/{Guid.NewGuid()}/files?projectId={fixture.Project.Id}", content)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await fixture.Client.PostAsync($"/api/browser-archives/{Guid.NewGuid()}/files?projectId={fixture.Project.Id}", content)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await fixture.Client.PostAsJsonAsync($"/api/browser-archives/{staged.Id}/start", new { rootPath = "PART.SLDPRT" })).StatusCode);
         TenantContext.Set(new(Guid.NewGuid(), fixture.Company, fixture.Company, "viewer", "ProductionViewer", false, new HashSet<string>()));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => fixture.Service.SetEnabledAsync(false, "viewer", UserRole.Administrator, default));
     }
@@ -128,10 +134,11 @@ public sealed class BrowserCadArchiveTests
         using var fixture = new Fixture(); await fixture.Setup();
         using var bytes = new MemoryStream(); using (var zip = new ZipArchive(bytes, ZipArchiveMode.Create, true))
         { using var entry = new StreamWriter(zip.CreateEntry("../escaped.SLDPRT").Open()); entry.Write("unsafe"); }
-        using var form = new MultipartFormDataContent(); form.Add(JsonContent.Create(new BrowserCadArchiveTarget(fixture.Project.Id)), "target");
-        form.Add(new ByteArrayContent(bytes.ToArray()), "files", "test.zip");
-        var response = await fixture.Client.PostAsync($"/api/browser-archives/{Guid.NewGuid()}/files?projectId={fixture.Project.Id}", form);
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode); Assert.Contains("越界", await response.Content.ReadAsStringAsync());
+        bytes.Position = 0;
+        fixture.Tenant();
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.StageAsync(Guid.NewGuid(), new(fixture.Project.Id),
+            [new FormFile(bytes, 0, bytes.Length, "files", "test.zip")], "admin", UserRole.Administrator, default));
+        Assert.Contains("越界", error.Message);
         Assert.False(File.Exists(Path.Combine(fixture.Queue.Root, "escaped.SLDPRT")));
     }
 
@@ -157,9 +164,8 @@ public sealed class BrowserCadArchiveTests
         var id = Guid.NewGuid();
         var files = new Dictionary<string, string> { ["first/PART.SLDPRT"] = "source-one", ["second/PART.SLDPRT"] = "source-two" };
         Assert.Single(files.Values.Select(value => Encoding.UTF8.GetByteCount(value)).Distinct());
-        using var form = Fixture.Content(new(fixture.Project.Id), files);
-        var response = await fixture.Client.PostAsync($"/api/browser-archives/{id}/files?projectId={fixture.Project.Id}", form);
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode); Assert.Contains("内容不同", await response.Content.ReadAsStringAsync());
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.StageProject(id, new(fixture.Project.Id), files));
+        Assert.Contains("内容不同", error.Message);
         foreach (var file in files) Assert.Equal(file.Value, await File.ReadAllTextAsync(fixture.Queue.Under(id, "input/" + file.Key)));
         Assert.NotEqual("Ready", fixture.Queue.Read(id)!.State);
         Assert.Empty(await fixture.Repository.ListDocumentsAsync(fixture.Project.Id, default));
@@ -179,7 +185,9 @@ public sealed class BrowserCadArchiveTests
         var first = await fixture.Stage(new(fixture.Project.Id), files);
         Assert.DoesNotContain(first.Files, file => file.RelativePath == companion);
         Assert.Equal(2, fixture.Queue.Read(first.Id)!.CompanionFiles!.Count);
-        Assert.Equal(HttpStatusCode.BadRequest, (await fixture.Client.PostAsJsonAsync($"/api/browser-archives/{first.Id}/start", new { rootPath = companion })).StatusCode);
+        fixture.Tenant();
+        var invalidRoot = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.StartAsync(first.Id, companion, "admin", UserRole.Administrator, default));
+        Assert.Contains("根图档", invalidRoot.Message);
         await fixture.Process(first.Id, "ROOT.SLDASM");
         var documents = await fixture.Repository.ListDocumentsAsync(fixture.Project.Id, default); Assert.Equal(3, documents.Count);
         var root = documents.Single(doc => doc.Kind == DocumentKind.Assembly); var other = documents.Single(doc => doc.Kind == DocumentKind.Other);
@@ -281,6 +289,12 @@ public sealed class BrowserCadArchiveTests
         await fixture.Repository.SetOrganizationMembershipsAsync("std", [department.Id], department.Id, default);
         Fixture.Auth(fixture.Client, "std", "ProcessReviewer");
         var files = new Dictionary<string, string> { ["PART.SLDPRT"] = "unclassified" };
+        using (var projectUpload = Fixture.Content(new(fixture.Project.Id), files))
+        {
+            var response = await fixture.Client.PostAsync($"/api/browser-archives/{Guid.NewGuid()}/files", projectUpload);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("项目网页存档已停用", await response.Content.ReadAsStringAsync());
+        }
         var staged = await fixture.Stage(new(DrawingType: 2), files); await fixture.Process(staged.Id, "PART.SLDPRT", "std", UserRole.ProcessReviewer);
         var standard = fixture.Scope.ServiceProvider.GetRequiredService<StandardStructureService>(); fixture.Tenant("std", UserRole.ProcessReviewer);
         var item = Assert.Single((await standard.ReadAsync("std", UserRole.ProcessReviewer, default)).Catalog.Structures);
@@ -740,20 +754,43 @@ public sealed class BrowserCadArchiveTests
         }
         internal async Task<BrowserCadArchiveView> Stage(BrowserCadArchiveTarget target, Dictionary<string, string> files)
         {
+            if (target.ProjectId.HasValue) return await StageProject(Guid.NewGuid(), target, files);
             TenantContext.Clear(); using var form = Content(target, files);
-            var result = await Client.PostAsync($"/api/browser-archives/{Guid.NewGuid()}/files{(target.ProjectId is Guid project ? "?projectId=" + project : "")}", form);
+            var result = await Client.PostAsync($"/api/browser-archives/{Guid.NewGuid()}/files", form);
             Assert.True(result.IsSuccessStatusCode, await result.Content.ReadAsStringAsync());
             return (await result.Content.ReadFromJsonAsync<BrowserCadArchiveView>())!;
         }
+        internal async Task<BrowserCadArchiveView> StageProject(Guid id, BrowserCadArchiveTarget target, Dictionary<string, string> files)
+        {
+            Tenant();
+            var contents = files.ToDictionary(file => file.Key, file => new MemoryStream(Encoding.UTF8.GetBytes(file.Value)));
+            try
+            {
+                var form = contents.Select(file => (IFormFile)new FormFile(file.Value, 0, file.Value.Length, "files", file.Key)).ToArray();
+                return await Service.StageAsync(id, target, form, "admin", UserRole.Administrator, default);
+            }
+            finally
+            {
+                foreach (var stream in contents.Values) stream.Dispose();
+                TenantContext.Clear();
+            }
+        }
         internal async Task Process(Guid id, string root, string actor = "admin", UserRole role = UserRole.Administrator)
         {
-            TenantContext.Clear(); var started = await Client.PostAsJsonAsync($"/api/browser-archives/{id}/start", new { rootPath = root });
-            Assert.True(started.IsSuccessStatusCode, await started.Content.ReadAsStringAsync()); Tenant(actor, role);
+            await Start(id, root, actor, role);
+            Tenant(actor, role);
             await Service.ProcessAsync(Queue.Read(id)!, actor, role, default); TenantContext.Clear();
             Assert.Equal("Succeeded", Queue.Read(id)!.State);
         }
-        internal async Task Start(Guid id, string root)
+        internal async Task Start(Guid id, string root, string actor = "admin", UserRole role = UserRole.Administrator)
         {
+            if (Queue.Read(id)!.Target.ProjectId.HasValue)
+            {
+                Tenant(actor, role);
+                try { await Service.StartAsync(id, root, actor, role, default); }
+                finally { TenantContext.Clear(); }
+                return;
+            }
             TenantContext.Clear();
             var result = await Client.PostAsJsonAsync($"/api/browser-archives/{id}/start", new { rootPath = root });
             Assert.True(result.IsSuccessStatusCode, await result.Content.ReadAsStringAsync());

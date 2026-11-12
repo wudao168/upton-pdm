@@ -24,6 +24,7 @@ internal static class Program
         var dll = Path.GetFullPath(args[0]);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) => { var path = Path.Combine(Path.GetDirectoryName(dll), new AssemblyName(e.Name).Name + ".dll"); return File.Exists(path) ? Assembly.LoadFrom(path) : null; };
         assembly = Assembly.LoadFrom(dll);
+        Static("PdmDocumentIdentityStore", "ConfigureBrowserReadScope", directory);
         if(args.Length>2 && args[2]=="assembly-facts")
         {
             foreach(var name in new[]{"CheckInBatchAsync","PrepareBatchCheckInPermissionAsync","ResolveBatchReferenceVersionsAsync"})
@@ -94,7 +95,9 @@ internal static class Program
         {
             Action attempt = () => Await(Call(client, "UploadVersionFileAsync", project, path, document, path, CancellationToken.None, null, null,
                 Hash(path), null, null));
-            Expect<InvalidOperationException>(attempt); attempt();
+            attempt();
+            Assert(lostCompletion ? handler.StoredTargets.Count == 2 : handler.Chunks[1] == 2,
+                "transient failure did not retry exactly the failed operation");
             Assert(handler.Starts == 1, "created another upload session");
             Assert(handler.Chunks[0] == 1, "reuploaded acknowledged chunk zero");
             Assert(handler.StoredTargets.Distinct().Count() == 1, "completion target changed");
@@ -128,7 +131,8 @@ internal static class Program
         {
             Action attempt = () => Await(Call(client, "UploadVersionFileAsync", project, source, document, source,
                 CancellationToken.None, null, null, Hash(source), batch, checkout));
-            Expect<InvalidOperationException>(attempt); attempt();
+            attempt();
+            Assert(handler.StoredTargets.Count == 2, "lost completion response did not replay the same target once");
             Assert(handler.Starts == 1 && handler.StoredTargets.All(target => target == serverTarget), "owned upload restarted or ignored server target");
             Assert((string)handler.StartBody["batchId"] == batch.ToString() && (string)handler.StartBody["documentId"] == document.ToString()
                 && (string)handler.StartBody["checkoutSessionId"] == checkout.ToString(), "upload owner missing");
@@ -259,7 +263,7 @@ internal static class Program
                 if (difference == "none")
                 {
                     retry(); Assert((Guid?)Get(node, "DocumentId") == id, "pending identity replaced");
-                    Assert((Guid?)Get(Static("PdmDocumentIdentityStore", "ReadBinding", path), "ProjectId") == project, "pending binding not restored");
+                    Assert((Guid?)Get(Static("PdmDocumentIdentityStore", "ReadProjectBinding", path, project), "ProjectId") == project, "pending project-scoped receipt not restored");
                 }
                 else { Expect<InvalidOperationException>(retry); Assert(Get(node, "DocumentId") == null, "unsafe pending identity assigned"); }
             }
@@ -296,6 +300,8 @@ internal static class Program
         public AtomicReceiptHandler(Guid batch, string mode) { this.batch = batch; this.mode = mode; }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            if (request.Method == HttpMethod.Get && request.RequestUri.AbsolutePath == "/api/archive-batch-limits")
+                return Task.FromResult(Reply(new { maxRequestBytes = 30000000L }));
             if (request.Method == HttpMethod.Post)
             {
                 Posts++; var body = Json.Deserialize<Dictionary<string, object>>(request.Content.ReadAsStringAsync().GetAwaiter().GetResult());
@@ -304,7 +310,11 @@ internal static class Program
                 if (Posts == 1 && mode == "retry") throw new HttpRequestException("simulated response loss");
                 if (mode == "receipt") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("{\"message\":\"响应发送失败\"}") });
             }
-            else Assert(request.RequestUri.AbsolutePath.EndsWith(batch.ToString()), "wrong receipt query");
+            else
+            {
+                Assert(request.RequestUri.AbsolutePath.EndsWith(batch.ToString()), "wrong receipt query");
+                if (mode == "retry" && Posts == 1) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            }
             return Task.FromResult(Reply(new { batchId = batch, results = documents.Take(mode == "partial" ? 4 : documents.Length).Select(id => new { document = new { id } }).ToArray() }));
         }
     }
@@ -491,6 +501,7 @@ internal static class Program
     }
     static void Baseline()
     {
+        Static("PdmDocumentIdentityStore", "ConfigureBrowserReadScope", directory);
         var id = Guid.NewGuid(); var baseline = Guid.NewGuid(); var node = Node("bound.SLDPRT", id, 1); File.WriteAllText((string)Get(node, "FullPath"), "native");
         Set(node, "OpenedVersionId", Guid.NewGuid());
         Assert((bool)Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", Get(node, "FullPath"), id, Guid.NewGuid(), baseline, "W1", Hash((string)Get(node, "FullPath")), 6L), "binding failed");
@@ -500,6 +511,7 @@ internal static class Program
     }
     static void ReleasedBaseline()
     {
+        Static("PdmDocumentIdentityStore", "ConfigureBrowserReadScope", directory);
         foreach (var difference in new[] { "none", "hash", "properties", "references", "work", "missing" })
         {
             var id = Guid.NewGuid(); var baseline = Guid.NewGuid(); var latest = Guid.NewGuid();
@@ -750,7 +762,9 @@ internal static class Program
         var items=Array.CreateInstance(T("BatchOperationItem"),1); items.SetValue(New("BatchOperationItem",root,0),0);
         Static("PdmAddin","SynchronizeBatchFileIdentities",items);
         Assert((Guid)Get(alias,"DocumentId")==document,"drawing alias lost model identity");
-        using(var handler=new JsonHandler(request => new[]{new{id=Guid.NewGuid(),revision=new{display="W1"},sha256=Hash((string)Get(model,"FullPath")),propertySnapshot=new Dictionary<string,string>()}}))
+        using(var handler=new JsonHandler(request => request.Method == HttpMethod.Post && request.RequestUri.AbsolutePath == "/api/documents/version-verifications"
+            ? (object)new HttpResponseMessage(HttpStatusCode.NotFound)
+            : new[]{new{id=Guid.NewGuid(),revision=new{display="W1"},sha256=Hash((string)Get(model,"FullPath")),propertySnapshot=new Dictionary<string,string>()}}))
         using(var client=(IDisposable)Client(handler))
         {
             var plugin=New("PdmAddin"); T("PdmAddin").GetField("apiClient",Flags).SetValue(plugin,client);
@@ -852,6 +866,7 @@ internal static class Program
     }
     static void ExternalImport()
     {
+        Static("PdmDocumentIdentityStore", "ConfigureBrowserReadScope", Path.Combine(directory, "workspace"));
         var project = Guid.NewGuid();
         var node = Node("import-cache.SLDPRT", Guid.NewGuid(), 1);
         Set(node, "DocumentId", null);
@@ -864,6 +879,9 @@ internal static class Program
         items.SetValue(New("BatchOperationItem", root, 0), 0); items.SetValue(New("BatchOperationItem", node, 1), 1);
         Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", items, project);
         Static("PdmAddin", "ValidateBatchFileNames", items);
+        var controlled = Path.Combine(directory, "workspace", "bound.SLDPRT");
+        Directory.CreateDirectory(Path.GetDirectoryName(controlled));
+        File.Copy(path, controlled, true); path = controlled; Set(node, "FullPath", path);
         Assert((bool)Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, Guid.NewGuid(), project, Guid.NewGuid(), "W1", Hash(path), new FileInfo(path).Length), "same-project binding failed");
         Assert(!(bool)Static("PdmAddin", "RequiresExternalReferenceCopy", node, project), "same-project source blocked");
         Assert((bool)Static("PdmAddin", "RequiresExternalReferenceCopy", node, Guid.NewGuid()), "foreign project binding allowed");
@@ -927,6 +945,7 @@ internal static class Program
     static object New(string name, params object[] args)
     {
         var value = Activator.CreateInstance(T(name), Flags & ~BindingFlags.Static, null, args, null);
+        if (name == "PdmAddin") T(name).GetField("lifetime", Flags).SetValue(value, new CancellationTokenSource());
         var children = value.GetType().GetProperty("Children", Flags);
         if (children?.CanWrite == true && children.GetValue(value) == null) children.SetValue(value, Activator.CreateInstance(children.PropertyType));
         return value;

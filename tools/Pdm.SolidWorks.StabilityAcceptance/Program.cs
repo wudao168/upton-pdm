@@ -57,7 +57,7 @@ internal static partial class Program
         if (args.Length < 3 || args.Length > 8 || roots.Length > 1 || options.Any(value =>
             value != "--structure-only" && value != "--archive-preload" && value != "--mixed-states-only"
                 && value != "--api-payload" && value != "--virtual-fixture" && value != "--suppressed-only" && value != "--archive-only"
-                && value != "--virtual-nested-fixture" && value != "--reopen-native" && value != "--rename-fixture" && value != "--rename-existing"
+                && value != "--virtual-nested-fixture" && value != "--reopen-native" && value != "--rename-fixture" && value != "--rename-existing" && value != "--preserve-search-settings"
                 && value != "--audit-native" && value != "--repair-native-ref" && value != "--pack-repaired" && value != "--reopen-archive" && value != "--pending-child-rename" && value != "--isolated-virtual-fixture" && value != "--separate-instance" && value != "--checkout-context" && value != "--checkout-discard-chain" && value != "--open-only" && value != "--controlled-isolation" && value != "--discard-edit-regression" && value != "--linked-archive" && value != "--inventory-probe" && value != "--live-workflow")
             || options.Contains("--structure-only") && options.Contains("--archive-preload")
             || options.Contains("--api-payload") && !options.Contains("--archive-preload")
@@ -171,6 +171,8 @@ internal static partial class Program
             }
             Report["separateProcessVerified"] = true;
             Report["preexistingProcessIds"] = existingProcesses;
+            File.WriteAllText(Path.Combine(qa, "owned-solidworks.json"), new JavaScriptSerializer().Serialize(new
+                { processId = ownedPid, started = ownedStarted.ToString("O"), preexistingProcessIds = existingProcesses }));
             app.Visible = false; app.UserControl = false;
             Report["processId"] = ownedPid; Report["solidWorksVersion"] = app.RevisionNumber();
             var loadedAddin = app.GetAddInObject("{BCFD8A8A-472B-42E2-AC62-58BC17773650}");
@@ -181,11 +183,16 @@ internal static partial class Program
             }
             Report["interactiveAddinNotLoaded"] = true;
             Console.WriteLine("NATIVE: version=" + Report["solidWorksVersion"] + " pid=" + ownedPid);
-            searchFolders = app.GetSearchFolders((int)swSearchFolderTypes_e.swDocumentType); workingDirectory = app.GetCurrentWorkingDirectory();
-            searchRules = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules);
-            if (!app.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, copies)) throw new InvalidOperationException("无法设置独立样本搜索目录。");
+            workingDirectory = app.GetCurrentWorkingDirectory();
+            if (!options.Contains("--preserve-search-settings"))
+            {
+                searchFolders = app.GetSearchFolders((int)swSearchFolderTypes_e.swDocumentType);
+                searchRules = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules);
+                if (!app.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, copies)) throw new InvalidOperationException("无法设置独立样本搜索目录。");
+                app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, true);
+            }
+            Report["searchPreferencesNotWritten"] = options.Contains("--preserve-search-settings");
             app.SetCurrentWorkingDirectory(copies);
-            app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, true);
             var explicitRoot = roots.Length == 1;
             if (explicitRoot && Path.GetFileName(roots[0]) != roots[0]) throw new InvalidOperationException("根装配参数只能是样本内的文件名。");
             var assemblies = explicitRoot ? new[] { Path.Combine(copies, roots[0]) } : Directory.GetFiles(copies, "*.SLDASM", SearchOption.TopDirectoryOnly);
@@ -518,14 +525,28 @@ internal static partial class Program
                     if (rawEdit != "仅用于隔离副本的未保存内容验证")
                         throw new InvalidOperationException("隔离工程图样本未建立真实的属性修改。");
                     // Custom-property API writes need not set the UI save flag. Model a user
-                    // editor's pending change explicitly, then exercise the real Save3 path.
+                    // editor's pending change, which must be frozen to a submission copy.
                     drawing.SetSaveFlag();
                     if (!drawing.GetSaveFlag()) throw new InvalidOperationException("工程图未进入待保存状态，无法验证修改保留。");
                     Report["existingDrawingPath"] = drawingPath;
                     Scan(plugin, app, model, "existing-drawing", expectedDrawings);
-                    if (app.GetOpenDocumentByName(drawingPath) == null || drawing.GetSaveFlag() || savedDrawingHash == Hash(drawingPath))
-                        throw new InvalidOperationException("已有工程图窗口被关闭，或确认保存后的修改未写入隔离副本。");
-                    Report["existingDrawingEditSavedAndWindowRetained"] = true;
+                    if (app.GetOpenDocumentByName(drawingPath) == null || !drawing.GetSaveFlag() || savedDrawingHash != Hash(drawingPath))
+                        throw new InvalidOperationException("存档准备改变了原工程图窗口、待保存状态或源文件字节。");
+                    drawing.Extension.CustomPropertyManager[""].Get6("UPLM_QA_PreserveEdit", false, out var retainedEdit, out _, out _, out _);
+                    if (retainedEdit != "仅用于隔离副本的未保存内容验证") throw new InvalidOperationException("原工程图的未保存属性修改丢失。");
+                    Report["existingDrawingWindowDirtyAndSourcePreserved"] = true;
+                    // After asserting retention, close only this QA document to independently
+                    // reopen the captured native submission bytes and inspect persistence.
+                    app.CloseDoc(drawing.GetTitle());
+                    var memoryPath = (string)Report["existingDrawingMemoryCopyPath"];
+                    var persisted = app.OpenDoc6(memoryPath, (int)swDocumentTypes_e.swDocDRAWING,
+                        (int)(swOpenDocOptions_e.swOpenDocOptions_Silent | swOpenDocOptions_e.swOpenDocOptions_ReadOnly), "", ref errors, ref warnings);
+                    if (persisted == null || errors != 0 || !string.Equals(persisted.GetPathName(), memoryPath, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("提交副本不能按实际路径重新只读打开。");
+                    persisted.Extension.CustomPropertyManager[""].Get6("UPLM_QA_PreserveEdit", false, out var persistedEdit, out _, out _, out _);
+                    if (persistedEdit != retainedEdit || !persisted.IsOpenedReadOnly()) throw new InvalidOperationException("真实提交副本未保留未保存属性修改。");
+                    Report["existingDrawingMemoryCopyReopenedAndVerified"] = true;
+                    app.CloseDoc(persisted.GetTitle());
                 }
             }
         NativeVerificationComplete:
@@ -911,7 +932,7 @@ internal static partial class Program
                 {
                     var node = Get(item, "Node");
                     propertiesByPath[(string)Get(node, "FullPath")] = (IReadOnlyDictionary<string, string>)type.GetMethod("ReadArchivePreflightProperties", Members)
-                        .Invoke(addin, new object[] { node, cards, configurations });
+                        .Invoke(addin, new object[] { node, cards, configurations, null });
                     if (Get(node, "Kind").ToString() == "Drawing")
                     {
                         type.GetMethod("ValidateDrawingModelsSaved", Members).Invoke(addin, new object[] { node, null });
@@ -954,6 +975,21 @@ internal static partial class Program
                 if (outsideHashes.Any(pair => Hash(Path.Combine((string)Report["copies"], pair.Key)) != pair.Value))
                     throw new InvalidOperationException("存档准备改写了结构外文件，验证失败。");
                 Report["outsideFilesUnchanged"] = true;
+                if (mode == "existing-drawing")
+                {
+                    var edited = Flatten(root).Single(node => string.Equals((string)Get(node, "FullPath"), (string)Report["existingDrawingPath"], StringComparison.OrdinalIgnoreCase));
+                    var memory = type.GetMethod("MemoryCopy", Members).Invoke(addin, new[] { edited });
+                    if (memory == null) throw new InvalidOperationException("未保存工程图缺少真实提交副本。");
+                    var copy = (string)memory.GetType().GetField("CopyPath", Members).GetValue(memory);
+                    var hash = (string)memory.GetType().GetField("CopyHash", Members).GetValue(memory);
+                    if (!File.Exists(copy) || Hash(copy) != hash || hash == Hash((string)Report["existingDrawingPath"]))
+                        throw new InvalidOperationException("未保存工程图提交副本不存在、哈希不符或仍为旧源文件字节。");
+                    var destination = Path.Combine(Path.GetDirectoryName((string)Report["copies"]), "verified-memory-copy", Path.GetFileName(copy));
+                    Directory.CreateDirectory(Path.GetDirectoryName(destination)); File.Copy(copy, destination);
+                    if (Hash(destination) != hash) throw new InvalidOperationException("复制到隔离验收目录的提交副本字节不一致。");
+                    Report["existingDrawingMemoryCopyPath"] = destination;
+                    Report["existingDrawingMemoryCopySha256"] = hash;
+                }
                 Console.WriteLine("NATIVE PRELOAD PASS: " + mode + " models saved before drawings; final read-only preflight clean");
             }
             finally

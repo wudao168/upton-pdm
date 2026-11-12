@@ -24,13 +24,13 @@ public sealed class ProjectRecordReadAccessTests(PdmApiFactory factory) : IClass
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync(url)).StatusCode);
         Authorize(client, "admin", "Administrator");
         var roleName = "记录只读测试-" + Guid.NewGuid().ToString("N");
-        var created = await client.PostAsJsonAsync("/api/role-permissions", new { name = roleName, description = "只有项目可见权限", sourceRoleCode = "Engineer" });
-        created.EnsureSuccessStatusCode();
-        using var directory = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
-        var roleCode = directory.RootElement.GetProperty("roles").EnumerateArray().Single(item => item.GetProperty("name").GetString() == roleName).GetProperty("role").GetString()!;
-        (await client.PutAsJsonAsync($"/api/role-permissions/{roleCode}", new { permissions = new[] { PermissionCodes.ProjectView } })).EnsureSuccessStatusCode();
         using var scope = factory.Services.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+        var directory = await ApiTestAuthorization.CreateRoleAsync(repository, roleName, "只有项目记录查看权限", "Engineer", default);
+        var roleCode = directory.Roles.Single(role => role.Name == roleName).Role;
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        (await client.PutAsJsonAsync("/api/authorization-center", AuthorizationPolicy.UpdateRole(settings, roleCode,
+            [PermissionCodes.ProjectView, ProjectCenterPermissions.Tab("records")]))).EnsureSuccessStatusCode();
         Assert.IsType<InMemoryPdmRepository>(repository);
         var username = "record-reader-" + Guid.NewGuid().ToString("N");
         await repository.CreateUserAsync(new(Guid.NewGuid(), username, "记录查看人员", "unused", UserRole.Engineer, true, RoleCode: roleCode, CompanyId: Guid.Parse("70000000-0000-0000-0000-000000000001")), default);
@@ -44,7 +44,8 @@ public sealed class ProjectRecordReadAccessTests(PdmApiFactory factory) : IClass
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync($"/api/projects/{projectId}/manager-notes", new { content = "不允许新增的记录" })).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync($"/api/projects/{projectId}/todos", new { content = "不允许推送的待办", recipientUsernames = new[] { username } })).StatusCode);
         Authorize(client, "admin", "Administrator");
-        (await client.PutAsJsonAsync($"/api/role-permissions/{roleCode}", new { permissions = Array.Empty<string>() })).EnsureSuccessStatusCode();
+        settings = await repository.GetAuthorizationSettingsAsync(default);
+        (await client.PutAsJsonAsync("/api/authorization-center", AuthorizationPolicy.UpdateRole(settings, roleCode, []))).EnsureSuccessStatusCode();
         Authorize(client, username, "Engineer");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(url)).StatusCode);
     }

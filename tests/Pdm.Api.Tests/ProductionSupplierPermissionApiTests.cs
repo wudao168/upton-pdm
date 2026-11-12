@@ -36,7 +36,7 @@ public sealed class ProductionSupplierPermissionApiTests(PdmApiFactory factory) 
         async Task<HttpClient> Account(string name, params string[] permissions)
         {
             var label = name + Guid.NewGuid().ToString("N");
-            var directory = await repository.CreateRoleAsync(label, "供应商权限回归", "Engineer", default);
+            var directory = await ApiTestAuthorization.CreateRoleAsync(repository, label, "供应商权限回归", "Engineer", default);
             var definition = directory.Roles.Single(item => item.Name == label);
             await repository.SetRolePermissionsAsync(definition.Role, permissions, default);
             await repository.CreateUserAsync(new(Guid.NewGuid(), label, name, "unused", UserRole.Engineer, true, CompanyId: company, RoleCode: definition.Role), default);

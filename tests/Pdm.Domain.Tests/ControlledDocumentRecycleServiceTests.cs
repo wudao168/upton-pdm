@@ -9,7 +9,7 @@ public sealed class ControlledDocumentRecycleServiceTests
     [Fact]
     public async Task Administrator_CanRecycleAndRestoreUnreferencedWorkDocument()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         var document = await repository.RegisterDocumentAsync(
             new RegisterDocumentCommand(project.Id, "RECYCLE-001", "待删除测试件", "RECYCLE-001.SLDPRT", DocumentKind.Part),
@@ -32,7 +32,7 @@ public sealed class ControlledDocumentRecycleServiceTests
     [Fact]
     public async Task Engineer_CannotUseControlledRecycleBin()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         var document = await repository.RegisterDocumentAsync(
             new RegisterDocumentCommand(project.Id, "RECYCLE-002", "权限测试件", "RECYCLE-002.SLDPRT", DocumentKind.Part),
@@ -45,7 +45,7 @@ public sealed class ControlledDocumentRecycleServiceTests
     [Fact]
     public async Task RecycleRequiresExactNameConfirmationAndOptimisticVersion()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         var document = await repository.RegisterDocumentAsync(
             new RegisterDocumentCommand(project.Id, "RECYCLE-003", "确认测试件", "RECYCLE-003.SLDPRT", DocumentKind.Part),
@@ -59,7 +59,7 @@ public sealed class ControlledDocumentRecycleServiceTests
     [Fact]
     public async Task BatchRecycleKeepsBlockedItemsAndReportsPartialSuccess()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         var first = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "BATCH-001", "批量测试一", "BATCH-001.SLDPRT", DocumentKind.Part), "admin", CancellationToken.None);
         var second = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "BATCH-002", "批量测试二", "BATCH-002.SLDPRT", DocumentKind.Part), "admin", CancellationToken.None);

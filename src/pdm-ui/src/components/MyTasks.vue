@@ -9,6 +9,10 @@ import { useUserDisplayName } from '../userDisplay'
 import { isProjectTodo, isTaskCenterNotification, oplResponseCategory, releaseApprovalTaskForNotification } from '../taskNotifications'
 
 const displayUserName = useUserDisplayName()
+function passwordApplicantName(task: PasswordResetTask) {
+  const name = task.displayName?.trim()
+  return name && name.toLowerCase() !== task.username.trim().toLowerCase() ? name : displayUserName(task.username)
+}
 
 const props = withDefaults(defineProps<{
   tasks: MyApprovalTask[]
@@ -266,8 +270,8 @@ const rows = computed<TaskCenterRow[]>(() => [
     kind: 'password' as const,
     status: '待处理',
     statusClass: 'is-remind',
-    title: `${displayUserName(task.username)} 密码重置申请`,
-    content: `${task.displayName}申请将账号密码重置为初始密码`,
+    title: `${passwordApplicantName(task)} 密码重置申请`,
+    content: `${passwordApplicantName(task)}申请将账号密码重置为初始密码`,
     createdAt: task.requestedAt,
     password: task,
   })),

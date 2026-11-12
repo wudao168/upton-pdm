@@ -2088,6 +2088,7 @@ public sealed partial class PdmWorkflowService(
         var projectFolders = await repository.ListProjectFoldersAsync(project.Id, actor, role, cancellationToken);
         var currentProjectDocuments = await repository.ListDocumentsAsync(project.Id, cancellationToken);
         var currentProjectDocumentsById = currentProjectDocuments.ToDictionary(document => document.Id);
+        var storageProjectsByDocument = currentProjectDocuments.ToDictionary(document => document.Id, _ => project);
         void RequireProjectDocumentAccess(PdmDocument document, FolderAccess requiredAccess)
         {
             var folder = document.FolderId is null
@@ -2135,6 +2136,12 @@ public sealed partial class PdmWorkflowService(
 
         var files = new List<ControlledOpenFile>();
         var warnings = new List<string>();
+        var referenceIssues = new List<ControlledOpenReferenceIssue>();
+        void MissingReference(DocumentReferenceNode reference, string message)
+        {
+            warnings.Add(message);
+            referenceIssues.Add(new(reference.InstancePath, reference.FileName, "", message));
+        }
         var filesByDocument = new Dictionary<Guid, ControlledOpenFile>();
         var normalizedConflictDocumentIds = new HashSet<Guid>();
         var fileNames = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
@@ -2154,7 +2161,45 @@ public sealed partial class PdmWorkflowService(
         // F03: expand only from a captured native file inventory, not old feature-source discovery.
         if (rootVersion.ReferenceSnapshot.UsesNativeFileInventory) treeScopeOnly = false;
         var scopedRoot = treeScopeOnly ? ArchiveSafety.StructureOnly(rootVersion.ReferenceSnapshot) : rootVersion.ReferenceSnapshot;
-        if (allowCurrentVersionFallback)
+        var restoredLegacyDrawingModels = false;
+        if (rootDocument.Kind == DocumentKind.Drawing
+            && !scopedRoot.Children.Any(node => node.Kind is DocumentKind.Part or DocumentKind.Assembly))
+        {
+            var relatedModels = (await repository.ListDocumentRelationsAsync(project.Id, cancellationToken))
+                .Where(relation => relation.DrawingDocumentId == documentId)
+                .Select(relation => relation.ModelDocumentId).Distinct().ToArray();
+            if (relatedModels.Length > 0)
+            {
+                if (!allowCurrentVersionFallback)
+                    throw new PdmRuleException("该工程图历史快照未记录模型引用版本，不能用当前模型替代。请先核对原始图模版本并补齐引用。");
+                if (!resolveLegacyReferences)
+                    throw new PdmReferenceVersionConfirmationException("该工程图旧存档未记录模型引用版本，按已登记图模关系获取最新受控模型需要明确确认。");
+                var models = new List<DocumentReferenceNode>();
+                foreach (var modelId in relatedModels)
+                {
+                    // Only existing, explicit relationships may repair a legacy manifest.
+                    // File-name guesses and changes to immutable snapshots are not allowed.
+                    var model = await repository.FindDocumentAsync(modelId, cancellationToken)
+                        ?? throw new PdmNotFoundException("工程图已登记的关联模型不存在，请核对图模关系。");
+                    if (model.Kind == DocumentKind.Drawing) throw new PdmRuleException("工程图关联的模型类型无效，请核对图模关系。");
+                    var modelProject = await repository.FindProjectAsync(model.ProjectId, cancellationToken)
+                        ?? throw new PdmNotFoundException("工程图关联模型所属项目不存在。");
+                    if (!await repository.HasProjectContentReadAccessAsync(modelProject.Id, actor, role, cancellationToken))
+                        throw new UnauthorizedAccessException("当前用户没有工程图关联模型所属项目的内容读取权限。");
+                    await RequireDocumentAccessAsync(model.Id, actor, role, FolderAccess.View, cancellationToken);
+                    storageProjectsByDocument[model.Id] = modelProject;
+                    authorizedDocumentIds.Add(model.Id);
+                    var history = await ListOpenVersionsAsync(model.Id);
+                    var latest = history.FirstOrDefault(item => item.Revision.Display == model.Revision.Display) ?? history.FirstOrDefault()
+                        ?? throw new PdmNotFoundException($"工程图关联模型{model.FileName}尚无受控存档版本。");
+                    models.Add(latest.ReferenceSnapshot with { Revision = latest.Revision });
+                }
+                scopedRoot = scopedRoot with { Children = [.. scopedRoot.Children, .. models] };
+                restoredLegacyDrawingModels = true;
+                warnings.Add("工程图旧存档缺少模型引用版本，本次经确认按已登记图模关系获取最新受控模型；历史快照保持不变。");
+            }
+        }
+        if (allowCurrentVersionFallback && resolveLegacyReferences)
         {
             var currentDesigns = versionsByDocument.Where(pair => pair.Value.Count > 0).ToDictionary(pair => pair.Key, pair =>
             {
@@ -2163,6 +2208,7 @@ public sealed partial class PdmWorkflowService(
                 return (treeScopeOnly ? ArchiveSafety.StructureOnly(currentVersion.ReferenceSnapshot) : currentVersion.ReferenceSnapshot)
                     with { Revision = currentVersion.Revision };
             });
+            if (restoredLegacyDrawingModels) currentDesigns[documentId] = scopedRoot with { Revision = rootVersion.Revision };
             var effectiveIndexes = nativeIndexes.Select(index =>
             {
                 if (index.DocumentId is not Guid id || !currentDesigns.TryGetValue(id, out var design)
@@ -2188,15 +2234,18 @@ public sealed partial class PdmWorkflowService(
             var optionalCurrentDrawing = allowCurrentVersionFallback
                 && !isRoot
                 && node.Kind == DocumentKind.Drawing;
-            var optionalMissingComponent = allowMissingComponents && !forEdit && !isRoot
-                && node.Kind is DocumentKind.Part or DocumentKind.Assembly;
+            var nativeComponent = !isRoot && node.Kind is DocumentKind.Part or DocumentKind.Assembly;
+            var requiredDrawingModel = forEdit && nativeComponent && rootDocument.Kind == DocumentKind.Drawing
+                && scopedRoot.Children.Contains(node);
+            var optionalMissingComponent = allowMissingComponents && nativeComponent && !requiredDrawingModel
+                && (!forEdit || node.Status == ReferenceNodeStatus.Missing || !node.DocumentId.HasValue);
             try
             {
             if (node.Status == ReferenceNodeStatus.Missing)
             {
                 if (optionalCurrentDrawing || optionalMissingComponent)
                 {
-                    warnings.Add($"引用文件{node.FileName}缺失，本次按缺失引用打开。");
+                    MissingReference(node, $"引用文件{node.FileName}缺失，本次按缺失引用打开。");
                     continue;
                 }
                 throw new PdmRuleException($"引用文件{node.FileName}缺失，不能生成完整打开清单。");
@@ -2216,7 +2265,7 @@ public sealed partial class PdmWorkflowService(
                 {
                     if (optionalMissingComponent)
                     {
-                        warnings.Add($"引用文件{node.FileName}尚未登记，本次按缺失引用打开。");
+                        MissingReference(node, $"引用文件{node.FileName}尚未登记，本次按缺失引用打开。");
                         continue;
                     }
                     throw new PdmRuleException($"引用文件{node.FileName}尚未登记，不能生成完整打开清单。");
@@ -2230,7 +2279,7 @@ public sealed partial class PdmWorkflowService(
                 {
                     if (optionalCurrentDrawing || optionalMissingComponent)
                     {
-                        warnings.Add($"引用文件{node.FileName}尚未登记，本次按缺失引用打开。");
+                        MissingReference(node, $"引用文件{node.FileName}尚未登记，本次按缺失引用打开。");
                         continue;
                     }
                     throw new PdmRuleException($"引用文件{node.FileName}尚未登记，不能生成完整打开清单。");
@@ -2251,7 +2300,14 @@ public sealed partial class PdmWorkflowService(
                 }
                 else
                 {
+                    var externalDocument = await repository.FindDocumentAsync(referencedDocumentId, cancellationToken)
+                        ?? throw new PdmNotFoundException($"引用图档{node.FileName}不存在。");
+                    var externalProject = await repository.FindProjectAsync(externalDocument.ProjectId, cancellationToken)
+                        ?? throw new PdmNotFoundException($"引用图档{node.FileName}所属项目不存在。");
+                    if (!await repository.HasProjectContentReadAccessAsync(externalProject.Id, actor, role, cancellationToken))
+                        throw new UnauthorizedAccessException("当前用户没有引用图档所属项目的内容读取权限。");
                     await RequireDocumentAccessAsync(referencedDocumentId, actor, role, FolderAccess.View, cancellationToken);
+                    storageProjectsByDocument[referencedDocumentId] = externalProject;
                 }
                 authorizedDocumentIds.Add(referencedDocumentId);
             }
@@ -2281,16 +2337,18 @@ public sealed partial class PdmWorkflowService(
                     {
                         if (optionalMissingComponent)
                         {
-                            warnings.Add($"引用文件{node.FileName}未记录引用版本，本次按缺失引用打开。");
+                            MissingReference(node, $"引用文件{node.FileName}未记录引用版本，本次按缺失引用打开。");
                             continue;
                         }
                         throw new PdmRuleException($"引用文件{node.FileName}的快照未记录版本，不能用当前最新版本替代。");
                     }
 
+                    if (versions.Count > 0 && !resolveLegacyReferences)
+                        throw new PdmReferenceVersionConfirmationException($"引用文件{node.FileName}未记录引用版本，采用最新受控版本需要明确确认。");
                     version = versions.FirstOrDefault();
-                    if (version is null && allowCurrentVersionFallback)
+                    if (version is null && allowCurrentVersionFallback && !requiredDrawingModel)
                     {
-                        warnings.Add($"引用文件{node.FileName}尚未形成受控版本，本次按缺失引用打开。");
+                        MissingReference(node, $"引用文件{node.FileName}尚未形成受控版本，本次按缺失引用打开。");
                         continue;
                     }
                     if (version is null)
@@ -2304,10 +2362,14 @@ public sealed partial class PdmWorkflowService(
                     version = versions.FirstOrDefault(item => item.Revision.Display.Equals(referencedRevision, StringComparison.OrdinalIgnoreCase));
                     if (version is null && allowCurrentVersionFallback)
                     {
+                        if (versions.Count > 0 && !resolveLegacyReferences)
+                            throw new PdmReferenceVersionConfirmationException($"引用文件{node.FileName}的存档版本{referencedRevision}不存在，采用最新受控版本需要明确确认。");
                         version = versions.FirstOrDefault();
                         if (version is null)
                         {
-                            warnings.Add($"引用文件{node.FileName}尚未形成受控版本，本次按缺失引用打开。");
+                            if (requiredDrawingModel)
+                                throw new PdmNotFoundException($"工程图关联的模型{node.FileName}尚无可用受控版本，无法获取编辑权限。");
+                            MissingReference(node, $"引用文件{node.FileName}尚未形成受控版本，本次按缺失引用打开。");
                             continue;
                         }
                         warnings.Add($"引用文件{node.FileName}的快照版本{referencedRevision}不存在，已使用最新受控版本{version.Revision.Display}。");
@@ -2316,7 +2378,7 @@ public sealed partial class PdmWorkflowService(
                     {
                         if (optionalMissingComponent)
                         {
-                            warnings.Add($"引用文件{node.FileName}的受控版本{referencedRevision}不存在，本次按缺失引用打开。");
+                            MissingReference(node, $"引用文件{node.FileName}的受控版本{referencedRevision}不存在，本次按缺失引用打开。");
                             continue;
                         }
                         throw new PdmNotFoundException($"引用文件{node.FileName}的受控版本{referencedRevision}不存在。");
@@ -2359,7 +2421,7 @@ public sealed partial class PdmWorkflowService(
                         ?? throw new PdmNotFoundException($"引用文件{node.FileName}已不在当前项目中。");
                     var currentVersions = await ListOpenVersionsAsync(referencedDocumentId);
                     if (!resolveLegacyReferences)
-                        throw new PdmRuleException($"引用快照包含同一图档的不同版本：{node.FileName}（{existing.Revision}、{version.Revision.Display}）。请明确确认更新引用后再打开，系统未自动替换子件版本。");
+                        throw new PdmReferenceVersionConfirmationException($"引用快照包含同一图档的不同版本：{node.FileName}（{existing.Revision}、{version.Revision.Display}）。请明确确认更新引用后再打开，系统未自动替换子件版本。");
                     var currentVersion = currentVersions.FirstOrDefault(item =>
                             item.Revision.Display.Equals(currentDocument.Revision.Display, StringComparison.OrdinalIgnoreCase))
                         ?? currentVersions.FirstOrDefault()
@@ -2394,21 +2456,22 @@ public sealed partial class PdmWorkflowService(
             }
 
             var isolated = ArchiveSafety.NativeCopy(nativeIndexes, referencedDocumentId, version);
+            var storageProject = storageProjectsByDocument[referencedDocumentId];
             try
             {
                 await fileStorage.ValidateStoredFileMetadataAsync(
-                    project,
+                    storageProject,
                     new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt),
                     cancellationToken);
                 if (isolated != null)
                 {
-                    await fileStorage.ValidateStoredFileMetadataAsync(project,
+                    await fileStorage.ValidateStoredFileMetadataAsync(storageProject,
                         new StoredFile(isolated.RelativePath, isolated.Length, isolated.Sha256, version.CreatedAt), cancellationToken);
                 }
             }
-            catch (PdmNotFoundException) when (optionalMissingComponent)
+            catch (PdmNotFoundException) when (optionalMissingComponent && !forEdit)
             {
-                warnings.Add($"引用文件{fileName}的存档副本缺失，本次按缺失引用打开。");
+                MissingReference(node, $"引用文件{fileName}的存档副本缺失，本次按缺失引用打开。");
                 continue;
             }
             var item = new ControlledOpenFile(
@@ -2522,7 +2585,7 @@ public sealed partial class PdmWorkflowService(
             rootFile.RelativePath,
             forEdit,
             files,
-            warnings.Distinct(StringComparer.Ordinal).ToArray());
+            warnings.Distinct(StringComparer.Ordinal).ToArray()) { ReferenceIssues = referenceIssues.Distinct().ToArray() };
         await AuditAsync(
             actor,
             forEdit ? "document.open-manifest.edit" : releasedOnly ? "document.open-manifest.released" : "document.open-manifest.readonly",
@@ -3728,6 +3791,7 @@ public sealed partial class PdmWorkflowService(
                 HeatTreatment = fields.Contains("heatTreatment") ? Optional(command.HeatTreatment) : original.HeatTreatment,
                 Weight = fields.Contains("weight") ? Optional(command.Weight) : original.Weight,
                 Quantity = fields.Contains("quantity") ? command.Quantity!.Value : original.Quantity,
+                IsSummaryQuantity = original.IsSummaryQuantity || fields.Contains("quantity"),
                 Revision = fields.Contains("revision") ? Required(command.Revision, "版本") : original.Revision,
                 ParentDrawingNumber = fields.Contains("parentDrawingNumber") ? Optional(command.ParentDrawingNumber) : original.ParentDrawingNumber,
                 ImpactStage = fields.Contains("impactStage") ? impactStage : original.ImpactStage,
@@ -4376,8 +4440,7 @@ public sealed partial class PdmWorkflowService(
         foreach (var user in await repository.ListUsersAsync(cancellationToken))
         {
             if (!user.IsActive || string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase)) continue;
-            if (!IsProjectDesignLead(project, user.Username)
-                && !await repository.HasUserPermissionAsync(user.Username, user.Role, PermissionCodes.DrawingReviewDecide, cancellationToken)) continue;
+            if (!await AuthorizationPolicy.CanAsync(repository, projectId, user.Username, PermissionCodes.DrawingReviewDecide, cancellationToken)) continue;
             if (!await repository.HasProjectContentReadAccessAsync(projectId, user.Username, user.Role, cancellationToken)) continue;
             candidates.Add(user);
         }
@@ -4390,7 +4453,7 @@ public sealed partial class PdmWorkflowService(
         var project = await repository.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
         var result = new List<string>();
         foreach (var user in await ListDrawingReviewCandidateUsersAsync(projectId, actor, ct))
-            if ((IsProjectDesignLead(project, user.Username) || await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user, PermissionCodes.DrawingReviewDecide, ct))
+            if (await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user, PermissionCodes.DrawingReviewDecide, ct)
                 && await NotificationRecipientPolicy.InBusinessCompanyAsync(repository, user, project.OrganizationId, ct)) result.Add(user.Username);
         return result;
     }
@@ -4447,9 +4510,8 @@ public sealed partial class PdmWorkflowService(
             if (!reviewer.IsActive) throw new PdmRuleException($"指定审核人 {reviewer.DisplayName} 已停用。");
             if (string.Equals(reviewer.Username, actor, StringComparison.OrdinalIgnoreCase))
                 throw new PdmRuleException("发起人不能同时作为指定审核人。");
-            if (!IsProjectDesignLead(project, reviewer.Username)
-                && !await repository.HasUserPermissionAsync(reviewer.Username, reviewer.Role, PermissionCodes.DrawingReviewDecide, cancellationToken))
-                throw new PdmRuleException($"指定审核人 {reviewer.DisplayName} 没有2D图纸审核权限，请先调整角色权限。");
+            if (!await AuthorizationPolicy.CanAsync(repository, projectId, reviewer.Username, PermissionCodes.DrawingReviewDecide, cancellationToken))
+                throw new PdmRuleException($"指定审核人 {reviewer.DisplayName} 没有此项目的2D图纸审核权限，请在权限中心配置。");
             if (selected.Any(candidate => string.Equals(candidate.DrawingVersion?.CreatedBy, reviewer.Username, StringComparison.OrdinalIgnoreCase)))
                 throw new PdmRuleException($"指定审核人 {reviewer.DisplayName} 不能审核自己生成的图档版本，请选择其他人员。");
             reviewers.Add(reviewer);
@@ -4468,8 +4530,8 @@ public sealed partial class PdmWorkflowService(
         if (!supervisor.IsActive) throw new PdmRuleException("已配置的机械主管账号已停用。");
         if (reviewers.Any(reviewer => string.Equals(supervisor.Username, reviewer.Username, StringComparison.OrdinalIgnoreCase)))
             throw new PdmRuleException("指定审核人与机械主管必须是不同人员。");
-        if (!await repository.HasUserPermissionAsync(supervisor.Username, supervisor.Role, PermissionCodes.DrawingReviewDecide, cancellationToken))
-            throw new PdmRuleException("机械主管没有2D图纸批准权限，请先调整角色权限。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, supervisor.Username, PermissionCodes.DrawingReviewDecide, cancellationToken))
+            throw new PdmRuleException("机械主管没有此项目的2D图纸批准权限，请在权限中心配置。");
 
         var packageId = Guid.NewGuid();
         var items = selected.Select(candidate => new DrawingReviewItem
@@ -4829,15 +4891,8 @@ public sealed partial class PdmWorkflowService(
             ?? throw new PdmNotFoundException("图纸审核单不存在。");
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DrawingReviewDecide, cancellationToken))
-        {
-            var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
-                ?? throw new PdmNotFoundException("项目不存在。");
-            if (package.State != DrawingReviewPackageState.InReview
-                || !package.AssignedReviewers.Contains(actor, StringComparer.OrdinalIgnoreCase)
-                || !IsProjectDesignLead(project, actor))
-                throw new UnauthorizedAccessException("当前角色未配置执行此操作的权限。");
-        }
+        if (!await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, PermissionCodes.DrawingReviewDecide, cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有此项目的2D图纸审核权限，请在权限中心配置。");
         var item = package.Items.SingleOrDefault(candidate => candidate.Id == itemId)
             ?? throw new PdmNotFoundException("图纸审核项不存在。");
         if (command.Target != DrawingReviewTarget.Drawing2D)
@@ -4980,9 +5035,10 @@ public sealed partial class PdmWorkflowService(
 
     public async Task<DrawingReviewPackage> DecideDrawingReviewSupervisorAsync(Guid packageId, DecideDrawingReviewSupervisorCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.DrawingReviewDecide, cancellationToken);
         var package = await repository.FindDrawingReviewPackageAsync(packageId, cancellationToken)
             ?? throw new PdmNotFoundException("图纸审核单不存在。");
+        if (!await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, PermissionCodes.DrawingReviewDecide, cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有此项目的2D图纸批准权限，请在权限中心配置。");
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         if (package.State != DrawingReviewPackageState.PendingSupervisorApproval)
@@ -5282,8 +5338,7 @@ public sealed partial class PdmWorkflowService(
         var currentTask = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
         if (task.Decision is not null || currentTask?.Id != taskId || package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
             throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
-        if (!(task.Participants?.CanSign(actor) ?? (string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))))
+        if (!(task.Participants?.CanSign(actor) ?? string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)))
             throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
     }
 
@@ -6658,6 +6713,13 @@ public sealed partial class PdmWorkflowService(
             ?? throw new PdmNotFoundException("属性写回任务不存在。");
         if (!await repository.HasProjectContentReadAccessAsync(request.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        var document = await RequireDocumentAsync(request.SourceDocumentId, cancellationToken);
+        if (document.ProjectId != request.ProjectId)
+            throw new PdmRuleException("属性写回任务与源图档的项目不一致，已停止处理，请重新生成任务。");
+        var access = (await new DocumentOperationAccessService(repository).ApplyAsync(request.ProjectId,
+            [document], actor, role, cancellationToken)).Single().OperationAccess;
+        if (access?.CanArchive != true)
+            throw new UnauthorizedAccessException("权限中心未授权该图档的属性写回存档操作，请联系授权人员确认项目和目录权限。");
         return request;
     }
 

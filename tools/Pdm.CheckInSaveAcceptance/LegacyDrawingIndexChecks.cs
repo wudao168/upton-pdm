@@ -29,7 +29,7 @@ internal static partial class Program
    drawings.Add(drawing);models.Add(model);nodes.Add(model);nodes.Add(drawing);
   }
   versions[(Guid)Get(root,"DocumentId")]=LinkedVersion(root,LinkedSnapshot(root));
-  var plugin=New("PdmAddin");var project=Guid.NewGuid();var session=(Guid)Field(plugin,"checkoutSessionId");SetField(plugin,"authenticatedUsername","tester");
+  var plugin=New("PdmAddin");SetField(plugin,"lifetime",new CancellationTokenSource());var project=Guid.NewGuid();var session=(Guid)Field(plugin,"checkoutSessionId");SetField(plugin,"authenticatedUsername","tester");
   void Check(bool passed,string text){TreeCheck(passed,text);Console.WriteLine("PASS: "+text);}
   using(var client=(IDisposable)New("PdmApiClient","http://legacy-index.invalid/"))
   using(var handler=new LinkedArchiveHandler(nodes.ToArray(),versions,project,session,new List<string>(),false))
@@ -42,9 +42,10 @@ internal static partial class Program
    Check(drawings.All(drawing=>Classify(drawing)=="Unchanged"&&(bool)Get(drawing,"DrawingReferenceIndexPending")),"最新且未改动的工程图保持未变更，只提示历史引用待补全");
    Set(models[0],"IsModifiedInSolidWorks",true);await Refresh();
    Check(!(bool)Get(drawings[0],"RequiresModelUpdate"),"没有编辑权限的只读重建标志不触发配套工程图更新");
-   Set(models[0],"CheckedOutBy","tester");await Refresh();
+   Set(models[0],"CheckedOutBy","tester");Set(models[0],"HasCurrentEditSession",true);await Refresh();
+   Console.WriteLine("Model state: modified="+Get(models[0],"IsModifiedInSolidWorks")+" owner="+Get(models[0],"CheckedOutBy")+" session="+Get(models[0],"HasCurrentEditSession")+" work="+Get(models[0],"WorkState")+" drawing="+Get(drawings[0],"RequiresModelUpdate")+" classification="+Classify(drawings[0]));
    Check((bool)Get(drawings[0],"RequiresModelUpdate")&&Classify(drawings[0])=="DrawingUpdate","实际拥有编辑权限且存在未保存模型修改时，配套更新仍然生效");
-   Set(models[0],"IsModifiedInSolidWorks",false);Set(models[0],"CheckedOutBy",null);await Refresh();
+   Set(models[0],"IsModifiedInSolidWorks",false);Set(models[0],"CheckedOutBy",null);Set(models[0],"HasCurrentEditSession",false);await Refresh();
    using(var dialog=(System.Windows.Forms.Form)New("BatchOperationDialog",root,LinkedItems(nodes.ToArray()),Array.CreateInstance(Type("ProjectDto"),0),null,"tester",Enum.Parse(Type("BatchOperationKind"),"CheckIn"),null,null,null,false,false,0))
    {
     archiveRuleVersions=versions.ToDictionary(pair=>pair.Key,pair=>new[]{pair.Value});archiveRuleDelay=0;

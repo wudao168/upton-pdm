@@ -2,6 +2,7 @@ using System.Text.Json;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
+using Upton.Pdm.Tests;
 
 namespace Upton.Pdm.Domain.Tests;
 
@@ -139,7 +140,7 @@ public sealed class StockedMaterialServiceTests
     }
 
     [Fact]
-    public async Task LowStockNotifiesDefaultAssistantOnceAndNotifiesAgainAfterRecovery()
+    public async Task LowStockNotifiesAuthorizedPeopleOnceAndNotifiesAgainAfterRecovery()
     {
         var f = await Fixture.CreateAsync();
         await f.AddAsync("01010000001", 0);
@@ -164,6 +165,7 @@ public sealed class StockedMaterialServiceTests
         var view = await f.Service.SettingsAsync(f.Scope, default);
         Assert.Equal(240, view.Settings.SyncIntervalMinutes);
         Assert.Equal(new[] { "assistant" }, view.EffectiveRecipients);
+        await FinancialTestActors.GrantAsync(f.Repository, "Engineer", new(PermissionCodes.StockView, ["company"]), new(PermissionCodes.StockLowInventoryNotify, ["company"]));
         await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.SaveSettingsAsync(f.Scope, new(240, true, false, ["foreign"]), view.RowVersion, "admin", UserRole.Administrator, default));
         view = await f.Service.SaveSettingsAsync(f.Scope, new(120, true, false, ["assistant", "second"]), view.RowVersion, "admin", UserRole.Administrator, default);
         Assert.Equal(2, view.EffectiveRecipients.Count);
@@ -178,6 +180,12 @@ public sealed class StockedMaterialServiceTests
         f.Clock.Now = f.Clock.Now.AddHours(2);
         await f.Service.SynchronizeAsync(f.Scope, "scheduled", default, scheduled: true);
         Assert.True(f.Client.PlanReads > reads);
+        await FinancialTestActors.GrantAsync(f.Repository, "Engineer", new AuthorizationGrant(PermissionCodes.StockLowInventoryNotify, []));
+        view = await f.Service.SettingsAsync(f.Scope, default);
+        Assert.Equal(["assistant"], view.EffectiveRecipients);
+        var edited = await f.Service.SaveSettingsAsync(f.Scope, view.Settings with { SyncIntervalMinutes = 240 }, view.RowVersion, "admin", UserRole.Administrator, default);
+        Assert.Contains("second", edited.Settings.Recipients!);
+        Assert.Equal(["assistant"], edited.EffectiveRecipients);
     }
 
     [Fact]
@@ -508,6 +516,10 @@ public sealed class StockedMaterialServiceTests
             await f.Repository.CreateUserAsync(new(Guid.NewGuid(), "assistant", "标准助理", "hash", UserRole.Engineer, true, RoleCode: role, CompanyId: company), default);
             await f.Repository.CreateUserAsync(new(Guid.NewGuid(), "second", "第二接收人", "hash", UserRole.Engineer, true, CompanyId: company), default);
             await f.Repository.CreateUserAsync(new(Guid.NewGuid(), "foreign", "其他公司人员", "hash", UserRole.Engineer, true, CompanyId: Guid.NewGuid()), default);
+            await f.Repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "常备物料设置人员", "hash", UserRole.Administrator, true, CompanyId: company), default);
+            await FinancialTestActors.GrantAsync(f.Repository, "Administrator", new(PermissionCodes.StockView, ["company"]), new(PermissionCodes.StockSettingsManage, ["company"]));
+            await FinancialTestActors.GrantAsync(f.Repository, role, new(PermissionCodes.StandardLibraryView, ["company"]), new(PermissionCodes.StockView, ["company"]),
+                new(PermissionCodes.StockLowInventoryNotify, ["company"]));
             f.Category = await f.Categories.CreateCategoryAsync(new(Guid.NewGuid(), "常备分类", null, 1, true, "admin", f.Clock.Now, "admin", f.Clock.Now, 1), default);
             var template = (await f.Materials.FindCategoryAsync("0101", default))!;
             foreach (var (code, name, supply) in new[] { ("010402", "工具刀具", MaterialSupplyMode.Purchase), ("010405", "包装材料", MaterialSupplyMode.Purchase), ("010502", "非金属", MaterialSupplyMode.Purchase), ("0203", "标准机加件", MaterialSupplyMode.Manufacture) })

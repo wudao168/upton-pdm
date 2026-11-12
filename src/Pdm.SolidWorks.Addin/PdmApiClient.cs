@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Collections.Generic;
 using System.Net.Http;
@@ -24,6 +24,7 @@ internal sealed partial class PdmApiClient : IDisposable
 
     public event EventHandler AuthenticationExpired;
     public Func<Guid, CancellationToken, Task> BeforeCheckout { get; set; }
+    public Func<string, Task<bool>> ConfirmReferenceVersions { get; set; }
 
     public PdmApiClient(string baseAddress)
     {
@@ -96,6 +97,9 @@ internal sealed partial class PdmApiClient : IDisposable
         return await GetJsonAsync<List<DocumentDto>>(string.Concat("api/projects/", projectId, "/documents"), cancellationToken);
     }
 
+    public Task<DocumentDto> GetDocumentAsync(Guid documentId, CancellationToken cancellationToken) =>
+        GetJsonAsync<DocumentDto>("api/documents/" + documentId, cancellationToken);
+
     public Task<List<BomPropertyMappingDto>> GetBomPropertyMappingsAsync(CancellationToken cancellationToken) =>
         GetJsonAsync<List<BomPropertyMappingDto>>("api/bom-property-mappings", cancellationToken);
 
@@ -132,7 +136,7 @@ internal sealed partial class PdmApiClient : IDisposable
             {
                 ThrowAuthenticationExpiredIfNeeded(response);
                 ThrowServiceUnavailableIfNeeded(response);
-                throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
+                throw ServiceError(response.StatusCode.ToString(), body);
             }
 
             return serializer.Deserialize<DocumentReferenceNodeDto>(body);
@@ -146,7 +150,7 @@ internal sealed partial class PdmApiClient : IDisposable
         bool forEdit,
         CancellationToken cancellationToken,
         bool resolveLegacyReferences = false,
-        bool allowMissingComponents = false)
+        bool allowMissingComponents = true)
     {
         try
         {
@@ -159,6 +163,15 @@ internal sealed partial class PdmApiClient : IDisposable
         catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
             throw new TimeoutException("准备受控图档超时。大型装配需要逐项校验受控文件，请确认PLM服务和文件库可访问后重试。", exception);
+        }
+        catch (ReferenceVersionConfirmationException exception) when (!resolveLegacyReferences && !versionId.HasValue && !releasedOnly)
+        {
+            if (ConfirmReferenceVersions == null || !await ConfirmReferenceVersions(exception.Message))
+                throw new OperationCanceledException("已取消更新引用版本，原有窗口、文件和权限已保留。");
+            var confirmed = await CreateControlledOpenManifestAsync(documentId, versionId, releasedOnly, forEdit,
+                cancellationToken, true, allowMissingComponents);
+            confirmed.LatestReferenceVersionsConfirmed = true;
+            return confirmed;
         }
     }
 
@@ -434,7 +447,7 @@ internal sealed partial class PdmApiClient : IDisposable
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
-            { ThrowAuthenticationExpiredIfNeeded(response); ThrowServiceUnavailableIfNeeded(response); throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body)); }
+            { ThrowAuthenticationExpiredIfNeeded(response); ThrowServiceUnavailableIfNeeded(response); throw ServiceError(response.StatusCode.ToString(), body); }
             return serializer.Deserialize<ArchiveBatchReceiptDto>(body);
         }
     }
@@ -662,9 +675,19 @@ internal sealed partial class PdmApiClient : IDisposable
         if (fileProperties != null)
             foreach (var property in fileProperties) result[property.Key] = property.Value;
         if (modelProperties != null)
-            foreach (var property in modelProperties) result[property.Key] = property.Value;
+            foreach (var property in modelProperties)
+            {
+                // A reused version's property card may still contain the previous file fingerprint.
+                if (!IsArchiveFileProperty(property.Key)) result[property.Key] = property.Value;
+            }
         return result;
     }
+
+    internal static bool IsArchiveFileProperty(string name) =>
+        string.Equals(name, "FileName", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "Extension", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "LastWriteTimeUtc", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "SourceFileSha256", StringComparison.OrdinalIgnoreCase);
 
     public async Task<StoredVersionFile> UploadVersionFileAsync(
         Guid projectId,
@@ -993,7 +1016,7 @@ internal sealed partial class PdmApiClient : IDisposable
             {
                 ThrowAuthenticationExpiredIfNeeded(response);
                 ThrowServiceUnavailableIfNeeded(response);
-                throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
+                throw ServiceError(response.StatusCode.ToString(), body);
             }
 
             return serializer.Deserialize<T>(body);
@@ -1019,7 +1042,7 @@ internal sealed partial class PdmApiClient : IDisposable
                     ThrowAuthenticationExpiredIfNeeded(response);
                 }
                 ThrowServiceUnavailableIfNeeded(response);
-                throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
+                throw ServiceError(response.StatusCode.ToString(), body);
             }
 
             return serializer.Deserialize<T>(body);
@@ -1294,6 +1317,18 @@ internal sealed partial class PdmApiClient : IDisposable
         return null;
     }
 
+    private static InvalidOperationException ServiceError(string status, string body)
+    {
+        try
+        {
+            var problem = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
+            if (problem.TryGetValue("type", out var code) && code?.ToString() == "urn:uplm:reference-version-confirmation")
+                return new ReferenceVersionConfirmationException(GetErrorMessage(status, body));
+        }
+        catch { }
+        return new InvalidOperationException(GetErrorMessage(status, body));
+    }
+
     private static string GetErrorMessage(string status, string body)
     {
         if (status == "RequestEntityTooLarge" || status == "413")
@@ -1423,6 +1458,7 @@ internal sealed class DocumentReferenceNodeDto
 
 internal sealed class DocumentDto
 {
+    public DocumentOperationAccessDto OperationAccess { get; set; }
     public string DrawingVersion { get; set; }
     public string PublishedVersion { get; set; }
     public Guid Id { get; set; }
@@ -1444,6 +1480,19 @@ internal sealed class DocumentDto
     public string CheckoutReleaseRequestedBy { get; set; }
     public DateTime? CheckoutReleaseRequestedAt { get; set; }
     public RevisionDto Revision { get; set; }
+}
+
+internal sealed class ReferenceVersionConfirmationException : InvalidOperationException
+{
+    public ReferenceVersionConfirmationException(string message) : base(message) { }
+}
+
+internal sealed class DocumentOperationAccessDto
+{
+    public bool CanCheckout { get; set; }
+    public bool CanArchive { get; set; }
+    public bool CanRestore { get; set; }
+    public string Reason { get; set; }
 }
 
 internal sealed class DocumentRegistrationCandidateDto
@@ -1608,6 +1657,7 @@ internal sealed class ArchiveBatchReceiptDto
 
 internal sealed class ControlledOpenManifestDto
 {
+    public List<OpenReferenceIssueDto> ReferenceIssues { get; set; } = new List<OpenReferenceIssueDto>();
     internal bool LatestReferenceVersionsConfirmed { get; set; }
     // Local proof for resuming an existing checkout, never supplied by the server
     // or serialized into immutable version/cache manifests.

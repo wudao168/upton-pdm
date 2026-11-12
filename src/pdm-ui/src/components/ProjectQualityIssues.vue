@@ -1,0 +1,16 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import PersonName from './PersonName.vue'
+import QualityIssuePanel from './QualityIssuePanel.vue'
+import { qualityFailure, readProjectRetrospective } from '../qualityReview'
+import type { RetrospectiveWorkspace } from '../qualityReview'
+import '../styles/quality-review.css'
+const props=defineProps<{token:string;projectId:string}>()
+const emit=defineEmits<{openIssue:[projectId:string,issueId:string];updated:[]}>()
+const data=ref<RetrospectiveWorkspace>(),loading=ref(false),error=ref(''),query=ref(''),scope=ref('quality'),focused=ref('');let generation=0
+const rows=computed(()=>data.value?.issues.filter(row=>(scope.value==='all'||scope.value==='quality'&&row.profile?.domain==='质量'||scope.value==='unclassified'&&!row.profile)&&(!query.value.trim()||`${row.issue.number} ${row.issue.description} ${row.profile?.category??''}`.includes(query.value.trim())))??[])
+async function load(){const run=++generation;loading.value=true;error.value='';try{const result=await readProjectRetrospective(props.projectId,props.token);if(run===generation)data.value=result}catch(reason){if(run===generation){data.value=undefined;error.value=qualityFailure(reason,'项目问题读取失败，请核对权限后重试。')}}finally{if(run===generation)loading.value=false}}
+watch(()=>[props.token,props.projectId],()=>{data.value=undefined;focused.value='';void load()},{immediate:true});onBeforeUnmount(()=>generation++)
+function updated(){emit('updated');void load()}
+</script>
+<template><section class="quality-review" aria-label="项目质量问题"><header class="quality-review__toolbar"><div class="quality-review__filters"><label>问题范围<select v-model="scope"><option value="quality">质量问题</option><option value="unclassified">待分类问题</option><option value="all">全部项目问题</option></select></label><label>查找问题<input v-model="query" placeholder="问题/分类" aria-label="查找质量问题"></label></div><button :disabled="loading" @click="load">刷新</button></header><p v-if="error" role="alert" class="quality-review__error">{{ error }}</p><p v-if="loading" role="status">正在读取项目问题…</p><p v-else-if="data&&!data.canViewIssues" class="quality-review__hint">当前账号未获授权查看项目问题明细。</p><div v-else-if="data?.canViewIssues" class="quality-review__scroll"><table><thead><tr><th>项目</th><th>编号</th><th>问题</th><th>分类</th><th>状态</th><th>负责人</th><th>验证结果</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.issue.id"><td>{{ row.projectCode }}</td><td>{{ row.issue.number }}</td><td>{{ row.issue.description }}</td><td>{{ row.profile?.category||'待分类' }}</td><td>{{ row.issue.status }}</td><td><PersonName :name="row.ownerName||'姓名待补充'" /></td><td>{{ row.profile?.verificationResult||'未验证' }}</td><td><button @click="focused=row.issue.id">闭环资料</button><button @click="emit('openIssue',row.issue.relatedProjectId||row.issue.projectId,row.issue.id)">原问题</button></td></tr><tr v-if="!rows.length"><td colspan="8" class="quality-review__empty">当前范围没有问题记录。</td></tr></tbody></table></div><QualityIssuePanel v-if="focused" :key="focused" :token="token" :project-id="data?.issues.find(row=>row.issue.id===focused)?.issue.relatedProjectId||data?.issues.find(row=>row.issue.id===focused)?.issue.projectId||projectId" :issue-id="focused" @updated="updated" /></section></template>

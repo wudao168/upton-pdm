@@ -28,7 +28,7 @@ public sealed class AuthorizationCenterApiTests
         await using var factory = new PdmApiFactory();
         using var client = factory.CreateClient();
         var repo = factory.Services.GetRequiredService<IPdmRepository>();
-        var company = (await repo.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        var company = (await repo.FindUserAsync("admin", default))!.CompanyId!.Value;
         var customer = Guid.Parse("c0046500-0000-0000-0000-000000000001");
         var a = await repo.CreateNumberedProjectAsync(new(company, "P", 2, customer, "授权测试项目", null, null, 1, "permission-admin", @"C:\PDM\Vault", @"C:\PDM\Release"), default);
         var b = await repo.CreateNumberedProjectAsync(new(company, "P", 2, customer, "未授权项目", null, null, 1, "permission-admin", @"C:\PDM\Vault", @"C:\PDM\Release"), default);
@@ -36,7 +36,8 @@ public sealed class AuthorizationCenterApiTests
         await repo.CreateUserAsync(new(Guid.NewGuid(), "permission-worker", "项目人员", "unused", UserRole.Engineer, true, RoleCode: "permission-worker", CompanyId: company), default);
         var existing = await repo.GetAuthorizationSettingsAsync(default);
         var manager = Template("manager", PermissionCodes.RoleSettingsView, PermissionCodes.RoleSettingsEdit, PermissionCodes.ProjectView, PermissionCodes.ProjectContentView) with { RoleCode = "permission-admin" };
-        var viewer = Template("viewer", PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, "project.tab.information.view", "project.templates.assign", PermissionCodes.DingTalkSelfBind) with { ProjectAssignable = true };
+        var viewer = Template("viewer", PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, "project.tab.information.view", "project.templates.assign",
+            "project.risk.manage", "project.record.manage", PermissionCodes.DingTalkSelfBind) with { ProjectAssignable = true };
         var settings = await repo.SaveAuthorizationSettingsAsync(existing with { Templates = [manager, viewer], Assignments = [new(Guid.NewGuid(), "permission-worker", "viewer", company, "project", a.Id)] }, existing.Revision, default);
         Login(client, "permission-worker");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/authorization-center")).StatusCode);
@@ -50,6 +51,11 @@ public sealed class AuthorizationCenterApiTests
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/projects/{a.Id}/nameplate")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/projects/{b.Id}/nameplate")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/projects/{a.Id}/plan")).StatusCode);
+        var workbench = await client.GetFromJsonAsync<ProjectWorkbench>("/api/workbench?scope=company&summaryOnly=true");
+        var authorizedProject = Assert.Single(workbench!.Projects);
+        Assert.Equal(a.Id, authorizedProject.Project.Id);
+        Assert.True(authorizedProject.CanRegisterRisk);
+        Assert.True(authorizedProject.CanMaintainRecord);
         Login(client, "permission-admin");
         Assert.True(await repo.HasUserPermissionAsync("permission-admin", UserRole.Engineer, PermissionCodes.RoleSettingsView, default));
         var centerResponse = await client.GetAsync("/api/authorization-center");
@@ -70,7 +76,7 @@ public sealed class AuthorizationCenterApiTests
     {
         await using var factory = new PdmApiFactory(); using var client = factory.CreateClient();
         var repo = factory.Services.GetRequiredService<IPdmRepository>();
-        var company = (await repo.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        var company = (await repo.FindUserAsync("admin", default))!.CompanyId!.Value;
         await repo.CreateUserAsync(new(Guid.NewGuid(), "permission-owner", "权限负责人", "unused", UserRole.Administrator, true, CompanyId: company), default);
         var settings = await repo.GetAuthorizationSettingsAsync(default); Login(client, "permission-owner", "Administrator");
         var empty = settings with { Templates = settings.Templates.Select(t => t with { Grants = [] }).ToArray() };
@@ -81,12 +87,134 @@ public sealed class AuthorizationCenterApiTests
     }
 
     [Fact]
+    public async Task BudgetAssessmentFollowsExplicitAuthorizationWithoutProjectStaffing()
+    {
+        await using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        var repo = factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repo.FindUserAsync("admin", default))!.CompanyId!.Value;
+        const string username = "budget-admin";
+        await repo.CreateUserAsync(new(Guid.NewGuid(), username, "预算管理员", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        var customer = (await repo.ListCustomersAsync(false, default)).First();
+        var first = await repo.CreateNumberedProjectAsync(new(company, "P", 2, customer.Id, "可授权预算项目", null, null, 1, username, @"C:\PDM\Vault", @"C:\PDM\Release"), default);
+        var second = await repo.CreateNumberedProjectAsync(new(company, "P", 2, customer.Id, "范围外预算项目", null, null, 1, username, @"C:\PDM\Vault", @"C:\PDM\Release"), default);
+        Login(client, username, "Administrator");
+        var settings = await repo.GetAuthorizationSettingsAsync(default);
+        var adminRole = Assert.Single(settings.Templates, role => role.RoleCode == "Administrator");
+        Assert.DoesNotContain(adminRole.Grants, grant => grant.Permission == PermissionCodes.ProjectBudgetAssessmentEdit);
+        var financeGrants = adminRole.Grants.Select(grant => grant.Permission is AuthorizationActions.FinancialBudgetRead or AuthorizationActions.FinancialBudgetMaintain
+            ? grant with { Scopes = ["company"] } : grant).ToArray();
+        settings = await repo.SaveAuthorizationSettingsAsync(settings with
+        {
+            Templates = settings.Templates.Select(role => role.Key == adminRole.Key ? role with { Grants = financeGrants } : role).ToArray()
+        }, settings.Revision, default);
+
+        var center = await client.GetFromJsonAsync<JsonElement>("/api/authorization-center");
+        Assert.Contains(center.GetProperty("permissions").EnumerateArray(), permission =>
+            permission.GetProperty("code").GetString() == PermissionCodes.ProjectBudgetAssessmentEdit);
+        var path = $"/api/projects/{first.Id}/budget/assessments";
+        var command = new SaveBudgetAssessmentCommand([new(Guid.NewGuid(), "外购设备", "Equipment", null,
+            [new(Guid.NewGuid(), "测试设备", Quantity: 1, UnitPrice: 25)])], 0);
+        Assert.False((await client.GetFromJsonAsync<BudgetAssessmentDirectory>(path))!.Sheets.Single().CanEdit);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync(path, command)).StatusCode);
+
+        var scopedRole = Template("budget-assessment-scope", PermissionCodes.ProjectBudgetAssessmentEdit) with { ProjectAssignable = true };
+        var assignment = new AuthorizationAssignment(Guid.NewGuid(), username, scopedRole.Key, company, "project", first.Id);
+        var grantedResponse = await client.PutAsJsonAsync("/api/authorization-center", settings with
+        {
+            Templates = [.. settings.Templates, scopedRole],
+            Assignments = [assignment]
+        });
+        Assert.True(grantedResponse.IsSuccessStatusCode, await grantedResponse.Content.ReadAsStringAsync());
+        var granted = (await grantedResponse.Content.ReadFromJsonAsync<AuthorizationSettings>())!;
+        var preview = (await client.GetFromJsonAsync<AuthorizationDecision[]>($"/api/authorization-center/preview?username={username}&projectId={first.Id}"))!;
+        Assert.True(preview.Single(decision => decision.Permission == PermissionCodes.ProjectBudgetAssessmentEdit).Allowed);
+        Assert.True((await client.GetFromJsonAsync<BudgetAssessmentDirectory>(path))!.Sheets.Single().CanEdit);
+        var saved = await client.PutAsJsonAsync(path, command);
+        Assert.True(saved.IsSuccessStatusCode, await saved.Content.ReadAsStringAsync());
+        Assert.Equal(25m, (await saved.Content.ReadFromJsonAsync<BudgetAssessmentDirectory>())!.Sheets.Single().Total);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"/api/projects/{second.Id}/budget/assessments", command)).StatusCode);
+
+        var revoked = await client.PutAsJsonAsync("/api/authorization-center", granted with { Assignments = [] });
+        Assert.True(revoked.IsSuccessStatusCode, await revoked.Content.ReadAsStringAsync());
+        Assert.False((await client.GetFromJsonAsync<BudgetAssessmentDirectory>(path))!.Sheets.Single().CanEdit);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync(path, command with { ExpectedRowVersion = 1 })).StatusCode);
+    }
+
+    [Fact]
+    public async Task ExpenseBonusAndStockEndpointsHonorProjectAndCompanyGrants()
+    {
+        await using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var companies = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.Where(company => company.IsActive).ToArray();
+        var company = companies[0].Id;
+        var otherCompany = companies[1];
+        const string owner = "module-permission-admin";
+        const string worker = "module-permission-worker";
+        await repository.CreateUserAsync(new(Guid.NewGuid(), owner, "权限维护测试", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), worker, "项目授权测试", "unused", UserRole.ProductionViewer, true, CompanyId: company), default);
+        var customer = (await repository.ListCustomersAsync(false, default)).First();
+        Task<Project> CreateProject(Guid companyId, string name) => repository.CreateNumberedProjectAsync(new(companyId, "P", 2,
+            customer.Id, name, null, null, 1, owner, @"C:\PDM\Vault", @"C:\PDM\Release"), default);
+        var project = await CreateProject(company, "已授权项目");
+        var second = await CreateProject(company, "本公司范围外项目");
+        var foreign = await CreateProject(otherCompany.Id, "其他公司项目");
+        var expenses = $"/api/projects/{project.Id}/expense-requests";
+        var bonus = $"/api/projects/{project.Id}/bonus";
+        const string stock = "/api/stocked-materials/";
+        var draft = new SaveExpenseRequest("SitePurchase", "Procurement", null, "权限测试", [], 0, false);
+
+        Login(client, worker, "ProductionViewer");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(expenses)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(bonus)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(stock)).StatusCode);
+
+        Login(client, owner, "Administrator");
+        var original = await repository.GetAuthorizationSettingsAsync(default);
+        var projectRole = Template("module-project-scope", PermissionCodes.ProjectView, PermissionCodes.ProjectContentView,
+            ProjectCenterPermissions.Tab("budget"), ProjectCenterPermissions.Write, PermissionCodes.ProjectExpenseView,
+            PermissionCodes.ProjectExpenseSubmit, PermissionCodes.ProjectBonusView, PermissionCodes.ProjectBonusManage) with { ProjectAssignable = true };
+        var companyRole = Template("module-company-scope", PermissionCodes.StandardLibraryView, PermissionCodes.StockView, PermissionCodes.StockSettingsManage);
+        var response = await client.PutAsJsonAsync("/api/authorization-center", original with
+        {
+            Templates = [.. original.Templates, projectRole, companyRole],
+            Assignments = [new(Guid.NewGuid(), worker, projectRole.Key, company, "project", project.Id), new(Guid.NewGuid(), worker, companyRole.Key, company, "company")]
+        });
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        var granted = (await response.Content.ReadFromJsonAsync<AuthorizationSettings>())!;
+        Login(client, worker, "ProductionViewer");
+        Assert.True((await client.GetFromJsonAsync<ExpenseDirectory>(expenses))!.CanCreate);
+        var savedDraft = await client.PutAsJsonAsync($"{expenses}/{Guid.NewGuid()}", draft);
+        Assert.True(savedDraft.IsSuccessStatusCode, await savedDraft.Content.ReadAsStringAsync());
+        Assert.True((await client.GetFromJsonAsync<ProjectBonusView>(bonus))!.CanCreate);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"{bonus}/history")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync(stock + "settings")).StatusCode);
+        foreach (var denied in new[] { second, foreign })
+        {
+            Assert.False((await client.GetAsync($"/api/projects/{denied.Id}/bonus")).IsSuccessStatusCode);
+            Assert.False((await client.PutAsJsonAsync($"/api/projects/{denied.Id}/expense-requests/{Guid.NewGuid()}", draft)).IsSuccessStatusCode);
+        }
+        using var foreignStockRequest = new HttpRequestMessage(HttpMethod.Get, stock + "settings");
+        foreignStockRequest.Headers.Add("X-Company-Id", otherCompany.Id.ToString());
+        Assert.False((await client.SendAsync(foreignStockRequest)).IsSuccessStatusCode);
+
+        Login(client, owner, "Administrator");
+        var revoked = await client.PutAsJsonAsync("/api/authorization-center", granted with { Assignments = [] });
+        Assert.True(revoked.IsSuccessStatusCode, await revoked.Content.ReadAsStringAsync());
+        Login(client, worker, "ProductionViewer");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"{expenses}/{Guid.NewGuid()}", draft)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(bonus)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(stock + "settings")).StatusCode);
+    }
+
+    [Fact]
     public async Task RoleCreatedInCenterCanBeAssignedRenamedAndDeletedAfterUnassignment()
     {
         await using var factory = new PdmApiFactory();
         using var client = factory.CreateClient();
         var repo = factory.Services.GetRequiredService<IPdmRepository>();
-        var company = (await repo.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        var company = (await repo.FindUserAsync("admin", default))!.CompanyId!.Value;
         await repo.CreateUserAsync(new(Guid.NewGuid(), "role-owner", "角色维护人", "unused", UserRole.Administrator, true, CompanyId: company), default);
         Login(client, "role-owner", "Administrator");
 

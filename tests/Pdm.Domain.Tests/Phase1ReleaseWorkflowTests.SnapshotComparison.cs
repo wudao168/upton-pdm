@@ -26,7 +26,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [InlineData(true)]
     public async Task SnapshotComparison_ReloadedConfigurationsDoNotBlockUnchangedFormalSubmission(bool configured)
     {
-        var repository=new InMemoryPdmRepository(TimeProvider.System);
+        var repository=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow=new PdmWorkflowService(repository,new UnusedFileStorage(),new RecordingPublisher(),TimeProvider.System);
         var items=(await repository.GetBomAsync(ProjectId,BomKind.Standard,default)).Select(item=>configured?WithSnapshotConfiguration(item):item).ToArray();
@@ -42,7 +42,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [Fact]
     public async Task SnapshotComparison_ReloadedDeletionOnlySupplementKeepsItsExistingDraftAndQuantities()
     {
-        var repository=new InMemoryPdmRepository(TimeProvider.System);
+        var repository=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow=new PdmWorkflowService(repository,new UnusedFileStorage(),new RecordingPublisher(),TimeProvider.System);
         var items=(await repository.GetBomAsync(ProjectId,BomKind.Standard,default)).Select(WithSnapshotConfiguration).ToArray();
@@ -73,7 +73,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [InlineData(true)]
     public async Task SnapshotComparison_StillRejectsChangedConfigurationContents(bool kit)
     {
-        var repository=new InMemoryPdmRepository(TimeProvider.System);
+        var repository=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow=new PdmWorkflowService(repository,new UnusedFileStorage(),new RecordingPublisher(),TimeProvider.System);
         var items=(await repository.GetBomAsync(ProjectId,BomKind.Standard,default)).Select(WithSnapshotConfiguration).ToArray();

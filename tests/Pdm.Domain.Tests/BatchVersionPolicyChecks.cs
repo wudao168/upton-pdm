@@ -10,7 +10,7 @@ public sealed class BatchVersionPolicyChecks
     [Fact]
     public async Task PendingBatchIdentitiesHaveAccessibleEmptyVersionHistory()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("PENDING-VERIFY", "预留版本核对", "admin", "vault", "release"), "admin", default);
         var pending = await repository.ReserveArchiveDocumentAsync(new(project.Id, "NEW", "新图", "NEW.SLDPRT", DocumentKind.Part),
             "admin", new(Guid.NewGuid(), Guid.NewGuid(), "QA"), default);
@@ -22,7 +22,7 @@ public sealed class BatchVersionPolicyChecks
     [Fact]
     public async Task ReusesProjectDecisionButChecksEveryDocumentAndEveryRequest()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("POLICY-1", "版本核对", "admin", "vault", "release"), "admin", default);
         var other = await repository.CreateProjectAsync(new("POLICY-2", "无权项目", "admin", "vault", "release"), "admin", default);
         var own = new List<PdmDocument>();
@@ -71,10 +71,10 @@ public sealed class BatchVersionPolicyChecks
                 FileChecks++;
                 if ((Guid)args![0]! == DeniedFile) return Task.FromResult(false);
             }
-            if (method.Name == nameof(IPdmRepository.HasProjectContentReadAccessAsync))
+            if (method.Name == nameof(IPdmRepository.FindProjectAsync))
             {
                 ProjectChecks++;
-                if ((Guid)args![0]! == DeniedProject) return Task.FromResult(false);
+                if ((Guid)args![0]! == DeniedProject) return Task.FromResult<Project?>(null);
             }
             if (method.Name == nameof(IPdmRepository.ListDocumentVersionVerificationsAsync))
             {

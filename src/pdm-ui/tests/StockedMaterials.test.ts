@@ -96,11 +96,12 @@ describe('常备件', () => {
     expect(api.listStockedMaterials).toHaveBeenCalledTimes(2)
     expect(api.refreshStockedMaterials).not.toHaveBeenCalled()
   })
-  it('defaults to four hours and warns when the assistant has no assigned users', async () => {
+  it('defaults to four hours and directs users to grant the notification permission', async () => {
     wrapper = mount(StockedMaterialSettings, { props: { token: 'token' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect((wrapper.find('input[aria-label="U9C自动回读间隔（小时）"]').element as HTMLInputElement).value).toBe('4.00')
-    expect(wrapper.text()).toContain('未找到有效人员')
+    expect(wrapper.text()).toContain('接收低库存提醒')
+    expect(wrapper.findAll('button').some(button => button.text() === '立即同步')).toBe(false)
     api.saveStockedMaterialSettings.mockRejectedValue(new Error('常备件设置或回读数据已更新，请刷新后重新保存。'))
     await wrapper.findAll('button').find(button => button.text() === '保存设置')!.trigger('click'); await flushPromises()
     expect(api.saveStockedMaterialSettings).toHaveBeenCalledWith(expect.objectContaining({ syncIntervalMinutes: 240 }), 1, 'token')
@@ -128,7 +129,7 @@ describe('常备件', () => {
     api.readStockedMaterialSettings.mockResolvedValueOnce(settingsView()).mockResolvedValueOnce(latest)
     let complete!: () => void
     api.refreshStockedMaterials.mockImplementation(() => new Promise<void>(resolve => { complete = resolve }))
-    wrapper = mount(StockedMaterialSettings, { props: { token: 'token' }, global: { plugins: [ElementPlus] } })
+    wrapper = mount(StockedMaterialSettings, { props: { token: 'token', canSynchronize: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const interval = wrapper.find('input[aria-label="U9C自动回读间隔（小时）"]')
     await interval.setValue('6'); await interval.trigger('change')
@@ -148,7 +149,7 @@ describe('常备件', () => {
   })
   it('shows readback failure and restores the immediate sync button for retry', async () => {
     api.refreshStockedMaterials.mockRejectedValue(new Error('U9C库存数量回读失败，已保留上次成功数据。'))
-    wrapper = mount(StockedMaterialSettings, { props: { token: 'token' }, global: { plugins: [ElementPlus] } })
+    wrapper = mount(StockedMaterialSettings, { props: { token: 'token', canSynchronize: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text() === '立即同步')!.trigger('click'); await flushPromises()
     expect(wrapper.find('[role="alert"]').text()).toContain('已保留上次成功数据')
@@ -158,7 +159,7 @@ describe('常备件', () => {
   it('does not adopt a new settings version when another user changes settings during sync', async () => {
     api.refreshStockedMaterials.mockResolvedValue(undefined)
     api.readStockedMaterialSettings.mockResolvedValueOnce(settingsView()).mockResolvedValueOnce({ ...settingsView(), rowVersion: 9, settings: { ...settingsView().settings, notifyLowStock: false } })
-    wrapper = mount(StockedMaterialSettings, { props: { token: 'token' }, global: { plugins: [ElementPlus] } })
+    wrapper = mount(StockedMaterialSettings, { props: { token: 'token', canSynchronize: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text() === '立即同步')!.trigger('click'); await flushPromises()
     expect(wrapper.find('[role="alert"]').text()).toContain('设置已被其他人修改')

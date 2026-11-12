@@ -20,6 +20,7 @@ public sealed partial class PdmAddin
     private string pendingOpenHostPath;
     private long pendingOpenStarted;
     private int pendingOpenIdleEpoch = -1;
+    private int nativeOpenCompletionEpoch = -1;
 
     private bool NativeInsertionEvidenceAllowed() => !disconnecting && !ControlledOpenBoundary.IsActive
         && Volatile.Read(ref ownedReferenceResolutionDepth) == 0
@@ -37,6 +38,7 @@ public sealed partial class PdmAddin
         pendingOpenHostPath = assemblyEventDocumentPath;
         pendingOpenStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         pendingOpenIdleEpoch = -1;
+        nativeOpenCompletionEpoch = -1;
         unknownAddedEpoch = unknownSavedEpoch = 0; unknownRemovalObserved = false;
         unknownLoadOwner = null; unknownLoadOwnerPath = null;
         if (nativeFileOpenCommandId != 0 || !NativeInsertionEvidenceAllowed()
@@ -123,6 +125,8 @@ public sealed partial class PdmAddin
     private int OnNativeCommandClosed(int command, int reason)
     {
         if (nativeUiCommandId == command) nativeUiCommandId = 0;
+        if (command == 2 && reason == -2 && command == nativeFileOpenCommandId && nativeFileOpenInProgress != 0)
+            nativeOpenCompletionEpoch = nativeLoadEpoch;
         // swCommands_PmCancel=-1, swCommands_PmOK=-2. A successful File > Open
         // still needs FileOpenPostNotify, the documented end of native loading.
         var completed = reason == -1 || reason == -2 && IsAssemblyInsertionCommand(command);
@@ -147,8 +151,7 @@ public sealed partial class PdmAddin
 
     private bool CanStartArchiveRequest()
     {
-        TryCompleteReturnedFileOpen();
-        TryCompleteSavedInsertionForArchive();
+        ReconcileNativeCommandBeforeUserOperation();
         var reason = ArchiveRequestBusyReason();
         if (reason == null) return true;
         taskPaneControl?.SetCheckoutReminder(reason, true);
@@ -156,6 +159,42 @@ public sealed partial class PdmAddin
             + Volatile.Read(ref nativeFileOpenInProgress) + " sourceCommand=" + nativeFileOpenCommandId);
         TopMostMessageBox.Show(taskPaneControl, reason, "存档准备提醒", MessageBoxButtons.OK, MessageBoxIcon.Information);
         return false;
+    }
+
+    private void ReconcileNativeCommandBeforeUserOperation()
+    {
+        TryCompleteFinishedNativeOpen();
+        TryCompleteReturnedFileOpen();
+        TryCompleteSavedInsertionForArchive();
+    }
+
+    // Reconcile a missing FileOpenPostNotify only with a matching command-complete
+    // event plus an idle, stable native document. Time alone is never completion.
+    private bool TryCompleteFinishedNativeOpen()
+    {
+        var epoch = nativeLoadEpoch;
+        bool Proof() => nativeFileOpenInProgress != 0 && nativeFileOpenCommandId == 2
+            && nativeOpenCompletionEpoch == epoch && pendingOpenIdleEpoch == epoch
+            && nativeLoadEpoch == epoch && NativeInsertionEvidenceAllowed();
+        if (!Proof()) return false;
+        try
+        {
+            if (!application.StartupProcessCompleted || application.CommandInProgress) return false;
+            application.GetRunningCommandInfo(out _, out _, out var active);
+            if (active) return false;
+            var model = application.GetOpenDocumentByName(pendingOpenPath) as IModelDoc2;
+            if (model == null || !ReferenceEquals(application.ActiveDoc, model)
+                || !PathsEqual(model.GetPathName(), pendingOpenPath) || model.GetBlockingState() != 0) return false;
+            var count = application.GetDocumentCount();
+            var stamp = model.GetUpdateStamp();
+            application.GetRunningCommandInfo(out _, out _, out active);
+            if (active || application.CommandInProgress || model.GetBlockingState() != 0 || model.GetUpdateStamp() != stamp
+                || application.GetDocumentCount() != count || !ReferenceEquals(application.ActiveDoc, model) || !Proof()) return false;
+            OnFileOpened(pendingOpenPath);
+            LogOperation("已核对打开命令完成及稳定文档，恢复结构读取：" + pendingOpenPath);
+            return true;
+        }
+        catch (Exception error) { LogDiagnostic("核对原生打开结束状态", error); return false; }
     }
 
     // File > Open on a STEP-derived child can return to the original assembly

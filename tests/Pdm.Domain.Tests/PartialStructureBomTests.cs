@@ -8,6 +8,44 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class PartialStructureBomTests
 {
     [Fact]
+    public async Task BatchQuantitySurvivesRefreshWithoutChangingCadSourceQuantities()
+    {
+        var f = await CreateAsync();
+        var actor = await f.Repository.FindUserAsync("admin", default);
+        if (actor is null)
+        {
+            actor = new(Guid.NewGuid(), "admin", "数量验收人员", "unused", UserRole.Administrator, true);
+            await f.Repository.CreateUserAsync(actor, default);
+        }
+        var settings = await f.Repository.GetAuthorizationSettingsAsync(default);
+        var permissions = new HashSet<string> { PermissionCodes.BomMechanicalEdit, PermissionCodes.ProjectView, PermissionCodes.ProjectContentView };
+        var pending = new Queue<string>(permissions);
+        while (pending.TryDequeue(out var code))
+            foreach (var dependency in RolePermissionCatalog.Permissions.Single(item => item.Code == code).Dependencies)
+                if (permissions.Add(dependency)) pending.Enqueue(dependency);
+        await f.Repository.SaveAuthorizationSettingsAsync(settings with { Templates = settings.Templates.Select(template => template.RoleCode == actor.EffectiveRoleCode
+            ? template with { Grants = [.. template.Grants.Where(grant => !permissions.Contains(grant.Permission)), .. permissions.Select(code => new AuthorizationGrant(code, ["company"]))] }
+            : template).ToArray() }, settings.Revision, default);
+        var first = await PartAsync(f, "BATCH-ONE", new() { ["全局/物料分类"] = "标准件", ["全局/单位"] = "个" });
+        var second = await PartAsync(f, "BATCH-TWO", new() { ["全局/物料分类"] = "标准件", ["全局/单位"] = "个" });
+        var root = await ArchiveBatchTests.Register(f.Repository, f.Project, "BATCH-ROOT", DocumentKind.Assembly, f.Session);
+        var tree = ArchiveBatchTests.Node(root) with { Children = [first with { Quantity = 1 }, second with { Quantity = 2 }] };
+        await f.Repository.CheckInVersionAsync(root.Id, "admin", f.Session, ArchiveBatchTests.Commit(f.Project, root, tree, 'F', true), default);
+        var generated = await f.Workflow.GenerateMechanicalBomAsync(f.Project.Id, true, "admin", UserRole.Administrator, default);
+        Assert.Equal(2, generated.StandardItems.Count);
+        var ids = generated.StandardItems.Select(item => item.Id).ToArray();
+        await f.Workflow.BatchUpdateBomItemsAsync(f.Project.Id, new(ids, ["quantity"], Quantity: 3), "admin", UserRole.Administrator, default);
+        var refreshed = await f.Workflow.GenerateMechanicalBomAsync(f.Project.Id, true, "admin", UserRole.Administrator, default);
+        Assert.Equal(2, refreshed.StandardItems.Count);
+        Assert.All(refreshed.StandardItems, item => { Assert.Equal(3, item.Quantity); Assert.True(item.IsSummaryQuantity); Assert.Contains(item.Id, ids); });
+        var source = (await f.Repository.GetLatestReferenceSnapshotAsync(f.Project.Id, default))!;
+        Assert.Equal(new[] { 1, 2 }, source.Root.Children.Select(node => node.Quantity));
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Workflow.BatchUpdateBomItemsAsync(f.Project.Id,
+            new(ids, ["quantity"], Quantity: 1.5m), "admin", UserRole.Administrator, default));
+        Assert.All(await f.Repository.GetBomAsync(f.Project.Id, BomKind.Standard, default), item => Assert.Equal(3, item.Quantity));
+    }
+
+    [Fact]
     public async Task ManuallyMaintainedFlatTotalSurvivesSourceRefreshAndDoesNotChangeTheArchivedStructure()
     {
         var f=await CreateAsync();
@@ -127,7 +165,7 @@ public sealed class PartialStructureBomTests
 
     private static async Task<(InMemoryPdmRepository Repository, PdmWorkflowService Workflow, Project Project, Guid Session)> CreateAsync()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("PARTIAL-" + Guid.NewGuid().ToString("N"), "部分结构BOM", "admin", "vault", "release"), "admin", default);
         var workflow = new PdmWorkflowService(repository, DispatchProxy.Create<IFileStorage, ArchiveBatchReadReuseTests.Files>(), null!, TimeProvider.System);
         return (repository, workflow, project, Guid.NewGuid());

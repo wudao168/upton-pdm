@@ -16,7 +16,7 @@ public sealed class ArchiveRecycleTests
     { public ArchiveRecycleService Service => new(Repository, Repository, TimeProvider.System); }
     private static async Task<Fixture> Create(bool completeFollowup = true)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("REC-" + Guid.NewGuid().ToString("N"), "批次回收测试", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid(); var batch = Guid.NewGuid();
         var part = await Register(repository, project, "PART", DocumentKind.Part, session);
@@ -157,10 +157,11 @@ public sealed class ArchiveRecycleTests
     [Theory]
     [InlineData(UserRole.Engineer)]
     [InlineData(UserRole.PlanningManager)]
-    public async Task OnlyAuthorizedAdministratorCanReadOrExecute(UserRole role)
+    public async Task AccountWithoutRecycleGrantCannotReadOrExecuteEvenWithForgedRole(UserRole role)
     {
         var f = await Create();
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => f.Service.ListBatchesAsync(f.Project.Id, "admin", role, default));
+        await PermissionTestUsers.Ensure(f.Repository, ("without-recycle", role));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => f.Service.ListBatchesAsync(f.Project.Id, "without-recycle", UserRole.Administrator, default));
         Assert.Equal(3, (await f.Repository.ListDocumentsAsync(f.Project.Id, default)).Count);
     }
 }

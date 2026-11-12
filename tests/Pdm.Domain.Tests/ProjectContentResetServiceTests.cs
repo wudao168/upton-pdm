@@ -9,7 +9,7 @@ public sealed class ProjectContentResetServiceTests
     [Fact]
     public async Task AdministratorCanResetOnlyAfterServerReadinessAndExactProjectConfirmation()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         var store = new FakeResetStore(new(new Dictionary<string, int> { ["受控图档"] = 2 }, [], true));
         var service = new ProjectContentResetService(repository, store, TimeProvider.System);
@@ -24,7 +24,7 @@ public sealed class ProjectContentResetServiceTests
     [Fact]
     public async Task PublishedContentBlocksReset()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         var store = new FakeResetStore(new(new Dictionary<string, int> { ["发布包"] = 1 }, ["存在已正式发布的发布包或BOM基线"], true));
         var service = new ProjectContentResetService(repository, store, TimeProvider.System);
@@ -37,7 +37,7 @@ public sealed class ProjectContentResetServiceTests
     [Fact]
     public async Task ForceResetRequiresAdministratorAndOnlyBypassesInterruptibleWork()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         const string checkout = "存在已签出的图档，请先存档或释放编辑权限。";
         const string writeback = "存在正在执行的CAD属性写回任务。";
@@ -57,7 +57,7 @@ public sealed class ProjectContentResetServiceTests
     [Fact]
     public async Task ForceResetStillRejectsUnfinishedExternalSync()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         const string checkout = "存在已签出的图档，请先存档或释放编辑权限。";
         const string outbox = "存在尚未处理完成的外部集成事件，请等待同步完成后重试。";

@@ -117,10 +117,15 @@ try
     var collision = await repository.RegisterDocumentAsync(new(project.Id, "SHARED-2", "同名零件", "SHARED.SLDPRT", DocumentKind.Part), "reader0", default);
     var drawing = await repository.RegisterDocumentAsync(new(sibling.Id, "SHARED-D", "关联工程图", "SHARED.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: shared.Id), "reader0", default);
     var folder = (await repository.ListDocumentsAsync(sibling.Id, default)).First().FolderId;
-    await sql.ExecuteAsync("""
-        INSERT INTO document(id,project_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,folder_id,created_at,updated_at)
-        VALUES(@Id,@ProjectId,@Name,@Name,@FileName,'Part','Work','W1',@FolderId,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
-        """, Enumerable.Range(0, 1500).Select(i => new { Id = Guid.NewGuid(), ProjectId = sibling.Id, Name = $"UNRELATED-{i}", FileName = $"UNRELATED-{i}.SLDPRT", FolderId = folder }));
+    // 这里仅准备读取样本；一次提交避免逐条落盘挤占后续导航性能测试的磁盘资源。
+    await using (var fixtureTransaction = await sql.BeginTransactionAsync())
+    {
+        await sql.ExecuteAsync("""
+            INSERT INTO document(id,project_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,folder_id,created_at,updated_at)
+            VALUES(@Id,@ProjectId,@Name,@Name,@FileName,'Part','Work','W1',@FolderId,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
+            """, Enumerable.Range(0, 1500).Select(i => new { Id = Guid.NewGuid(), ProjectId = sibling.Id, Name = $"UNRELATED-{i}", FileName = $"UNRELATED-{i}.SLDPRT", FolderId = folder }), fixtureTransaction);
+        await fixtureTransaction.CommitAsync();
+    }
     DocumentReferenceNode Node(PdmDocument document) => new(Guid.NewGuid(), document.Id, document.FileName, document.FileName, document.Name, document.Kind, "Default", 1, ReferenceNodeStatus.Normal, document.Revision, "reader0", []);
     var tree = Node(model) with { Children = [Node(shared), Node(shared) with { DocumentId = null, FileName = "VIRTUAL^ROOT.SLDPRT", Status = ReferenceNodeStatus.Virtual }] };
     var snapshot = Guid.NewGuid();
@@ -168,6 +173,15 @@ try
     Check(newCounts == oldCounts + 1, "引用快照更新后立即重新计算计数");
     await sql.ExecuteAsync("UPDATE document SET deleted_at=UTC_TIMESTAMP(6) WHERE id=@Id", new { collision.Id });
     Check((await repository.ListProjectsAsync(default)).Single(item => item.Id == project.Id).DocumentCount == oldCounts, "图档删除后立即失效旧计数缓存");
+    // 用一个连接也能完成读取，确定性捕获持有外层连接后再嵌套申请连接的问题。
+    var singleConnection = new MySqlConnectionStringBuilder(settings.ConnectionString) { MaximumPoolSize = 1, MinimumPoolSize = 0 };
+    IPdmRepository singleConnectionRepository = new MySqlPdmRepository(Options.Create(new PdmDatabaseOptions { Provider = "MySql", ConnectionString = singleConnection.ConnectionString }), TimeProvider.System);
+    Check((await singleConnectionRepository.GetOrganizationDirectoryAsync(default)).Users.Count == 150
+        && (await singleConnectionRepository.GetRolePermissionDirectoryAsync(default)).Roles.Count > 0
+        && (await singleConnectionRepository.ListProjectsForUserAsync("reader0", UserRole.Administrator, default)).Any(item => item.Id == project.Id)
+        && (await singleConnectionRepository.FindProjectForUserAsync(project.Id, "reader0", UserRole.Administrator, default))?.Id == project.Id
+        && (await singleConnectionRepository.ListProjectFoldersAsync(project.Id, "reader0", UserRole.Administrator, default)).Count > 0,
+        "单连接池可完成组织与权限目录、项目列表、项目详情及文件夹读取，无嵌套连接等待");
     var allTimes = new List<double>();
     var workload = Stopwatch.StartNew();
     await Task.WhenAll(Enumerable.Range(0, 50).Select(async user =>
@@ -188,6 +202,52 @@ try
     allTimes.Sort();
     samples.Add(new { operation = "50-users-three-navigation-rounds", completed = allTimes.Count, elapsedMs = workload.ElapsedMilliseconds, p50Ms = Math.Round(allTimes[74]), p95Ms = Math.Round(allTimes[142]), maxMs = Math.Round(allTimes[^1]), poolLimit = settings.MaximumPoolSize });
     Check(allTimes.Count == 150, "150个隔离账号、50个并发读取者完成三轮导航，无连接池死锁或读取错误");
+    var adminTenant = TenantContext.Current!;
+    var authorization = await repository.GetAuthorizationSettingsAsync(default);
+    var emptyRole = new AuthorizationTemplate("navigation-empty", "导航无授权测试岗位", "隔离验收专用", [], RoleCode: "navigation-empty");
+    var scopedTemplate = new AuthorizationTemplate("navigation-scoped", "导航项目范围测试", "隔离验收专用",
+        [new(PermissionCodes.ProjectView, ["company"]), new(PermissionCodes.ProjectContentView, ["company"])], RoleCode: "navigation-scoped", ProjectAssignable: true);
+    authorization = await repository.SaveAuthorizationSettingsAsync(authorization with { Templates = [.. authorization.Templates, emptyRole, scopedTemplate] }, authorization.Revision, default, updateRoles: true);
+    var scopedActor = new UserAccount(Guid.NewGuid(), "navigation-scoped-reader", "导航范围测试人员", "not-a-login-password", UserRole.ProductionViewer, true, RoleCode: emptyRole.RoleCode, CompanyId: company);
+    await repository.CreateUserAsync(scopedActor, default);
+    async Task SelectScopedActor()
+    {
+        TenantContext.Set(new(scopedActor.Id, company, company, scopedActor.Username, scopedActor.EffectiveRoleCode, false,
+            await repository.GetUserPermissionsAsync(scopedActor.Username, scopedActor.Role, default), scopedActor.EffectiveRoleCodes));
+    }
+    await SelectScopedActor();
+    Check(!await repository.HasProjectReadAccessAsync(project.Id, scopedActor.Username, scopedActor.Role, default)
+        && (await repository.ListProjectsForUserAsync(scopedActor.Username, scopedActor.Role, default)).Count == 0
+        && await repository.FindProjectForUserAsync(project.Id, scopedActor.Username, scopedActor.Role, default) is null,
+        "未授权账号不能读取项目入口、列表或详情");
+    TenantContext.Set(adminTenant);
+    var assignment = new AuthorizationAssignment(Guid.NewGuid(), scopedActor.Username, scopedTemplate.Key, company, "project", project.Id);
+    authorization = await repository.SaveAuthorizationSettingsAsync(authorization with { Assignments = [.. authorization.Assignments, assignment] }, authorization.Revision, default);
+    await SelectScopedActor();
+    Check(await repository.HasProjectReadAccessAsync(project.Id, scopedActor.Username, scopedActor.Role, default)
+        && (await repository.ListProjectsForUserAsync(scopedActor.Username, scopedActor.Role, default)).Select(item => item.Id).SequenceEqual([project.Id])
+        && (await repository.FindProjectForUserAsync(project.Id, scopedActor.Username, scopedActor.Role, default))?.Id == project.Id,
+        "明确项目授权后入口、列表和详情结果一致");
+    Check(!await repository.HasProjectReadAccessAsync(sibling.Id, scopedActor.Username, scopedActor.Role, default)
+        && await repository.FindProjectForUserAsync(sibling.Id, scopedActor.Username, scopedActor.Role, default) is null,
+        "仅本项目授权不会扩展至其他项目");
+    TenantContext.Set(adminTenant);
+    var otherCompany = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.Id != company).Id;
+    var foreignProject = await repository.CreateProjectAsync(new(code + "-FOREIGN", "其他公司权限验收", "reader0", "D:/navigation-qa", "D:/navigation-qa-release"), "reader0", default);
+    await sql.ExecuteAsync("UPDATE project SET organization_id=@Company WHERE id=@Id", new { Company = otherCompany, foreignProject.Id });
+    await SelectScopedActor();
+    Check(!await repository.HasProjectReadAccessAsync(foreignProject.Id, scopedActor.Username, scopedActor.Role, default)
+        && await repository.FindProjectForUserAsync(foreignProject.Id, scopedActor.Username, scopedActor.Role, default) is null
+        && !(await repository.ListProjectsForUserAsync(scopedActor.Username, scopedActor.Role, default)).Any(item => item.Id == foreignProject.Id),
+        "项目授权不能跨公司读取入口、列表或详情");
+    TenantContext.Set(adminTenant);
+    authorization = await repository.SaveAuthorizationSettingsAsync(authorization with { Assignments = authorization.Assignments.Where(item => item.Id != assignment.Id).ToArray() }, authorization.Revision, default);
+    await SelectScopedActor();
+    Check(!await repository.HasProjectReadAccessAsync(project.Id, scopedActor.Username, scopedActor.Role, default)
+        && (await repository.ListProjectsForUserAsync(scopedActor.Username, scopedActor.Role, default)).Count == 0
+        && await repository.FindProjectForUserAsync(project.Id, scopedActor.Username, scopedActor.Role, default) is null,
+        "撤销后下一次读取立即失去项目入口、列表和详情授权");
+    TenantContext.Set(adminTenant);
     await File.WriteAllTextAsync(output, JsonSerializer.Serialize(new { status = "passed", database, productionDatabaseWritten = false, checks, samples }, json));
     Console.WriteLine(JsonSerializer.Serialize(new { status = "passed", checks, samples }, json));
     void Check(bool condition, string? message) { if (!condition) throw new Exception(message ?? "并发权限读取失败。"); if (message is not null) checks.Add(message); }

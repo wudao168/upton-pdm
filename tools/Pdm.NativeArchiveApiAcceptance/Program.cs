@@ -224,8 +224,21 @@ internal static class NativeArchiveRunner
             }
             Require(before[file.SourcePath] == file.SourceSha256, "源图档内容在原生准备后发生变化。");
         }
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand("NATIVE-" + Guid.NewGuid().ToString("N"),
-            "真实CAD整批存档隔离验收", "admin", Path.Combine(ownedFiles, "vault"), Path.Combine(ownedFiles, "release")), "admin", default);
+        var account = await repository.FindUserAsync("admin", default)
+            ?? throw new InvalidOperationException("隔离验收账号尚未初始化。");
+        var company = account.CompanyId ?? throw new InvalidOperationException("隔离验收账号未配置公司。");
+        var previousTenant = TenantContext.Current;
+        Project project;
+        try
+        {
+            TenantContext.Set(new(account.Id, company, company, account.Username, account.EffectiveRoleCode, false, new HashSet<string>()));
+            project = await repository.CreateProjectAsync(new CreateProjectCommand("NATIVE-" + Guid.NewGuid().ToString("N"),
+                "真实CAD整批存档隔离验收", "admin", Path.Combine(ownedFiles, "vault"), Path.Combine(ownedFiles, "release")), "admin", default);
+        }
+        finally
+        {
+            if (previousTenant is null) TenantContext.Clear(); else TenantContext.Set(previousTenant);
+        }
         await repository.EnsureProjectFolderTreeAsync(project.Id, default);
         var folder = (await repository.ListProjectFoldersAsync(project.Id, "admin", UserRole.Administrator, default))
             .First(folder => folder.TemplateKey == "mechanical.project");

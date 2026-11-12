@@ -33,7 +33,7 @@ public sealed class ProjectReportingApiTests
  {
   var repository=factory.Services.GetRequiredService<IPdmRepository>();
   var project=(await repository.ListProjectsAsync(default)).First();
-  await repository.CreateUserAsync(new(Guid.NewGuid(),actor,actor,"unused",role,true),default);
+  await ApiTestAuthorization.EnsureUserAsync(repository,new(Guid.NewGuid(),actor,actor,"unused",role,true),default);
   if(project.OrganizationId is Guid company)await repository.SetUserCompanyScopeAsync(actor,company,true,[company],"admin",default);
  }
  private static string Token(string actor,string role)=>new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken("upton-pdm","upton-pdm-clients",[new Claim(ClaimTypes.Name,actor),new Claim(ClaimTypes.Role,role)],expires:DateTime.UtcNow.AddMinutes(10),signingCredentials:new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")),SecurityAlgorithms.HmacSha256)));

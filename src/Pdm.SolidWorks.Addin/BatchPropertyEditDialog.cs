@@ -266,16 +266,29 @@ internal sealed class BatchPropertyEditItem
 
     internal void AcceptChanges()
     {
-        foreach (var property in PropertyValues())
+        AcceptPropertyValues();
+        AcceptPropertyCardAssignment();
+    }
+
+    internal void AcceptPropertyValues()
+    {
+        // Only these fields were eligible for the native write. A pending template
+        // and unread/inapplicable fields must retain their own baseline.
+        foreach (var property in ChangedProperties().ToArray())
         {
             originalValues[property.Key] = property.Value ?? string.Empty;
         }
+        filledIdentityProperties.Clear();
+    }
+
+    // Assigning a template does not write the values being edited in this dialog.
+    internal void AcceptPropertyCardAssignment()
+    {
         if (propertyCardFields.Count > 0)
         {
             activePropertyCardFields = propertyCardFields;
             propertyCardFields = Array.Empty<NativePropertyCardField>();
         }
-        filledIdentityProperties.Clear();
     }
 
     internal NativePropertyCardField PropertyCardField(string editorPropertyName) =>
@@ -314,8 +327,13 @@ internal sealed class BatchPropertyEditItem
 
     internal void SetActivePropertyCard(NativePropertyCardTemplate template)
     {
+        // A reread describes the card currently assigned to the file, not an earlier preview.
+        propertyCardFields = Array.Empty<NativePropertyCardField>();
         if (template == null || !template.IsAvailable)
         {
+            activePropertyCardFields = Array.Empty<NativePropertyCardField>();
+            PropertyCard = "未发现属性卡";
+            PropertyCardPath = string.Empty;
             return;
         }
 
@@ -395,13 +413,13 @@ internal sealed class BatchPropertyEditItem
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (activeCardPropertyNames.Contains("项目号", StringComparer.OrdinalIgnoreCase)
-            && plmPropertyNames.Contains("项目号"))
+            && plmPropertyNames.Contains("项目号") && !IsPropertyUnread("项目号"))
         {
             ProjectNumber = projectNumber?.Trim() ?? string.Empty;
             propertyScopes["项目号"] = Value(scopes, "项目号");
         }
         if (activeCardPropertyNames.Contains("项目名称", StringComparer.OrdinalIgnoreCase)
-            && plmPropertyNames.Contains("项目名称"))
+            && plmPropertyNames.Contains("项目名称") && !IsPropertyUnread("项目名称"))
         {
             ProjectName = projectName?.Trim() ?? string.Empty;
             propertyScopes["项目名称"] = Value(scopes, "项目名称");
@@ -1050,6 +1068,16 @@ internal sealed class BatchPropertyEditDialog : Form
             CancelValidation("请先勾选需要读取当前属性卡的图档。");
             return;
         }
+        if (selectedItems.Any(item => item.HasChanges)
+            && TopMostMessageBox.Show(this,
+                "读取当前属性卡会刷新已勾选图档，并替换其中尚未写入的属性编辑和待设置属性卡。是否继续读取？",
+                "确认重新读取属性卡", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        InvalidatePropertyCardConfirmation();
 
         operationRunning = true;
         operationPaused = false;
@@ -1109,6 +1137,9 @@ internal sealed class BatchPropertyEditDialog : Form
             stop.Visible = false;
             UseWaitCursor = false;
             button.Enabled = true;
+            rows.ResetBindings();
+            RefreshDynamicPropertyColumns();
+            UpdateSummary();
             UpdateOperationState();
         }
     }
@@ -1389,6 +1420,8 @@ internal sealed class BatchPropertyEditDialog : Form
 
     private void ApplyItemFilter()
     {
+        grid.EndEdit();
+        propertyCardGrid.EndEdit();
         var kind = documentTypeFilter.SelectedItem as string ?? "全部类型";
         var propertyName = propertyColumnFilter.SelectedItem as string ?? "全部属性";
         var excludeMatches = string.Equals(propertyMatchFilter.SelectedItem as string, "不包含", StringComparison.Ordinal);
@@ -1405,8 +1438,6 @@ internal sealed class BatchPropertyEditDialog : Form
                 .Distinct()
                 .ToArray();
         }
-        grid.EndEdit();
-        propertyCardGrid.EndEdit();
         grid.SuspendLayout();
         propertyCardGrid.SuspendLayout();
         try
@@ -1475,6 +1506,19 @@ internal sealed class BatchPropertyEditDialog : Form
         var value = modelItem.PropertyValue(propertyName);
         foreach (var drawing in RelatedDrawingItems(modelItem))
         {
+            var sources = RelatedModelItems(drawing).ToArray();
+            if (!drawing.IsPropertyApplicable(propertyName)
+                || sources.Any(source => source.IsPropertyUnread(propertyName)))
+            {
+                continue;
+            }
+            if (sources.Select(source => source.PropertyValue(propertyName)).Distinct(StringComparer.Ordinal).Count() != 1)
+            {
+                plmSyncStatus.Text = "关联模型属性不一致，未自动覆盖工程图，请核对";
+                plmSyncStatus.ForeColor = Color.FromArgb(210, 110, 0);
+                fillResultToolTip.SetToolTip(plmSyncStatus, drawing.FileName + "：“" + propertyName + "”的关联模型值不一致，工程图原值已保留。");
+                continue;
+            }
             if (string.Equals(drawing.PropertyValue(propertyName), value, StringComparison.Ordinal))
             {
                 continue;
@@ -2273,7 +2317,8 @@ internal sealed class BatchPropertyEditDialog : Form
             ? fillOptionValue.SelectedItem?.ToString() ?? string.Empty
             : fillValue.Text ?? string.Empty;
         var selectedRows = rows.Where(candidate => candidate.Selected).ToArray();
-        var applicableRows = selectedRows.Where(item => BatchPropertyEditItem.IsIdentityProperty(property) || item.IsPropertyApplicable(property)).ToArray();
+        var applicableRows = selectedRows.Where(item => !item.IsPropertyUnread(property)
+            && (BatchPropertyEditItem.IsIdentityProperty(property) || item.IsPropertyApplicable(property))).ToArray();
         foreach (var item in applicableRows)
         {
             item.SetPropertyValue(property, value);
@@ -2485,7 +2530,15 @@ internal sealed class BatchPropertyEditDialog : Form
             return;
         }
 
-        var lines = Clipboard.GetText().Replace("\r\n", "\n").TrimEnd('\n').Split('\n');
+        PasteGridText(Clipboard.GetText());
+        eventArgs.Handled = true;
+        eventArgs.SuppressKeyPress = true;
+    }
+
+    private void PasteGridText(string text)
+    {
+        if (grid.CurrentCell == null) return;
+        var lines = (text ?? string.Empty).Replace("\r\n", "\n").TrimEnd('\n').Split('\n');
         var isSingleValue = lines.Length == 1 && lines[0].IndexOf('\t') < 0;
         if (isSingleValue && grid.SelectedCells.Count > 1)
         {
@@ -2499,8 +2552,6 @@ internal sealed class BatchPropertyEditDialog : Form
             grid.EndEdit();
             grid.Refresh();
             UpdateSummary();
-            eventArgs.Handled = true;
-            eventArgs.SuppressKeyPress = true;
             return;
         }
 
@@ -2508,10 +2559,10 @@ internal sealed class BatchPropertyEditDialog : Form
             .Where(column => !column.ReadOnly && !(column is DataGridViewCheckBoxColumn))
             .OrderBy(column => column.DisplayIndex)
             .ToArray();
-        var startColumn = Array.FindIndex(editableColumns, column => column.Index >= grid.CurrentCell.ColumnIndex);
+        var startColumn = Array.FindIndex(editableColumns, column => column.DisplayIndex >= grid.CurrentCell.OwningColumn.DisplayIndex);
         if (startColumn < 0)
         {
-            startColumn = 0;
+            return;
         }
 
         for (var rowOffset = 0; rowOffset < lines.Length && grid.CurrentCell.RowIndex + rowOffset < grid.Rows.Count; rowOffset++)
@@ -2528,8 +2579,6 @@ internal sealed class BatchPropertyEditDialog : Form
         grid.EndEdit();
         grid.Refresh();
         UpdateSummary();
-        eventArgs.Handled = true;
-        eventArgs.SuppressKeyPress = true;
     }
 
     private bool TrySetPastedCellValue(DataGridViewCell cell, string value)
@@ -2733,7 +2782,8 @@ internal sealed class BatchPropertyEditDialog : Form
         }
         catch (Exception exception)
         {
-            executionStatus.Text = string.Concat("操作失败：", exception.Message);
+            PluginDiagnosticLog.Record("批量属性操作失败", exception.ToString());
+            executionStatus.Text = "操作失败，请检查图档是否可编辑后重试；详情已记录到插件诊断日志。";
             executionStatus.ForeColor = Color.FromArgb(190, 55, 55);
         }
         finally

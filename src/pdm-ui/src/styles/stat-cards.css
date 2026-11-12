@@ -38,9 +38,9 @@
   font-variant-numeric: tabular-nums;
 }
 
-:root body :is(.pdm-overview-alerts > .is-danger, .procurement-tracking__stats > .is-danger,
+:root body :is(.pdm-stat-card.is-danger, .pdm-overview-alerts > .is-danger, .procurement-tracking__stats > .is-danger,
     .pdm-budget__cards > .is-overrun, .pdm-workspace-usage > .has-recovery) { --pdm-stat-accent: var(--pdm-danger); }
-:root body :is(.pdm-overview-alerts > .is-warning, .procurement-tracking__stats > .is-warning) { --pdm-stat-accent: var(--pdm-orange); }
+:root body :is(.pdm-stat-card.is-warning, .pdm-overview-alerts > .is-warning, .procurement-tracking__stats > .is-warning) { --pdm-stat-accent: var(--pdm-orange); }
 
 :root body :is(.pdm-stat-card > span, .pdm-overview-alerts > article > span, .pdm-overview-alerts > button > span,
     .pdm-plan-summary > article > span,
@@ -62,17 +62,28 @@
   transform: none;
   order: 0;
 }
-:root body :is(.pdm-stat-card > span, .pdm-overview-alerts > article > span, .pdm-overview-alerts > button > span,
+:root body :is(.pdm-stat-card > span:not(:where(.pdm-stat-card__label)), .pdm-overview-alerts > article > span, .pdm-overview-alerts > button > span,
     .pdm-plan-summary > article > span,
     .pdm-plan-summary-action > span,
     .pdm-budget__card-heading, .procurement-stats-card__label, .pdm-workspace-usage > article > small,
-    .mobile-metrics > button > span)::before {
-  content: '';
+    .mobile-metrics > button > span)::before,
+.pdm-stat-card__icon {
   flex: 0 0 24px;
   width: 24px;
   height: 24px;
   border-radius: 50%;
+  background-color: var(--pdm-stat-accent);
+}
+:root body :is(.pdm-stat-card > span:not(:where(.pdm-stat-card__label)), .pdm-overview-alerts > article > span, .pdm-overview-alerts > button > span,
+    .pdm-plan-summary > article > span, .pdm-plan-summary-action > span, .pdm-budget__card-heading,
+    .procurement-stats-card__label, .pdm-workspace-usage > article > small, .mobile-metrics > button > span)::before {
+  content: '';
   background: var(--pdm-stat-accent) var(--pdm-stat-icon) center / 16px 16px no-repeat;
+}
+.pdm-stat-card__icon {
+  display: inline-grid;
+  place-items: center;
+  color: #fff;
 }
 :root body .pdm-overview-alerts > .pdm-overview-shipping {
   --pdm-stat-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6h11v11H3zM14 10h4l3 4v3h-7'/%3E%3Ccircle cx='7' cy='18' r='2'/%3E%3Ccircle cx='18' cy='18' r='2'/%3E%3C/svg%3E");
@@ -83,20 +94,21 @@
     .procurement-stats-card__value, .mobile-metrics > button > strong) {
   margin: 8px 0;
   color: var(--pdm-text);
-  font-size: 36px;
+  font-size: var(--pdm-stat-value-size, 36px);
   line-height: 40px;
   font-weight: 700;
   white-space: normal;
   overflow-wrap: anywhere;
   order: 1;
 }
-:root body :is(.pdm-overview-alerts > .is-danger > strong, .procurement-stats-card.is-danger > strong) { color: var(--pdm-danger); }
-:root body :is(.pdm-overview-alerts > .is-warning > strong, .procurement-stats-card.is-warning > strong) { color: var(--pdm-orange); }
+:root body :is(.pdm-stat-card.is-danger > strong, .pdm-overview-alerts > .is-danger > strong, .procurement-stats-card.is-danger > strong) { color: var(--pdm-danger); }
+:root body :is(.pdm-stat-card.is-warning > strong, .pdm-overview-alerts > .is-warning > strong, .procurement-stats-card.is-warning > strong) { color: var(--pdm-orange); }
 :root body .procurement-stats-card.is-success > strong { color: #02972f; }
-:root body :is(.pdm-overview-alerts > article > em, .pdm-overview-alerts > button > em) {
+:root body :is(.pdm-stat-card__detail, .pdm-overview-alerts > article > em, .pdm-overview-alerts > button > em) {
   margin-top: auto;
   color: var(--pdm-muted);
   font-size: 12px;
+  font-style: normal;
   line-height: 18px;
   white-space: normal;
   transform: none;
@@ -109,7 +121,7 @@
 
 /* Keep the cards readable in side panes as well as full-width summary strips. */
 :root body :is(.wh-report-summary, .pdm-overview-risk .pdm-overview-alerts, .pdm-plan-summary, .pdm-budget__cards,
-    .procurement-tracking__stats, .pdm-workspace-usage, .mobile-metrics) {
+    .procurement-tracking__stats, .pdm-workspace-usage, .mobile-metrics, .spare-parts__metrics) {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   align-items: stretch;
@@ -122,6 +134,10 @@
   container: overview-alerts / inline-size;
   flex: 0 0 auto;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 104px), 1fr));
+}
+:root body .spare-parts__metrics {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 164px), 1fr));
+  grid-auto-rows: 1fr;
 }
 @container overview-alerts (max-width: 430px) {
   :root body .pdm-overview-alerts > :is(article, button) { padding-inline: 10px !important; }
@@ -154,17 +170,18 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
-:root body :is(.pdm-plan-summary, .pdm-budget__cards) > article {
+:root body :is(.pdm-plan-summary, .pdm-budget__cards, .spare-parts__metrics) > article {
   min-height: 80px;
   justify-content: center;
   padding: 7px 16px !important;
   gap: 6px;
 }
-:root body :is(.pdm-plan-summary > article > span, .pdm-plan-summary-action > span, .pdm-budget__card-heading) {
+:root body .spare-parts__metrics > .pdm-stat-card { height: 80px; padding-inline: 12px !important; }
+:root body :is(.pdm-plan-summary > article > span, .pdm-plan-summary-action > span, .pdm-budget__card-heading, .spare-parts__metrics > article > span) {
   font-size: 16px;
   line-height: 22px;
 }
-:root body :is(.pdm-plan-summary > article > span, .pdm-plan-summary-action > span, .pdm-budget__card-heading)::before {
+:root body :is(.pdm-plan-summary > article > span, .pdm-plan-summary-action > span, .pdm-budget__card-heading, .spare-parts__metrics > article > span)::before {
   flex-basis: 20px;
   width: 20px;
   height: 20px;
@@ -188,7 +205,8 @@
   overflow-wrap: anywhere;
 }
 :root body :is(.pdm-budget__card-value > strong, .pdm-plan-summary__value > strong,
-    .pdm-plan-shipping-countdown > strong, .pdm-plan-summary > article > strong, .pdm-plan-summary-action > strong) {
+    .pdm-plan-shipping-countdown > strong, .pdm-plan-summary > article > strong, .pdm-plan-summary-action > strong,
+    .spare-parts__metrics > article > strong) {
   min-width: 0;
   max-width: 100%;
   margin: 0;

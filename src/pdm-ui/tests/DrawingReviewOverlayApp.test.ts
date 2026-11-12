@@ -33,4 +33,19 @@ describe('审核浮层全局主题', () => {
     wrapper.unmount()
     delete window.chrome
   })
+
+  it('审核浮层按当前授权更新，撤销后不因默认审核人名单保留权限', async () => {
+    let receive: (event: MessageEvent) => void = () => {}
+    Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: {
+      postMessage: vi.fn(), addEventListener: vi.fn((_name, handler) => { receive = handler }), removeEventListener: vi.fn(),
+    } } })
+    const wrapper = mount(DrawingReviewOverlayApp, { global: { stubs: { DrawingReviewPanel: true } } })
+    for (const canDecide of [false, true, false]) {
+      receive(new MessageEvent('message', { data: { type: 'review-overlay-state', payload: { visible: true, currentUsername: 'reviewer', defaultReviewers: ['reviewer'], canDecide } } }))
+      await nextTick()
+      expect(wrapper.getComponent({ name: 'DrawingReviewPanel' }).props('canDecide')).toBe(canDecide)
+    }
+    wrapper.unmount()
+    delete window.chrome
+  })
 })

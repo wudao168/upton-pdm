@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import { ElMessage } from '../statusMessage'
 import { reactive, ref, watch } from 'vue'
 import { testPreviewAgent } from '../api'
@@ -248,7 +249,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       <el-tab-pane v-if="canManageStorage !== false" label="项目编号" name="numbering">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>组织编号流水</h2><p>设置下一次项目编号和设备序列号使用的流水基线。</p></div></header>
-          <div class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>组织</th><th>当前项目流水</th><th>当前序列流水</th><th>操作</th></tr></thead><tbody><tr v-for="row in counterDrafts" :key="row.id"><td><strong>{{ row.name }}</strong></td><td><input v-model.number="row.project" class="pdm-table-input" type="number" min="0" max="99999"></td><td><input v-model.number="row.serial" class="pdm-table-input" type="number" min="0" max="9999999"></td><td><button type="button" class="pdm-text-action" :disabled="pending" @click="saveCounters(row)">保存</button></td></tr></tbody></table></div>
+          <div class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>组织</th><th>当前项目流水</th><th>当前序列流水</th><th>操作</th></tr></thead><tbody><tr v-for="row in counterDrafts" :key="row.id"><td><strong><CompanyName :name="row.name" /></strong></td><td><input v-model.number="row.project" class="pdm-table-input" type="number" min="0" max="99999"></td><td><input v-model.number="row.serial" class="pdm-table-input" type="number" min="0" max="9999999"></td><td><button type="button" class="pdm-text-action" :disabled="pending" @click="saveCounters(row)">保存</button></td></tr></tbody></table></div>
         </section>
       </el-tab-pane>
       <el-tab-pane v-if="canManageStorage !== false" label="存档位置" name="storage" class="pdm-storage-location-pane">

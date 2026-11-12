@@ -93,6 +93,7 @@ public sealed class NotificationInboxTests
     public async Task ProjectApplicationPoolKeepsPlanningApproversAndClosesThePriorApplicationRound()
     {
         using var f = await Fixture.Create();
+        await PermissionTestUsers.Revoke(f.Repository, "Administrator", PermissionCodes.ProjectApplicationApprove);
         var data = new ProjectApplicationData(new(null, "客户", "项目", null, null, "worker", [], "", false), "人员", []);
         var application = new ProjectApplication(Guid.NewGuid(), "AP-ROLE", f.Company, "worker", "人员", ProjectApplicationService.Pending, 1, data, 1, f.Now, f.Now);
         application = await f.Repository.SaveApplicationAsync(application, new(Guid.NewGuid(), 1, "提交", "worker", "人员", f.Now, data), 0, default);

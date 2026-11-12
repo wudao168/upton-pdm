@@ -30,11 +30,9 @@ public sealed class ReleaseItemCommentService(
 
         var currentTask = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null)
             ?? throw new PdmConflictException("当前发布包没有待处理的审批节点。");
-        var canEmergencySubstitute = await repository.HasUserPermissionAsync(
-            actor, role, PermissionCodes.ApprovalEmergencySubstitute, cancellationToken);
-        if (!string.Equals(currentTask.Assignee, actor, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase)
-            && !canEmergencySubstitute)
+        var currentApprover = currentTask.Participants?.CanSign(actor) ?? string.Equals(currentTask.Assignee, actor, StringComparison.OrdinalIgnoreCase);
+        if (!currentApprover && !await ApprovalEmergencyPolicy.CanAsync(
+            repository, package.ProjectId, package.EmergencyRoleCodes, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("只有当前审批人或紧急代批人员可以新增物料批注。");
 
         text = text?.Trim() ?? string.Empty;

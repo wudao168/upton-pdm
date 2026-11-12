@@ -283,6 +283,8 @@ public sealed record U9ConnectionTestResult(
 
 public interface IU9OpenApiClient
 {
+    Task<IReadOnlyList<PurchaseAnalysisLine>> QueryPurchaseAnalysisAsync(string baseUrl, string token,
+        string organization, DateOnly from, DateOnly through, CancellationToken ct) => throw new NotSupportedException();
     Task<IReadOnlyList<SparePurchasePrice>> QuerySparePurchasePricesAsync(string baseUrl, string token,
         string organizationCode, IReadOnlyList<string> materialCodes, DateTimeOffset synchronizedAt, CancellationToken ct) =>
         throw new NotSupportedException();

@@ -149,7 +149,7 @@ public sealed class ProjectCopyService(
         var sourceFolders = await repository.ListProjectFoldersAsync(source.Id, actor, role, cancellationToken);
         var targetFolders = (await repository.ListProjectFoldersAsync(target.Id, actor, role, cancellationToken)).ToList();
         var sourceDocuments = await repository.ListDocumentsAsync(source.Id, cancellationToken);
-        var sourceRelations = (await repository.ListDocumentRelationsAsync(source.Id, cancellationToken)).ToDictionary(relation => relation.DrawingDocumentId);
+        var sourceRelations = (await repository.ListDocumentRelationsAsync(source.Id, cancellationToken)).ToLookup(relation => relation.DrawingDocumentId);
         var latestVersions = (await repository.ListProjectDocumentVersionsAsync(source.Id, cancellationToken))
             .GroupBy(version => version.DocumentId)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(version => version.CreatedAt).First());
@@ -168,7 +168,7 @@ public sealed class ProjectCopyService(
         foreach (var sourceDocument in selectedDocuments)
         {
             var version = latestVersions[sourceDocument.Id];
-            await documentStorage.VerifyStoredFileAsync(source, NativeFile(sourceDocument, version), cancellationToken);
+            await documentStorage.VerifyVersionReadAsync(source, NativeFile(sourceDocument, version), cancellationToken);
         }
         var eligibleProjectFolders = sourceFolders.Where(folder => folder.Purpose == ProjectFolderPurpose.Standard).ToArray();
         var selectedProjectFolderIds = ExpandedSelectedFolderIds(eligibleProjectFolders, options.FolderIds);
@@ -188,9 +188,12 @@ public sealed class ProjectCopyService(
         }
         foreach (var sourceDocument in selectedDocuments.Where(document => document.Kind == DocumentKind.Drawing))
         {
-            Guid? relatedModelId = null;
-            if (sourceRelations.TryGetValue(sourceDocument.Id, out var relation)) relatedModelId = documentMap.GetValueOrDefault(relation.ModelDocumentId);
-            var registered = await RegisterCopyAsync(sourceDocument, relatedModelId, target, sourceFolders, targetFolders, latestVersions[sourceDocument.Id], actor, cancellationToken);
+            var relatedModelIds = sourceRelations[sourceDocument.Id]
+                .Select(relation => documentMap.GetValueOrDefault(relation.ModelDocumentId))
+                .Where(id => id != Guid.Empty).Distinct().ToArray();
+            var registered = await RegisterCopyAsync(sourceDocument, relatedModelIds.Length == 0 ? null : relatedModelIds[0], target, sourceFolders, targetFolders, latestVersions[sourceDocument.Id], actor, cancellationToken);
+            foreach (var relatedModelId in relatedModelIds.Skip(1))
+                await RegisterCopyAsync(sourceDocument, relatedModelId, target, sourceFolders, targetFolders, latestVersions[sourceDocument.Id], actor, cancellationToken);
             documentMap[sourceDocument.Id] = registered.Id;
         }
 

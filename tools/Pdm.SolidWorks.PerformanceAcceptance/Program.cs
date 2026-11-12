@@ -140,6 +140,20 @@ internal static class Program
                 lazyTreeBuild = initialRenderedNodes <= 250 && modelNodes == 5_001,
             };
             Console.WriteLine(new JavaScriptSerializer().Serialize(report));
+            if (Environment.GetEnvironmentVariable("PDM_PERFORMANCE_PROFILE") == "1")
+            {
+                var flags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
+                var healthType = controlType.GetNestedType("StructureHealthFilter", BindingFlags.NonPublic);
+                var none = Enum.Parse(healthType, "None");
+                var checks = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in new[] { "UpdateTreeHealth", "TreePresentationStamp", "BuildTreeNode" })
+                {
+                    var profile = Stopwatch.StartNew();
+                    controlType.GetMethod(name, flags).Invoke(name == "TreePresentationStamp" ? null : control,
+                        name == "UpdateTreeHealth" ? null : name == "TreePresentationStamp" ? new[] { root, "", none } : new object[] { root, "", checks, none });
+                    Console.WriteLine("PROFILE " + name + " " + profile.ElapsedMilliseconds + "ms");
+                }
+            }
             return passed ? 0 : 1;
         }
         catch (Exception exception)

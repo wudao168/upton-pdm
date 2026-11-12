@@ -46,9 +46,9 @@ public sealed class DingTalkOfficeTests
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var companies = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.Where(item => item.IsActive).ToArray();
         var company = companies[0].Id;
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
         await repository.SetUserCompanyScopeAsync("admin", company, false, [], "admin", default);
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "mobile-employee", "员工张工", "unused", UserRole.Engineer, true), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "mobile-employee", "员工张工", "unused", UserRole.Engineer, true), default);
         await repository.SetUserCompanyScopeAsync("mobile-employee", company, false, [], "admin", default);
         admin.DefaultRequestHeaders.Authorization = new("Bearer", AdminToken());
         admin.DefaultRequestHeaders.Add("X-Company-Id", company.ToString());
@@ -114,7 +114,7 @@ public sealed class DingTalkOfficeTests
         var company = companies[0].Id;
         foreach (var (username, role) in new[] { ("admin", UserRole.Administrator), ("employee", UserRole.Engineer), ("other", UserRole.Engineer) })
         {
-            await repository.CreateUserAsync(new(Guid.NewGuid(), username, "测试姓名", "unused", role, true), default);
+            await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), username, "测试姓名", "unused", role, true), default);
             await repository.SetUserCompanyScopeAsync(username, company, false, [], "admin", default);
         }
         HttpClient Client(string username, UserRole role)
@@ -185,7 +185,7 @@ public sealed class DingTalkOfficeTests
         }
         foreach (var (username, name, role) in new[] { ("admin", "管理员", UserRole.Administrator), ("qr-owner", "扫码员工", UserRole.Engineer), ("qr-other", "其他员工", UserRole.Engineer) })
         {
-            await repository.CreateUserAsync(new(Guid.NewGuid(), username, name, "unused", role, true), default);
+            await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), username, name, "unused", role, true), default);
             await repository.SetUserCompanyScopeAsync(username, company, false, [], "admin", default);
         }
         using var admin = Client("admin", "Administrator");

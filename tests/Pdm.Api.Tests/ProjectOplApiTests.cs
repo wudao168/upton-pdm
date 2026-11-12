@@ -97,15 +97,16 @@ public sealed class ProjectOplApiTests
 
         Login("opl-colleague");
         Assert.Empty(await Todos());
-        Assert.Equal(HttpStatusCode.Forbidden, (await Transcribe(path)).StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync(path, Body(input with { ExpectedRowVersion = 1 }))).StatusCode);
+        // 指派决定待办归属；实际编辑和转写能力由权限中心授权。
+        Assert.Equal(HttpStatusCode.OK, (await Transcribe(path)).StatusCode);
+        Assert.True((await client.GetFromJsonAsync<OplView>($"/api/projects/{project.Id}/opl"))!.Rows.Single().CanEdit);
         Login("opl-manager");
         var reassigned = input with { Owner = "opl-replacement", ExpectedRowVersion = 1 };
         Assert.Equal(HttpStatusCode.OK, (await client.PutAsync(path, Body(reassigned))).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsync(path, Body(reassigned))).StatusCode);
         Login("opl-owner");
         Assert.NotNull(Assert.Single(await Todos()).ResolvedAt);
-        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync(path, Body(reassigned with { ExpectedRowVersion = 2 }))).StatusCode);
+        Assert.True((await client.GetFromJsonAsync<OplView>($"/api/projects/{project.Id}/opl"))!.Rows.Single().CanEdit);
 
         Login("opl-replacement");
         Assert.Null(Assert.Single(await Todos()).ResolvedAt);
@@ -191,7 +192,7 @@ public sealed class ProjectOplApiTests
         using var factory = baseFactory.WithWebHostBuilder(builder => builder.ConfigureServices(services => {
             services.Configure<DingTalkOplOptions>(settings => {
                 settings.Enabled = true; settings.CorpId = "corp"; settings.AppKey = "app"; settings.AppSecret = "secret"; settings.RobotCode = "robot";
-                settings.CompanyId = Guid.NewGuid(); settings.PublicUrl = "http://192.168.2.8:5173";
+                settings.CompanyId = Guid.Parse("70000000-0000-0000-0000-000000000001"); settings.PublicUrl = "http://192.168.2.8:5173";
                 settings.Projects[projectId] = new() { OpenConversationId = "cid" };
             });
             services.AddHttpClient<DingTalkOplIntegration>().ConfigurePrimaryHttpMessageHandler(() => handler);

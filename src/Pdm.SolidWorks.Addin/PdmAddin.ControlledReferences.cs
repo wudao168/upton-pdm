@@ -18,7 +18,7 @@ public sealed partial class PdmAddin
 
     private IModelDoc2 OpenControlledReadOnlyDocumentCore(string path, int documentType, string configuration,
         ControlledOpenManifestDto manifest, bool preserveLoadedContext, bool preserveWorkingEdits = false,
-        bool allowMissingComponents = false)
+        bool allowMissingComponents = true, bool requireDrawingModels = false)
     {
         using var retainedWorking = new ControlledWorkingCopyScope(path, manifest);
         var resumedPaths = new HashSet<string>(manifest.Files.Where(file => manifest.ResumedDocumentIds.Contains(file.DocumentId))
@@ -65,7 +65,7 @@ public sealed partial class PdmAddin
             var timer = System.Diagnostics.Stopwatch.StartNew();
             IModelDoc2 opened;
             Action<ISet<string>> verifyBoundary;
-            var missingComponents = allowMissingComponents && !manifest.ForEdit
+            var missingComponents = allowMissingComponents
                 ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) : null;
             using (var search = new ControlledReferenceSearchScope(application, path, manifest))
             {
@@ -89,7 +89,7 @@ public sealed partial class PdmAddin
                             throw new IOException("受控文件在打开期间发生变化，未认定打开完成：" + file.FileName);
                 }
                 var embeddedSources = ValidateHistoricalControlledOpenReferences(opened, path, manifest, application, missingComponents)
-                    ?? ValidateControlledLoadedSources(opened, path, manifest, application, missingComponents);
+                    ?? ValidateControlledLoadedSources(opened, path, manifest, application, missingComponents, !requireDrawingModels);
                 verifyBoundary(missingComponents);
                 var expected = new HashSet<string>(manifest.Files.Select(file =>
                     Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), file.RelativePath ?? file.FileName))), StringComparer.OrdinalIgnoreCase);
@@ -114,7 +114,7 @@ public sealed partial class PdmAddin
                 }
                 try { if (manifest.RetainedLocalReferences.Count == 0 && !(missingComponents?.Count > 0)) ControlledReferenceMaterializer.RememberVerifiedOpen(path, manifest); }
                 catch (Exception cacheError) { LogDiagnostic("保存已核对的引用准备记录，本次打开已完成", cacheError); }
-                ReportMissingComponentsOnOpen(missingComponents);
+                ReportMissingComponentsOnOpen(missingComponents, "已打开", path);
                 return opened;
             }
             catch (Exception error)
@@ -151,12 +151,29 @@ public sealed partial class PdmAddin
         throw new IOException("受控装配体打开未完成，请检查引用图档后重试。");
     }
 
-    private void ReportMissingComponentsOnOpen(ISet<string> missingComponents)
+    private void ReportMissingComponentsOnOpen(ISet<string> missingComponents, string completed = "已打开", string rootPath = null)
     {
+        rootPath = rootPath ?? (application?.ActiveDoc as IModelDoc2)?.GetPathName() ?? currentTree?.FullPath;
+        var context = controlledOpenManifests.FirstOrDefault(pair => pair.Value.Files.Any(file =>
+            PathsEqual(ControlledReferenceMaterializer.LocalPath(pair.Key, file), rootPath)));
+        if (context.Value != null)
+        {
+            var manifest = context.Value;
+            var issues = (manifest.ReferenceIssues ?? new List<OpenReferenceIssueDto>()).ToList();
+            foreach (var path in missingComponents ?? new HashSet<string>())
+                if (!issues.Any(issue => string.Equals(issue.OriginalPath, path, StringComparison.OrdinalIgnoreCase)
+                    || string.IsNullOrWhiteSpace(issue.OriginalPath) && string.Equals(issue.FileName, Path.GetFileName(path), StringComparison.OrdinalIgnoreCase)))
+                    issues.Add(new OpenReferenceIssueDto { InstancePath = manifest.RootRelativePath, FileName = Path.GetFileName(path),
+                        OriginalPath = path, Reason = "缺失引用已压缩，未加载。" });
+            manifest.ReferenceIssues = OpenReferenceFindings.Merge(issues);
+            try { OpenReferenceFindings.Save(Path.Combine(context.Key, manifest.RootRelativePath), manifest.RootVersionId, manifest.ReferenceIssues); }
+            catch (Exception error) { LogDiagnostic("保留缺件诊断清单", error); }
+            if (currentTree != null && PathsEqual(currentTree.FullPath, rootPath)) currentTree.OpenReferenceIssues = manifest.ReferenceIssues;
+        }
         if (!(missingComponents?.Count > 0)) return;
         var names = missingComponents.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
         PluginDiagnosticLog.Record("缺件打开", "缺失引用未加载：" + string.Join("、", names));
-        taskPaneControl?.SetCheckoutReminder("已打开，" + names.Length + "项缺失引用未加载："
+        taskPaneControl?.SetCheckoutReminder(completed + "，" + names.Length + "项缺失引用未加载："
             + string.Join("、", names.Take(2)) + (names.Length > 2 ? "等（详见日志）" : ""), false);
     }
 
@@ -214,7 +231,7 @@ public sealed partial class PdmAddin
         => ValidateControlledLoadedSources(opened, rootPath, manifest, app);
 
     private static HashSet<string> ValidateControlledLoadedSources(IModelDoc2 opened, string rootPath,
-        ControlledOpenManifestDto manifest, ISldWorks app, ISet<string> missingComponents = null)
+        ControlledOpenManifestDto manifest, ISldWorks app, ISet<string> missingComponents = null, bool allowMissingDrawingModels = true)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(rootPath));
         var expected = ControlledOpenBoundary.Paths(directory, manifest);
@@ -265,10 +282,10 @@ public sealed partial class PdmAddin
         {
             if (missingComponents == null || NativeArchiveManifest.IsInterconnectCachePath(path)
                 || !IsNativeModelReference(path)) return false;
-            missingComponents.Add(Path.GetFileName(path));
+            missingComponents.Add(path);
             return true;
         }
-        void CheckDeferred(string path, string name, bool embedded, bool mayBeMissing = false)
+        void CheckDeferred(string path, string name, bool embedded, bool mayBeMissing = false, bool requireExactPath = false)
         {
             if (embedded) return;
             var fileName = string.IsNullOrWhiteSpace(path) ? string.Empty : Path.GetFileName(path);
@@ -279,11 +296,16 @@ public sealed partial class PdmAddin
                 return;
             }
             var file = manifest.Files.FirstOrDefault(candidate => string.Equals(candidate.FileName, fileName, StringComparison.OrdinalIgnoreCase));
-            var actual = ArchiveReferencePath.Resolve(path, directory, "核对未加载组件引用", rootPath);
             var isLocal = manifest.RetainedLocalReferences.TryGetValue(fileName, out var pending);
-            if (isLocal && pending.Matches(actual)) local = actual;
-            else if (!PathsEqual(actual, local))
-                failures.Add(name + "：未加载组件仍指向原目录，尚未完成受控引用定位");
+            if (isLocal || requireExactPath)
+            {
+                var actual = ArchiveReferencePath.Resolve(path, directory, "核对未加载组件引用", rootPath);
+                if (isLocal && pending.Matches(actual)) local = actual;
+                else if (requireExactPath && !PathsEqual(actual, local))
+                    failures.Add(name + "：关联模型尚未定位到当前受控工作区：" + fileName);
+            }
+            // Unloaded occurrences expose a saved path. Verify the controlled bytes here
+            // and compare actual paths only after the native model has loaded.
             if (verifiedCopies.Add(local) && (isLocal ? !pending.Matches(local) : !ControlledReferenceMaterializer.Matches(local, file)))
                 failures.Add(name + "：未加载组件的受控文件内容校验失败");
             if (!Path.GetExtension(local).Equals(".SLDASM", StringComparison.OrdinalIgnoreCase)
@@ -317,7 +339,6 @@ public sealed partial class PdmAddin
                 else
                 {
                     var localChild = manifest.RetainedLocalReferences.TryGetValue(Path.GetFileName(native), out var child) && child.Matches(native);
-                    if (!localChild && !PathsEqual(native, target)) failures.Add(name + "：内部引用尚未定位到受控工作区：" + Path.GetFileName(native));
                     CheckDeferred(localChild ? native : target, name + "/" + Path.GetFileName(native), false);
                 }
             }
@@ -363,8 +384,8 @@ public sealed partial class PdmAddin
                     }
                     if (loaded != null) Check(path, component.Name2, embedded);
                     else CheckDeferred(path, component.Name2, embedded, missingComponents != null
-                        && !embedded && IsNativeModelReference(path) && !expected.ContainsKey(Path.GetFileName(path))
-                        && component.IsSuppressed());
+                        && !expected.ContainsKey(Path.GetFileName(path) ?? string.Empty)
+                        && CanOmitUnloadedComponent(component, path, embedded));
                     if (embedded && !string.IsNullOrWhiteSpace(path)) embeddedSources.Add(path);
                     Visit(loaded, componentOwner);
                 }
@@ -377,7 +398,8 @@ public sealed partial class PdmAddin
                     var path = loaded?.GetPathName();
                     if (string.IsNullOrWhiteSpace(path)) path = view.GetReferencedModelName();
                     if (loaded != null) Check(path, "工程图模型", false);
-                    else CheckDeferred(path, "工程图模型", false, mayBeMissing: true);
+                    else CheckDeferred(path, "工程图模型", false, mayBeMissing: allowMissingDrawingModels,
+                        requireExactPath: !allowMissingDrawingModels);
                     Visit(loaded);
                 }
         }
@@ -394,4 +416,8 @@ public sealed partial class PdmAddin
     private static bool IsNativeModelReference(string path)
         => string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
             || string.Equals(Path.GetExtension(path), ".SLDASM", StringComparison.OrdinalIgnoreCase);
+
+    private static bool CanOmitUnloadedComponent(IComponent2 component, string path, bool embedded)
+        => !embedded && IsNativeModelReference(path) && !NativeArchiveManifest.IsInterconnectCachePath(path)
+            && !IsSolidWorksTemporaryVirtualComponentPath(path) && component.IsSuppressed();
 }

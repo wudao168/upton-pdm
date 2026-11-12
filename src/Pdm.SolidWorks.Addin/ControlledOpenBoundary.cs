@@ -79,11 +79,11 @@ internal sealed class ControlledOpenBoundary : IDisposable
 
     internal void Verify(ISet<string> missingComponents = null, ISldWorks application = null)
     {
-        var unexpected = blocked.Where(path => missingComponents?.Contains(Path.GetFileName(path)) != true).ToList();
+        var unexpected = blocked.Where(path => missingComponents?.Contains(path) != true).ToList();
         bool IsUnlistedPart(string path) => string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
             && !paths.ContainsKey(Path.GetFileName(path));
         // SolidWorks can omit a Toolbox occurrence from the returned tree when its
-        // open callback rejects the file. In a read-only open, the rejected request
+        // open callback rejects the file. When missing references are allowed, the rejected request
         // itself identifies the missing part. Loaded sources are checked separately.
         if (missingComponents != null && application != null && unexpected.Any(IsUnlistedPart))
         {
@@ -102,7 +102,7 @@ internal sealed class ControlledOpenBoundary : IDisposable
                     unexpected.RemoveAll(path =>
                     {
                         if (!IsUnlistedPart(path) || !path.StartsWith(browser, StringComparison.OrdinalIgnoreCase)) return false;
-                        missingComponents.Add(Path.GetFileName(path));
+                        missingComponents.Add(path);
                         return true;
                     });
                 }

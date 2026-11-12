@@ -10,7 +10,7 @@ public sealed class MaterialSyncBatchServiceTests
     public async Task CreateAsync_OrdersItemsByMaterialCodeAndPersistsProgress()
     {
         var timeProvider = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(timeProvider);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(timeProvider);
         var materials = new InMemoryMaterialRepository(timeProvider);
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:secret",

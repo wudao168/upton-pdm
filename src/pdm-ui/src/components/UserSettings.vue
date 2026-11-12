@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import DepartmentName from './DepartmentName.vue'
+import CompanyName from './CompanyName.vue'
+import CompanyNameField from './CompanyNameField.vue'
 import PersonName from './PersonName.vue'
 import SearchField from './SearchField.vue'
 import { computed, reactive, ref, watch } from 'vue'
@@ -76,17 +79,18 @@ function roleName(role: string) { return props.roleDirectory.roles.find(item => 
 function roleNames(user: PdmUser) { return (user.roles ?? [user.role]).map(roleName).join('、') }
 function unitById(id?: string) { return props.directory.units.find(item => item.id === id) }
 function companyName(id?: string) { return props.directory.organizations.find(item => item.id === id)?.name ?? '—' }
-function unitPath(id: string) {
+function unitPathNames(id: string) {
   const names: string[] = []
   let current = unitById(id)
   while (current) { names.unshift(current.name); current = unitById(current.parentUnitId) }
-  return names.join(' / ')
+  return names
 }
+function unitPath(id: string) { return unitPathNames(id).join(' / ') }
 function memberships(username: string) { return props.directory.memberships.filter(item => item.username.toLocaleLowerCase('zh-CN') === username.toLocaleLowerCase('zh-CN') && activeCompanyUnitIds.value.has(item.unitId)) }
 function primaryMembership(username: string) { return memberships(username).find(item => item.isPrimary) }
 function userCompanyId(user: PdmUser) { return user.companyId ?? unitById(primaryMembership(user.username)?.unitId)?.organizationId }
 function primaryUnitName(username: string) { const item = primaryMembership(username); return item ? unitPath(item.unitId) : '未分配' }
-function otherUnitNames(username: string) { return memberships(username).filter(item => !item.isPrimary).map(item => unitPath(item.unitId)).join('、') || '—' }
+function otherMemberships(username: string) { return memberships(username).filter(item => !item.isPrimary) }
 
 function openUser(user?: PdmUser) {
   editingUsername.value = user?.username ?? ''
@@ -153,10 +157,10 @@ async function resetPassword(user: PdmUser) {
 
     <section v-if="activeSection !== 'roles'" class="pdm-panel user-company-context" aria-label="当前公司主体">
       <div><strong>当前公司主体</strong><small>用户以主公司归属，组织关系和负责人按当前公司隔离维护</small></div>
-      <select :value="activeOrganizationId" aria-label="选择当前公司主体" @change="emit('updateActiveOrganizationId', ($event.target as HTMLSelectElement).value)">
+      <CompanyNameField :name="activeCompany?.name"><select :value="activeOrganizationId" aria-label="选择当前公司主体" @change="emit('updateActiveOrganizationId', ($event.target as HTMLSelectElement).value)">
         <option v-for="company in directory.organizations.filter(item => item.isActive !== false)" :key="company.id" :value="company.id">{{ company.name }}</option>
-      </select>
-      <span>{{ activeCompany?.name || '请选择公司' }}</span>
+      </select></CompanyNameField>
+      <CompanyName :name="activeCompany?.name || '请选择公司'" />
     </section>
 
     <section v-if="activeSection === 'users'" class="pdm-panel user-directory" aria-label="用户列表">
@@ -168,7 +172,7 @@ async function resetPassword(user: PdmUser) {
         <table class="pdm-project-table" data-pdm-min-width="820">
           <colgroup><col v-for="column in (canManageUsers ? 7 : 6)" :key="column"><col class="user-actions-column"></colgroup>
           <thead><tr><th v-if="canManageUsers">账号</th><th>姓名</th><th>角色</th><th>公司</th><th>主部门</th><th>兼任部门</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody><tr v-for="user in filteredUsers" :key="user.username"><td v-if="canManageUsers" :title="user.username">{{ user.username }}</td><td><PersonName :name="user.displayName || '姓名待补充'" /></td><td :title="roleNames(user)">{{ roleNames(user) }}</td><td :title="companyName(user.companyId ?? undefined)">{{ companyName(user.companyId ?? undefined) }}</td><td :title="primaryUnitName(user.username)">{{ primaryUnitName(user.username) }}</td><td :title="otherUnitNames(user.username)">{{ otherUnitNames(user.username) }}</td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><div class="user-row-actions"><button v-if="canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button><button v-if="canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button><button v-if="canManageUsers && user.username.toLocaleLowerCase('zh-CN') !== currentUsername.toLocaleLowerCase('zh-CN')" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button></div></td></tr></tbody>
+          <tbody><tr v-for="user in filteredUsers" :key="user.username"><td v-if="canManageUsers" :title="user.username">{{ user.username }}</td><td><PersonName :name="user.displayName || '姓名待补充'" /></td><td :title="roleNames(user)">{{ roleNames(user) }}</td><td :title="companyName(user.companyId ?? undefined)"><CompanyName :name="companyName(user.companyId ?? undefined)" /></td><td :title="primaryUnitName(user.username)"><DepartmentName :names="unitPathNames(primaryMembership(user.username)?.unitId ?? '')" separator=" / " fallback="未分配" /></td><td :title="otherMemberships(user.username).map(item => unitPath(item.unitId)).join('、')"><template v-for="(item, index) in otherMemberships(user.username)" :key="item.unitId"><template v-if="index">、</template><DepartmentName :names="unitPathNames(item.unitId)" separator=" / " /></template><template v-if="!otherMemberships(user.username).length">—</template></td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><div class="user-row-actions"><button v-if="canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button><button v-if="canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button><button v-if="canManageUsers && user.username.toLocaleLowerCase('zh-CN') !== currentUsername.toLocaleLowerCase('zh-CN')" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button></div></td></tr></tbody>
         </table>
       </div>
       <p v-if="!filteredUsers.length" class="pdm-empty-info">没有符合条件的用户。</p>
@@ -185,10 +189,10 @@ async function resetPassword(user: PdmUser) {
         <label>账号<input v-model="userForm.username" :disabled="Boolean(editingUsername)" maxlength="100" autocomplete="off"></label>
         <label>姓名<input v-model="userForm.displayName" maxlength="100"></label>
         <label>系统角色<el-select v-model="userForm.roles" multiple filterable collapse-tags :max-collapse-tags="3" style="width:100%"><el-option v-for="role in assignableRoles" :key="role.role" :label="role.name" :value="role.role" /></el-select><small>可多选；第一个角色作为兼容主角色，实际权限按所有角色合并。</small></label>
-        <label>主公司<select v-model="userForm.companyId" :disabled="!platformAdministrator"><option v-for="company in activeCompanies" :key="company.id" :value="company.id">{{ company.name }}</option></select></label>
+        <label>主公司<CompanyNameField :name="activeCompanies.find(company => company.id === userForm.companyId)?.name"><select v-model="userForm.companyId" :disabled="!platformAdministrator"><option v-for="company in activeCompanies" :key="company.id" :value="company.id">{{ company.name }}</option></select></CompanyNameField></label>
         <template v-if="platformAdministrator">
           <label class="user-checkbox"><input v-model="userForm.crossCompanyView" type="checkbox"> 允许跨公司访问</label>
-          <label v-if="userForm.crossCompanyView">可访问公司<el-select v-model="userForm.accessibleCompanyIds" multiple filterable style="width:100%"><el-option v-for="company in accessibleCompanyOptions" :key="company.id" :label="company.name" :value="company.id" /></el-select></label>
+          <label v-if="userForm.crossCompanyView">可访问公司<el-select v-model="userForm.accessibleCompanyIds" multiple filterable style="width:100%"><template #label="{ label }"><CompanyName :name="label" /></template><el-option v-for="company in accessibleCompanyOptions" :key="company.id" :label="company.name" :value="company.id"><CompanyName :name="company.name" /></el-option></el-select></label>
           <small v-if="userForm.crossCompanyView">主公司始终可访问；此处只授权额外公司。平台管理员和开发者可直接访问全部启用公司。</small>
         </template>
         <label v-if="!editingUsername">初始密码<input v-model="userForm.password" type="password" minlength="8" autocomplete="new-password"></label>
@@ -199,7 +203,7 @@ async function resetPassword(user: PdmUser) {
     </el-dialog>
 
     <el-dialog v-model="membershipDialog" :title="`组织关系 · ${selectedUser?.displayName ?? ''}`" width="620px">
-      <div class="user-form"><label>所属部门<el-select v-model="membershipUnits" multiple filterable style="width:100%"><el-option v-for="unit in activeUnits" :key="unit.id" :label="`${companyName(unit.organizationId)} / ${unitPath(unit.id)}`" :value="unit.id" /></el-select></label><label>主部门<el-select v-model="primaryUnitId" style="width:100%"><el-option v-for="unitId in membershipUnits" :key="unitId" :label="unitPath(unitId)" :value="unitId" /></el-select></label><small>可加入同一公司的多个部门，但必须指定一个主部门。</small></div>
+      <div class="user-form"><label>所属部门<el-select v-model="membershipUnits" multiple filterable style="width:100%"><template #label="{ value }"><DepartmentName :names="unitPathNames(String(value))" separator=" / " /></template><el-option v-for="unit in activeUnits" :key="unit.id" :label="`${companyName(unit.organizationId)} / ${unitPath(unit.id)}`" :value="unit.id"><CompanyName :name="companyName(unit.organizationId)" /> / <DepartmentName :names="unitPathNames(unit.id)" separator=" / " /></el-option></el-select></label><label>主部门<el-select v-model="primaryUnitId" style="width:100%"><template #label="{ value }"><DepartmentName :names="unitPathNames(String(value))" separator=" / " /></template><el-option v-for="unitId in membershipUnits" :key="unitId" :label="unitPath(unitId)" :aria-label="unitPath(unitId)" :value="unitId"><DepartmentName :names="unitPathNames(unitId)" separator=" / " /></el-option></el-select></label><small>可加入同一公司的多个部门，但必须指定一个主部门。</small></div>
       <template #footer><button type="button" class="pdm-secondary-action" @click="membershipDialog=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveMemberships">保存</button></template>
     </el-dialog>
   </section>

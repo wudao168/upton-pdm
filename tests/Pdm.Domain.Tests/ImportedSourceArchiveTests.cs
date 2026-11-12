@@ -16,7 +16,7 @@ public sealed class ImportedSourceArchiveTests
     [InlineData(true, "设计表.xlsx")]
     public async Task DesignSourceAndParentCommitAtomicallyAndReplayWithoutAnotherVersion(bool rejectSource, string sourceName)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
         var storage = DispatchProxy.Create<IFileStorage, ArchiveBatchReadReuseTests.Files>();
         ((ArchiveBatchReadReuseTests.Files)(object)storage).RejectAt = rejectSource ? 2 : 0;
         var workflow = new PdmWorkflowService(repository, storage, null!, TimeProvider.System);
@@ -59,7 +59,7 @@ public sealed class ImportedSourceArchiveTests
     [InlineData("SOURCE.zip", true)]
     public async Task OtherFilesCannotBypassRegistrationRules(string name, bool batch)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("STEP-" + Guid.NewGuid().ToString("N"), "导入源登记限制", "admin", "vault", "release"), "admin", default);
         await Assert.ThrowsAsync<PdmRuleException>(() => workflow.RegisterDocumentAsync(new(project.Id, "SOURCE", "导入源", name, DocumentKind.Other, SourceSha256: new string('A', 64)),

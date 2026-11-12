@@ -47,12 +47,13 @@ internal static partial class Program
                 StandardPreviewFailureScenario();
                 return 0;
             }
-            if (args.Length > 1) { SourceWriteLock(args[1] == "--expect-file-lock"); return 0; }
+            var excludeStandardModules = args.Contains("--exclude-standard-modules");
+            if (args.Length > 1 && !excludeStandardModules) { SourceWriteLock(args[1] == "--expect-file-lock"); return 0; }
             PlmBackupFailureScenario();
             DraftRelocatedBaselineScenario();
             DiscardRestoreScenario().GetAwaiter().GetResult();
             DiscardRestoreScenario(true).GetAwaiter().GetResult();
-            StandardPreviewFailureScenario();
+            if (!excludeStandardModules) StandardPreviewFailureScenario();
             Scenario(false, false).GetAwaiter().GetResult();
             Scenario(true, false).GetAwaiter().GetResult();
             Scenario(true, true).GetAwaiter().GetResult();
@@ -117,7 +118,10 @@ internal static partial class Program
         Set(entry, "DocumentId", Guid.NewGuid()); Set(entry, "ProjectId", Guid.NewGuid());
         Set(entry, "SessionId", Field(plugin, "checkoutSessionId")); Set(entry, "SourcePath", source);
         Set(entry, "BaseSha256", Type("EditDraftJournal").GetMethod("Hash", Flags).Invoke(null, new object[] { source }));
-        Set(entry, "ObservedOpen", true); Set(entry, "ProcessId", int.MaxValue);
+        // Model a reused PID with a different start time. An invalid Windows PID can
+        // return access denied, which correctly does not prove that the owner exited.
+        Set(entry, "ObservedOpen", true); Set(entry, "ProcessId", System.Diagnostics.Process.GetCurrentProcess().Id);
+        Set(entry, "ProcessStartedUtcTicks", 0L);
         var journal = New("EditDraftJournal", root, "missing-source");
         Invoke(journal, "Save", entry);
         SetField(plugin, "editJournal", journal);
@@ -132,14 +136,25 @@ internal static partial class Program
         var restarted = New("PdmAddin");
         SetField(restarted, "editJournal", New("EditDraftJournal", root, "missing-source"));
         EmptyApplication(restarted);
+        Require(((IDictionary)Field(restarted, "localEdits")).Count == 0, "Restart fixture unexpectedly has active edits");
+        var recoveryWatch = System.Diagnostics.Stopwatch.StartNew();
         for (var index = 0; index < 100; index++)
             Require(((ICollection)Invoke(restarted, "PrepareClosedEdits")).Count == 0, "Restart lost missing-source backoff");
-        var recovered = ((IEnumerable)Invoke(journal, "ReadAll")).Cast<object>().Single();
+        var recoveredJournal = Field(restarted, "editJournal");
+        var recovered = ((IEnumerable)Invoke(recoveredJournal, "ReadAll")).Cast<object>().Single();
         Require((int)Get(recovered, "MaintenanceFailureCount") == 1, "Restart repeated the same failure");
         File.WriteAllText(source, "base");
-        Set(recovered, "NextMaintenanceAttemptUtc", DateTime.MinValue); Invoke(journal, "Save", recovered);
+        Set(recovered, "NextMaintenanceAttemptUtc", DateTime.MinValue); Invoke(recoveredJournal, "Save", recovered);
+        using (var owner = System.Diagnostics.Process.GetCurrentProcess())
+            Set(recovered, "ProcessStartedUtcTicks", owner.StartTime.ToUniversalTime().Ticks);
+        Invoke(recoveredJournal, "Save", recovered);
+        Require(((ICollection)Invoke(restarted, "PrepareClosedEdits")).Count == 0, "Recovery took a record from a live owner process");
+        Set(recovered, "ProcessStartedUtcTicks", 0L); Set(recovered, "UnsavedChanges", true); Invoke(recoveredJournal, "Save", recovered);
+        Require(((ICollection)Invoke(restarted, "PrepareClosedEdits")).Count == 0, "Recovery released retained unsaved memory without restoration");
+        Set(recovered, "UnsavedChanges", false); Invoke(recoveredJournal, "Save", recovered);
         var pending = (ICollection)Invoke(restarted, "PrepareClosedEdits");
         Require(pending.Count == 1 && (bool)Get(pending.Cast<object>().Single(), "PendingClose"), "Restored original path did not resume safely");
+        Console.WriteLine("Recovery maintenance: 100 backoff ticks and retry in " + recoveryWatch.ElapsedMilliseconds + " ms");
         File.SetAttributes(source, FileAttributes.Normal);
         Directory.Delete(root, true);
         Console.WriteLine("PASS: missing source held safely for 100 ticks and restart; original-path recovery resumed");
@@ -306,13 +321,13 @@ internal static partial class Program
         SetField(plugin, "draftIdleCheck", new Func<bool>(() => allowDraft));
         var extension = new Proxy(extensionType, call =>
         {
-            if (call.MethodName != "SaveAs") throw new Exception("Unexpected extension call: " + call.MethodName);
+            if (call.MethodName != "SaveAs3") throw new Exception("Unexpected extension call: " + call.MethodName);
             Invoke(plugin, "OnAssemblyFileSaved", 0, path);
             Invoke(plugin, "OnAssemblyTreeChanged");
             Invoke(plugin, "OnDocumentStateChanged");
             Invoke(plugin, "OnActiveDocumentChanged");
             File.WriteAllText((string)call.Args[0], "unsaved memory");
-            call.Args[4] = 0; call.Args[5] = 0; dirtyFlag = false; saves++; return true;
+            call.Args[5] = 0; call.Args[6] = 0; dirtyFlag = false; saves++; return true;
         }).GetTransparentProxy();
         var model = new Proxy(modelType, call =>
         {
@@ -322,6 +337,7 @@ internal static partial class Program
                 case "GetType": return 1;
                 case "GetSaveFlag": return dirtyFlag;
                 case "get_Extension": return extension;
+                case "get_SelectionManager": return null;
                 case "SetSaveFlag": dirtyFlag = true; return null;
                 default: throw new Exception("Unexpected model call: " + call.MethodName);
             }

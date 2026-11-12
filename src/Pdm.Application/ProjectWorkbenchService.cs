@@ -96,8 +96,6 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
         foreach (var project in projects) if (await repository.HasProjectContentReadAccessAsync(project.Id, actor, role, ct)) readable.Add(project);
         projects = readable.ToArray();
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
-        var user = await repository.FindUserAsync(actor, ct);
-        var roles = user?.EffectiveRoleCodes ?? TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()];
         var administrator = await repository.HasUserPermissionAsync(actor, role, "workbench.all", ct);
         var managedUnits = WorkbenchScope.ManagedUnits(directory, actor);
         var plans = (projects.Length == 0 ? [] : await planning.ListPlansAsync(projects.Select(project => project.Id).ToArray(), ct))
@@ -171,12 +169,10 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("验收情况暂时无法读取"); }
                 }
-                var canRegister = administrator || WorkbenchScope.Manager(root, actor) || root.ExecutionUnitId is Guid unit && managedUnits.Contains(unit)
-                    || WorkbenchScope.Engineer(root, actor) || WorkbenchScope.Engineer(project, actor) || root.PhaseOwners.Values.Concat(project.PhaseOwners.Values).Any(value => WorkbenchScope.Contains(value, actor))
-                    || ((plan?.ChangeDraftSource ?? plan)?.Tasks.Any(task => WorkbenchScope.Contains(task.Assignee, actor)) ?? false)
-                    || WorkbenchScope.Contains(commercial?.SalesPeople, actor) || WorkbenchScope.Contains(commercial?.PresalesPeople, actor);
+                var canRegister = project.EffectiveProjectPermissions.Contains("project.risk.manage");
                 result.Add(new(project, effective, plan?.ApprovalStatus.ToString() ?? "Missing", budget, purchasing, acceptance, warnings, canRegister,
-                    effective?.ApprovalStatus == ProjectPlanApprovalStatus.Approved && effective.Tasks.Count > 0 ? ProjectPlanningService.CompletionPercent(effective.Tasks, effective.Stages) : null, administrator || WorkbenchScope.Manager(root, actor) || WorkbenchScope.Manager(project, actor)));
+                    effective?.ApprovalStatus == ProjectPlanApprovalStatus.Approved && effective.Tasks.Count > 0 ? ProjectPlanningService.CompletionPercent(effective.Tasks, effective.Stages) : null,
+                    project.EffectiveProjectPermissions.Contains("project.record.manage")));
             }
         }
         if (summaryOnly && opl is not null)
@@ -198,9 +194,8 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
         return new(views, selected, clock.GetUtcNow(), result, visibleRisks.Select(risk =>
         {
             var project = projects.First(item => item.Id == risk.ProjectId);
-            var root = projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.ParentProjectId)) ?? project;
-            return risk with { CanClose = administrator || WorkbenchScope.Same(risk.Owner, actor) || WorkbenchScope.Same(risk.CreatedBy, actor)
-                || WorkbenchScope.Manager(root, actor) || root.ExecutionUnitId is Guid unit && managedUnits.Contains(unit) };
+            return risk with { CanClose = WorkbenchScope.Same(risk.Owner, actor) || WorkbenchScope.Same(risk.CreatedBy, actor)
+                || project.EffectiveProjectPermissions.Contains("project.risk.close-others") };
         }).ToArray(), scopes);
     }
 

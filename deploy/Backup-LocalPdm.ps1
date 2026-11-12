@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$DestinationRoot, [switch]$PlanOnly)
 
 $ErrorActionPreference = 'Stop'
@@ -24,21 +24,16 @@ foreach ($source in $plan.sources) {
     }
 }
 $receipt = Get-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Raw | ConvertFrom-Json
-$mysqlDump = Join-Path $receipt.mysqlHome 'bin\mysqldump.exe'
+$mysqlDump = Resolve-PdmMySqlTool $projectRoot $receipt 'mysqldump.exe'
 $rootClientPath = Join-Path $localRoot 'secrets\mysql-root-client.ini'
 if (-not (Test-Path -LiteralPath $mysqlDump) -or -not (Test-Path -LiteralPath $rootClientPath)) { throw '缺少数据库备份程序或受保护的连接配置。' }
 if (Test-Path -LiteralPath $backupRoot) { throw '本次备份目录已存在，请重新执行以创建独立批次。' }
-$serviceWasRunning = (Get-Service -Name 'UptonPdmApi').Status -eq 'Running'
-$serviceStopped = $false
+$apiRuntime = Get-PdmBackupApiRuntime $projectRoot
 $workerPause = Join-Path $localRoot 'cad-archive-worker\storage-roots.txt.pause'
 $workerPaused = $workerPause + 'd'
 $pauseRequested = $false
 try {
-    if ($serviceWasRunning) {
-        Stop-Service -Name 'UptonPdmApi' -Force
-        (Get-Service -Name 'UptonPdmApi').WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-        $serviceStopped = $true
-    }
+    Suspend-PdmBackupApiRuntime $apiRuntime
     if (Get-Process -Name 'Upton.Pdm.CadArchiveWorker' -ErrorAction SilentlyContinue) {
         Remove-Item -LiteralPath $workerPaused -Force -ErrorAction SilentlyContinue
         [IO.File]::WriteAllText($workerPause, [DateTimeOffset]::Now.ToString('O'))
@@ -53,17 +48,18 @@ try {
     $incomplete = Join-Path $backupRoot 'backup.incomplete.json'
     @{ status = 'incomplete'; startedAt = [DateTimeOffset]::Now.ToString('O') } | ConvertTo-Json | Set-Content -LiteralPath $incomplete -Encoding UTF8
     $databasePath = Join-Path $backupRoot 'database\pdm.sql'
+    Assert-PdmBackupApiQuiescent $apiRuntime
     & $mysqlDump "--defaults-extra-file=$rootClientPath" --single-transaction --routines --triggers --events --hex-blob "--result-file=$databasePath" $plan.database
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $databasePath)) { throw '数据库导出失败，本批次不算完整备份。' }
-    # Keep compatibility with the delimiter emitted for SIGNAL triggers by the bundled MySQL client.
+    # Keep executable trigger comments restorable by the bundled MySQL client.
     $dumpText = [IO.File]::ReadAllText($databasePath, [Text.Encoding]::UTF8)
-    $dumpText = [Text.RegularExpressions.Regex]::Replace($dumpText, '(?m)(/\*!\d+ TRIGGER [^\r\n]*SIGNAL SQLSTATE [^\r\n]*); (\*/;;)$', '$1 $2')
+    $dumpText = ConvertTo-PdmRestorableSqlDump $dumpText
     [IO.File]::WriteAllText($databasePath, $dumpText, [Text.UTF8Encoding]::new($false))
     $copied = Copy-PdmStorageSources $plan $backupRoot
+    Assert-PdmBackupApiQuiescent $apiRuntime
     $configuration = Join-Path $backupRoot 'configuration'
     New-Item -ItemType Directory -Path $configuration -Force | Out-Null
-    $service = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\UptonPdmApi'
-    @{ imagePath = $service.ImagePath; account = $service.ObjectName; environment = @($service.Environment) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $configuration 'api-service.json') -Encoding UTF8
+    Copy-PdmBackupApiConfiguration $apiRuntime $configuration
     Copy-Item -LiteralPath (Join-Path $localRoot 'mysql\my.ini') -Destination (Join-Path $configuration 'mysql.ini')
     Copy-Item -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Destination (Join-Path $configuration 'deployment-receipt.json')
     if (Get-ScheduledTask -TaskName 'UPLM-BrowserCadArchive' -ErrorAction SilentlyContinue) {
@@ -74,7 +70,7 @@ try {
     })
     $manifest = [ordered]@{
         format = 'upton-pdm-backup-v2'; createdAt = [DateTimeOffset]::Now.ToString('O'); sourceDatabase = $plan.database
-        consistency = 'API服务停止期间导出数据库并复制文件'; sourceMachine = $env:COMPUTERNAME
+        consistency = 'API实例停止且本仓库自动拉起任务暂停期间导出数据库并复制文件'; sourceMachine = $env:COMPUTERNAME
         databaseDump = @{ relativePath = 'database/pdm.sql'; length = (Get-Item -LiteralPath $databasePath).Length; sha256 = (Get-FileHash -LiteralPath $databasePath -Algorithm SHA256).Hash }
         sources = $copied.sources; files = @($copied.files) + $configurationFiles; references = $copied.references; databaseCounts = $plan.tableCounts
         warnings = $plan.warnings; historicalFilesPreserved = $true
@@ -91,6 +87,6 @@ try {
     }
     throw
 } finally {
-    try { if ($serviceStopped) { Start-Service -Name 'UptonPdmApi' } }
+    try { Restore-PdmBackupApiRuntime $apiRuntime }
     finally { if ($pauseRequested) { Remove-Item -LiteralPath $workerPause -Force -ErrorAction SilentlyContinue } }
 }

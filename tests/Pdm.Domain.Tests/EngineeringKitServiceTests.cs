@@ -12,7 +12,7 @@ public sealed class EngineeringKitServiceTests
         var time = TimeProvider.System;
         var kits = new InMemoryEngineeringKitRepository();
         var materials = new InMemoryMaterialRepository(time);
-        var pdm = new InMemoryPdmRepository(time);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(time);
         var service = new EngineeringKitService(kits, materials, pdm, time, Library());
         var required = Material("0102000001", "必选螺栓");
         await materials.UpsertU9MaterialAsync(required, CancellationToken.None);
@@ -51,7 +51,7 @@ public sealed class EngineeringKitServiceTests
         var time = TimeProvider.System;
         var kits = new InMemoryEngineeringKitRepository();
         var materials = new InMemoryMaterialRepository(time);
-        var pdm = new InMemoryPdmRepository(time);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(time);
         var service = new EngineeringKitService(kits, materials, pdm, time, Library());
         var required = Material("0102000001", "必选螺栓");
         var second = Material("0102000002", "配套垫圈");
@@ -86,7 +86,7 @@ public sealed class EngineeringKitServiceTests
         var time = TimeProvider.System;
         var kits = new InMemoryEngineeringKitRepository();
         var materials = new InMemoryMaterialRepository(time);
-        var pdm = new InMemoryPdmRepository(time);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(time);
         var service = new EngineeringKitService(kits, materials, pdm, time, Library());
         var material = Material("0102000003", "定位销");
         await materials.UpsertU9MaterialAsync(material, CancellationToken.None);
@@ -108,7 +108,7 @@ public sealed class EngineeringKitServiceTests
     public async Task SaveDraft_RejectsOptionalOrUnknownComponents()
     {
         var time = TimeProvider.System;
-        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), new InMemoryMaterialRepository(time), new InMemoryPdmRepository(time), time, Library());
+        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), new InMemoryMaterialRepository(time), global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(time), time, Library());
 
         var allOptional = await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveDraftAsync(null,
             new("不允许可选件", "UPTON", null, null, [new(Guid.NewGuid(), 1, true, 1)], StandardLibraryCategoryId: CategoryId),
@@ -127,7 +127,7 @@ public sealed class EngineeringKitServiceTests
     public async Task PublishedCategoryMovesAndNewRevisionsKeepModelAndEngineerCannotReadDraft()
     {
         var library = Library();
-        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(TimeProvider.System);
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), materials, pdm, TimeProvider.System, library);
         var material = Material("0102000003", "定位销") with { Specification = "PIN-01", Brand = "UPTON" };
@@ -167,7 +167,7 @@ public sealed class EngineeringKitServiceTests
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var material = Material("0102000003", "定位销");
         await materials.UpsertU9MaterialAsync(material, default);
-        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), materials, new InMemoryPdmRepository(TimeProvider.System), TimeProvider.System, library);
+        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), materials, global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(TimeProvider.System), TimeProvider.System, library);
         SaveEngineeringKitDraftCommand input = new("套件", "UPTON", null, null, [new(material.Id, 1, false, 1)]);
         foreach (var id in new[] { (Guid?)null, Guid.NewGuid(), StandardLibraryDefaults.UncategorizedId })
             await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveDraftAsync(null, input with { StandardLibraryCategoryId = id }, "admin", UserRole.Administrator, default));
@@ -198,7 +198,7 @@ public sealed class EngineeringKitServiceTests
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var material = Material("0102000003", "定位销");
         await materials.UpsertU9MaterialAsync(material, default);
-        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), materials, new InMemoryPdmRepository(TimeProvider.System), TimeProvider.System, library);
+        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), materials, global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(TimeProvider.System), TimeProvider.System, library);
         async Task<EngineeringKit> Publish(Guid categoryId, string? manual = null)
         {
             var draft = await service.SaveDraftAsync(null, new("套件", "UPTON", null, null, [new(material.Id, 1, false, 1)],
@@ -234,7 +234,7 @@ public sealed class EngineeringKitServiceTests
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var material = Material("0102000003", "定位销");
         await materials.UpsertU9MaterialAsync(material, default);
-        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), materials, new InMemoryPdmRepository(TimeProvider.System), TimeProvider.System, library);
+        var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), materials, global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(TimeProvider.System), TimeProvider.System, library);
         var draft = await service.SaveDraftAsync(null, new("套件", "UPTON", null, null, [new(material.Id, 1, false, 1)], StandardLibraryCategoryId: child.Id), "admin", UserRole.Administrator, default);
         await library.UpdateCategoryAsync(child with { ParentId = other.Id }, child.RowVersion, default);
         var released = await service.PublishAsync(draft.Id, draft.RowVersion, "admin", UserRole.Administrator, default);
@@ -247,7 +247,7 @@ public sealed class EngineeringKitServiceTests
     {
         var time = TimeProvider.System;
         var materials = new InMemoryMaterialRepository(time);
-        var pdm = new InMemoryPdmRepository(time);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.CreateWithDeveloper(time);
         var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(pdm), materials, pdm, time, Library());
         var material = Material("0102000003", "定位销");
         await materials.UpsertU9MaterialAsync(material, default);

@@ -9,7 +9,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task QuantityPreviewDoesNotWriteAndConfirmationResizesAccessoriesButPreservesFixedAndPublishedSnapshot()
     {
-        var clock=TimeProvider.System;var pdm=new InMemoryPdmRepository(clock);var materials=new InMemoryMaterialRepository(clock);var relations=new InMemoryMaterialRelationRepository();
+        var clock=TimeProvider.System;var pdm=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);var materials=new InMemoryMaterialRepository(clock);var relations=new InMemoryMaterialRelationRepository();
         var service=new MaterialRelationService(relations,materials,pdm,clock);
         var project=await pdm.CreateProjectAsync(new("QTY-"+Guid.NewGuid().ToString("N"),"配套数量确认","admin","vault","release"),"admin",default);
         var motor=await AddApprovedMaterialAsync(materials,MaterialKind.Standard,"0102","MOTOR-Q","主料");
@@ -50,7 +50,7 @@ public sealed partial class MaterialRelationServiceTests
     [Fact]
     public async Task ResizingOneAllocationLeavesTheOtherCombinationAndItsAccessoriesUnchanged()
     {
-        var clock=TimeProvider.System;var pdm=new InMemoryPdmRepository(clock);var materials=new InMemoryMaterialRepository(clock);var relations=new InMemoryMaterialRelationRepository();var service=new MaterialRelationService(relations,materials,pdm,clock);
+        var clock=TimeProvider.System;var pdm=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);var materials=new InMemoryMaterialRepository(clock);var relations=new InMemoryMaterialRelationRepository();var service=new MaterialRelationService(relations,materials,pdm,clock);
         var project=await pdm.CreateProjectAsync(new("COMBO-Q-"+Guid.NewGuid().ToString("N"),"组合数量","admin","vault","release"),"admin",default);
         var motor=await AddApprovedMaterialAsync(materials,MaterialKind.Standard,"0102","MOTOR-C","主料");var a=await AddApprovedMaterialAsync(materials,MaterialKind.Standard,"0102","ACC-A","配件A");var b=await AddApprovedMaterialAsync(materials,MaterialKind.Standard,"0102","ACC-B","配件B");
         var draft=await service.SaveDraftAsync(null,new(motor.Id,"多组合","初版",null,[new("配件",true,MaterialRelationSelectionMode.Single,1,1,false,1,[new(a.Id,MaterialRelationQuantityMode.PerMainQuantity,1,false,1),new(b.Id,MaterialRelationQuantityMode.PerMainQuantity,1,false,2)])]),"admin",UserRole.Administrator,default);

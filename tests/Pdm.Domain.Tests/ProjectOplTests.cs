@@ -9,9 +9,9 @@ public sealed class ProjectOplTests
     [Fact]
     public async Task LinkedReleasesKeepEverySuccessfulPublicationAndShareDistinctDrawingCounts()
     {
-        var projects = new InMemoryPdmRepository(TimeProvider.System);
+        var projects = await NewProjectsAsync();
         var issues = new InMemoryProjectOplRepository();
-        var service = new ProjectOplService(projects, issues, new Storage(), TimeProvider.System);
+        var service = new ProjectOplService(projects, issues, new Storage(), TimeProvider.System, qualityGate: new OrdinaryIssueGate());
         var first = await service.SaveAsync(ProjectId, null, Input(), [], "admin", UserRole.Administrator, default);
         var second = await service.SaveAsync(ProjectId, null, Input() with { Description = "第二项问题" }, [], "admin", UserRole.Administrator, default);
         var drawing = await projects.RegisterDocumentAsync(new(ProjectId, "OPL-DRAW", "图纸", "OPL.SLDDRW", DocumentKind.Drawing), "admin", default);
@@ -45,8 +45,8 @@ public sealed class ProjectOplTests
     [Fact]
     public async Task ReleaseLinksRejectMissingVoidAndSiblingIssuesButAllowCompletedIssues()
     {
-        var projects = new InMemoryPdmRepository(TimeProvider.System);
-        var service = new ProjectOplService(projects, new InMemoryProjectOplRepository(), new Storage(), TimeProvider.System);
+        var projects = await NewProjectsAsync();
+        var service = new ProjectOplService(projects, new InMemoryProjectOplRepository(), new Storage(), TimeProvider.System, qualityGate: new OrdinaryIssueGate());
         var issue = await service.SaveAsync(ProjectId, null, Input(), [], "admin", UserRole.Administrator, default);
         await service.CompleteAsync(ProjectId, issue.Id, 1, "admin", UserRole.Administrator, default);
         Assert.Equal(new[] { issue.Id }, await service.ValidateReleaseLinksAsync(ProjectId, [issue.Id, issue.Id], "admin", UserRole.Administrator, default));
@@ -55,7 +55,7 @@ public sealed class ProjectOplTests
         await Assert.ThrowsAsync<PdmRuleException>(() => service.ValidateReleaseLinksAsync(ProjectId, [discarded.Id], "admin", UserRole.Administrator, default));
         var numbering = await projects.GetProjectNumberingOptionsAsync(default);
         var customer = (await projects.ListCustomersAsync(true, default))[0];
-        var root = await projects.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "OPL范围测试", null, null, 1, "admin", "D:/test", "D:/release"), default);
+        var root = await projects.CreateNumberedProjectAsync(new((await projects.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "OPL范围测试", null, null, 1, "admin", "D:/test", "D:/release"), default);
         var child = await projects.CreateSubprojectAsync(new(root.Id, "关联子设备", null, 1), default);
         var sibling = await projects.CreateSubprojectAsync(new(root.Id, "同级子设备", null, 1), default);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.ValidateReleaseLinksAsync(root.Id, [issue.Id], "admin", UserRole.Administrator, default));
@@ -66,6 +66,12 @@ public sealed class ProjectOplTests
 
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static OplInput Input(long version = 0) => new("相机支架松动", "高", "待处理", "", new(2026, 10, 15), "", version, []);
+    private static async Task<InMemoryPdmRepository> NewProjectsAsync()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
+        return repository;
+    }
     private sealed class Storage : IProjectOplStorage
     {
         public readonly Dictionary<Guid, byte[]> Files = [];
@@ -76,12 +82,13 @@ public sealed class ProjectOplTests
     [Fact]
     public async Task CompleteUsesServerClockPreservesFieldsAndChecksPermissionsAndVersions()
     {
-        var projects = new InMemoryPdmRepository(TimeProvider.System);
+        var projects = await NewProjectsAsync();
         await PermissionTestUsers.Ensure(projects, ("admin", UserRole.Administrator), ("other", UserRole.Engineer));
+        await PermissionTestUsers.Revoke(projects, "Engineer", "project.opl.complete");
         var issues = new InMemoryProjectOplRepository();
         var store = new Storage();
         var now = new DateTimeOffset(2026, 10, 13, 0, 1, 0, TimeSpan.Zero);
-        var service = new ProjectOplService(projects, issues, store, new OplClock(now));
+        var service = new ProjectOplService(projects, issues, store, new OplClock(now), qualityGate: new OrdinaryIssueGate());
         var issue = await service.SaveAsync(ProjectId, null, Input(), [new("现场.txt", [1])], "admin", UserRole.Administrator, default);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.CompleteAsync(ProjectId, issue.Id, 1, "other", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmConflictException>(() => service.CompleteAsync(ProjectId, issue.Id, 0, "admin", UserRole.Administrator, default));
@@ -99,12 +106,19 @@ public sealed class ProjectOplTests
     {
         public override DateTimeOffset GetUtcNow() => now;
     }
+    // 本组验证普通 OPL 的原有行为，质量资料和验证要求由独立门禁测试覆盖。
+    private sealed class OrdinaryIssueGate : IQualityIssueGate
+    {
+        public Task<bool> CanTransitionAsync(OplIssue issue, string nextStatus, string actor, CancellationToken ct) => Task.FromResult(true);
+        public Task RequireSaveAsync(OplIssue original, OplIssue candidate, string actor, CancellationToken ct) => Task.CompletedTask;
+        public Task RequireTransitionAsync(OplIssue issue, string nextStatus, string actor, CancellationToken ct) => Task.CompletedTask;
+    }
     [Fact]
     public async Task CreateEditAttachmentsAndCompletionPersistWithServerMetadata()
     {
         var store = new Storage();
         var repository = new InMemoryProjectOplRepository();
-        var service = new ProjectOplService(new InMemoryPdmRepository(TimeProvider.System), repository, store, TimeProvider.System);
+        var service = new ProjectOplService(await NewProjectsAsync(), repository, store, TimeProvider.System, qualityGate: new OrdinaryIssueGate());
         var created = await service.SaveAsync(ProjectId, null, Input(), [new("现场.txt", [1, 2, 3])], "admin", UserRole.Administrator, default);
         Assert.Equal(1, created.Number); Assert.Equal(1, created.RowVersion); Assert.Equal("admin", created.CreatedBy);
         var file = Assert.Single(created.Attachments);
@@ -120,14 +134,14 @@ public sealed class ProjectOplTests
     [Fact]
     public async Task FamilySharesListAndNumbersWhileRelatedChildIsOptionalAndValidated()
     {
-        var projects = new InMemoryPdmRepository(TimeProvider.System);
+        var projects = await NewProjectsAsync();
         var numbering = await projects.GetProjectNumberingOptionsAsync(default);
         var customer = (await projects.ListCustomersAsync(true, default))[0];
-        var root = await projects.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "OPL共用清单测试", null, new(2026, 10, 12), 1, "admin", "D:/test", "D:/release"), default);
+        var root = await projects.CreateNumberedProjectAsync(new((await projects.FindUserAsync("admin", default))!.CompanyId!.Value, "P", 0, customer.Id, "OPL共用清单测试", null, new(2026, 10, 12), 1, "admin", "D:/test", "D:/release"), default);
         var child = await projects.CreateSubprojectAsync(new(root.Id, "子设备", null, 1), default);
         var store = new Storage();
         var service = new ProjectOplService(projects, new InMemoryProjectOplRepository(), store, TimeProvider.System);
-        var whole = await service.SaveAsync(child.Id, null, Input(), [], "admin", UserRole.Administrator, default);
+        var whole = await service.SaveAsync(root.Id, null, Input(), [], "admin", UserRole.Administrator, default);
         Assert.Equal(root.Id, whole.ProjectId); Assert.Null(whole.RelatedProjectId);
         var specific = await service.SaveAsync(root.Id, null, Input() with { RelatedProjectId = child.Id }, [new("测试.txt", [1])], "admin", UserRole.Administrator, default);
         Assert.Equal(2, specific.Number); Assert.Equal(child.Id, specific.RelatedProjectId);
@@ -139,7 +153,7 @@ public sealed class ProjectOplTests
         var file = Assert.Single(specific.Attachments);
         Assert.Equal(root.Id, file.StorageProjectId);
         Assert.Equal(1, (await service.OpenAsync(child.Id, specific.Id, file.Id, "admin", UserRole.Administrator, default)).Content.Length);
-        var cleared = await service.SaveAsync(child.Id, specific.Id, Input(1), [], "admin", UserRole.Administrator, default);
+        var cleared = await service.SaveAsync(root.Id, specific.Id, Input(1), [], "admin", UserRole.Administrator, default);
         Assert.Null(cleared.RelatedProjectId); Assert.Equal(2, cleared.Number);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, null, Input() with { RelatedProjectId = root.Id }, [], "admin", UserRole.Administrator, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, null, Input() with { RelatedProjectId = ProjectId }, [], "admin", UserRole.Administrator, default));
@@ -149,7 +163,7 @@ public sealed class ProjectOplTests
     public async Task InvalidInputAndStaleEditsCannotReplaceSavedIssueOrLeakFiles()
     {
         var store = new Storage();
-        var projects = new InMemoryPdmRepository(TimeProvider.System);
+        var projects = await NewProjectsAsync();
         var service = new ProjectOplService(projects, new InMemoryProjectOplRepository(), store, TimeProvider.System);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(ProjectId, null, Input() with { Description = " " }, [], "admin", UserRole.Administrator, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(ProjectId, null, Input() with { Status = "待确认" }, [], "admin", UserRole.Administrator, default));

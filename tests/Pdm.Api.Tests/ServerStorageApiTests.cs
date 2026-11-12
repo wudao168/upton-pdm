@@ -98,7 +98,7 @@ public sealed class ServerStorageApiTests
         var response = await client.PutAsJsonAsync("/api/system-settings/storage", settings with { BackupRoot = Path.Combine(settings.ProgramTemplateRoot, "backup") });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("备份目标", await response.Content.ReadAsStringAsync());
-        Authorize(client, "unprivileged-storage-reader", "Engineer");
+        Authorize(client, "engineer", "Engineer");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/system-settings/storage")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/system-settings/storage/backup-plan")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync("/api/system-settings/storage", settings)).StatusCode);

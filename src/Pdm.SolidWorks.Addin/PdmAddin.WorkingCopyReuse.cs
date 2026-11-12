@@ -13,6 +13,10 @@ public sealed partial class PdmAddin
 
     private async Task<bool> TryAcquireReusableWorkingCopyAsync(IReadOnlyList<BatchOperationItem> selected,
         Guid projectId, Guid rootId)
+        => await TryAcquireReusableWorkingCopyCoreAsync(selected, projectId, rootId, true);
+
+    private async Task<bool> TryAcquireReusableWorkingCopyCoreAsync(IReadOnlyList<BatchOperationItem> selected,
+        Guid projectId, Guid rootId, bool completeAcquisition)
     {
         var rootPath = selected.FirstOrDefault(item => item.Node.DocumentId == rootId)?.Node.FullPath ?? currentTree?.FullPath;
         if (string.IsNullOrWhiteSpace(rootPath) || IsReadOnlyPreviewPath(rootPath)
@@ -35,7 +39,7 @@ public sealed partial class PdmAddin
             throw new InvalidOperationException("当前编辑恢复记录尚未准备完成，已保留窗口，请重新登录后重试获取权限。");
 
         await apiClient.RefreshDocumentRulesAsync(lifetime.Token);
-        var latest = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token);
+        var latest = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token, allowMissingComponents: true);
         var requestedIds = new HashSet<Guid>(selected.Where(item => item.Node.DocumentId.HasValue).Select(item => item.Node.DocumentId.Value));
         var relations = await apiClient.GetDocumentRelationsAsync(projectId, lifetime.Token);
         var requiredDrawings = new HashSet<Guid>(selected.Where(item => item.Node.Kind == CadDocumentKind.Drawing && item.Node.DocumentId.HasValue)
@@ -124,6 +128,7 @@ public sealed partial class PdmAddin
         var rootVersion = (await apiClient.GetVersionsAsync(rootId, lifetime.Token)).FirstOrDefault(version => version.Id == latest.RootVersionId);
         if (!WorkingReuseSnapshotVersionMatches(latest.Files.Single(file => file.DocumentId == rootId), rootVersion))
             return CannotReuse("当前版本缺少可核对的引用快照");
+        var missingComponents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             var exactSnapshots = new Dictionary<Guid, DocumentReferenceNodeDto> { [rootId] = rootVersion.ReferenceSnapshot };
@@ -131,8 +136,9 @@ public sealed partial class PdmAddin
             {
                 var missing = new HashSet<Guid>();
                 string nativeConflict = null;
+                missingComponents.Clear();
                 if (WorkingReuseLoadedContextForEditMatches(rootModel, context.Key, workingManifest, rootVersion.ReferenceSnapshot, exactSnapshots, missing, editableAssemblyIds,
-                    conflict => nativeConflict = conflict)) break;
+                    conflict => nativeConflict = conflict, missingComponents)) break;
                 if (missing.Count == 0) return CannotReuse("实际加载的引用或配置与当前基准不一致：" + nativeConflict);
                 foreach (var id in missing)
                 {
@@ -161,7 +167,7 @@ public sealed partial class PdmAddin
             var newCheckout = previousDocument != null && string.IsNullOrWhiteSpace(previousDocument.CheckedOutBy);
             plmAuthoritativeCheckouts.Add(id);
             DocumentDto document;
-            try { document = await apiClient.CheckoutAsync(id, checkoutSessionId, checkoutMachineName, lifetime.Token); }
+            try { document = await AcquireRecordedCheckoutAsync(id, projectId, paths[id], newCheckout); }
             finally { plmAuthoritativeCheckouts.Remove(id); }
             if (document.Id != id || document.ProjectId != projectId || document.CheckoutSessionId != checkoutSessionId
                 || !string.Equals(document.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
@@ -176,19 +182,12 @@ public sealed partial class PdmAddin
             var file = workingManifest.Files.Single(candidate => candidate.DocumentId == id);
             if (!WorkingReuseDraftMatches(paths[id], file, document, recordedDraft, checkoutSessionId, authenticatedUsername))
             {
-                if (newCheckout && FindLoadedDocument(paths[id])?.GetSaveFlag() != true && ControlledReferenceMaterializer.Matches(paths[id], file))
-                    try
-                    {
-                        var released = await apiClient.DiscardCheckoutAsync(id, checkoutSessionId, lifetime.Token);
-                        ApplyCheckoutDocumentToMatchingInstances(matching, released);
-                    }
-                    catch (Exception error) { LogDiagnostic("获取权限后恢复记录未完成，新增权限尚未释放", error); }
                 throw new InvalidOperationException("编辑恢复记录未能安全保存，已停止解锁并保留当前窗口和文件，请检查诊断日志后重试：" + item.Node.FileName);
             }
         }
         // Checkout serializes changes to each requested document. Recheck after it so
         // a version published during the first manifest request is never unlocked stale.
-        var acquired = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token);
+        var acquired = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token, allowMissingComponents: true);
         if (!WorkingReuseManifestsMatch(latestScope, WorkingAcquisitionScope(acquired, requiredDrawings)))
             throw new InvalidOperationException("获取权限期间服务器版本发生变化：" + WorkingReuseManifestDifferences(latest, acquired)
                 + "。已保留当前窗口、文件和已获取权限，请核对后继续。");
@@ -204,6 +203,8 @@ public sealed partial class PdmAddin
             EnsureLoadedDocumentEditable(paths[id]);
         }
         await AcquireLinkedDrawingPermissionsAsync(projectId, selected.Select(item => item.Node.DocumentId.Value).Distinct(), context.Key, lifetime.Token);
+        if (completeAcquisition) CompleteRecordedAcquisitions(requestedIds);
+        ReportMissingComponentsOnOpen(missingComponents, "已获取权限", rootPath);
         LogOperation("Working reuse completed root=" + rootPath + " selected=" + selected.Select(item => item.Node.DocumentId).Distinct().Count()
             + " files=" + latest.Files.Count + " reopened=0 replaced=0");
         return true;
@@ -298,7 +299,8 @@ public sealed partial class PdmAddin
 
     private static bool WorkingReuseLoadedContextForEditMatches(IModelDoc2 root, string directory,
         ControlledOpenManifestDto manifest, DocumentReferenceNodeDto snapshot,
-        IReadOnlyDictionary<Guid, DocumentReferenceNodeDto> exactSnapshots, ISet<Guid> missingSnapshots, ISet<Guid> editableAssemblyIds, Action<string> reportConflict = null)
+        IReadOnlyDictionary<Guid, DocumentReferenceNodeDto> exactSnapshots, ISet<Guid> missingSnapshots, ISet<Guid> editableAssemblyIds,
+        Action<string> reportConflict = null, ISet<string> missingComponents = null)
     {
         var files = manifest.Files.ToDictionary(file => file.FileName, StringComparer.OrdinalIgnoreCase);
         var snapshots = WorkingReuseSnapshotNodes(snapshot).ToLookup(node => node.FileName ?? string.Empty, StringComparer.OrdinalIgnoreCase);
@@ -322,8 +324,7 @@ public sealed partial class PdmAddin
             ControlledOpenFileDto file, IModelDoc2 loadedOwner, string configuration, int depth)
         {
             if (depth > 128) return Reject("instance-depth", path, "configuration=" + configuration);
-            var expectedChildren = (expected.Children ?? new List<DocumentReferenceNodeDto>())
-                .Where(child => child.Kind != (int)CadDocumentKind.Drawing && child.Role != (int)CadReferenceRole.ExternalFileDependency).ToArray();
+            var expectedChildren = WorkingReuseModelChildren(expected);
             if (expectedChildren.Length == 0 && components.Length > 0)
             {
                 // A parent's old occurrence snapshot can be shallow. Verify the owner's
@@ -332,16 +333,33 @@ public sealed partial class PdmAddin
                 if (!string.Equals(own.Configuration ?? string.Empty, configuration, StringComparison.OrdinalIgnoreCase)
                     && !(ReferenceEquals(own, snapshot) && string.IsNullOrWhiteSpace(own.Configuration)))
                     return Reject("exact-snapshot-configuration", path, "instance=" + configuration + " expected=" + own.Configuration);
-                expected = own;
-                expectedChildren = (own.Children ?? new List<DocumentReferenceNodeDto>())
-                    .Where(child => child.Kind != (int)CadDocumentKind.Drawing && child.Role != (int)CadReferenceRole.ExternalFileDependency).ToArray();
+                expectedChildren = WorkingReuseModelChildren(own);
+            }
+            if (missingComponents != null)
+            {
+                var omitted = components.Where(component =>
+                {
+                    var saved = component.GetPathName();
+                    return !files.ContainsKey(Path.GetFileName(saved) ?? string.Empty)
+                        && CanOmitUnloadedComponent(component, saved, component.IsVirtual) && component.GetModelDoc2() == null;
+                }).ToArray();
+                var missingSnapshot = expectedChildren.Where(child => child.Status == (int)CadReferenceStatus.Missing
+                    && IsNativeModelReference(child.FileName) && !files.ContainsKey(child.FileName)).ToArray();
+                if ((omitted.Length > 0 || missingSnapshot.Length > 0) && loadedOwner?.GetSaveFlag() != true
+                    && ControlledReferenceMaterializer.Matches(path, file))
+                {
+                    components = components.Where(component => !omitted.Any(item => ReferenceEquals(item, component))).ToArray();
+                    expectedChildren = expectedChildren.Where(child => !missingSnapshot.Contains(child)).ToArray();
+                    missingComponents.UnionWith(omitted.Select(component => Path.GetFileName(component.GetPathName())));
+                    missingComponents.UnionWith(missingSnapshot.Select(child => child.FileName));
+                }
             }
             var actual = components.Select(component => new CadTreeNode
             {
                 FileName = Path.GetFileName(component.GetPathName()), Configuration = component.ReferencedConfiguration,
                 Status = component.IsVirtual ? CadReferenceStatus.Virtual : CadReferenceStatus.Normal
             }).ToArray();
-            if (!WorkingReuseChildrenMatch(expected, actual, out var pending)
+            if (!MatchWorkingReuseChildren(expectedChildren, actual, out var pending)
                 && !(editableAssemblyIds?.Contains(file.DocumentId) == true && (WorkingReuseChildrenAreSubset(expectedChildren, actual)
                     || WorkingReuseChildrenAreKnownParts(expectedChildren, actual, manifest.Files))))
             {
@@ -372,7 +390,7 @@ public sealed partial class PdmAddin
                 var loaded = component.GetModelDoc2() as IModelDoc2;
                 if (!files.TryGetValue(name, out var childFile))
                 {
-                    if (pending) continue; // Historical external omissions are not adopted or given permissions.
+                    if (pending && loaded == null) continue; // Historical unloaded omissions are not adopted.
                     return Reject("not-in-manifest", componentPath, "parent=" + path);
                 }
                 var expectedPath = ControlledReferenceMaterializer.LocalPath(directory, childFile);
@@ -435,10 +453,15 @@ public sealed partial class PdmAddin
             foreach (var item in WorkingReuseSnapshotNodes(child)) yield return item;
     }
 
-    private static bool WorkingReuseChildrenMatch(DocumentReferenceNodeDto expected, IReadOnlyList<CadTreeNode> actual, out bool pending)
-    {
-        var children = (expected.Children ?? new List<DocumentReferenceNodeDto>())
+    private static DocumentReferenceNodeDto[] WorkingReuseModelChildren(DocumentReferenceNodeDto expected) =>
+        (expected.Children ?? new List<DocumentReferenceNodeDto>())
             .Where(child => child.Kind != (int)CadDocumentKind.Drawing && child.Role != (int)CadReferenceRole.ExternalFileDependency).ToArray();
+
+    private static bool WorkingReuseChildrenMatch(DocumentReferenceNodeDto expected, IReadOnlyList<CadTreeNode> actual, out bool pending)
+        => MatchWorkingReuseChildren(WorkingReuseModelChildren(expected), actual, out pending);
+
+    private static bool MatchWorkingReuseChildren(DocumentReferenceNodeDto[] children, IReadOnlyList<CadTreeNode> actual, out bool pending)
+    {
         pending = children.Length == 0 && actual.Count > 0;
         if (pending) return true;
         var before = children.Select(child => WorkingReuseReferenceKey(child.FileName, child.Configuration, child.Status == (int)CadReferenceStatus.Virtual)).OrderBy(value => value);
@@ -500,7 +523,8 @@ public sealed partial class PdmAddin
         LogOperation("按本会话已完成存档回执补齐工作清单 files=" + files.Count + " root=" + previous.RootDocumentId);
         return new ControlledOpenManifestDto { Id = latest.Id, ProjectId = previous.ProjectId, ProjectCode = previous.ProjectCode,
             RootDocumentId = previous.RootDocumentId, RootVersionId = previous.RootVersionId, RootRevision = previous.RootRevision,
-            RootRelativePath = previous.RootRelativePath, ForEdit = true, Files = files };
+            RootRelativePath = previous.RootRelativePath, ForEdit = true, Files = files,
+            ReferenceIssues = OpenReferenceFindings.Merge(latest.ReferenceIssues), Warnings = latest.Warnings };
     }
 
     private static string WorkingReuseManifestDifferences(ControlledOpenManifestDto previous, ControlledOpenManifestDto latest)

@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
@@ -13,7 +13,7 @@ public sealed class WorkflowNotificationTests
         using var f=await Fixture.Create();f.SetCompany(f.Company);
         await f.Repository.CreateUserAsync(new(Guid.NewGuid(),"copy-system-only","技术管理员","unused",UserRole.Administrator,true,CompanyId:f.Company),default);
         var error=await Assert.ThrowsAsync<PdmRuleException>(()=>f.Rule("standard-release",true,[new("User",null,Target:"copy-system-only")]));
-        Assert.Contains("业务角色",error.Message);
+        Assert.Contains("权限中心",error.Message);
     }
     [Fact]
     public async Task CompletionCopiesCombineExplicitPeopleDepartmentRolesAndProjectRolesWithoutDuplicates()
@@ -221,6 +221,9 @@ public sealed class WorkflowNotificationTests
             new("Fixed", f.First, f.Position) })
             await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.SaveFlowAsync("standard-release", new(true, [recipient], catalog.RowVersion, f.Company), "submitter", UserRole.Administrator, default));
         var custom = (await f.Repository.CreateRoleAsync("供应链主管", "通知测试", "SupplyChain", default)).Roles.Single(item => item.Name == "供应链主管");
+        var authorization = await f.Repository.GetAuthorizationSettingsAsync(default);
+        var source = authorization.Templates.Single(t => t.RoleCode == "SupplyChain");
+        await f.Repository.SaveAuthorizationSettingsAsync(authorization with { Templates = [.. authorization.Templates, new("qa-notification-role", custom.Name, "通知测试", source.Grants, custom.Role)] }, authorization.Revision, default, updateRoles: true);
         await f.Rule("standard-release", true, [new("Fixed", f.Supply, RoleCode: custom.Role.ToUpperInvariant())]);
         var rule = Assert.Single((await f.Store.ReadAsync(f.Company, default)).Flows);
         Assert.Equal(custom.Role, Assert.Single(rule.Recipients).RoleCode);

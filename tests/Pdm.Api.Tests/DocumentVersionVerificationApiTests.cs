@@ -140,7 +140,7 @@ public sealed class DocumentVersionVerificationApiTests(PdmApiFactory factory) :
             services.RemoveAll<IPdmRepository>(); services.AddSingleton<IPdmRepository>(repository);
         }));
         var client = host.CreateClient();
-        var project = await repository.CreateProjectAsync(new("VERIFY-" + Guid.NewGuid().ToString("N"), "批量校验", owner, "vault", "release"), owner, default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("VERIFY-" + Guid.NewGuid().ToString("N"), "批量校验", owner, "vault", "release"), owner, default);
         var document = await repository.RegisterDocumentAsync(new(project.Id, "ROOT", "根图档", "ROOT.SLDASM", DocumentKind.Assembly), owner, default);
         var fixture = new Fixture(host, client, repository, project, document); fixture.Authenticate("admin", "Administrator"); return fixture;
     }

@@ -599,7 +599,9 @@ public sealed class MaterialService(
             ?? (await repository.FindUserAsync(actor, ct))?.EffectiveRoleCodes ?? [role.ToString()] : [];
         var legacyCanDecide = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, ct) && legacyRoles.Intersect((await repository.FindUserAsync(actor, ct))?.EffectiveRoleCodes ?? [], StringComparer.OrdinalIgnoreCase).Any();
         return application with {
-            CanDecide = requiresManualApproval && application.Status == MaterialCodeApplicationStatus.Pending && (application.ApprovalWorkflow is null
+            CanDecide = requiresManualApproval && application.Status == MaterialCodeApplicationStatus.Pending
+                && await AuthorizationPolicy.CanAsync(repository, application.ProjectId, actor, PermissionCodes.ApprovalDecide, ct)
+                && (application.ApprovalWorkflow is null
                 ? legacyCanDecide
                 : node?.CanSign(actor) == true),
             CanEmergencyDecide = requiresManualApproval && application.Status == MaterialCodeApplicationStatus.Pending && node is not null

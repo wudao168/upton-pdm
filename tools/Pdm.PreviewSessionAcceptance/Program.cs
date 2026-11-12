@@ -68,24 +68,10 @@ internal static class Program
                     Console.WriteLine("PASS: preview session "+mode+"; mutations="+string.Join(",",calls));
                 }
             }
-            // This check only enumerates processes and rejects before COM activation.
-            // Do not create a real CAD session as part of this managed regression.
-            var existing=Process.GetProcessesByName("SLDWORKS");
-            try
-            {
-                if(existing.Length>0)
-                {
-                    var session=Activator.CreateInstance(sessionType,Flags,null,new object[]{true},null);
-                    var rejected=false;
-                    try{sessionType.GetMethod("EnsureApplication",Flags).Invoke(session,null);}
-                    catch(TargetInvocationException error){rejected=error.InnerException is InvalidOperationException&&error.InnerException.Message.Contains("已有SolidWorks");}
-                    if(!rejected||appField.GetValue(session)!=null)throw new Exception("Existing CAD was not rejected before activation");
-                    sessionType.GetMethod("Reset",Flags).Invoke(session,null);
-                    Console.WriteLine("PASS: pre-existing CAD prevents COM activation; no CAD object created");
-                }
-                else Console.WriteLine("SKIP: no pre-existing CAD for read-only activation guard check");
-            }
-            finally{foreach(var process in existing)process.Dispose();}
+            // EnsureApplication now starts a PID-owned private process even when
+            // another CAD session exists. It is not a read-only probe and belongs
+            // in the separately invoked native-startup acceptance tool.
+            Console.WriteLine("SKIP: real CAD startup; this suite covers controlled session-ownership proxies only");
             return 0;
         }
         catch(Exception error){Console.WriteLine("FAIL: "+error);return 1;}

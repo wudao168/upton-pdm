@@ -1,5 +1,7 @@
 using System.Collections;
 using System.Reflection;
+using System.Runtime.Remoting.Messaging;
+using System.Runtime.Remoting.Proxies;
 using System.Security.Cryptography;
 using System.Web.Script.Serialization;
 
@@ -44,7 +46,7 @@ internal static class Program
                 var request=Activator.CreateInstance(Type(assembly,"WorkspaceDocumentStateRequest"),true);
                 Set(request,"DocumentId",id);Set(request,"FileName","source.SLDPRT");Set(request,"LatestRevision","W1");
                 var requests=Array.CreateInstance(request.GetType(),1);requests.SetValue(request,0);
-                var snapshot=Call(assembly,"WorkspaceLocalStateReader","Read",Path.Combine(root,"workspace"),project,"TEST","QA",requests);
+                var snapshot=Call(assembly,"WorkspaceLocalStateReader","Read",Path.Combine(root,"workspace"),project,"TEST","QA",requests,null);
                 var state=((IEnumerable)Get(snapshot,"Items")).Cast<object>().Single();
                 Console.WriteLine(assembly.GetName().Name+" state="+Get(state,"LocalState"));
                 Check((string)Get(state,"LocalState")=="ReadOnlyCache","桌面与插件均认可相同缓存绑定："+assembly.GetName().Name);
@@ -89,6 +91,8 @@ internal static class Program
     static void HeartbeatSafety(string source,Guid id,Guid project)
     {
         var plugin=New("PdmAddin");var pluginType=plugin.GetType();var session=(Guid)pluginType.GetField("checkoutSessionId",All).GetValue(plugin);
+        var application = pluginType.GetField("application", All);
+        application.SetValue(plugin, new EmptyApplication(application.FieldType).GetTransparentProxy());
         pluginType.GetField("authenticatedUsername",All).SetValue(plugin,"QA");
         var node=New("CadTreeNode");Set(node,"FullPath",source);Set(node,"DocumentId",(Guid?)id);
         Set(node,"CheckedOutBy","QA");Set(node,"CheckoutSessionId",(Guid?)session);Set(node,"CheckedOutAt",(DateTime?)DateTime.UtcNow.AddMinutes(-1));
@@ -105,5 +109,16 @@ internal static class Program
         Set(node,"CheckoutSessionId",(Guid?)session);
         Check(Lost(DateTime.UtcNow)&&(File.GetAttributes(source)&FileAttributes.ReadOnly)!=0,"正式图档真实权限丢失仍受只读保护");
         Check(Hash(source)==before,"权限变化不修改文件内容");
+    }
+    sealed class EmptyApplication : RealProxy
+    {
+        public EmptyApplication(Type type) : base(type) { }
+        public override IMessage Invoke(IMessage message)
+        {
+            var call = (IMethodCallMessage)message;
+            return call.MethodName == "GetDocuments"
+                ? new ReturnMessage(Array.Empty<object>(), null, 0, call.LogicalCallContext, call)
+                : new ReturnMessage(new InvalidOperationException("Unexpected CAD operation: " + call.MethodName), call);
+        }
     }
 }

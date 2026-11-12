@@ -49,21 +49,18 @@ public sealed partial class PdmAddin
         {
             var node = target.Item1; var id = node.DocumentId.Value; var previous = target.Item4;
             var created = string.IsNullOrWhiteSpace(previous.CheckedOutBy);
-            var acquired = false;
-            var wasReadOnly = (File.GetAttributes(node.FullPath) & FileAttributes.ReadOnly) != 0;
             try
             {
                 var document = previous;
                 if (document.CheckoutSessionId != checkoutSessionId || !string.Equals(document.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
                 {
                     plmAuthoritativeCheckouts.Add(id);
-                    try { document = await apiClient.CheckoutAsync(id, checkoutSessionId, checkoutMachineName, lifetime.Token); }
+                    try { document = await AcquireRecordedCheckoutAsync(id, projectId, node.FullPath, created); }
                     finally { plmAuthoritativeCheckouts.Remove(id); }
                 }
                 if (document.Id != id || document.ProjectId != projectId || document.CheckoutSessionId != checkoutSessionId
                     || !string.Equals(document.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("服务器尚未确认当前工程图的编辑权限，已保留原窗口和文件。");
-                acquired = true;
                 var latest = (await apiClient.GetVersionsAsync(id, lifetime.Token, 1)).FirstOrDefault();
                 if (latest?.Id != target.Item3.Id) throw new InvalidOperationException("获取期间工程图存档版本发生变化，已停止解锁并保留当前窗口和文件。");
                 var matching = (currentTree == null ? Enumerable.Empty<CadTreeNode>() : EnumerateCadNodes(currentTree))
@@ -78,21 +75,11 @@ public sealed partial class PdmAddin
             }
             catch
             {
-                if (created && acquired && FindLoadedDocument(node.FullPath)?.GetSaveFlag() != true
-                    && VersionMatchesLocalFile(target.Item3, node.FullPath, ComputeFileHash(node.FullPath)))
-                    try
-                    {
-                        var released = await apiClient.DiscardCheckoutAsync(id, checkoutSessionId, lifetime.Token);
-                        var matching = (currentTree == null ? Enumerable.Empty<CadTreeNode>() : EnumerateCadNodes(currentTree))
-                            .Where(candidate => candidate.DocumentId == id && PathsEqual(candidate.FullPath, node.FullPath)).Concat(new[] { node }).Distinct().ToArray();
-                        ApplyCheckoutDocumentToMatchingInstances(matching, released);
-                        SetFileReadOnly(node.FullPath, wasReadOnly);
-                        if (wasReadOnly) ProtectLoadedDocument(node.FullPath);
-                    }
-                    catch (Exception error) { LogDiagnostic("工程图获取未完成，新增权限暂未释放", error); }
+                await RecoverRecordedAcquisitionsAsync();
                 throw;
             }
         }
+        CompleteRecordedAcquisitions(targets.Select(target => target.Item1.DocumentId.Value));
         return true;
     }
 }

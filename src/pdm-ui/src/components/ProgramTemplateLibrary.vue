@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import PersonName from './PersonName.vue'
 import SearchField from './SearchField.vue'
+import CategoryNavigation from './CategoryNavigation.vue'
+import '../styles/category-manager.css'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
@@ -78,13 +80,16 @@ const tagText = ref('')
 const decisionComment = ref('')
 const checkedItems = ref<string[]>([])
 const optionDialogOpen = ref(false)
+const categoryManagerOpen = ref(false)
+const categoryEditingIndex = ref<number | null>(null)
+const categoryName = ref('')
+const categorySaving = ref(false)
 const optionSaving = ref(false)
 const optionCatalog = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [], types: [] })
 const optionDraft = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [], types: [] })
-type OptionSection = 'AssetType' | 'Category' | 'Vendor' | 'Platform'
+type OptionSection = 'AssetType' | 'Vendor' | 'Platform'
 const optionSections: { value: OptionSection; label: string }[] = [
   { value: 'AssetType', label: '模板类型' },
-  { value: 'Category', label: '分类' },
   { value: 'Vendor', label: '厂商' },
   { value: 'Platform', label: '平台' },
 ]
@@ -156,6 +161,10 @@ function mergeOptions(maintained: string[], used: string[], current?: string) {
   return [...new Set([...maintained, ...used, (current ?? '').trim()].filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-CN'))
 }
 const categories = computed(() => mergeOptions(optionCatalog.value.categories, usedValues(item => item.category)))
+const categoryNodes = computed(() => [...new Set([...optionCatalog.value.categories, ...categories.value])].map(category => ({ id: category, label: category, children: [] })))
+watch(categories, values => {
+  if (categoryFilter.value && !values.includes(categoryFilter.value)) categoryFilter.value = ''
+})
 const vendors = computed(() => mergeOptions(optionCatalog.value.vendors, usedValues(item => item.vendor)))
 const platforms = computed(() => mergeOptions(optionCatalog.value.platforms, usedValues(item => item.platform)))
 const categoryOptions = computed(() => mergeOptions(optionCatalog.value.categories, usedValues(item => item.category), form.category))
@@ -179,19 +188,16 @@ const maintainedTypeKeys = computed(() => new Set(maintainedTypes.value.map(item
 const historicalTypeKeys = computed(() => [...new Set(templates.value.map(template => template.assetType))]
   .filter(key => key && !maintainedTypeKeys.value.has(key)))
 const optionPlaceholders: Record<Exclude<OptionSection, 'AssetType'>, string> = {
-  Category: '输入分类名称',
   Vendor: '输入厂商名称',
   Platform: '输入平台名称',
 }
 const optionPlaceholder = computed(() => optionPlaceholders[optionSection.value as Exclude<OptionSection, 'AssetType'>] ?? '输入名称')
 const currentOptionValues = computed(() => {
-  if (optionSection.value === 'Category') return optionDraft.value.categories
   if (optionSection.value === 'Vendor') return optionDraft.value.vendors
   if (optionSection.value === 'Platform') return optionDraft.value.platforms
   return []
 })
 const currentUsedValues = computed(() => {
-  if (optionSection.value === 'Category') return categories.value
   if (optionSection.value === 'Vendor') return vendors.value
   if (optionSection.value === 'Platform') return platforms.value
   return []
@@ -266,6 +272,62 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+function openCategoryEditor(index = -1) {
+  categoryEditingIndex.value = index
+  categoryName.value = optionCatalog.value.categories[index] ?? ''
+}
+
+async function persistCategories(categories: string[]) {
+  if (!canManageOptions.value || categorySaving.value) return false
+  categorySaving.value = true
+  try {
+    const latest = await getProgramTemplateOptions(props.token)
+    if (JSON.stringify(latest.categories) !== JSON.stringify(optionCatalog.value.categories)) {
+      optionCatalog.value = latest
+      categoryEditingIndex.value = null
+      ElMessage.warning('分类已被更新，请核对列表后重试')
+      return false
+    }
+    optionCatalog.value = await saveProgramTemplateOptions({ ...latest, categories }, props.token)
+    ElMessage.success('标准程序分类已保存')
+    return true
+  } catch {
+    ElMessage.error('分类保存失败，请检查权限或网络后重试')
+    return false
+  } finally {
+    categorySaving.value = false
+  }
+}
+
+async function saveCategory() {
+  const index = categoryEditingIndex.value
+  const name = categoryName.value.trim()
+  if (index == null || !name) return
+  const next = [...optionCatalog.value.categories]
+  if (next.some((item, position) => position !== index && item.toLowerCase() === name.toLowerCase())) {
+    ElMessage.warning('分类名称已存在')
+    return
+  }
+  next.splice(index < 0 ? next.length : index, index < 0 ? 0 : 1, name)
+  if (await persistCategories(next)) categoryEditingIndex.value = null
+}
+
+async function moveCategory(index: number, offset: -1 | 1) {
+  const next = [...optionCatalog.value.categories]
+  const target = index + offset
+  if (target < 0 || target >= next.length) return
+  const [name] = next.splice(index, 1)
+  next.splice(target, 0, name!)
+  if (await persistCategories(next)) categoryEditingIndex.value = null
+}
+
+async function deleteCategory(name: string) {
+  try {
+    await ElMessageBox.confirm('确定删除分类“' + name + '”？已有模板的历史分类仍会保留。', '删除分类', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch { return }
+  if (await persistCategories(optionCatalog.value.categories.filter(item => item !== name))) categoryEditingIndex.value = null
 }
 
 async function openOptionMaintenance() {
@@ -673,34 +735,36 @@ onMounted(async () => {
 
 <template>
   <section class="program-template-library" aria-label="程序模板库">
-    <section class="pdm-panel program-template-panel">
-      <div class="program-template-toolbar">
-        <el-select v-model="typeFilter" clearable filterable placeholder="全部类型" aria-label="模板类型"><el-option v-for="item in maintainedTypes" :key="item.key" :label="item.name" :value="item.key" /></el-select>
-        <el-select v-model="categoryFilter" clearable filterable placeholder="全部分类" aria-label="模板分类"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
-        <el-select v-model="platformFilter" clearable filterable placeholder="全部平台" aria-label="模板平台"><el-option v-for="item in platforms" :key="item" :label="item" :value="item" /></el-select>
-        <el-select v-model="vendorFilter" clearable filterable placeholder="全部厂商" aria-label="模板厂商"><el-option v-for="vendor in vendors" :key="vendor" :label="vendor" :value="vendor" /></el-select>
-        <SearchField><el-input v-model="search" clearable placeholder="搜索编号、名称、平台或标签" aria-label="搜索程序模板" class="program-template-search" @keyup.enter="appliedSearch = search" /><template #action><el-button class="program-template-search-action" type="primary" @click="appliedSearch = search">搜索</el-button></template></SearchField>
+    <div class="program-template-body pdm-project-list-layout">
+      <CategoryNavigation v-model="categoryFilter" :nodes="categoryNodes" aria-label="标准程序分类筛选"><template v-if="canManageOptions" #actions><el-button size="small" type="primary" @click="categoryEditingIndex = null; categoryManagerOpen = true">分类维护</el-button></template></CategoryNavigation>
+      <section class="pdm-panel program-template-panel">
+        <div class="program-template-toolbar">
+          <el-select v-model="typeFilter" clearable filterable placeholder="全部类型" aria-label="模板类型"><el-option v-for="item in maintainedTypes" :key="item.key" :label="item.name" :value="item.key" /></el-select>
+          <el-select v-model="platformFilter" clearable filterable placeholder="全部平台" aria-label="模板平台"><el-option v-for="item in platforms" :key="item" :label="item" :value="item" /></el-select>
+          <el-select v-model="vendorFilter" clearable filterable placeholder="全部厂商" aria-label="模板厂商"><el-option v-for="vendor in vendors" :key="vendor" :label="vendor" :value="vendor" /></el-select>
+          <SearchField><el-input v-model="search" clearable placeholder="搜索编号、名称、平台或标签" aria-label="搜索程序模板" class="program-template-search" @keyup.enter="appliedSearch = search" /><template #action><el-button class="program-template-search-action" type="primary" @click="appliedSearch = search">搜索</el-button></template></SearchField>
 
-        <el-button class="program-template-refresh" :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
-        <el-button v-if="canSubmit" class="program-template-upload" type="primary" :icon="Plus" @click="openCreate">上传模板</el-button>
-        <el-button v-if="canManageOptions" @click="openOptionMaintenance">选项维护</el-button>
-        <span>共 {{ rows.length }} 项</span>
-      </div>
+          <el-button class="program-template-refresh" :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
+          <el-button v-if="canSubmit" class="program-template-upload" type="primary" :icon="Plus" @click="openCreate">上传模板</el-button>
+          <el-button v-if="canManageOptions" @click="openOptionMaintenance">选项维护</el-button>
+          <span>共 {{ rows.length }} 项</span>
+        </div>
 
-      <el-table class="pdm-auto-fit-table" v-loading="loading" :data="rows" stripe height="100%" row-key="template.id" @row-click="handleRowClick">
-        <el-table-column label="编号" width="108"><template #default="{ row }"><code>{{ row.template.code }}</code></template></el-table-column>
-        <el-table-column label="程序名称" min-width="140"><template #default="{ row }"><strong class="program-template-name">{{ row.revision.name }}</strong></template></el-table-column>
-        <el-table-column label="功能说明" min-width="220"><template #default="{ row }"><span class="program-template-description">{{ row.revision.description || '—' }}</span></template></el-table-column>
-        <el-table-column label="类型" width="150" align="center"><template #default="{ row }"><el-tag effect="plain">{{ assetTypeLabel(row.template.assetType) }}</el-tag></template></el-table-column>
-        <el-table-column label="厂商 / 平台" width="150" align="center"><template #default="{ row }"><span class="program-template-vendor"><strong>{{ row.revision.vendor }}</strong><span class="program-template-cell-note">{{ row.revision.platform }} · {{ row.revision.softwareVersion }}</span></span></template></el-table-column>
-        <el-table-column label="接口 / 适用范围" min-width="170"><template #default="{ row }"><span>{{ row.revision.parameters.length ? ioSummary(row.revision) : row.revision.applicableSeries || '—' }}</span></template></el-table-column>
-        <el-table-column label="版本" width="80"><template #default="{ row }"><code>{{ row.revision.version }}</code></template></el-table-column>
-        <el-table-column label="提交人" width="90"><template #default="{ row }"><PersonName :name="displayUserName(row.revision.createdBy)" /></template></el-table-column>
-        <el-table-column label="状态" width="100" align="center"><template #default="{ row }"><el-tag :type="stateTagType(row.revision.state)">{{ stateLabel(row.revision.state) }}</el-tag></template></el-table-column>
-        <el-table-column label="更新时间" width="140"><template #default="{ row }">{{ dateLabel(row.revision.publishedAt || row.revision.submittedAt || row.revision.createdAt) }}</template></el-table-column>
-        <el-table-column label="操作" width="64"><template #default="{ row }"><el-button link type="primary" @click.stop="openDetail(row.template.id, row.revision.id)">查看</el-button></template></el-table-column>
-      </el-table>
-    </section>
+        <el-table data-pdm-column-layout="scroll" v-loading="loading" :data="rows" stripe height="100%" row-key="template.id" @row-click="handleRowClick">
+          <el-table-column label="编号" width="100"><template #default="{ row }"><code>{{ row.template.code }}</code></template></el-table-column>
+          <el-table-column label="程序名称" min-width="140"><template #default="{ row }"><strong class="program-template-name">{{ row.revision.name }}</strong></template></el-table-column>
+          <el-table-column label="功能说明" min-width="180"><template #default="{ row }"><span class="program-template-description">{{ row.revision.description || '—' }}</span></template></el-table-column>
+          <el-table-column label="类型" width="112" align="center"><template #default="{ row }"><el-tag effect="plain">{{ assetTypeLabel(row.template.assetType) }}</el-tag></template></el-table-column>
+          <el-table-column label="厂商 / 平台" width="130" align="center"><template #default="{ row }"><span class="program-template-vendor"><strong>{{ row.revision.vendor }}</strong><span class="program-template-cell-note">{{ row.revision.platform }} · {{ row.revision.softwareVersion }}</span></span></template></el-table-column>
+          <el-table-column label="接口 / 适用范围" min-width="140"><template #default="{ row }"><span>{{ row.revision.parameters.length ? ioSummary(row.revision) : row.revision.applicableSeries || '—' }}</span></template></el-table-column>
+          <el-table-column label="版本" width="76"><template #default="{ row }"><code>{{ row.revision.version }}</code></template></el-table-column>
+          <el-table-column label="提交人" width="82"><template #default="{ row }"><PersonName :name="displayUserName(row.revision.createdBy)" /></template></el-table-column>
+          <el-table-column label="状态" width="80" align="center"><template #default="{ row }"><el-tag :type="stateTagType(row.revision.state)">{{ stateLabel(row.revision.state) }}</el-tag></template></el-table-column>
+          <el-table-column label="更新时间" width="134"><template #default="{ row }">{{ dateLabel(row.revision.publishedAt || row.revision.submittedAt || row.revision.createdAt) }}</template></el-table-column>
+          <el-table-column label="操作" width="64"><template #default="{ row }"><el-button link type="primary" @click.stop="openDetail(row.template.id, row.revision.id)">查看</el-button></template></el-table-column>
+        </el-table>
+      </section>
+    </div>
 
     <el-drawer v-model="detailOpen" class="program-template-detail" size="min(1120px, 94vw)" destroy-on-close>
       <template #header>
@@ -744,6 +808,37 @@ onMounted(async () => {
         </div>
       </template>
     </el-drawer>
+
+    <el-dialog v-if="canManageOptions" v-model="categoryManagerOpen" title="标准程序分类维护" width="min(860px, calc(100vw - 32px))">
+      <div class="category-manager">
+        <section class="category-manager__list">
+          <header class="category-manager__header"><div><strong>分类列表</strong><span>使用上移和下移调整顺序</span></div><el-button type="primary" size="small" :disabled="categorySaving" @click="openCategoryEditor()">新增分类</el-button></header>
+          <div class="category-manager__rows">
+            <div v-if="!optionCatalog.categories.length" class="category-manager__empty">暂无标准程序分类</div>
+            <div v-for="(name, index) in optionCatalog.categories" :key="name" class="category-manager__row">
+              <div class="category-manager__name"><strong :title="name">{{ name }}</strong></div>
+              <div class="category-manager__actions">
+                <el-button link :disabled="categorySaving || index === 0" @click="moveCategory(index, -1)">上移</el-button>
+                <el-button link :disabled="categorySaving || index === optionCatalog.categories.length - 1" @click="moveCategory(index, 1)">下移</el-button>
+                <el-button link :disabled="categorySaving" @click="openCategoryEditor(index)">编辑</el-button>
+                <el-button link type="danger" :disabled="categorySaving" @click="deleteCategory(name)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="category-manager__editor">
+          <template v-if="categoryEditingIndex !== null">
+            <h3>{{ categoryEditingIndex < 0 ? "新增分类" : "编辑分类" }}</h3>
+            <el-form label-position="top" @submit.prevent="saveCategory">
+              <el-form-item label="名称" required><el-input v-model="categoryName" aria-label="分类名称" maxlength="60" :disabled="categorySaving" /></el-form-item>
+              <div class="category-manager__editor-actions"><el-button :disabled="categorySaving" @click="categoryEditingIndex = null">取消</el-button><el-button native-type="submit" type="primary" :loading="categorySaving" :disabled="!categoryName.trim()">保存</el-button></div>
+            </el-form>
+          </template>
+          <div v-else class="category-manager__placeholder"><strong>分类编辑</strong><p>在左侧新增分类，或选择已有分类进行编辑。</p></div>
+        </section>
+      </div>
+      <template #footer><el-button :disabled="categorySaving" @click="categoryManagerOpen = false">关闭</el-button></template>
+    </el-dialog>
 
     <el-dialog v-model="optionDialogOpen" title="程序模板选项维护" width="min(720px, calc(100vw - 32px))">
       <p class="program-template-option-hint">模板类型、分类、厂商、平台在这里维护好后，上传与编辑草稿时从这些值中选择，不再允许临时输入。</p>
@@ -822,7 +917,8 @@ onMounted(async () => {
 
 <style scoped>
 .program-template-library { min-height: 0; height: 100%; display: flex; flex-direction: column; gap: var(--pdm-container-gap); }
-.program-template-panel { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }.program-template-toolbar { min-height: 50px; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--pdm-border); }.program-template-toolbar > span { color: var(--pdm-muted); font-size: 11px; white-space: nowrap; }.program-template-toolbar .program-template-upload { width: 150px; }
+.program-template-body { flex: 1; min-width: 0; min-height: 0; }
+.program-template-panel { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }.program-template-toolbar { min-height: 50px; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--pdm-border); }.program-template-toolbar > span { color: var(--pdm-muted); font-size: 11px; white-space: nowrap; }.program-template-toolbar .program-template-upload { width: 150px; }
 .program-template-panel :deep(.el-table__header .cell),.program-template-panel :deep(.el-table__body .cell) { text-align: center; justify-content: center; }
 .program-template-panel :deep(.el-table__body),.program-template-panel :deep(.el-table__body .cell),.program-template-panel :deep(.el-table__body code),.program-template-panel :deep(.el-table__body .el-tag),.program-template-panel :deep(.el-table__body .el-button) { font-size: 12px; }.program-template-name,.program-template-description,.program-template-cell-note { min-width: 0; display: block; overflow: hidden; font-size: 12px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }.program-template-description,.program-template-cell-note { color: var(--pdm-muted); }.program-template-vendor { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; overflow: hidden; white-space: nowrap; }.program-template-vendor strong { flex: 0 0 auto; font-size: 12px; }.program-template-vendor .program-template-cell-note { display: inline; }
 .program-template-detail-title { min-width: 0; display: flex; align-items: center; gap: 10px; }.program-template-detail-title div { min-width: 0; flex: 1; }.program-template-detail-title h2 { margin: 0; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.program-template-detail-title p { margin: 3px 0 0; color: var(--pdm-muted); font-size: 11px; }

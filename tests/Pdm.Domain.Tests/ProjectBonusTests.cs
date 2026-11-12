@@ -1,6 +1,7 @@
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
+using Upton.Pdm.Tests;
 namespace Upton.Pdm.Domain.Tests;
 
 public sealed class ProjectBonusTests
@@ -150,6 +151,12 @@ public sealed class ProjectBonusTests
         var company = (await repo.GetOrganizationDirectoryAsync(default)).Organizations.First(o => o.IsActive).Id;
         foreach (var name in new[] { "manager", "worker" }.Concat(ProjectBonusDefaults.Create().Departments.Select(d => "review-" + d.Key)))
             await repo.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", name == "manager" ? UserRole.Administrator : UserRole.Approver, true, CompanyId: company), default);
+        await FinancialTestActors.GrantAsync(repo, "Administrator", new(PermissionCodes.ProjectBonusView, ["company"]),
+            new(PermissionCodes.ProjectBonusManage, ["project-manager"]), new(PermissionCodes.ProjectBonusHistoryView, ["project-manager"]),
+            new(PermissionCodes.ProjectExpenseView, ["company"]), new(PermissionCodes.ProjectExpenseSubmit, ["project-manager"]));
+        await FinancialTestActors.GrantAsync(repo, "Approver", new(PermissionCodes.ProjectBonusView, ["company"]),
+            new(PermissionCodes.ProjectBonusScore, ["company"]), new(PermissionCodes.ProjectBonusApprove, ["company"]), new(PermissionCodes.ProjectBonusPay, ["company"]),
+            new(PermissionCodes.ProjectExpenseView, ["company"]), new(PermissionCodes.ProjectExpenseApprove, ["company"]));
         var customer = (await repo.ListCustomersAsync(true, default)).First();
         var project = await repo.CreateNumberedProjectAsync(new(company, "P", 2, customer.Id, "奖金验收", null, null, 1, "manager", @"C:\qa-vault", @"C:\qa-release"), default);
         project = await repo.SetMainProjectStaffingAsync(project.Id, new("manager", [], []), "manager", default);

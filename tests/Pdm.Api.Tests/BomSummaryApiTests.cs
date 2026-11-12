@@ -29,7 +29,7 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
             MaterialSupplyMode.Purchase, "001", "FILE-" + Guid.NewGuid(), null, null, brand, null, null, null, CategoryCode: "0102"), "admin", UserRole.Administrator, default);
         var file = await materials.CreateMaterialAttachmentAsync(new(Guid.NewGuid(), material.Id, MaterialAttachmentKind.Document,
             "安装说明.pdf", Path.GetTempPath(), "attachment-display.pdf", 1, new string('A',64), "admin", DateTimeOffset.UtcNow), default);
-        var project = await repository.CreateProjectAsync(new("FILES-" + Guid.NewGuid().ToString("N"), "附件标记验收", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("FILES-" + Guid.NewGuid().ToString("N"), "附件标记验收", "admin", "vault", "release"), "admin", default);
         var item = new BomItem(Guid.NewGuid(),project.Id,BomKind.Standard,1,material.MaterialCode,material.Name,1,"001",null,material.Specification,"W1",true)
             {Brand=brand,Source="Manual",Files=[]};
         await repository.ReplaceBomAsync(project.Id,BomKind.Standard,[item],default);
@@ -74,7 +74,7 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
         var material = await services.GetRequiredService<MaterialService>().CreateAsync(new(null, "同料号发布来源", kind == BomKind.Standard ? MaterialKind.Standard : MaterialKind.Electrical,
             MaterialSupplyMode.Purchase, "001", "MODEL-" + Guid.NewGuid(), null, null, brand, null, null, null,
             CategoryCode: kind == BomKind.Standard ? "0102" : "0101"), "admin", UserRole.Administrator, default);
-        var project = await repository.CreateProjectAsync(new("SOURCE-" + Guid.NewGuid().ToString("N"), "新增来源验收", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("SOURCE-" + Guid.NewGuid().ToString("N"), "新增来源验收", "admin", "vault", "release"), "admin", default);
         var old = new BomItem(Guid.NewGuid(), project.Id, kind, 1, material.MaterialCode, material.Name, 1, "001", null, material.Specification, "W1", true) { Brand = brand, Source = "Manual" };
         var addedId = Guid.NewGuid();
         var added = old with { Id = addedId, ReleaseTrackingId = addedId, Sequence = 2, Quantity = 2 };
@@ -113,7 +113,7 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
         var materials = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
         var service = scope.ServiceProvider.GetRequiredService<MaterialService>();
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"INV-{Guid.NewGuid():N}", "库存替换验收", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand($"INV-{Guid.NewGuid():N}", "库存替换验收", "admin", "vault", "release"), "admin", default);
         var materialKind = kind == BomKind.Standard ? MaterialKind.Standard : MaterialKind.Electrical;
         var model = $"INV-{Guid.NewGuid():N}";
         var material = await service.CreateAsync(new(null, "库存物料", materialKind, MaterialSupplyMode.Purchase,
@@ -201,7 +201,7 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
     {
         using var scope = factory.Services.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"CHECK-{Guid.NewGuid():N}", "未保存料号核对", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand($"CHECK-{Guid.NewGuid():N}", "未保存料号核对", "admin", "vault", "release"), "admin", default);
         var inputs = new[] { "01030000968", "01030000666" }.Select((code, index) =>
             new BomItemInput(index + 1, code, $"测试{index + 1}", 1, "001", null, "MODEL", "W1", false, Id: Guid.NewGuid())).ToArray();
         var response = await client.PostAsJsonAsync("/api/material-code/validate", new { projectId = project.Id, items = inputs });
@@ -221,7 +221,7 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
     {
         using var scope = factory.Services.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"MANUAL-{Guid.NewGuid():N}", "人工料号验证", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand($"MANUAL-{Guid.NewGuid():N}", "人工料号验证", "admin", "vault", "release"), "admin", default);
         var input = new BomItemInput(1, $"ABSENT-{Guid.NewGuid():N}", "手动新增物料", 1, "001", null, "MODEL", "W1", true, Brand: "TEST");
         var rejected = await client.PutAsJsonAsync($"/api/projects/{project.Id}/boms/Standard", new { items = new[] { input } });
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);

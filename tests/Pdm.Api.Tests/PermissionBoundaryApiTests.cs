@@ -22,7 +22,7 @@ public sealed class PermissionBoundaryApiTests
         var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var materials = factory.Services.GetRequiredService<IMaterialRepository>();
-        var project = await repository.CreateProjectAsync(new($"PERMISSION-{Guid.NewGuid():N}", "接口权限测试", "admin", @"D:\PDM\Permission", @"D:\PDM\PermissionRelease"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new($"PERMISSION-{Guid.NewGuid():N}", "接口权限测试", "admin", @"D:\PDM\Permission", @"D:\PDM\PermissionRelease"), "admin", default);
         await repository.SetMainProjectStaffingAsync(project.Id, new("admin", [], ["engineer"]), "admin", default);
         await repository.SetRolePermissionsAsync("Engineer", canEditMechanical
             ? [PermissionCodes.ProjectContentView, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit]

@@ -207,7 +207,7 @@ public sealed class ProductionTrackingTests
     private static async Task<(InMemoryPdmRepository Repository, InMemoryProductionTrackingStore Store,
         ProductionTrackingService Service, Project Project, ReleasePackage Package, BomItem Item)> FixtureAsync(string? model = "7002541.00-02")
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("PROD-" + Guid.NewGuid().ToString("N"),
             "非标件生产", "admin", "vault", "release"), "admin", Ct);
         var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1,

@@ -11,7 +11,7 @@ public sealed class CrmCustomerIntegrationTests
     public async Task Sync_ReusesProtectedU9ConfigurationAndKeepsSecretsOutOfSettingsAndAudit()
     {
         var clock = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var materials = await ConfiguredMaterialsAsync(clock);
         var u9Client = new RecordingU9Client([
             new("C10001", "U9C客户甲"),
@@ -51,7 +51,7 @@ public sealed class CrmCustomerIntegrationTests
     public async Task UpdateSettings_OnlyChangesTheScheduleAndRequiresU9OAuthConfiguration()
     {
         var clock = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var unconfiguredMaterials = new InMemoryMaterialRepository(clock);
         var service = new CrmCustomerIntegrationService(repository, unconfiguredMaterials, new RecordingU9Client([]), new TestProtector(), clock);
 
@@ -81,7 +81,7 @@ public sealed class CrmCustomerIntegrationTests
     public async Task AutomaticSync_RunsWhenDueAndWaitsForTheConfiguredInterval()
     {
         var clock = new MutableTimeProvider(new DateTimeOffset(2026, 8, 16, 1, 0, 0, TimeSpan.Zero));
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var materials = await ConfiguredMaterialsAsync(clock);
         var u9Client = new RecordingU9Client([new("C10001", "自动同步客户")]);
         var service = new CrmCustomerIntegrationService(repository, materials, u9Client, new TestProtector(), clock);
@@ -106,7 +106,7 @@ public sealed class CrmCustomerIntegrationTests
     public async Task AutomaticSync_RecordsFailureAndDoesNotRetryBeforeTheInterval()
     {
         var clock = new MutableTimeProvider(new DateTimeOffset(2026, 8, 16, 2, 0, 0, TimeSpan.Zero));
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var materials = await ConfiguredMaterialsAsync(clock);
         var u9Client = new FailingU9Client();
         var service = new CrmCustomerIntegrationService(repository, materials, u9Client, new TestProtector(), clock);

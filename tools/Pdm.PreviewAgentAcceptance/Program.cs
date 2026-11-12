@@ -24,6 +24,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Contains("--serve")) return ServeFixtureWorker();
         directory = Path.Combine(Path.GetFullPath(args[0]), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
@@ -32,7 +33,7 @@ internal static class Program
             JournalChecks();
             var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(); var port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop();
             var options = new AgentOptions { Name = "PC-07", ServerUrl = "http://127.0.0.1:" + port, Port = port, Token = "acceptance-only", BindAddress = "127.0.0.1",
-                WorkRoot = Path.Combine(directory, "jobs"), WorkerPath = Path.GetFullPath(args[1]), DataDirectory = Path.Combine(directory, "data"), StartWithWindows = false };
+                WorkRoot = Path.Combine(directory, "jobs"), WorkerPath = args[1] == "--fixture" ? Assembly.GetExecutingAssembly().Location : Path.GetFullPath(args[1]), DataDirectory = Path.Combine(directory, "data"), StartWithWindows = false };
             Set("Options", options);
             Set("Journal", new AgentJournal(Path.Combine(options.DataDirectory, "history"), 30));
             typeof(AgentProgram).GetMethod("StartServer", PrivateStatic).Invoke(null, new object[] { options });
@@ -170,6 +171,34 @@ internal static class Program
         }
     }
     private static void Set(string property, object value) => typeof(AgentProgram).GetProperty(property, BindingFlags.Static | BindingFlags.NonPublic).SetValue(null, value);
+    // Deterministic protocol peer: exercises the real agent HTTP/queue/journal/UI
+    // while never loading SolidWorks or editing a source drawing.
+    private static int ServeFixtureWorker()
+    {
+        Console.OutputEncoding = new UTF8Encoding(false);
+        Console.WriteLine("{\"ready\":true}"); Console.Out.Flush();
+        string line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            var request = Json.Deserialize<Dictionary<string, object>>(line);
+            var manifest = Json.Deserialize<Dictionary<string, object>>(File.ReadAllText((string)request["Manifest"]));
+            var jobs = ((System.Collections.IEnumerable)manifest["Jobs"]).Cast<Dictionary<string, object>>().ToArray();
+            var items = new List<object>();
+            foreach (var job in jobs)
+            {
+                System.Threading.Thread.Sleep(items.Count == 0 ? 500 : 2000);
+                var success = !Path.GetFileName((string)job["SourcePath"]).Contains("失败");
+                var item = new { DocumentId = (string)job["DocumentId"], Success = success, Error = success ? null : "System.IO.IOException: injected conversion failure" };
+                if (success) File.WriteAllText((string)job["OutputPath"], "isolated conversion fixture");
+                items.Add(item);
+                Console.WriteLine(Json.Serialize(new { Progress = true, Stage = "受控转换替身", Completed = items.Count, Total = jobs.Length, SolidWorksPid = 0, Item = item })); Console.Out.Flush();
+            }
+            var result = new { Success = true, Items = items };
+            File.WriteAllText((string)request["Result"], Json.Serialize(result));
+            Console.WriteLine(Json.Serialize(new { Success = true })); Console.Out.Flush();
+        }
+        return 0;
+    }
     private static void Capture(Form window, string name) { using (var bitmap = new Bitmap(window.Width, window.Height)) { window.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size)); bitmap.Save(Path.Combine(directory, name + ".png")); } }
     private static void Check(bool condition, string message) { if (!condition) throw new Exception("FAIL " + message); checks++; Console.WriteLine("PASS " + message); }
     private static async Task WaitUntil(Func<bool> condition) { for (var i = 0; i < 150; i++) { if (condition()) return; await Task.Delay(50); } throw new TimeoutException("Timed out waiting for test state"); }

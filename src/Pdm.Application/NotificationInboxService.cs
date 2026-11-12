@@ -56,19 +56,22 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
                 if (waitingForReview)
                 {
                     if (drawing.State != DrawingReviewPackageState.InReview) decisions[notice.Id] = new(notice, true, "本轮审图已结束或已进入后续节点");
+                    else if (user is null || !await AuthorizationPolicy.CanAsync(repository, drawing.ProjectId, user.Username, PermissionCodes.DrawingReviewDecide, ct))
+                        decisions[notice.Id] = new(notice, false, "未获得当前项目的2D图纸审核权限");
                     else if (!drawing.AllowsReviewer(notice.Recipient)) decisions[notice.Id] = new(notice, false, "当前审核任务已由其他人受理");
                     else if (drawing.AssignedReviewers.Count == 0 && user is not null)
                     {
                         var project = await repository.FindProjectAsync(drawing.ProjectId, ct);
-                        var isLead = project is not null && (string.Equals(project.DesignLead, user.Username, StringComparison.OrdinalIgnoreCase) || project.DesignLeads.Contains(user.Username, StringComparer.OrdinalIgnoreCase));
                         if (!await NotificationRecipientPolicy.InBusinessCompanyAsync(repository, user, project?.OrganizationId, ct)
-                            || !isLead && !await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user, PermissionCodes.DrawingReviewDecide, ct))
+                            || !await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user, PermissionCodes.DrawingReviewDecide, ct))
                             decisions[notice.Id] = new(notice, false, "不属于当前公共审图受理岗位");
                     }
                 }
                 else if (notice.Category == "DrawingReviewSupervisorApproval")
                 {
                     if (drawing.State != DrawingReviewPackageState.PendingSupervisorApproval) decisions[notice.Id] = new(notice, true, "本轮主管批准已结束");
+                    else if (user is null || !await AuthorizationPolicy.CanAsync(repository, drawing.ProjectId, user.Username, PermissionCodes.DrawingReviewDecide, ct))
+                        decisions[notice.Id] = new(notice, false, "未获得当前项目的2D图纸批准权限");
                     else if (!string.Equals(drawing.Supervisor, notice.Recipient, StringComparison.OrdinalIgnoreCase)) decisions[notice.Id] = new(notice, false, "不是当前指定主管");
                     else if (drawing.Items.Max(item => item.DrawingReviewedAt) is { } reviewedAt && notice.CreatedAt < reviewedAt)
                         decisions[notice.Id] = new(notice, true, "上一轮批准提醒已由本轮提醒替代");

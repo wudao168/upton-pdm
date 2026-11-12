@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import SearchField from './SearchField.vue'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { listMaterials } from '../api'
@@ -36,7 +37,7 @@ function choose(item: { id: string; kind: string }) { opened.value = false; emit
   <el-dialog v-model="opened" title="快速查找" class="pdm-command-dialog" modal-class="pdm-command-overlay" width="640px" append-to-body @opened="input?.focus()">
     <SearchField @search="matches[0] ? choose(matches[0]) : materials[0] && (material = materials[0], detailOpen = true)"><input ref="input" v-model="query" class="pdm-command-input" aria-label="查找项目、图档、发布包或料品" placeholder="输入项目号、名称、图号或料号" @keydown.down.prevent="moveResult(1)" @keydown.enter.prevent="matches[0] ? choose(matches[0]) : materials[0] && (material = materials[0], detailOpen = true)"></SearchField>
     <p class="pdm-muted">项目按当前权限检索；图档与发布包限定当前项目。</p>
-    <ul ref="results" class="pdm-command-results" @keydown.down.prevent="moveResult(1)" @keydown.up.prevent="moveResult(-1)"><li v-for="item in matches" :key="item.kind + item.id"><button type="button" class="pdm-text-action" @click="choose(item)"><span><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></span><em>{{ item.kind }}</em></button></li>
+    <ul ref="results" class="pdm-command-results" @keydown.down.prevent="moveResult(1)" @keydown.up.prevent="moveResult(-1)"><li v-for="item in matches" :key="item.kind + item.id"><button type="button" class="pdm-text-action" @click="choose(item)"><span><strong>{{ item.label }}</strong><small><CompanyName v-if="item.kind === '项目'" :name="item.detail" /><template v-else>{{ item.detail }}</template></small></span><em>{{ item.kind }}</em></button></li>
       <li v-for="item in materials" :key="item.id"><button type="button" class="pdm-text-action" @click="material = item; detailOpen = true"><span><strong>{{ item.materialCode }} · {{ item.name }}</strong><small>{{ item.specification }}</small></span><em>料品</em></button></li>
     </ul><p v-if="pending" role="status">正在查找料品…</p><p v-else-if="failure" role="alert">{{ failure }}</p><p v-else-if="!matches.length && !materials.length">没有符合条件的对象。</p>
   </el-dialog>

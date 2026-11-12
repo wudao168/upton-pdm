@@ -59,6 +59,52 @@ public sealed class LoginSecurityTests
         Assert.True((await service.ListAsync(ct)).Single().Sessions.Single().Revoked);
     }
 
+    [Fact]
+    public async Task OptionalMySqlLockedHeartbeatDoesNotBlockBusinessOrBypassRevocation()
+    {
+        var connection = Environment.GetEnvironmentVariable("PDM_LOGIN_MYSQL_TEST_CONNECTION");
+        if (string.IsNullOrWhiteSpace(connection)) return;
+        var username = "qa-heartbeat-" + Guid.NewGuid().ToString("N");
+        var key = "user:" + username;
+        var options = Options.Create(new PdmDatabaseOptions { Provider = "MySql", ConnectionString = connection });
+        var store = new LoginSecurityStore(options);
+        var security = new LoginSecurityService(store, clock);
+        var otherProcess = new LoginSecurityService(new LoginSecurityStore(options), clock);
+        await using var db = new MySqlConnector.MySqlConnection(connection);
+        await db.OpenAsync();
+        try
+        {
+            var login = await security.OpenAsync(account with { Id = Guid.NewGuid(), Username = username }, Peer(), null, false, ct);
+            Assert.Null(login.Error);
+            var before = (await store.ReadAsync<LoginUserState>(key, ct)).Sessions.Single().LastSeenAt;
+            clock.Now = clock.Now.AddSeconds(31);
+            await using (var held = await db.BeginTransactionAsync())
+            {
+                await using var command = db.CreateCommand(); command.Transaction = held;
+                command.CommandText = "SELECT state_key FROM login_security_state WHERE state_key=@key FOR UPDATE";
+                command.Parameters.AddWithValue("@key", key); await command.ExecuteScalarAsync();
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var checks = Enumerable.Range(0, 24).Select(i => (i % 2 == 0 ? security : otherProcess).ValidateAsync(username, login.SessionId, new DefaultHttpContext().Request, ct));
+                Assert.All(await Task.WhenAll(checks).WaitAsync(TimeSpan.FromSeconds(8)), error => Assert.Null(error));
+                Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5));
+                Assert.Equal(before, (await store.ReadAsync<LoginUserState>(key, ct)).Sessions.Single().LastSeenAt);
+                await held.RollbackAsync();
+            }
+            Assert.Null(await security.ValidateAsync(username, login.SessionId, new DefaultHttpContext().Request, ct));
+            Assert.Equal(clock.Now, (await store.ReadAsync<LoginUserState>(key, ct)).Sessions.Single().LastSeenAt);
+            Assert.True(await security.RevokeAsync(username, login.SessionId!, ct));
+            clock.Now = clock.Now.AddSeconds(31);
+            Assert.Contains("退出", await otherProcess.ValidateAsync(username, login.SessionId, new DefaultHttpContext().Request, ct));
+            Assert.True((await store.ReadAsync<LoginUserState>(key, ct)).Sessions.Single().Revoked);
+        }
+        finally
+        {
+            await using var cleanup = db.CreateCommand();
+            cleanup.CommandText = "DELETE FROM login_security_state WHERE state_key=@key";
+            cleanup.Parameters.AddWithValue("@key", key); await cleanup.ExecuteNonQueryAsync();
+        }
+    }
+
     [Theory]
     [InlineData("malformed")]
     [InlineData("expired")]
@@ -302,14 +348,16 @@ public sealed class LoginSecurityTests
     }
 
     [Fact]
-    public async Task BuiltInAdminCanEditGlobalPolicy_CompanyAdministratorCannot()
+    public async Task PolicyManagementUsesGrantedPermissionAndRevocationInsteadOfAccountName()
     {
         await using var factory = new PdmApiFactory();
         using var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var issuer = factory.Services.GetRequiredService<ITokenIssuer>();
         var admin = new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true);
-        await repository.CreateUserAsync(admin, ct);
+        await ApiTestAuthorization.EnsureUserAsync(repository, admin, ct);
+        admin = (await repository.FindUserAsync(admin.Username, ct))!;
+        await ApiTestAuthorization.GrantRoleAsync(repository, admin.EffectiveRoleCode, "system.login-policy.manage", AuthorizationActions.ClientLogs);
         client.DefaultRequestHeaders.Authorization = new("Bearer", issuer.Issue(admin, TimeSpan.FromHours(1)));
         var response = await client.GetFromJsonAsync<JsonElement>("/api/login-security");
         Assert.True(response.GetProperty("canEditPolicy").GetBoolean());
@@ -318,7 +366,13 @@ public sealed class LoginSecurityTests
         await repository.CreateUserAsync(companyAdmin, ct);
         client.DefaultRequestHeaders.Authorization = new("Bearer", issuer.Issue(companyAdmin, TimeSpan.FromHours(1)));
         response = await client.GetFromJsonAsync<JsonElement>("/api/login-security");
+        Assert.True(response.GetProperty("canEditPolicy").GetBoolean());
+        var settings = await repository.GetAuthorizationSettingsAsync(ct);
+        await repository.SaveAuthorizationSettingsAsync(settings with { Templates = settings.Templates.Select(t => t with { Grants = t.Grants.Where(g => g.Permission != "system.login-policy.manage").ToArray() }).ToArray() }, settings.Revision, ct);
+        response = await client.GetFromJsonAsync<JsonElement>("/api/login-security");
         Assert.False(response.GetProperty("canEditPolicy").GetBoolean());
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync("/api/login-security/policy", new SaveLoginSecurityPolicy(true, false))).StatusCode);
+        client.DefaultRequestHeaders.Authorization = new("Bearer", issuer.Issue(admin, TimeSpan.FromHours(1)));
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync("/api/login-security/policy", new SaveLoginSecurityPolicy(true, false))).StatusCode);
     }
 

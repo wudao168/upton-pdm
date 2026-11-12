@@ -55,7 +55,7 @@ public sealed class WorkspaceDocumentApiTests
         await using var factory = new PdmApiFactory();
         using var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(new("INDEX-" + Guid.NewGuid().ToString("N"), "导航读取测试", "admin", "D:/test", "D:/release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("INDEX-" + Guid.NewGuid().ToString("N"), "导航读取测试", "admin", "D:/test", "D:/release"), "admin", default);
         var document = await repository.RegisterDocumentAsync(new(project.Id, "INDEX", "索引零件", "INDEX.SLDPRT", DocumentKind.Part), "admin", default);
         Authorize(client);
         var url = $"/api/projects/{project.Id}/folder-documents";

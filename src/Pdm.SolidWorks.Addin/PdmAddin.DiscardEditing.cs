@@ -55,7 +55,8 @@ public sealed partial class PdmAddin
                 ControlledOpenManifestDto combined = null;
                 foreach (var target in project)
                 {
-                    var next = await apiClient.CreateControlledOpenManifestAsync(target.Item1.DocumentId.Value, null, false, false, lifetime.Token);
+                    var next = await apiClient.CreateControlledOpenManifestAsync(target.Item1.DocumentId.Value, null, false, false, lifetime.Token,
+                        allowMissingComponents: true);
                     if (next.ProjectId != project.Key || !next.Files.Any(file => file.DocumentId == target.Item1.DocumentId))
                         throw new InvalidOperationException("服务器恢复清单与所选图档或项目不一致。");
                     if (combined != null && combined.Files.Join(next.Files, left => left.DocumentId, right => right.DocumentId,
@@ -300,8 +301,15 @@ public sealed partial class PdmAddin
                     var opened = OpenOrActivateDocumentOnSolidWorksThread(window.Path, window.DocumentType, window.Configuration,
                         window.ReadOnly || discardedPaths.Contains(window.Path));
                     if (opened == null) throw new IOException("原工作窗口尚未恢复：" + window.Path);
-                    if (context.Value != null) ValidateControlledLoadedPathsCore(opened, window.Path, context.Value, application, true);
-                    search?.VerifyLoadedSources();
+                    if (context.Value != null)
+                    {
+                        var missing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var directory = Path.Combine(context.Key, context.Value.RootRelativePath);
+                        ValidateControlledLoadedSources(opened, directory, context.Value, application, missing,
+                            allowMissingDrawingModels: window.ReadOnly || discardedPaths.Contains(window.Path));
+                        search.VerifyLoadedSources(missing);
+                        ReportMissingComponentsOnOpen(missing, "已恢复窗口");
+                    }
                 }
             }
             catch (Exception error) { LogDiagnostic("恢复放弃编辑前窗口：" + window.Path, error); failures.Add(window.Path); }
@@ -332,7 +340,9 @@ public sealed partial class PdmAddin
         // Stored source strings (and the native dependency cache) can retain old
         // addresses while every actual component already uses this working copy.
         // Validate those real sources without rewriting any file or closing it.
-        ValidateControlledLoadedPathsCore(loaded, path, manifest, application, true);
+        var missing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        ValidateControlledLoadedSources(loaded, path, manifest, application, missing);
+        ReportMissingComponentsOnOpen(missing, "已核对恢复文件");
         var directory = Path.GetDirectoryName(path);
         var loadedPaths = new HashSet<string>(((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
             .Select(model => model.GetPathName()).Where(value => !string.IsNullOrWhiteSpace(value)), StringComparer.OrdinalIgnoreCase);

@@ -101,7 +101,7 @@ public sealed class AuthorizationCenterTests
             Assert.Contains(RolePermissionCatalog.Permissions, p => p.Code == grant.Permission && !p.Hidden);
         var reader = Assert.Single(settings.Templates, t => t.Key == "project-reader");
         Assert.True(reader.ProjectAssignable);
-        Assert.All(reader.Grants, g => Assert.Equal("project", RolePermissionCatalog.Permissions.Single(p => p.Code == g.Permission).Scope));
+        Assert.All(reader.Grants.Where(g => g.Permission != PermissionCodes.DingTalkSelfBind), g => Assert.Equal("project", RolePermissionCatalog.Permissions.Single(p => p.Code == g.Permission).Scope));
         Assert.DoesNotContain(reader.Grants, g => g.Permission == ProjectCenterPermissions.Download);
     }
 

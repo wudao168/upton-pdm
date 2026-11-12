@@ -17,7 +17,7 @@ public sealed class ProductionSupplierTests
         Company(company);
         try
         {
-            var repository = new InMemoryPdmRepository(TimeProvider.System);
+            var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
             var service = new ProductionSupplierService(repository, new InMemoryProductionSupplierStore(), TimeProvider.System);
             var categoryId = Guid.NewGuid();
             var catalog = await service.SaveCategoryAsync(categoryId, new("机加工", true, 0), "admin", UserRole.Administrator, default);
@@ -57,7 +57,7 @@ public sealed class ProductionSupplierTests
         Company(company);
         try
         {
-            var repository = new InMemoryPdmRepository(TimeProvider.System);
+            var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
             var supplierService = new ProductionSupplierService(repository, new InMemoryProductionSupplierStore(), TimeProvider.System);
             var category = Guid.NewGuid();
             var catalog = await supplierService.SaveCategoryAsync(category, new("表面处理", true, 0), "admin", UserRole.Administrator, default);

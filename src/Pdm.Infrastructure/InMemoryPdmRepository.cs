@@ -150,10 +150,6 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
         AuthorizationPolicy.CanAsync(this, projectId, actor, PermissionCodes.ProjectContentView, cancellationToken);
 
-    private Task<bool> HasCommercialProjectAccessAsync(Project project, string actor, UserRole role, CancellationToken ct) =>
-        CommercialProjectAccess.CanReadAsync(project, users.Values.FirstOrDefault(user => user.Username.Equals(actor, StringComparison.OrdinalIgnoreCase)),
-            actor, role, projectContacts, ct);
-
     private static bool IsInActiveCompany(Project project) => TenantContext.CompanyId is not Guid companyId || project.OrganizationId is null || project.OrganizationId == companyId;
 
     public Task<bool> HasChildProjectsAsync(Guid projectId, CancellationToken cancellationToken) =>
@@ -2418,7 +2414,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException("审批任务已经处理。 ");
             }
 
-            if (task.Participants is null && !emergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+            if (task.Participants is null && !emergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
             {
                 throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
             }
@@ -2481,8 +2477,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var currentTask = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
             if (task.Decision is not null || currentTask?.Id != taskId || package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
                 throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
-            if (!string.Equals(task.Assignee, expectedAssignee, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(expectedAssignee, "admin", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(task.Assignee, expectedAssignee, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException("审批任务已转交给其他用户，请刷新后重试。 ");
 
             var updated = package with

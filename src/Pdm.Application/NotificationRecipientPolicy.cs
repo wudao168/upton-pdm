@@ -4,8 +4,10 @@ namespace Upton.Pdm.Application;
 
 public static class NotificationRecipientPolicy
 {
-    public static bool CanReceive(AuthorizationSettings settings, OrganizationDirectoryUser user) => AuthorizationPolicy.GlobalAllows(settings,
-        new UserAccount(Guid.Empty, user.Username, user.DisplayName, "", user.Role, user.IsActive, RoleCode: user.EffectiveRoleCode, CompanyId: user.CompanyId, RoleCodes: user.EffectiveRoleCodes), user.CompanyId, AuthorizationActions.BusinessNotifications);
+    public static bool CanReceive(AuthorizationSettings settings, OrganizationDirectoryUser user,
+        string permission = AuthorizationActions.BusinessNotifications, Guid? company = null) => AuthorizationPolicy.GlobalAllows(settings,
+        new UserAccount(Guid.Empty, user.Username, user.DisplayName, "", user.Role, user.IsActive, RoleCode: user.EffectiveRoleCode, CompanyId: user.CompanyId, RoleCodes: user.EffectiveRoleCodes),
+        company ?? user.CompanyId, permission);
     public static async Task<bool> HasBusinessPermissionAsync(IPdmRepository repository, OrganizationDirectoryUser user, string permission, CancellationToken ct) =>
         await repository.FindUserAsync(user.Username, ct) is { } account && await HasBusinessPermissionAsync(repository, account, permission, ct);
     public static async Task<bool> CanReceiveAsync(IPdmRepository repository, string username, CancellationToken ct)

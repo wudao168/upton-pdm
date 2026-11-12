@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DepartmentSelectField from './DepartmentSelectField.vue'
 import type { BonusIndicator, BonusDepartment } from '../projectBonus'
 import { bonusId } from '../projectBonus'
 const props = defineProps<{ modelValue: BonusIndicator[]; departments: BonusDepartment[] }>()
@@ -18,7 +19,7 @@ function add() { emit('update:modelValue', [...props.modelValue, { id: bonusId()
       <label>评分标准 / 扣分规则<textarea v-model="item.guidance" rows="3" maxlength="2000" /></label>
       <label>证据要求<textarea v-model="item.evidence" rows="2" maxlength="2000" /></label>
       <div class="bonus-table-scroll"><table><thead><tr><th>评分部门</th><th>该指标内权重（%）</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="(department, d) in item.departments" :key="d"><td><select v-model="department.departmentKey"><option v-for="option in departments" :key="option.key" :value="option.key">{{ option.name }}</option></select></td><td><el-input-number v-model="department.weight" :min="0.01" :max="100" :controls="false" :precision="2" /></td><td><button type="button" class="pdm-secondary-action" @click="item.departments.splice(d, 1)">移除</button></td></tr>
+        <tr v-for="(department, d) in item.departments" :key="d"><td><DepartmentSelectField :name="departments.find(option => option.key === department.departmentKey)?.name"><select v-model="department.departmentKey"><option v-for="option in departments" :key="option.key" :value="option.key">{{ option.name }}</option></select></DepartmentSelectField></td><td><el-input-number v-model="department.weight" :min="0.01" :max="100" :controls="false" :precision="2" /></td><td><button type="button" class="pdm-secondary-action" @click="item.departments.splice(d, 1)">移除</button></td></tr>
       </tbody><tfoot><tr><th>合计</th><td>{{ item.departments.reduce((s, d) => s + Number(d.weight), 0) }}%</td><td><button type="button" class="pdm-secondary-action" @click="item.departments.push({ departmentKey: departments[0]?.key ?? '', weight: 0 })">增加评分部门</button></td></tr></tfoot></table></div>
       <button type="button" class="pdm-secondary-action" @click="emit('update:modelValue', modelValue.filter(i => i.id !== item.id))">删除该指标</button>
     </details>

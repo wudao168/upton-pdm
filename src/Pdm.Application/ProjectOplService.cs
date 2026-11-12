@@ -47,22 +47,42 @@ public interface IProjectOplStorage
     void Delete(string vaultRoot, Guid projectId, Guid attachmentId);
 }
 
-public sealed class ProjectOplService(IPdmRepository projects, IProjectOplRepository issues, IProjectOplStorage storage, TimeProvider clock, IServerStoragePaths? paths = null)
+public sealed class ProjectOplService(IPdmRepository projects, IProjectOplRepository issues, IProjectOplStorage storage, TimeProvider clock, IServerStoragePaths? paths = null, IQualityIssueGate? qualityGate = null)
 {
     public const int MaxFileLength = 10 * 1024 * 1024;
     public const string AssignmentCategory = "OplResponsePending";
     public static string AssignmentKey(Guid issueId) => $"opl-response:{issueId:D}";
     private static readonly string[] Priorities = ["紧急", "高", "普通", "低"];
     private static readonly string[] States = ["待处理", "处理中", "待确认", "已完成", "已作废"];
-    private async Task<(Project Root, bool Manager)> AccessAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
+    private async Task<Project> AccessAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     {
         var project = await projects.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
-        if (!await projects.HasProjectContentReadAccessAsync(projectId, actor, role, ct)) throw new UnauthorizedAccessException("无权查看该项目的开口问题。");
+        if (!await CanViewAsync(projectId, actor, ct)) throw new UnauthorizedAccessException("无权查看该项目的开口问题。");
         var root = project.ParentProjectId is null ? project : await projects.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct)
             ?? throw new PdmNotFoundException("主项目不存在。");
         if (root.Id != projectId && !await projects.HasProjectContentReadAccessAsync(root.Id, actor, role, ct)) throw new UnauthorizedAccessException("无权查看该主项目的开口问题。");
-        var manager = await AuthorizationPolicy.CanAsync(projects, root.Id, actor, "project.opl.manage", ct);
-        return (root, manager);
+        return root;
+    }
+    private async Task<bool> CanViewAsync(Guid projectId, string actor, CancellationToken ct) =>
+        await AuthorizationPolicy.CanAsync(projects, projectId, actor, "project.opl.view", ct)
+        && await AuthorizationPolicy.CanAsync(projects, projectId, actor, ProjectCenterPermissions.Tab("opl"), ct);
+
+    private async Task RequireOperationAsync(Guid projectId, string actor, string operation, CancellationToken ct)
+    {
+        if (!await CanViewAsync(projectId, actor, ct)
+            || !await AuthorizationPolicy.CanAsync(projects, projectId, actor, ProjectCenterPermissions.Write, ct)
+            || !await AuthorizationPolicy.CanAsync(projects, projectId, actor, operation, ct))
+            throw new UnauthorizedAccessException("当前账号没有该项目范围内的OPL操作权限，请联系授权人员在权限中心配置。");
+    }
+
+    private async Task RequireTransitionAsync(OplIssue issue, string nextStatus, string actor, CancellationToken ct)
+    {
+        if (issue.Status == nextStatus) return;
+        var target = issue.RelatedProjectId ?? issue.ProjectId;
+        if (nextStatus is not ("已完成" or "已作废") && Open(issue)) return;
+        await RequireOperationAsync(target, actor, nextStatus == "已完成" ? "project.opl.complete" : "project.opl.edit", ct);
+        if (qualityGate is null) throw new PdmRuleException("质量问题状态校验服务暂不可用，请联系管理员检查服务配置后重试。");
+        await qualityGate.RequireTransitionAsync(issue, nextStatus, actor, ct);
     }
     private static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     public static async Task<bool> CanRespondAsync(IPdmRepository repository, Guid projectId, string actor, CancellationToken ct)
@@ -94,20 +114,28 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
     }
     public async Task<OplView> GetAsync(Guid projectId, string actor, UserRole role, CancellationToken ct, bool includePeople = true)
     {
-        var (root, manager) = await AccessAsync(projectId, actor, role, ct);
-        var writable = await AuthorizationPolicy.CanAsync(projects, root.Id, actor, ProjectCenterPermissions.Write, ct);
-        var records = (await issues.ListAsync(root.Id, ct)).OrderByDescending(x => x.Number).ToArray();
+        var root = await AccessAsync(projectId, actor, role, ct);
+        var candidates = (await issues.ListAsync(root.Id, ct)).ToArray();
+        var readableProjects = new HashSet<Guid>();
+        foreach (var target in candidates.Select(x => x.RelatedProjectId ?? root.Id).Distinct())
+            if (await CanViewAsync(target, actor, ct)) readableProjects.Add(target);
+        var records = candidates.Where(x => readableProjects.Contains(x.RelatedProjectId ?? root.Id)).OrderByDescending(x => x.Number).ToArray();
         var editableProjects = new HashSet<Guid>();
-        if (await CanRespondAsync(projects, projectId, actor, ct))
+        var completableProjects = new HashSet<Guid>();
+        foreach (var target in readableProjects)
         {
-            editableProjects.Add(projectId);
-            if (projectId == root.Id)
-                foreach (var childId in records.Where(x => manager || Same(x.CreatedBy, actor) || Same(x.Owner, actor))
-                    .Select(x => x.RelatedProjectId).OfType<Guid>().Distinct())
-                    if (await CanRespondAsync(projects, childId, actor, ct)) editableProjects.Add(childId);
+            if (await CanRespondAsync(projects, target, actor, ct)) editableProjects.Add(target);
+            if (await AuthorizationPolicy.CanAsync(projects, target, actor, "project.opl.complete", ct)
+                && await AuthorizationPolicy.CanAsync(projects, target, actor, ProjectCenterPermissions.Write, ct)) completableProjects.Add(target);
         }
-        var rows = records.Select(x => new OplRow(x, editableProjects.Contains(x.RelatedProjectId ?? root.Id)
-            && (manager || Same(x.CreatedBy, actor) || Same(x.Owner, actor)), writable && (manager || Same(x.CreatedBy, actor)))).ToArray();
+        var rows = new OplRow[records.Length];
+        for (var index = 0; index < records.Length; index++)
+        {
+            var issue = records[index];
+            var canComplete = Open(issue) && completableProjects.Contains(issue.RelatedProjectId ?? root.Id)
+                && qualityGate is not null && await qualityGate.CanTransitionAsync(issue, "已完成", actor, ct);
+            rows[index] = new(issue, editableProjects.Contains(issue.RelatedProjectId ?? root.Id), canComplete);
+        }
         var people = new List<OplPerson>();
         if (includePeople) foreach (var user in await projects.ListUsersAsync(ct))
             if (user.IsActive && await projects.HasProjectContentReadAccessAsync(root.Id, user.Username, user.Role, ct))
@@ -150,7 +178,7 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
     public async Task<IReadOnlyList<Guid>> ValidateReleaseLinksAsync(Guid projectId, IReadOnlyList<Guid> ids,
         string actor, UserRole role, CancellationToken ct)
     {
-        var (root, _) = await AccessAsync(projectId, actor, role, ct);
+        var root = await AccessAsync(projectId, actor, role, ct);
         var available = (await issues.ListAsync(root.Id, ct)).ToDictionary(item => item.Id);
         var selected = ids.Distinct().ToArray();
         foreach (var id in selected)
@@ -158,14 +186,14 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
             if (!available.TryGetValue(id, out var issue) || issue.Status == "已作废")
                 throw new PdmRuleException("所选OPL问题不存在、已作废或不属于当前主项目，请刷新后重新选择。");
             if (issue.RelatedProjectId is Guid childId && (projectId != root.Id && childId != projectId
-                || !await projects.HasProjectContentReadAccessAsync(childId, actor, role, ct)))
+                || !await CanViewAsync(childId, actor, ct)))
                 throw new PdmRuleException("所选OPL问题不在当前发布项目的可访问范围内。");
         }
         return selected;
     }
     public async Task<OplIssue> SaveAsync(Guid projectId, Guid? id, OplInput input, IReadOnlyList<OplUpload> uploads, string actor, UserRole role, CancellationToken ct, string source = "Manual")
     {
-        var (root, manager) = await AccessAsync(projectId, actor, role, ct);
+        var root = await AccessAsync(projectId, actor, role, ct);
         var existing = id is null ? null : (await issues.ListAsync(root.Id, ct)).SingleOrDefault(x => x.Id == id)
             ?? throw new PdmNotFoundException("开口问题不存在。");
         if (existing is not null && (projectId != root.Id && existing.RelatedProjectId != projectId
@@ -182,12 +210,12 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
             if (existing is not null && existing.RelatedProjectId != relatedId && !await CanRespondAsync(projects, relatedId, actor, ct))
                 throw new UnauthorizedAccessException("无权将该问题转到所选子项目。");
         }
-        if (existing is not null && !(manager || Same(existing.CreatedBy, actor) || Same(existing.Owner, actor))) throw new UnauthorizedAccessException("仅提交人、负责人或项目经理可以编辑此问题。");
+        await RequireOperationAsync(input.RelatedProjectId ?? root.Id, actor, existing is null ? "project.opl.create" : "project.opl.edit", ct);
         if (string.IsNullOrWhiteSpace(input.Description) || input.Description.Length > 2000) throw new PdmRuleException("请填写问题描述，最多2000个字符。");
         if (!Priorities.Contains(input.Priority) || !States.Contains(input.Status)) throw new PdmRuleException("请选择有效的优先级和实施状态。");
+        if (input.Status == "已完成" && existing?.Status == "已作废") throw new PdmRuleException("已作废的问题不能标记为完成，请先重开问题。");
         if (input.Solution is null || input.Solution.Length > 4000) throw new PdmRuleException("解决措施最多4000个字符。");
         if (input.Status == "待确认" && string.IsNullOrWhiteSpace(input.Solution)) throw new PdmRuleException("请先填写解决措施，再提交确认。");
-        if (input.Status == "已完成" && existing?.Status != "已完成" && !(manager || existing is not null && Same(existing.CreatedBy, actor))) throw new UnauthorizedAccessException("请由提交人或项目经理确认完成。");
         var owner = input.Owner?.Trim() ?? "";
         if (owner.Length > 0)
         {
@@ -207,6 +235,20 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
             (existing?.Attachments.Where(x => retained.Contains(x.Id)) ?? []).Concat(added).ToArray(), existing?.Source ?? source, existing?.ExternalId,
             input.RelatedProjectId, existing?.AttachmentProjectId, existing?.CreatedByDisplayName,
             input.HasExpectedCompletionDate ? input.ExpectedCompletionDate : existing?.ExpectedCompletionDate);
+        if (existing is not null && existing.RowVersion != input.ExpectedRowVersion)
+            throw new PdmConflictException("问题已被其他人修改，请刷新后重试。");
+        // 同次保存更改了待验证内容时，用即将产生的版本进行门禁校验，不能沿用旧版本的验证结果。
+        var contentChanged = existing is not null && (value.Description != existing.Description || value.Priority != existing.Priority
+            || value.Owner != existing.Owner || value.DueDate != existing.DueDate || value.Solution != existing.Solution
+            || value.RelatedProjectId != existing.RelatedProjectId || value.ExpectedCompletionDate != existing.ExpectedCompletionDate
+            || !value.Attachments.SequenceEqual(existing.Attachments));
+        if (existing is not null)
+        {
+            if (qualityGate is not null) await qualityGate.RequireSaveAsync(existing, value, actor, ct);
+            else if (!Open(existing) && contentChanged) throw new PdmRuleException("质量问题保存校验服务暂不可用，请联系管理员检查服务配置后重试。");
+        }
+        await RequireTransitionAsync(value with { Status = existing?.Status ?? "待处理", CompletedAt = existing?.CompletedAt,
+            RowVersion = contentChanged ? existing!.RowVersion + 1 : value.RowVersion }, input.Status, actor, ct);
         var assignment = await AssignmentAsync(root, value, existing, ct);
         try
         {
@@ -225,7 +267,7 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
 
     public async Task RequireSpeechAccessAsync(Guid projectId, Guid? issueId, Guid? relatedProjectId, string actor, UserRole role, CancellationToken ct)
     {
-        var (root, manager) = await AccessAsync(projectId, actor, role, ct);
+        var root = await AccessAsync(projectId, actor, role, ct);
         if (projectId != root.Id && relatedProjectId != projectId)
             throw new PdmRuleException("请在所属主项目中调整关联子项目。");
         if (relatedProjectId is Guid relatedId)
@@ -235,11 +277,11 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
                 || !await projects.HasProjectContentReadAccessAsync(relatedId, actor, role, ct))
                 throw new UnauthorizedAccessException("无权在所选子项目中录入问题。");
         }
+        await RequireOperationAsync(relatedProjectId ?? root.Id, actor, issueId is null ? "project.opl.create" : "project.opl.edit", ct);
         if (issueId is null) return;
         var existing = (await issues.ListAsync(root.Id, ct)).SingleOrDefault(issue => issue.Id == issueId)
             ?? throw new PdmNotFoundException("开口问题不存在。");
         if (projectId != root.Id && existing.RelatedProjectId != projectId
-            || !(manager || Same(existing.CreatedBy, actor) || Same(existing.Owner, actor))
             || !await CanRespondAsync(projects, existing.RelatedProjectId ?? root.Id, actor, ct))
             throw new UnauthorizedAccessException("当前账号无权编辑该项目范围内的开口问题。");
         if (relatedProjectId is Guid target && relatedProjectId != existing.RelatedProjectId && !await CanRespondAsync(projects, target, actor, ct))
@@ -270,6 +312,7 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
         var attachments = uploads.Select(x => new OplAttachment(Guid.NewGuid(), Path.GetFileName(x.Name.Replace('\\', '/')), x.Content.Length, root.Id, vault)).ToArray();
         var value = new OplIssue(Guid.NewGuid(), root.Id, 0, input.Description.Trim(), input.Priority, input.Status, owner, input.DueDate, input.Solution.Trim(), actor, now, input.Status == "已完成" ? now : null, actor, now, 0, attachments,
             "DingTalk", null, input.RelatedProjectId, null, displayName);
+        await RequireTransitionAsync(value with { Status = "待处理", CompletedAt = null }, input.Status, actor, ct);
         var assignment = await AssignmentAsync(root, value, null, ct);
         try
         {
@@ -282,13 +325,16 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
     }
     public async Task<OplIssue> CompleteAsync(Guid projectId, Guid id, long expectedRowVersion, string actor, UserRole role, CancellationToken ct)
     {
-        var (root, manager) = await AccessAsync(projectId, actor, role, ct);
+        var root = await AccessAsync(projectId, actor, role, ct);
         var issue = (await issues.ListAsync(root.Id, ct)).SingleOrDefault(x => x.Id == id)
             ?? throw new PdmNotFoundException("开口问题不存在。");
-        if (!(manager || Same(issue.CreatedBy, actor))) throw new UnauthorizedAccessException("请由提交人或项目经理确认完成。");
+        if (projectId != root.Id && issue.RelatedProjectId != projectId)
+            throw new UnauthorizedAccessException("当前问题不属于此项目范围。");
+        await RequireOperationAsync(issue.RelatedProjectId ?? root.Id, actor, "project.opl.complete", ct);
         if (issue.RowVersion != expectedRowVersion) throw new PdmConflictException("问题已被其他人修改，请刷新后重试。");
         if (issue.Status == "已作废") throw new PdmRuleException("已作废的问题不能标记为完成。");
         if (issue.Status == "已完成") return issue;
+        await RequireTransitionAsync(issue, "已完成", actor, ct);
         var now = clock.GetUtcNow();
         var saved = await issues.SaveAsync(issue with { Status = "已完成", CompletedAt = now, UpdatedBy = actor, UpdatedAt = now }, expectedRowVersion, ct);
         await projects.AppendAuditAsync(new(Guid.NewGuid(), now, actor, "project.opl.complete", nameof(OplIssue), id.ToString(), $"开口问题 #{saved.Number} · 确认完成 · 版本 {saved.RowVersion}"), ct);
@@ -296,11 +342,11 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
     }
     public async Task<(OplAttachment Attachment, Stream Content)> OpenAsync(Guid projectId, Guid id, Guid attachmentId, string actor, UserRole role, CancellationToken ct)
     {
-        var (root, _) = await AccessAsync(projectId, actor, role, ct);
+        var root = await AccessAsync(projectId, actor, role, ct);
         var issue = (await issues.ListAsync(root.Id, ct)).SingleOrDefault(x => x.Id == id)
             ?? throw new PdmNotFoundException("附件不存在或已被移除。");
         if (projectId != root.Id && issue.RelatedProjectId != projectId
-            || issue.RelatedProjectId is Guid childId && !await projects.HasProjectContentReadAccessAsync(childId, actor, role, ct))
+            || !await CanViewAsync(issue.RelatedProjectId ?? root.Id, actor, ct))
             throw new UnauthorizedAccessException("无权查看该项目范围内的开口问题附件。");
         var file = issue.Attachments.SingleOrDefault(x => x.Id == attachmentId)
             ?? throw new PdmNotFoundException("附件不存在或已被移除。");

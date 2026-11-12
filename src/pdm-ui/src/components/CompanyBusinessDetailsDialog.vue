@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import { onMounted, ref } from 'vue'
 import { PdmApiError, readCompanyBusinessDetails, saveCompanyBusinessDetails } from '../api'
 import type { CompanyBusinessDetailsKind, CompanyBusinessFields } from '../companyBusinessDetails'
@@ -43,7 +44,7 @@ async function save() {
 
 <template>
   <el-dialog v-model="open" :title="title" width="min(600px, calc(100vw - 24px))" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy" @closed="emit('close', dialogId)">
-    <p class="company-detail-name">{{ company.name }}</p>
+    <p class="company-detail-name"><CompanyName :name="company.name" /></p>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
     <form v-if="draft" class="company-detail-fields" @submit.prevent="save">
       <label v-for="[key, label, length] in fields" :key="key" :class="{ 'company-detail-wide': key === 'address' || key === 'bankAccount' }">

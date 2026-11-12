@@ -101,7 +101,8 @@ public sealed partial class PdmAddin
     private async Task RequireRetainedManifestUnchangedAsync(ControlledOpenManifestDto manifest)
     {
         var files = manifest.Files.ToDictionary(file => file.DocumentId);
-        var current = await apiClient.CreateControlledOpenManifestAsync(manifest.RootDocumentId, null, false, manifest.ForEdit, lifetime.Token);
+        var current = await apiClient.CreateControlledOpenManifestAsync(manifest.RootDocumentId, null, false, manifest.ForEdit, lifetime.Token,
+            allowMissingComponents: true);
         if (current.ProjectId != manifest.ProjectId || current.RootDocumentId != manifest.RootDocumentId
             || current.RootVersionId != manifest.RootVersionId || !PathsEqual(current.RootRelativePath, manifest.RootRelativePath)
             || current.Files.Count != manifest.Files.Count || current.Files.Any(file => !files.TryGetValue(file.DocumentId, out var prior)

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DepartmentName from './DepartmentName.vue'
 import { computed, ref, watch } from 'vue'
 import { RotateCw as RefreshCw, Save } from '@lucide/vue'
 import { getProjectBudget, saveProjectBudget, getBudgetAssessments } from '../api'
@@ -11,8 +12,10 @@ import ExpenseRequests from './ExpenseRequests.vue'
 import ProjectBonusManager from './ProjectBonusManager.vue'
 import { ElMessage } from '../statusMessage'
 
-const props = defineProps<{ project: { id: string }; token?: string }>()
+const props = defineProps<{ project: { id: string; effectiveProjectPermissions?: string[] }; bonusPermissions?: string[]; token?: string }>()
 const subTab = ref<'summary' | 'assessment' | 'expenses' | 'bonus'>('summary')
+const canViewExpenses = computed(() => props.project.effectiveProjectPermissions?.includes('project.expense.view') === true)
+const canViewBonus = computed(() => (props.bonusPermissions ?? props.project.effectiveProjectPermissions)?.includes('project.bonus.view') === true)
 const bonusDirty = ref(false)
 const expenseDirty = ref(false)
 const assessmentDirty = ref(false)
@@ -120,11 +123,20 @@ async function save() {
 }
 // 同一项目的后台更新和登录续期不能重置页签或未保存内容。
 watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value = 'summary'; bonusDirty.value = false; assessmentDirty.value = false; expenseDirty.value = false; noteCategory.value = null; load() }, { immediate: true })
+watch([canViewExpenses, canViewBonus], ([expenses, bonus]) => {
+  if (subTab.value === 'expenses' && !expenses) { expenseDirty.value = false; subTab.value = 'summary' }
+  if (subTab.value === 'bonus' && !bonus) { bonusDirty.value = false; subTab.value = 'summary' }
+})
 </script>
 
 <template>
   <section class="pdm-budget" v-loading="loading">
-    <nav class="pdm-budget__tabs pdm-project-subtabs pdm-segmented" aria-label="预算页面" role="tablist"><button role="tab" :aria-selected="subTab === 'summary'" :class="{ 'is-active': subTab === 'summary' }" :disabled="assessmentDirty || expenseDirty || bonusDirty" @click="subTab = 'summary'">预算汇总</button><button role="tab" :aria-selected="subTab === 'assessment'" :class="{ 'is-active': subTab === 'assessment' }" :disabled="changed || expenseDirty || bonusDirty" @click="subTab = 'assessment'">预算评估</button><button role="tab" :aria-selected="subTab === 'expenses'" :class="{ 'is-active': subTab === 'expenses' }" :disabled="changed || assessmentDirty || bonusDirty" @click="subTab = 'expenses'">费用申请</button><button role="tab" :aria-selected="subTab === 'bonus'" :class="{ 'is-active': subTab === 'bonus' }" :disabled="changed || assessmentDirty || expenseDirty" @click="subTab = 'bonus'">项目奖金</button></nav>
+    <nav class="pdm-budget__tabs pdm-project-subtabs pdm-segmented" aria-label="预算页面" role="tablist">
+      <button role="tab" :aria-selected="subTab === 'summary'" :class="{ 'is-active': subTab === 'summary' }" :disabled="assessmentDirty || expenseDirty || bonusDirty" @click="subTab = 'summary'">预算汇总</button>
+      <button role="tab" :aria-selected="subTab === 'assessment'" :class="{ 'is-active': subTab === 'assessment' }" :disabled="changed || expenseDirty || bonusDirty" @click="subTab = 'assessment'">预算评估</button>
+      <button v-if="canViewExpenses" role="tab" :aria-selected="subTab === 'expenses'" :class="{ 'is-active': subTab === 'expenses' }" :disabled="changed || assessmentDirty || bonusDirty" @click="subTab = 'expenses'">费用申请</button>
+      <button v-if="canViewBonus" role="tab" :aria-selected="subTab === 'bonus'" :class="{ 'is-active': subTab === 'bonus' }" :disabled="changed || assessmentDirty || expenseDirty" @click="subTab = 'bonus'">项目奖金</button>
+    </nav>
     <ProjectBonusManager v-if="subTab === 'bonus'" :key="project.id" :project-id="project.id" :token="token" @dirty="bonusDirty = $event" />
     <ExpenseRequests v-if="subTab === 'expenses'" :key="project.id" :project-id="project.id" :token="token" @dirty="expenseDirty = $event" />
     <BudgetNotesDialog v-if="budget" :model-value="noteCategory !== null" :project-id="project.id" :category="noteCategory ?? ''" :title="`${noteCategory ? name(noteCategory) : ''}备注`" :notes="budget.notes ?? []" :row-version="budget.rowVersion" :token="token" :busy="saving" @update:model-value="value => { if (!value) noteCategory = null }" @added="notesAdded" @saving="noteSaving = $event" />
@@ -153,7 +165,7 @@ watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value
             <tbody>
               <tr v-for="row in group.rows" :key="row.input.category">
                 <th>{{ name(row.input.category) }}</th>
-                <td v-if="budgetEditable"><el-select v-model="row.input.departmentId" clearable placeholder="未归属，不向部门开放" :aria-label="`${name(row.input.category)}归属部门`"><el-option v-for="department in budget.departments ?? []" :key="department.id" :value="department.id" :label="department.name" /></el-select></td>
+                <td v-if="budgetEditable"><el-select v-model="row.input.departmentId" clearable placeholder="未归属，不向部门开放" :aria-label="`${name(row.input.category)}归属部门`"><template #label="{ label }"><DepartmentName :name="label" /></template><el-option v-for="department in budget.departments ?? []" :key="department.id" :value="department.id" :label="department.name"><DepartmentName :name="department.name" /></el-option></el-select></td>
                 <td class="budget-plan"><span v-if="budget.canViewBudget === false">无权查看</span><el-input-number v-else v-model="row.input.budgetAmount" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="!budgetEditable" aria-label="预算金额" /></td>
                 <td>{{ ['RiskReserve', 'Logistics', 'Other'].includes(row.input.category) ? '—' : money(assessments.amounts[row.input.category] ?? null) }}</td>
                 <td class="budget-actual"><span v-if="budget.canViewActual === false">无权查看</span><el-input-number v-else v-model="row.input.actualAmount" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="!actualEditable" aria-label="实际金额" /></td>

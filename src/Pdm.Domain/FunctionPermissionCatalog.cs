@@ -9,14 +9,47 @@ public static class FunctionPermissionCatalog
 {
     public const string SchemaMarker = "system.permission-profile.v2";
     public static bool RequiresExplicitGrant(string code) => code is PermissionCodes.MaterialRelationActivity
-        or PermissionCodes.MaterialRelationDelete or PermissionCodes.EngineeringKitDelete
+        or PermissionCodes.MaterialRelationDelete or PermissionCodes.EngineeringKitDelete or PermissionCodes.ProjectBudgetAssessmentEdit
         || ProjectFileFormPermissions.RequiresExplicitGrant(code)
         || ProductionMobilePermissions.RequiresExplicitGrant(code)
-        || code.StartsWith("spare-parts.", StringComparison.Ordinal);
+        || QualityReviewPermissions.RequiresExplicitGrant(code)
+        || code.StartsWith("spare-parts.", StringComparison.Ordinal)
+        || code.StartsWith("purchase-analysis.", StringComparison.Ordinal)
+        || code.StartsWith("ai.", StringComparison.Ordinal)
+        || code.StartsWith("project.expense.", StringComparison.Ordinal)
+        || code.StartsWith("project.bonus.", StringComparison.Ordinal)
+        || code.StartsWith("stock.", StringComparison.Ordinal) && code != AuthorizationActions.StockSynchronize;
     public static IReadOnlyList<PermissionDefinition> Build(IReadOnlyList<PermissionDefinition> existing)
     {
         var result = existing.Select(Describe).ToList();
         result.AddRange(AuthorizationActions.Definitions);
+        result.AddRange([
+            new(PermissionCodes.ProjectExpenseView, "查看费用申请", "费用申请", "按申请人、审批或抄送关系及财务数据范围显示。", Sensitive: true)
+                { Scope = "project", Action = "view", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("budget")] },
+            new(PermissionCodes.ProjectExpenseSubmit, "发起费用申请", "费用申请", "预览、保存、提交及撤回本人申请。", Sensitive: true)
+                { Scope = "project", Action = "edit", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectExpenseView, ProjectCenterPermissions.Write] },
+            new(PermissionCodes.ProjectExpenseApprove, "审批费用申请", "费用申请", "处理已分配给本人的当前审批节点。", Sensitive: true)
+                { Scope = "project", Action = "edit", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectExpenseView, PermissionCodes.ApprovalDecide, ProjectCenterPermissions.Write] },
+            new(PermissionCodes.ProjectBonusView, "查看项目奖金", "项目奖金", "查看本人分配及所参与的评分、审批和发放事项。", Sensitive: true)
+                { Scope = "project", Action = "view", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("budget")] },
+            new(PermissionCodes.ProjectBonusManage, "维护项目奖金分配", "项目奖金", "查看完整分配、发起、撤回及提交项目奖金。", Sensitive: true)
+                { Scope = "project", Action = "edit", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectBonusView, ProjectCenterPermissions.Write] },
+            new(PermissionCodes.ProjectBonusHistoryView, "查看奖金历史分配", "项目奖金", Sensitive: true)
+                { Scope = "project", Action = "view", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectBonusView] },
+            new(PermissionCodes.ProjectBonusScore, "填写项目奖金评分", "项目奖金", "处理已分配给本人的部门评分任务。", Sensitive: true)
+                { Scope = "project", Action = "edit", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectBonusView, ProjectCenterPermissions.Write] },
+            new(PermissionCodes.ProjectBonusApprove, "审批项目奖金", "项目奖金", "处理已分配给本人的当前审批节点。", Sensitive: true)
+                { Scope = "project", Action = "edit", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectBonusView, PermissionCodes.ApprovalDecide, ProjectCenterPermissions.Write] },
+            new(PermissionCodes.ProjectBonusPay, "登记项目奖金发放", "项目奖金", "由当前发放节点的有效人员登记批准金额。", Sensitive: true)
+                { Scope = "project", Action = "edit", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectBonusView, ProjectCenterPermissions.Write] },
+            new(PermissionCodes.StockView, "查看常备物料", "常备物料") { Action = "view", Dependencies = [PermissionCodes.StandardLibraryView] },
+            new(PermissionCodes.StockManage, "维护常备物料", "常备物料", "收录、取消常备及维护U9C库存规划。", Sensitive: true)
+                { Action = "edit", Dependencies = [PermissionCodes.StockView, PermissionCodes.StandardLibraryManage] },
+            new(PermissionCodes.StockSettingsManage, "维护常备物料设置", "常备物料", "配置自动回读和低库存提醒。", Sensitive: true)
+                { Action = "edit", Dependencies = [PermissionCodes.StockView] },
+            new(PermissionCodes.StockLowInventoryNotify, "接收低库存提醒", "常备物料", Sensitive: true)
+                { Action = "notify", Dependencies = [PermissionCodes.StockView, AuthorizationActions.BusinessNotifications] }
+        ]);
         foreach (var tab in ProjectCenterPermissions.Tabs)
             result.Add(new(ProjectCenterPermissions.Tab(tab.Key), $"查看{tab.Name}页签", "项目中心页签", "单独控制项目中心页签入口及对应内容的查看。")
             { Scope = "project", Action = "view", ProjectAuthorization = "role", Dependencies = tab.Key is "overview" or "records" ? [PermissionCodes.ProjectView] : [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView] });
@@ -86,7 +119,10 @@ public static class FunctionPermissionCatalog
         }
         result.AddRange(ProjectFileFormPermissions.Definitions());
         result.AddRange(SparePartPermissions.Definitions());
+        result.AddRange(PurchaseAnalysisPermissions.Definitions());
+        result.AddRange(AiPermissions.Definitions());
         result.AddRange(ProductionMobilePermissions.Definitions());
+        result.AddRange(QualityReviewPermissions.Definitions());
         result.Add(new(SchemaMarker, "权限配置格式", "系统内部") { Hidden = true });
         var bundles = result.Where(item => item.LegacyPermission is not null && item.LegacyPermission != PermissionCodes.ProjectContentView).Select(item => item.LegacyPermission!).ToHashSet();
         var keys = result.Select(item => item.Code).ToHashSet(StringComparer.Ordinal);
@@ -101,6 +137,12 @@ public static class FunctionPermissionCatalog
         if (project && item.Code != PermissionCodes.ProjectView) dependencies.Add(PermissionCodes.ProjectView);
         if (project && item.Code != PermissionCodes.ProjectContentView && (item.Module is "项目内容" or "质量资料" or "图纸审核" or "审批发布" || item.Code == PermissionCodes.ProjectBudgetView)) dependencies.Add(PermissionCodes.ProjectContentView);
         if (item.Code.StartsWith("project.budget.") && item.Code != PermissionCodes.ProjectBudgetView) dependencies.Add(PermissionCodes.ProjectBudgetView);
+        if (item.Code is PermissionCodes.ProjectBudgetEdit or PermissionCodes.ProjectBudgetAssessmentEdit)
+            dependencies.Add(AuthorizationActions.FinancialBudgetMaintain);
+        if (item.Code == PermissionCodes.ProjectBudgetActualEdit)
+            dependencies.Add(AuthorizationActions.FinancialActualMaintain);
+        if (item.Code == PermissionCodes.ProjectBudgetAssessmentEdit)
+            dependencies.AddRange([AuthorizationActions.FinancialBudgetRead, ProjectCenterPermissions.Tab("budget"), ProjectCenterPermissions.Write]);
         if (item.Code == PermissionCodes.ProjectBudgetSettlementEdit) dependencies.Add(PermissionCodes.ProjectBudgetSettlementView);
         if (item.Code.StartsWith("program-template.") && item.Code != PermissionCodes.ProgramTemplateView) dependencies.Add(PermissionCodes.ProgramTemplateView);
         if (item.Code == PermissionCodes.StandardLibraryManage) dependencies.Add(PermissionCodes.StandardLibraryView);

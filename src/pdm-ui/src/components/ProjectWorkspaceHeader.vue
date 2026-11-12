@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import DepartmentSelectField from './DepartmentSelectField.vue'
+import DepartmentName from './DepartmentName.vue'
+import CompanyName from './CompanyName.vue'
+import CompanyNameField from './CompanyNameField.vue'
 import PersonName from './PersonName.vue'
 import SearchField from './SearchField.vue'
 import UserSelect from './UserSelect'
@@ -18,7 +22,7 @@ import ProjectSettingsDrawer from './ProjectSettingsDrawer.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const projectAccess = useProjectCenterAccess()
 
-export type ProjectTab = 'overview' | 'information' | 'budget' | 'project-plan' | 'opl' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
+export type ProjectTab = 'overview' | 'information' | 'budget' | 'project-plan' | 'opl' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records' | 'summary'
 
 const props = withDefaults(defineProps<{
   active?: boolean
@@ -78,6 +82,7 @@ const tabs = [
   { key: 'budget', label: '预算' },
   { key: 'validation-plan', label: '质量' },
   { key: 'opl', label: 'OPL' },
+  { key: 'summary', label: '总结' },
   { key: 'documents', label: '图档' },
   { key: 'bom', label: 'BOM' },
   { key: 'release', label: '发布' },
@@ -135,7 +140,7 @@ const executionEngineers = computed(() => {
   })
 })
 const executionEngineerNames = computed(() => executionEngineers.value.map(item => displayUserName(item)).join('、') || '—')
-const visibleTabs = computed(() => tabs.filter(tab => projectAccess.canViewTab(tab.key) && (props.project.canReadContent || tab.key === 'overview' || tab.key === 'records')))
+const visibleTabs = computed(() => tabs.filter(tab => (tab.key === 'summary' ? props.project.effectiveProjectPermissions?.includes('project.summary.view') : projectAccess.canViewTab(tab.key)) && (props.project.canReadContent || tab.key === 'overview' || tab.key === 'records')))
 const switchConfirmationPending = ref(false)
 const projectSettingsOpen = ref(false)
 const projectBrowserOpen = ref(false)
@@ -290,7 +295,7 @@ function drawingDocumentCount(project: ProjectSummary) {
           <div><dt>状态</dt><dd><span class="pdm-status" :class="statusTone(documentStatus(sidebarProject, true))">{{ documentStatus(sidebarProject, true) }}</span></dd></div>
           <div><dt>型号</dt><dd :title="sidebarProject.deviceModel">{{ sidebarProject.deviceModel || '—' }}</dd></div>
           <div><dt>序列号</dt><dd :title="sidebarProject.serialNumbers.join('、')">{{ sidebarProject.serialNumbers.join('、') || '—' }}</dd></div>
-          <div><dt>事业部</dt><dd :title="rootProject.executionUnitName">{{ rootProject.executionUnitName || '待分配' }}</dd></div>
+          <div><dt>事业部</dt><dd :title="rootProject.executionUnitName"><DepartmentName :name="rootProject.executionUnitName" fallback="待分配" /></dd></div>
           <div><dt>项目经理</dt><dd :title="displayUserName(rootProject.primaryProjectManager, '—')"><PersonName :name="displayUserName(rootProject.primaryProjectManager, '—')" /></dd></div>
           <div><dt>主设计</dt><dd :title="projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '—'"><PersonName :name="projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '—'" /></dd></div>
           <div><dt>设计人员</dt><dd :title="executionEngineerNames"><PersonName :name="executionEngineerNames" /></dd></div>
@@ -357,8 +362,8 @@ function drawingDocumentCount(project: ProjectSummary) {
           <ElSelect v-model="projectTypeFilter" class="pdm-project-prefix-filter" aria-label="项目分类筛选" multiple clearable collapse-tags collapse-tags-tooltip placeholder="全部项目分类">
             <ElOption v-for="type in projectTypeOptions" :key="type.code" :value="type.code" :label="`${type.name} ${type.code}`" />
           </ElSelect>
-          <select v-model="projectCustomerFilter" aria-label="客户筛选"><option value="">全部客户</option><option v-for="customer in projectCustomerOptions" :key="customer.id" :value="customer.code">{{ customer.name }}</option></select>
-          <select v-model="projectExecutionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in projectExecutionUnitOptions" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select>
+          <CompanyNameField :name="selectedCustomer?.name"><select v-model="projectCustomerFilter" aria-label="客户筛选"><option value="">全部客户</option><option v-for="customer in projectCustomerOptions" :key="customer.id" :value="customer.code">{{ customer.name }}</option></select></CompanyNameField>
+          <DepartmentSelectField :name="selectedExecutionUnit?.name"><select v-model="projectExecutionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in projectExecutionUnitOptions" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select></DepartmentSelectField>
           <UserSelect v-model="projectPersonFilter" aria-label="人员筛选"><option value="">全部人员</option><option v-for="person in projectPersonOptions" :key="person" :value="person">{{ displayUserName(person) }}</option></UserSelect>
         </div>
         <div class="pdm-project-browser-list" role="listbox" aria-label="项目搜索结果">
@@ -375,7 +380,7 @@ function drawingDocumentCount(project: ProjectSummary) {
           >
             <strong :title="item.code">{{ item.code }}</strong>
             <span :title="item.name">{{ item.name }}</span>
-            <span :title="item.customerName">{{ item.customerName || '—' }}</span>
+            <CompanyName :name="item.customerName || '—'" />
             <span :title="item.deviceModel">{{ item.deviceModel || '—' }}</span>
             <span :title="item.serialNumbers.join('、')">{{ item.serialNumbers.join('、') || '—' }}</span>
             <em>{{ item.id === rootProject.id ? '当前项目' : '选择' }}</em>

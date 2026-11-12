@@ -42,13 +42,8 @@ public sealed class BudgetAssessmentService(IPdmRepository repository, IProjectB
             var root = item.ParentProjectId is null ? item : await repository.FindProjectAsync(item.RootProjectId ?? item.ParentProjectId.Value, ct);
             var leads = item.DesignLeads.Count > 0 ? item.DesignLeads : !string.IsNullOrWhiteSpace(item.DesignLead) ? new[] { item.DesignLead! }
                 : root?.DesignLeads.Count > 0 ? root.DesignLeads : new[] { root?.DesignLead ?? "" };
-            var canEdit = leads.Contains(actor, StringComparer.OrdinalIgnoreCase)
-                || string.Equals(item.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-                || item.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
-                || string.Equals(root?.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-                || root?.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase) == true;
             sheets.Add(new(item.Id, item.Code, item.Name, string.Join("、", leads.Where(value => !string.IsNullOrEmpty(value))),
-                canEdit && itemAccess.CanMaintainBudget, stored?.RowVersion ?? 0, groups, Sum(groups.Select(GroupTotal)), stored?.AssessmentUpdatedBy, stored?.AssessmentUpdatedAt, itemAccess.Budget && itemAccess.Actual ? (stored?.Notes ?? []).Where(note => note.Category == "Assessment").ToArray() : []));
+                itemAccess.CanMaintainAssessment, stored?.RowVersion ?? 0, groups, Sum(groups.Select(GroupTotal)), stored?.AssessmentUpdatedBy, stored?.AssessmentUpdatedAt, itemAccess.Budget && itemAccess.Actual ? (stored?.Notes ?? []).Where(note => note.Category == "Assessment").ToArray() : []));
         }
         var amounts = new Dictionary<string, decimal?>();
         foreach (var category in new[] { "Standard", "Nonstandard", "Equipment" }.Concat(ProjectBudgetCategories.Labor))
@@ -62,7 +57,7 @@ public sealed class BudgetAssessmentService(IPdmRepository repository, IProjectB
     {
         var directory = await GetAsync(projectId, actor, role, ct);
         if (directory.Sheets.FirstOrDefault(sheet => sheet.ProjectId == projectId)?.CanEdit != true)
-            throw new UnauthorizedAccessException("当前账号没有本项目预算评估维护权限；请由具备预算权限的项目负责人维护。");
+            throw new UnauthorizedAccessException("当前账号没有本项目的预算评估维护权限，请在权限中心核对授权范围。");
         if (command.Groups is null || command.Groups.Count > 100 || command.Groups.Any(group => group.Items is null) || command.Groups.Select(group => group.Id).Distinct().Count() != command.Groups.Count)
             throw new PdmRuleException("评估分组无效或重复，最多100组。");
         var current = await budgets.FindAsync(projectId, ct) ?? new(projectId, ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category)).ToArray(), ManualActualAmounts: true);

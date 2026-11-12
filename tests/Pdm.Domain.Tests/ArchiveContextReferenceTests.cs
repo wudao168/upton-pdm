@@ -177,7 +177,7 @@ public sealed class ArchiveContextReferenceTests
     {
         internal static async Task<Fixture> Create()
         {
-            var repository = new InMemoryPdmRepository(TimeProvider.System);
+            var repository = BusinessTestRepository.Create(TimeProvider.System);
             var project = await repository.CreateProjectAsync(new("CTX-" + Guid.NewGuid().ToString("N"), "上下文回归", "admin", "vault", "release"), "admin", default);
             var session = Guid.NewGuid();
             async Task<PdmDocument> Register(string name, DocumentKind kind)

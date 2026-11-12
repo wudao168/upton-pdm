@@ -30,7 +30,7 @@ public sealed class ProjectApplicationApiTests
         Authenticate(client);
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "兼任事业部负责人的管理员", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "admin", "兼任事业部负责人的管理员", "unused", UserRole.Administrator, true, CompanyId: company), default);
         var division = await repository.SaveOrganizationUnitAsync(new(null, company, null, "QA-BUDGET", "测试事业部", OrganizationUnitKind.BusinessDivision, true, 0), default);
         await repository.SetOrganizationUnitManagersAsync(division.Id, "admin", [], default);
         var view = (await client.GetFromJsonAsync<ProjectApplicationView>(path))!;
@@ -110,7 +110,7 @@ public sealed class ProjectApplicationApiTests
         using var client = factory.CreateClient();
         Authenticate(client);
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
         const string path = "/api/project-applications";
         var view = (await client.GetFromJsonAsync<ProjectApplicationView>(path))!;
         var person = view.People.First().Username;
@@ -146,9 +146,9 @@ public sealed class ProjectApplicationApiTests
         using var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "计划管理", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "admin", "计划管理", "unused", UserRole.Administrator, true, CompanyId: company), default);
         foreach (var name in new[] { "contract-owner", "contract-other" })
-            await repository.CreateUserAsync(new(Guid.NewGuid(), name, "销售助理", "unused", UserRole.ProductionViewer, true, RoleCode: "contract-test", CompanyId: company), default);
+            await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), name, "销售助理", "unused", UserRole.ProductionViewer, true, RoleCode: "contract-test", CompanyId: company), default);
         var settings = await repository.GetAuthorizationSettingsAsync(default);
         var template = new AuthorizationTemplate("contract-test", "立项补合同测试", "", [new(PermissionCodes.ProjectApplicationSubmit, ["company"])]) { RoleCode = "contract-test" };
         settings = await repository.SaveAuthorizationSettingsAsync(settings with { Templates = settings.Templates.Append(template).ToArray() }, settings.Revision, default);

@@ -41,7 +41,7 @@ internal static partial class Program
      Set(node,"StoredVersionStateKnown",true);Set(node,"HasStoredVersion",true);Set(node,"NativeFileScopeVerified",true);Set(node,"LatestStructureIndexPending",false);
      var snapshot=LinkedSnapshot(node);Set(snapshot,"Role",memoryMode?0:1);var version=LinkedVersion(node,snapshot);Set(version,"DrawingVersion","V1");Set(version,"StorageRelativePath","qa/"+Get(node,"FileName"));Set(version,"PropertySnapshot",new Dictionary<string,string>());versions[(Guid)Get(node,"DocumentId")]=version;
      Set(node,"LatestStoredSha256",Get(version,"Sha256"));Set(node,"LatestVersionSha256",Get(version,"Sha256"));Set(node,"OpenedVersionId",Get(version,"Id"));
-     if(memoryMode)Set(version,"PropertySnapshot",new Dictionary<string,string>{{"SourceFileSha256",(string)Get(version,"Sha256")}});
+     if(memoryMode||mode=="confirm")Set(version,"PropertySnapshot",new Dictionary<string,string>{{"SourceFileSha256",(string)Get(version,"Sha256")}});
      identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{Get(node,"FullPath"),Get(node,"DocumentId"),project,Get(version,"Id"),"A",Get(version,"Sha256"),Get(version,"FileLength")});
      File.AppendAllText((string)Get(node,"FullPath")," changed saved source");
     }
@@ -245,6 +245,13 @@ internal static partial class Program
    {
     if(!Confirmed)throw new Exception("未确认即提交");Commits++;var body=await request.Content.ReadAsStringAsync();var missingExtension=mode=="missing-references-cache"?".stp.SLDASM":".SLDPRT";WarningSnapshotCommitted=Enumerable.Range(0,3).All(i=>body.Contains("MISSING-"+i+missingExtension));var payload=json.Deserialize<Dictionary<string,object>>(body);
     var submitted=((IEnumerable)payload["files"]).Cast<Dictionary<string,object>>().ToDictionary(row=>Guid.Parse((string)row["documentId"]),row=>(Dictionary<string,object>)row["request"]);
+    if(mode=="confirm")foreach(var item in submitted)
+    {
+     var properties=(Dictionary<string,object>)item.Value["properties"];
+     if((string)properties["SourceFileSha256"]!=(string)item.Value["sha256"]
+      ||(string)properties["SourceFileSha256"]==(string)Get(versions[item.Key],"Sha256"))
+      throw new Exception("变更的3D文件提交时，旧版本属性覆盖了本次源文件哈希");
+    }
     if(mode.StartsWith("memory-"))foreach(var row in submitted.Values){var props=(Dictionary<string,object>)row["properties"];if((string)props["SourceFileSha256"]!=(string)row["sha256"])throw new Exception("旧源文件被误标为已提交的当前内容");if((string)props["全局/物料名称"]!="当前内存属性"||(string)props["UPLM.CustomPropertiesRead"]!="1")throw new Exception("未保存的内存属性未随当前副本完整提交");}
     value=new{batchId=payload["batchId"],results=nodes.Select(n=>{var requestData=submitted[(Guid)Get(n,"DocumentId")];return new{document=Document(n,true),version=new{id=Guid.NewGuid(),drawingVersion="V2",revision=new{display="W2"},sha256=requestData["sha256"],fileLength=requestData["fileLength"],storageRelativePath=requestData["storageRelativePath"],propertySnapshot=requestData["properties"]},versionCreated=true};}).ToArray()};
     if(mode=="changed-after-commit")File.AppendAllText((string)Get(nodes[0],"FullPath")," later-after-commit");

@@ -17,7 +17,7 @@ export function isFoldButton(button: HTMLButtonElement) {
 export const buttonNavigationSelector = 'nav, .pdm-sidebar, .pdm-tabs, [role="tablist"], .el-tree, [role="tree"], .el-pagination, .el-picker-panel, .el-dropdown-menu, .pdm-tree-context-menu'
 export const buttonContentSelector = [
   '.bonus-phase', '.bonus-role-option',
-  '.report-page .report-card', '.report-page .report-heat-cell', '.report-segment button',
+  '.pdm-stat-card', '.report-page .report-heat-cell', '.report-segment button',
   '.pdm-search-field__action > button', '.pdm-search-submit',
   '.pdm-command-results button', '.opl-board-card__open', '.opl-view-switch button',
   '[role="tab"]', '[role="treeitem"]', '[role="option"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]',

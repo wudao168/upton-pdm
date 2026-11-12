@@ -6,7 +6,6 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
     IProjectBudgetRepository budgets, TimeProvider clock)
 {
     private static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
-    private static bool Manager(Project project, string actor) => Same(project.PrimaryProjectManager, actor) || project.CollaborativeProjectManagers.Any(u => Same(u, actor));
     private async Task<Project> ProjectAsync(Guid id, string actor, UserRole role, CancellationToken ct)
     {
         if ((await repository.FindUserAsync(actor, ct))?.IsActive != true) throw new UnauthorizedAccessException("账号已停用，请重新登录。");
@@ -17,8 +16,12 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
             project = await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct) ?? throw new PdmNotFoundException("主项目不存在。");
             if (!await repository.HasProjectContentReadAccessAsync(project.Id, actor, role, ct)) throw new UnauthorizedAccessException("项目奖金统一在主项目申请，请联系项目经理。");
         }
+        if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusView, ct))
+            throw new UnauthorizedAccessException("当前账号没有主项目的奖金查看权限。");
         return project;
     }
+    private Task<bool> AllowsAsync(Project project, string actor, string permission, CancellationToken ct) =>
+        AuthorizationPolicy.CanAsync(repository, project.Id, actor, permission, ct);
     private Task<bool> CanConfigure(string actor, UserRole role, CancellationToken ct) => repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, ct);
     private async Task<Guid> CompanyAsync(string actor, CancellationToken ct) => TenantContext.CompanyId
         ?? (await repository.FindUserAsync(actor, ct))?.CompanyId ?? throw new PdmRuleException("请先选择公司。");
@@ -59,18 +62,21 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
     }
     private static bool PaymentMember(BonusApplication app, string actor) => app.Template?.Departments
         .FirstOrDefault(d => d.Key == app.Template.PaymentDepartmentKey)?.Reviewers?.Any(u => Same(u, actor)) == true;
-    private static bool Full(BonusApplication app, Project project, string actor) => Manager(project, actor)
-        || app.Steps.Any(s => s.Participants.Members.Any(u => Same(u, actor))) || PaymentMember(app, actor);
+    private static bool Full(BonusApplication app, string actor) =>
+        app.Steps.Any(s => s.Participants.Members.Any(u => Same(u, actor))) || PaymentMember(app, actor);
     public async Task<ProjectBonusView> GetAsync(Guid id, string actor, UserRole role, CancellationToken ct)
     {
         var project = await ProjectAsync(id, actor, role, ct);
         var book = await store.FindAsync(project.Id, ct) ?? new(project.Id, 0, null, []);
-        var manager = Manager(project, actor);
-        var canApprove = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, ct);
+        var canManage = await AllowsAsync(project, actor, PermissionCodes.ProjectBonusManage, ct);
+        var canApprove = await AllowsAsync(project, actor, PermissionCodes.ProjectBonusApprove, ct);
+        var canScore = await AllowsAsync(project, actor, PermissionCodes.ProjectBonusScore, ct);
+        var canPay = await AllowsAsync(project, actor, PermissionCodes.ProjectBonusPay, ct);
+        var canViewHistory = await AllowsAsync(project, actor, PermissionCodes.ProjectBonusHistoryView, ct);
         var applications = new List<BonusApplicationView>();
         foreach (var app in book.Applications)
         {
-            var full = Full(app, project, actor);
+            var full = canManage || Full(app, actor);
             var tasks = app.ScoringTasks.Where(t => t.Members.Any(u => Same(u, actor))).ToArray();
             if (!full && tasks.Length == 0 && !app.People.Any(p => Same(p.Username, actor))) continue;
             var visible = app;
@@ -85,22 +91,23 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
                     Steps = [], Audit = [], Payment = null, ProjectScore = null,
                     Template = app.Template is null ? null : app.Template with { Departments = app.Template.Departments.Select(d => d with { Reviewers = [] }).ToArray(), ApprovalNodes = [] } };
             }
-            applications.Add(new(visible, manager && app.Status is "Draft" or "Rejected" or "Withdrawn",
-                manager && app.Status == "Scored", canApprove && app.Status == "Pending" && app.Steps.FirstOrDefault(s => s.Decision is null)?.Participants.CanSign(actor) == true,
-                app.Status == "Approved" && PaymentMember(app, actor) && app.Payment is null, app.Status == "Scoring" ? tasks : []));
+            applications.Add(new(visible, canManage && app.Status is "Draft" or "Rejected" or "Withdrawn",
+                canManage && app.Status == "Scored", canApprove && app.Status == "Pending" && app.Steps.FirstOrDefault(s => s.Decision is null)?.Participants.CanSign(actor) == true,
+                canPay && app.Status == "Approved" && PaymentMember(app, actor) && app.Payment is null, canScore && app.Status == "Scoring" ? tasks : []));
         }
-        var showPool = manager || book.Applications.Any(a => Full(a, project, actor));
-        var settings = manager ? await store.GetSettingsAsync(project.OrganizationId ?? await CompanyAsync(actor, ct), ct) ?? ProjectBonusDefaults.Create() : null;
-        var users = manager ? (await repository.ListUsersAsync(ct)).Where(u => u.IsActive && (u.CompanyId is null || u.CompanyId == project.OrganizationId))
+        var showPool = canManage || book.Applications.Any(a => Full(a, actor));
+        var settings = canManage ? await store.GetSettingsAsync(project.OrganizationId ?? await CompanyAsync(actor, ct), ct) ?? ProjectBonusDefaults.Create() : null;
+        var users = canManage ? (await repository.ListUsersAsync(ct)).Where(u => u.IsActive && (u.CompanyId is null || u.CompanyId == project.OrganizationId))
             .Select(u => new BonusUserOption(u.Username, u.DisplayName)).ToArray() : [];
         return new(project.Id, project.Code, project.Name, book.RowVersion, showPool ? book.FrozenPool ?? await Pool(project, ct) : null,
-            book.FrozenPool.HasValue, manager, actor, applications, settings, users);
+            book.FrozenPool.HasValue, canManage, actor, applications, settings, users, canViewHistory);
     }
     public async Task<ProjectBonusView> SaveAsync(Guid id, string phase, SaveBonusDraft input, string actor, UserRole role, CancellationToken ct)
     {
         ProjectBonusRules.Phase(phase);
         var project = await ProjectAsync(id, actor, role, ct);
-        if (!Manager(project, actor)) throw new UnauthorizedAccessException("仅项目经理可发起和分配项目奖金。");
+        if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusManage, ct))
+            throw new UnauthorizedAccessException("当前账号没有本项目的奖金分配维护权限。");
         var book = await store.FindAsync(project.Id, ct) ?? new(project.Id, 0, null, []);
         var old = book.Applications.SingleOrDefault(a => a.Phase == phase);
         if (old is not null && old.Status is not ("Draft" or "Rejected" or "Withdrawn")) throw new PdmConflictException("请先撤回当前申请再调整，原评分和审批意见将保留在历史中。");
@@ -140,7 +147,7 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
                         throw new PdmRuleException($"请补充“{i.Name}”的评分依据。");
                     foreach (var d in i.Departments)
                     {
-                        var members = await Members(settings, d.DepartmentKey, project, ct);
+                        var members = await Members(settings, d.DepartmentKey, project, PermissionCodes.ProjectBonusScore, ct);
                         members = members.Where(m => !Same(m, target)).ToArray();
                         if (members.Count == 0) throw new PdmRuleException($"“{i.Name}”没有可独立评分的人员，不能给本人评分，请调整部门评分人员。");
                         tasks.Add(new(i.Id, personId, d.DepartmentKey, members));
@@ -156,7 +163,7 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
                 foreach (var key in node.DepartmentKeys)
                 {
                     var d = settings.Departments.Single(d => d.Key == key);
-                    var members = await Members(settings, key, project, ct, true);
+                    var members = await Members(settings, key, project, PermissionCodes.ProjectBonusApprove, ct);
                     branches.Add(new(d.UnitId!.Value, d.Name, members, false, []));
                 }
                 if (branches.Select(b => b.UnitId).Distinct().Count() != branches.Count) throw new PdmRuleException("同一并行节点不能重复配置同一个实际部门。");
@@ -170,7 +177,7 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
         await SaveBook(book, app, input.ExpectedRowVersion, ct);
         return await GetAsync(project.Id, actor, role, ct);
     }
-    private async Task<IReadOnlyList<string>> Members(ProjectBonusSettings settings, string key, Project project, CancellationToken ct, bool approval = false)
+    private async Task<IReadOnlyList<string>> Members(ProjectBonusSettings settings, string key, Project project, string permission, CancellationToken ct)
     {
         var department = settings.Departments.Single(d => d.Key == key);
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
@@ -180,8 +187,7 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
         {
             var user = directory.Users.FirstOrDefault(u => u.IsActive && Same(u.Username, name) && (u.CompanyId is null || u.CompanyId == project.OrganizationId));
             if (user is not null && directory.Memberships.Any(m => m.UnitId == department.UnitId && Same(m.Username, name))
-                && await repository.HasProjectContentReadAccessAsync(project.Id, name, user.Role, ct)
-                && (!approval || await repository.HasUserPermissionAsync(name, user.Role, PermissionCodes.ApprovalDecide, ct))) names.Add(name);
+                && await AllowsAsync(project, name, permission, ct)) names.Add(name);
         }
         if (names.Count == 0) throw new PdmRuleException($"“{department.Name}”没有可处理本项目的有效人员，请检查部门配置和项目权限。");
         return names.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -189,6 +195,8 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
     public async Task<ProjectBonusView> ScoreAsync(Guid id, string phase, SaveBonusScores input, string actor, UserRole role, CancellationToken ct)
     {
         var project = await ProjectAsync(id, actor, role, ct);
+        if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusScore, ct))
+            throw new UnauthorizedAccessException("当前账号没有本项目的奖金评分权限。");
         var (book, app) = await Current(project.Id, phase, ct);
         if (app.Status != "Scoring") throw new PdmConflictException("当前申请不在部门评分阶段。");
         if (input.Scores is null || input.Scores.Count is < 1 or > 3100) throw new PdmRuleException("请填写评分。");
@@ -199,7 +207,7 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
             var task = app.ScoringTasks.SingleOrDefault(t => t.PersonId == score.PersonId && t.IndicatorId == score.IndicatorId && t.DepartmentKey == score.DepartmentKey);
             if (task is null || !task.Members.Any(m => Same(m, actor))) throw new UnauthorizedAccessException("只能填写本人负责部门的评分。");
             // Recheck active department membership even when a frozen task still contains the old user.
-            if (!(await Members(app.Template!, task.DepartmentKey, project, ct)).Any(m => Same(m, actor))) throw new UnauthorizedAccessException("您已不属于该评分部门。");
+            if (!(await Members(app.Template!, task.DepartmentKey, project, PermissionCodes.ProjectBonusScore, ct)).Any(m => Same(m, actor))) throw new UnauthorizedAccessException("您已不属于该评分部门。");
             var indicator = ProjectBonusRules.Indicator(app, score.PersonId, score.IndicatorId);
             if (score.Score is null || score.Score < 0 || score.Score > indicator.MaxScore) throw new PdmRuleException($"“{indicator.Name}”分数须在0至{indicator.MaxScore}之间。");
             var comment = ProjectBonusRules.Text(score.Comment, "评分依据");
@@ -224,22 +232,23 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
         string name;
         if (action == "withdraw")
         {
-            if (!Manager(project, actor)) throw new UnauthorizedAccessException("仅项目经理可撤回申请。");
+            if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusManage, ct)) throw new UnauthorizedAccessException("当前账号没有本项目的奖金分配维护权限。");
             if (app.Status is not ("Scoring" or "Scored" or "Pending")) throw new PdmConflictException("当前状态不能撤回。");
             name = "撤回申请"; app = app with { Status = "Withdrawn" };
         }
         else if (action == "submit")
         {
-            if (!Manager(project, actor)) throw new UnauthorizedAccessException("仅项目经理可确认分配并提交审批。");
+            if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusManage, ct)) throw new UnauthorizedAccessException("当前账号没有本项目的奖金分配维护权限。");
             if (app.Status != "Scored") throw new PdmConflictException("请等待全部部门完成评分。");
             var result = ProjectBonusRules.Calculate(book.FrozenPool!.Value, app);
-            name = "项目经理确认分配并提交"; app = app with { Status = "Pending", ProjectScore = result.ProjectScore, Awards = result.Awards };
+            name = "确认分配并提交"; app = app with { Status = "Pending", ProjectScore = result.ProjectScore, Awards = result.Awards };
         }
         else if (action is "approve" or "reject")
         {
             var step = app.Status == "Pending" ? app.Steps.FirstOrDefault(s => s.Decision is null) : null;
             if (step is null) throw new PdmConflictException("当前没有待处理的审批节点。");
-            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, ct) || !step.Participants.CanSign(actor)) throw new UnauthorizedAccessException("您不是当前节点的待审批人员。");
+            if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusApprove, ct) || !step.Participants.CanSign(actor))
+                throw new UnauthorizedAccessException("审批奖金需要本项目的审批权限及当前节点的审批职责。");
             var approve = action == "approve";
             var group = ApprovalNodeRules.Sign(step.Participants, actor, approve ? ApprovalDecision.Approved : ApprovalDecision.Rejected, comment, now, false, out var waiting)!;
             var changed = step with { Participants = group, Decision = waiting ? null : approve ? "Approved" : "Rejected", Actor = actor, Comment = comment, DecidedAt = now };
@@ -256,8 +265,9 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
     {
         var project = await ProjectAsync(id, actor, role, ct);
         var (book, app) = await Current(project.Id, phase, ct);
-        if (!PaymentMember(app, actor) || !(await Members(app.Template!, app.Template!.PaymentDepartmentKey, project, ct)).Any(m => Same(m, actor)))
-            throw new UnauthorizedAccessException("仅配置的财务人员可登记发放。");
+        if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusPay, ct)
+            || !PaymentMember(app, actor) || !(await Members(app.Template!, app.Template!.PaymentDepartmentKey, project, PermissionCodes.ProjectBonusPay, ct)).Any(m => Same(m, actor)))
+            throw new UnauthorizedAccessException("登记发放需要本项目的发放权限及当前发放节点的处理职责。");
         if (app.Status != "Approved" || app.Payment is not null) throw new PdmConflictException("当前申请尚未批准或已经登记发放。");
         if (input.Amount != app.Awards.Sum(a => a.Amount) || input.Date == DateOnly.MinValue || input.Date > DateOnly.FromDateTime(clock.GetUtcNow().ToOffset(TimeSpan.FromHours(8)).DateTime))
             throw new PdmRuleException("登记金额须等于批准分配总额，发放日期不得为空或晚于今天。");
@@ -270,8 +280,8 @@ public sealed class ProjectBonusService(IPdmRepository repository, IProjectBonus
     public async Task<IReadOnlyList<ProjectBonusBook>> HistoryAsync(Guid id, string actor, UserRole role, CancellationToken ct)
     {
         var project = await ProjectAsync(id, actor, role, ct);
-        // Historical versions can contain former employees' allocations; restrict to the current project manager.
-        if (!Manager(project, actor)) throw new UnauthorizedAccessException("仅项目经理可查看完整历史分配版本。");
+        if (!await AllowsAsync(project, actor, PermissionCodes.ProjectBonusHistoryView, ct))
+            throw new UnauthorizedAccessException("当前账号没有本项目的奖金历史分配查看权限。");
         return await store.HistoryAsync(project.Id, ct);
     }
     private async Task<(ProjectBonusBook, BonusApplication)> Current(Guid id, string phase, CancellationToken ct)

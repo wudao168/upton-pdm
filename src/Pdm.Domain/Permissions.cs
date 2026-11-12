@@ -6,6 +6,20 @@ public static class PermissionCodes
     public const string ProjectBudgetView = "project.budget.view";
     public const string ProjectBudgetActualEdit = "project.budget.actual.edit";
     public const string ProjectBudgetEdit = "project.budget.edit";
+    public const string ProjectBudgetAssessmentEdit = "project.budget.assessment.edit";
+    public const string ProjectExpenseView = "project.expense.view";
+    public const string ProjectExpenseSubmit = "project.expense.submit";
+    public const string ProjectExpenseApprove = "project.expense.approve";
+    public const string ProjectBonusView = "project.bonus.view";
+    public const string ProjectBonusManage = "project.bonus.manage";
+    public const string ProjectBonusHistoryView = "project.bonus.history.view";
+    public const string ProjectBonusScore = "project.bonus.score";
+    public const string ProjectBonusApprove = "project.bonus.approve";
+    public const string ProjectBonusPay = "project.bonus.pay";
+    public const string StockView = "stock.view";
+    public const string StockManage = "stock.manage";
+    public const string StockSettingsManage = "stock.settings.manage";
+    public const string StockLowInventoryNotify = "stock.low-inventory.notify";
     public const string ProjectBudgetReserve = "project.budget.reserve";
     public const string ProjectBudgetSettlementView = "project.budget.settlement.view";
     public const string ProjectBudgetSettlementEdit = "project.budget.settlement.edit";
@@ -92,9 +106,10 @@ public static class RolePermissionCatalog
     public static IReadOnlyList<PermissionDefinition> Permissions { get; } = FunctionPermissionCatalog.Build(
     [
         new(PermissionCodes.WorkHoursReportView, "查看公司工时汇总", "工时管理", "查看当前公司员工的工时明细与汇总；不包含代填或修改他人工时。", Sensitive: true),
-        new(PermissionCodes.ProjectBudgetView, "查看项目预算", "项目预算", "查看未税预算、实际和预计成本；风险预留仅计划管理可见。"),
-        new(PermissionCodes.ProjectBudgetActualEdit, "维护实际成本及工时", "项目预算", "由财务人工登记实际金额和实际工时。", Sensitive: true),
-        new(PermissionCodes.ProjectBudgetEdit, "维护项目预算", "项目预算", "维护预算及剩余成本预估。", Sensitive: true),
+        new(PermissionCodes.ProjectBudgetView, "查看项目预算", "项目预算", "预算金额和实际成本按财务数据范围显示。"),
+        new(PermissionCodes.ProjectBudgetActualEdit, "维护实际成本及工时", "项目预算", "登记实际金额和工时，需要在当前项目范围内获得实际成本维护权限。", Sensitive: true),
+        new(PermissionCodes.ProjectBudgetEdit, "预算汇总 · 修改并保存", "项目预算", "修改「预算汇总」里的预算金额和剩余成本预估。", Sensitive: true),
+        new(PermissionCodes.ProjectBudgetAssessmentEdit, "维护预算评估", "项目预算", "新增及保存项目预算评估明细，需要在当前项目范围内获得预算金额查看和维护权限。", Sensitive: true),
         new(PermissionCodes.ProjectBudgetReserve, "查看及维护风险预留", "项目预算", Sensitive: true),
         new(PermissionCodes.ProjectBudgetSettlementView, "查看项目结算", "项目预算"),
         new(PermissionCodes.ProjectBudgetSettlementEdit, "维护项目结算", "项目预算", Sensitive: true),
@@ -152,7 +167,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ProductionSchedule, "安排自制生产", "生产跟踪", "安排内部资源组、日期和预计工时。", Sensitive: true),
         new(PermissionCodes.ProductionScanManage, "配置生产扫码岗位", "生产跟踪", "维护账号、角色与生产岗位、工位的绑定。", Sensitive: true),
         new(PermissionCodes.ProductionCapacityManage, "维护生产资源可用工时", "生产跟踪", "维护资源组每日可用工时。", Sensitive: true),
-        new(PermissionCodes.ApprovalDecide, "处理发布审批", "审批发布", Sensitive: true),
+        new(PermissionCodes.ApprovalDecide, "处理业务审批", "审批发布", "处理发布、料号等业务审批；仍须满足实际项目范围和当前流程节点条件。", Sensitive: true),
         new(PermissionCodes.ApprovalEmergencySubstitute, "紧急代批当前节点", "审批发布", "仅在紧急情况下替代当前审批人，必须填写原因，后续节点仍正常流转。", Sensitive: true),
         new(PermissionCodes.ProgramTemplateView, "查看和下载程序模板", "程序模板", "查看集团已发布的PLC、HMI程序模板。"),
         new(PermissionCodes.ProgramTemplateSubmit, "上传和提交程序模板", "程序模板", "维护本人创建的草稿并提交审核。", Sensitive: true),

@@ -63,11 +63,11 @@ public static class AuthorizationActions
         new PermissionDefinition("release.mechanical", "发布标准件／非标件", "审批发布", Sensitive: true) { Scope = "project" },
         new PermissionDefinition(FinancialBudgetRead, "查看项目预算金额", "财务数据范围"),
         new PermissionDefinition(FinancialActualRead, "查看项目实际成本", "财务数据范围"),
-        new PermissionDefinition(FinancialBudgetMaintain, "维护项目预算金额", "财务数据范围", Sensitive: true),
+        new PermissionDefinition(FinancialBudgetMaintain, "修改预算金额（汇总和评估共用）", "财务数据范围", "勾选预算汇总或预算评估的编辑权限时，系统会补选此项。", Sensitive: true) { Action = "edit" },
         new PermissionDefinition(FinancialActualMaintain, "维护项目实际成本", "财务数据范围", Sensitive: true),
         new PermissionDefinition(FinancialDepartmentRead, "查看所属部门财务明细", "财务数据范围"),
         new PermissionDefinition(LaborRatesManage, "维护工时单价", "财务数据范围", Sensitive: true),
-        new PermissionDefinition(StockSynchronize, "立即同步常备物料", "料品管理", Sensitive: true),
+        new PermissionDefinition(StockSynchronize, "立即同步常备物料", "常备物料", Sensitive: true) { Dependencies = [PermissionCodes.StockView] },
         new PermissionDefinition(CompanyReporting, "查看公司项目报表", "项目报表"),
         new PermissionDefinition(SelfReview, "审核本人图纸", "图纸审核", "独立授权；未授权时禁止审核本人图纸。", true),
         new PermissionDefinition(ReviewManage, "管理他人图纸审核任务", "图纸审核", Sensitive: true),
@@ -83,7 +83,8 @@ public static class AuthorizationActions
         new PermissionDefinition(FolderEdit, "目录默认编辑", "目录默认权限", Sensitive: true),
         new PermissionDefinition(FolderManage, "管理目录权限", "目录默认权限", Sensitive: true)
     }.Select(p => p with { Scope = p.Scope == "project" || p.Code.StartsWith("financial.") || p.Code.StartsWith("folder.") || p.Code.StartsWith("drawing-review.") || p.Code == ArchiveSubmit ? "project" : "system",
-        Action = FunctionPermissionCatalog.Action(p.Code, p.Name), ProjectAuthorization = "role" }).Select(p => p.Scope == "project" ? p with { Dependencies = [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView] } : p).ToArray();
+        Action = p.Action == "other" ? FunctionPermissionCatalog.Action(p.Code, p.Name) : p.Action,
+        ProjectAuthorization = "role" }).Select(p => p.Scope == "project" ? p with { Dependencies = [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView] } : p).ToArray();
 
     public static IReadOnlyDictionary<string, string> Scopes { get; } = new Dictionary<string, string>
     {

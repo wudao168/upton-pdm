@@ -20,6 +20,8 @@ public sealed class ProcurementFileApiTests(PdmApiFactory factory) : IClassFixtu
     {
         using var scope = factory.Services.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "production", "采购资料查看人员", "unused", UserRole.ProductionViewer, true,
+            CompanyId: (await repository.FindUserAsync("admin", default))!.CompanyId), default);
         var materials = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
         var materialService = scope.ServiceProvider.GetRequiredService<MaterialService>();
         var brands = scope.ServiceProvider.GetRequiredService<IMaterialBrandRepository>();
@@ -78,6 +80,8 @@ public sealed class ProcurementFileApiTests(PdmApiFactory factory) : IClassFixtu
         using var isolated = new PdmApiFactory();
         using var scope = isolated.Services.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "production", "采购资料查看人员", "unused", UserRole.ProductionViewer, true,
+            CompanyId: (await repository.FindUserAsync("admin", default))!.CompanyId), default);
         var materials = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
         var store = scope.ServiceProvider.GetRequiredService<IBomFileStore>();
         var materialService = scope.ServiceProvider.GetRequiredService<MaterialService>();

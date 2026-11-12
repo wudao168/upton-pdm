@@ -39,6 +39,7 @@ public sealed partial class PdmAddin
                 if (initialClient.IsAuthenticated) return;
                 var replacement = new PdmApiClient(latest.ApiBaseUrl);
                 replacement.BeforeCheckout = FinishPendingCloseBeforeCheckoutAsync;
+                replacement.ConfirmReferenceVersions = ConfirmReferenceVersionsAsync;
                 replacement.AuthenticationExpired += OnAuthenticationExpired;
                 initialClient.AuthenticationExpired -= OnAuthenticationExpired;
                 apiClient = replacement;

@@ -21,8 +21,10 @@ export function installControlSpacing() {
       const controls = children.filter(isControl)
       let layout = ''
       if (controls.length > 1 && !element.matches('button, input, select, textarea') && !element.closest(excluded)) {
-        const display = getComputedStyle(element).display
-        layout = /flex|grid/.test(display) ? 'flow'
+        const style = getComputedStyle(element)
+        const display = style.display
+        layout = display.includes('flex') && style.flexDirection.startsWith('column') ? 'flow-column'
+          : /flex|grid/.test(display) ? 'flow'
           : controls.every(child => getComputedStyle(child).display.startsWith('inline')) ? 'inline' : 'stack'
       }
       return { element, children, controls, layout }

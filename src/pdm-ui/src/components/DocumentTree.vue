@@ -25,6 +25,7 @@ const props = withDefaults(defineProps<{
 }>(), { canEdit: false, reviewStates: () => ({}), localStates: () => ({}), refreshing: false })
 
 const query = defineModel<string>('query', { required: true })
+const queryInput = ref(query.value)
 const filter = defineModel<DocumentFilter>('filter', { required: true })
 const emit = defineEmits<{ select: [node: DocumentNode]; refresh: []; open: [node: DocumentNode, mode: SolidWorksOpenMode]; openFolder: [node: DocumentNode]; versions: [node: DocumentNode] }>()
 const contextNode = ref<DocumentNode>()
@@ -37,10 +38,16 @@ const drawingPageSize = 80
 const drawingPageCount = computed(() => Math.ceil(props.drawings.length / drawingPageSize))
 const visibleDrawings = computed(() => props.drawings.slice(drawingPage.value * drawingPageSize, (drawingPage.value + 1) * drawingPageSize))
 watch([() => props.drawings, query, filter], () => { drawingPage.value = 0 })
+watch(query, value => { queryInput.value = value })
+
+function submitSearch() {
+  query.value = queryInput.value.trim()
+}
 
 function selectFilter(value: DocumentFilter) {
   if (filter.value === value) return
   filter.value = value
+  queryInput.value = ''
   query.value = ''
 }
 function changeDrawingPage(page: number) {
@@ -94,11 +101,12 @@ onBeforeUnmount(() => {
 <template>
   <section class="pdm-panel pdm-tree-panel" aria-label="项目设计树">
     <div class="pdm-tree-search-row">
-      <label class="pdm-tree-search">
-
-        <span class="pdm-sr-only">搜索图号或名称</span>
-        <SearchField><input v-model="query" type="search" aria-label="搜索图号或名称" placeholder="搜索图号或名称"></SearchField>
-      </label>
+      <form class="pdm-tree-search" @submit.prevent="submitSearch">
+        <SearchField>
+          <input v-model="queryInput" type="search" aria-label="搜索图号或名称" placeholder="搜索图号或名称">
+          <template #action><button type="submit">搜索</button></template>
+        </SearchField>
+      </form>
       <div class="pdm-tree-refresh">
         <button
           type="button"
@@ -183,7 +191,6 @@ onBeforeUnmount(() => {
       <span><i class="is-green" />只读缓存</span>
       <span><i class="is-blue" />可编辑</span>
       <span><i class="is-orange" />需处理</span>
-      <slot name="actions" />
     </footer>
   </section>
 </template>

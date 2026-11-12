@@ -34,6 +34,8 @@ internal static partial class Program
    var modes=missingOnly?new[]{"missing-suppressed","missing-nested","missing-actually-loaded","missing-edit",
      "missing-toolbox","missing-toolbox-language-dir","missing-toolbox-edit","missing-toolbox-known","missing-toolbox-and-outside"}
      :new[]{"verified","fallback","fallback-fails","preloaded-mismatch","same-title","historical","disabled-rule","legacy-warning"};
+   var constants=Assembly.LoadFrom(Path.Combine(Path.GetDirectoryName(assembly.Location),"SolidWorks.Interop.swconst.dll"));
+   var toolboxSearchOption=Convert.ToInt32(Enum.Parse(constants.GetType("SolidWorks.Interop.swconst.swUserPreferenceToggle_e",true),"swUseFolderAsDefaultSearchLocation"));
    foreach(var mode in modes)
    {
     Type("DocumentRuleGate").GetMethod("Configure",Flags).Invoke(null,new object[]{mode=="disabled-rule"||mode=="legacy-warning"?new[]{"F20"}:new string[0]});
@@ -41,6 +43,7 @@ internal static partial class Program
     var bytes=Encoding.UTF8.GetBytes("canonical native content");var manifest=SpeedManifest("ROOT.SLDASM",bytes);var files=((IList)Get(manifest,"Files")).Cast<object>().ToArray();
     var missing=mode.StartsWith("missing-",StringComparison.Ordinal);
     var toolbox=mode.StartsWith("missing-toolbox",StringComparison.Ordinal);
+    var toolboxSearch=toolbox;
     var toolboxRoot=Path.Combine(directory,"toolbox-data");
     var missingPath=toolbox?Path.Combine(toolboxRoot,"browser","GB",mode=="missing-toolbox-known"?"PART-1.SLDPRT":"MISSING.SLDPRT")
       :Path.Combine(directory,"original","MISSING.SLDPRT");
@@ -63,7 +66,9 @@ internal static partial class Program
     var other=Part(otherPath);
     object Component(object file)=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{
      var path=Path.Combine(folder,(string)Get(file,"FileName"));var first=path==partPath;
-     switch(call.MethodName){case "GetPathName":return path;case "get_Name2":return Path.GetFileNameWithoutExtension(path);case "get_IsVirtual":return false;case "GetModelDoc2":return first?Part(wrong?externalPath:partPath):null;default:throw new Exception("Unexpected component operation "+call.MethodName);}
+     var savedPath=mode=="missing-nested"&&Path.GetFileName(path)=="DEFERRED.SLDASM"
+      ?Path.Combine(directory,"original","DEFERRED.SLDASM"):path;
+     switch(call.MethodName){case "GetPathName":return savedPath;case "get_Name2":return Path.GetFileNameWithoutExtension(path);case "get_IsVirtual":return false;case "GetModelDoc2":return first?Part(wrong?externalPath:partPath):null;default:throw new Exception("Unexpected component operation "+call.MethodName);}
     }).GetTransparentProxy();
     var components=files.Skip(1).Select(Component).ToList();
     if(missing&&mode!="missing-nested"&&!toolbox)
@@ -82,33 +87,37 @@ internal static partial class Program
       case "GetDocuments":return new[]{mode=="same-title"?conflicting:other}.Concat(loaded?new[]{root}:new object[0]).ToArray();
       case "get_ActiveDoc":return active;
       case "OpenDoc6":if((string)call.Args[0]!=rootPath)throw new Exception("Unexpected document open");
+       if(toolboxSearch)throw new Exception("Controlled open allowed Toolbox to substitute a local part");
        if((mode=="missing-suppressed"||toolbox)&&!(bool)TreeCallStatic("ControlledOpenBoundary","Reject",missingPath))throw new Exception("Uncontrolled component was allowed to load");
        if(mode=="missing-toolbox-and-outside"&&!(bool)TreeCallStatic("ControlledOpenBoundary","Reject",Path.Combine(toolboxRoot,"browser-backup","MISSING.SLDPRT")))
         throw new Exception("A same-name part outside the configured Toolbox browser was allowed to load");
        opens++;loaded=true;active=root;return root;
       case "CloseDoc":if((string)call.Args[0]!="ROOT.SLDASM")throw new Exception("Closed unselected draft");closes++;loaded=false;active=other;return null;
       case "GetDocumentDependencies2":scans++;
-       if(mode=="missing-nested"&&(string)call.Args[0]==Path.Combine(folder,"DEFERRED.SLDASM"))return new[]{"MISSING.SLDPRT",missingPath};
+       if(mode=="missing-nested"&&(string)call.Args[0]==Path.Combine(folder,"DEFERRED.SLDASM"))
+        return new[]{"MISSING.SLDPRT",missingPath,"PART-3.SLDPRT",Path.Combine(directory,"original","PART-3.SLDPRT")};
        return (string)call.Args[0]==rootPath&&wrong?new[]{"PART-1.SLDPRT",externalPath}:new string[0];
       case "ReplaceReferencedDocument":if((string)call.Args[0]!=rootPath||(string)call.Args[1]!=externalPath||(string)call.Args[2]!=partPath)throw new Exception("Reference rewrite escaped root");replacements++;File.AppendAllText(rootPath,"|rebased");if(mode!="fallback-fails"&&mode!="legacy-warning")wrong=false;return true;
       case "GetCurrentWorkingDirectory":return "";
       case "GetSearchFolders":return search;
       case "SetCurrentWorkingDirectory":return true;
       case "SetSearchFolders":search=(string)call.Args[1];return true;
-      case "GetUserPreferenceToggle":return rules;
+      case "GetUserPreferenceToggle":return (int)call.Args[0]==toolboxSearchOption?toolboxSearch:rules;
       case "GetUserPreferenceStringValue":return mode=="missing-toolbox-language-dir"?Path.Combine(toolboxRoot,"lang","english"):toolboxRoot;
-      case "SetUserPreferenceToggle":rules=(bool)call.Args[1];return true;
+      case "SetUserPreferenceToggle":if((int)call.Args[0]==toolboxSearchOption)toolboxSearch=(bool)call.Args[1];else rules=(bool)call.Args[1];return true;
       default:throw new Exception("Unexpected native operation "+call.MethodName);
      }
     }).GetTransparentProxy());
     using var pane=missing?(System.Windows.Forms.Control)New("PdmTaskPaneControl","缺件打开验收"):null;
     if(pane!=null)SetField(plugin,"taskPaneControl",pane);
-    var failed=false;try{var opened=DiscardCall(plugin,"OpenControlledReadOnlyDocument",rootPath,2,"Default",manifest);if(opened!=root)throw new Exception("Wrong returned document");}catch(InvalidOperationException){failed=true;}catch(IOException){failed=true;}
-    var shouldFail=preloaded||mode=="same-title"||mode=="fallback-fails"||mode=="missing-actually-loaded"||mode=="missing-edit"
-      ||toolbox&&mode!="missing-toolbox"&&mode!="missing-toolbox-language-dir";
-    if(failed!=shouldFail||search!=""||rules||File.ReadAllText(otherPath)!="unselected dirty user draft")throw new Exception("Native-first validation/scope failure "+mode);
+    var failed=false;string failureMessage=null;try{var opened=DiscardCall(plugin,"OpenControlledReadOnlyDocument",rootPath,2,"Default",manifest);if(opened!=root)throw new Exception("Wrong returned document");}catch(InvalidOperationException error){failed=true;failureMessage=error.Message;}catch(IOException error){failed=true;failureMessage=error.Message;}
+    var shouldFail=preloaded||mode=="same-title"||mode=="fallback-fails"||mode=="missing-actually-loaded"
+      ||toolbox&&mode!="missing-toolbox"&&mode!="missing-toolbox-language-dir"&&mode!="missing-toolbox-edit";
+    if(failed!=shouldFail||search!=""||rules||toolboxSearch!=toolbox||File.ReadAllText(otherPath)!="unselected dirty user draft")throw new Exception("Native-first validation/scope failure "+mode+": "+failureMessage);
     if(missing&&!shouldFail&&(opens!=1||closes!=0||!((System.Windows.Forms.Control)Field(pane,"checkoutReminder")).Text.Contains("MISSING.SLDPRT")))
       throw new Exception("Missing component open did not keep the window and report the missing file: "+mode);
+    if(mode=="missing-nested"&&((System.Windows.Forms.Control)Field(pane,"checkoutReminder")).Text.Contains("PART-3.SLDPRT"))
+      throw new Exception("A verified deferred component was reported as missing because of its saved path");
     if(mode=="verified"&&(scans!=0||opens!=1||closes!=0||replacements!=0))throw new Exception("Verified native open performed an unnecessary 214-file prepass");
     if(mode=="fallback"&&(scans!=214||opens!=2||closes!=1||replacements!=1))throw new Exception("Reference mismatch did not run one bounded materialization retry");
     if(mode=="fallback-fails"&&(scans!=214||opens!=2||closes!=2))throw new Exception("Invalid fallback was accepted or retried indefinitely");

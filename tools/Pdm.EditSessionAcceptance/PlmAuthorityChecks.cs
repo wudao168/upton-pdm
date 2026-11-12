@@ -16,13 +16,16 @@ internal static partial class Program
         Directory.CreateDirectory(root);
         var bindings = Type("PdmDocumentIdentityStore").GetField("bindingDirectory", Flags);
         var previousBindings = bindings.GetValue(null);
+        var resolver = Type("PdmDocumentIdentityStore").GetField("workspaceRootResolver", Flags);
+        var previousRoot = resolver.GetValue(null);
         bindings.SetValue(null, Path.Combine(root, "bindings"));
+        resolver.SetValue(null, new Func<string>(() => root));
         try
         {
             foreach (var dirty in new[] { false, true })
             foreach (var scope in new[] { "unbound", "target", "other-project", "other-document" })
             {
-                var caseDirectory = Path.Combine(root, scope + "-" + dirty); Directory.CreateDirectory(caseDirectory);
+                var caseDirectory = Path.Combine(root, "View", scope + "-" + dirty); Directory.CreateDirectory(caseDirectory);
                 var path = Path.Combine(caseDirectory, "PART.SLDPRT");
                 File.WriteAllText(path, "saved original");
                 var closes = 0;
@@ -63,24 +66,25 @@ internal static partial class Program
                 var manifest = New("ControlledOpenManifestDto"); var file = New("ControlledOpenFileDto");
                 var project = Guid.NewGuid(); var document = Guid.NewGuid();
                 Set(manifest, "ProjectId", project); Set(file, "DocumentId", document);
-                if (scope != "unbound") Require((bool)Type("PdmDocumentIdentityStore").GetMethod("TryWrite", Flags)
+                if (scope != "unbound") Require((bool)Type("PdmDocumentIdentityStore").GetMethod("TryWriteControlledVersion", Flags)
                     .Invoke(null, new object[] { path, scope == "other-document" ? Guid.NewGuid() : document,
-                        scope == "other-project" ? Guid.NewGuid() : project }), "fixture binding failed");
+                        scope == "other-project" ? Guid.NewGuid() : project, Guid.NewGuid(), "W1",
+                        Type("EditDraftJournal").GetMethod("Hash", Flags).Invoke(null, new object[] { path }), new FileInfo(path).Length }), "fixture binding failed");
                 Set(file, "FileName", "PART.SLDPRT");
                 var files = (IList)Activator.CreateInstance(manifest.GetType().GetProperty("Files").PropertyType);
                 files.Add(file); Set(manifest, "Files", files);
                 var blocked = false;
-                try { Invoke(addin, "CloseLocalContextsForPlmOpen", manifest); }
+                try { Invoke(addin, "CloseLocalContextsForPlmOpen", manifest, null); }
                 catch (System.Reflection.TargetInvocationException error) when (error.InnerException is InvalidOperationException)
-                { blocked = error.InnerException.Message.Contains("备份") && error.InnerException.Message.Contains("保存"); }
-                var shouldBlock = dirty && scope != "target";
+                { blocked = error.InnerException.Message.Contains("同名图档") && error.InnerException.Message.Contains("保留"); }
+                var shouldBlock = scope != "target";
                 Require(blocked == shouldBlock && closes == (shouldBlock ? 0 : 1),
                     "PLM retrieval must honor target overwrite authorization and retain unrelated unsaved windows. scope=" + scope + "; dirty=" + dirty + "; closes=" + closes + "; calls=" + string.Join(",", calls));
                 Require(File.ReadAllText(path) == "saved original", "PLM retrieval changed original disk file");
             }
-            Console.WriteLine("PASS: eight backup-policy cases; authorized target proceeds, unrelated/unbound dirty windows stay, original disk bytes retained");
+            Console.WriteLine("PASS: eight identity-policy cases; authorized target proceeds, unrelated/unbound windows stay, original disk bytes retained");
         }
-        finally { bindings.SetValue(null, previousBindings); Directory.Delete(root, true); }
+        finally { bindings.SetValue(null, previousBindings); resolver.SetValue(null, previousRoot); Directory.Delete(root, true); }
     }
 
     static async Task PlmAuthorityScenario()
@@ -115,35 +119,54 @@ internal static partial class Program
             }
             var old = (string)Invoke(workspace, "GetWorkingFilePath", manifest, id);
             Directory.CreateDirectory(Path.GetDirectoryName(old)); File.WriteAllText(old, "unarchived local edit");
-            string first;
+            var lockedRejected = false;
             using (var locked = new FileStream(old, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
-                first = await Fresh();
-                Require(first != old && File.ReadAllBytes(first).SequenceEqual(baseline), "Locked local file blocked PLM acquisition");
+                try { await Fresh(); }
+                catch (IOException) { lockedRejected = true; }
             }
-            Require(File.ReadAllText(old) == "unarchived local edit", "Prior local file was damaged");
-            Console.WriteLine("PASS: locked modified local file cannot block explicit PLM retrieval; archived bytes used; previous file retained");
+            Require(lockedRejected && File.ReadAllText(old) == "unarchived local edit", "Locked modified file was replaced or bypassed without confirmation");
+            async Task<string> ConfirmBackupAndRetrieve(string expectedLocal)
+            {
+                var conflict = Invoke(workspace, "FindWorkingConflicts", manifest, new[] { id });
+                Require(conflict != null, "Unarchived local changes were not identified");
+                var rejected = false;
+                try { await Fresh(); }
+                catch (Exception error) when (error.GetType().Name == "WorkspaceCacheConflictException") { rejected = true; }
+                Require(rejected && File.ReadAllText(old) == expectedLocal, "Acquisition overwrote local changes without confirmation");
+                var backup = Invoke(workspace, "BackupWorkingConflicts", manifest, conflict, CancellationToken.None);
+                var recovery = (string)Get(backup, "RecoveryDirectory");
+                var task = (Task)Invoke(workspace, "PrepareBackedUpWorkingCopyAsync", manifest, new[] { id }, backup, CancellationToken.None);
+                await task;
+                var restored = (string)Get(task, "Result");
+                Require(restored == old && File.ReadAllBytes(restored).SequenceEqual(baseline), "Confirmed retrieval did not reuse the managed workspace");
+                Require(File.ReadAllText(Path.Combine(recovery, "PART.SLDPRT")) == expectedLocal, "Confirmed retrieval lost the verified recovery backup");
+                return restored;
+            }
+            var first = await ConfirmBackupAndRetrieve("unarchived local edit");
+            Require(await Fresh() == first, "Unchanged checkout created another workspace");
+            Console.WriteLine("PASS: locked or modified working files remain protected; confirmed verified backup permits retrieval in the same workspace");
 
             File.WriteAllText(first, "local saved modification"); File.SetAttributes(first, FileAttributes.ReadOnly);
-            var second = await Fresh();
-            Require(second != first && File.ReadAllBytes(second).SequenceEqual(baseline), "Read-only modified file blocked fresh PLM copy");
+            var second = await ConfirmBackupAndRetrieve("local saved modification");
             File.Delete(second);
             var third = await Fresh();
-            Require(third != second && File.ReadAllBytes(third).SequenceEqual(baseline), "Missing working file blocked PLM retrieval");
-            Console.WriteLine("PASS: read-only, changed and missing working files are replaced by independent verified PLM copies");
+            Require(third == second && File.ReadAllBytes(third).SequenceEqual(baseline), "Missing working file was not repaired in the managed workspace");
+            Console.WriteLine("PASS: read-only changes require verified backup; missing working files are repaired without another workspace");
 
             var read = (Task)Invoke(workspace, "PrepareReadOnlyAsync", manifest, false, CancellationToken.None); await read;
             var cached = (string)Get(read, "Result"); File.SetAttributes(cached, FileAttributes.Normal); File.WriteAllText(cached, "corrupt cache");
             using (var locked = new FileStream(cached, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
-                var fourth = await Fresh();
+                var freshRead = (Task)Invoke(workspace, "PrepareReadOnlyAsync", manifest, false, CancellationToken.None); await freshRead;
+                var fourth = (string)Get(freshRead, "Result");
                 Require(File.ReadAllBytes(fourth).SequenceEqual(baseline), "Corrupt locked snapshot prevented a new server download");
                 var request = New("WorkspaceDocumentStateRequest"); Set(request, "DocumentId", id); Set(request, "FileName", "PART.SLDPRT"); Set(request, "LatestRevision", "W1");
                 var requests = Array.CreateInstance(request.GetType(), 1); requests.SetValue(request, 0);
                 var state = Type("WorkspaceLocalStateReader").GetMethod("Read", Flags).Invoke(null,
                     new object[] { root, project, "QA-AUTHORITY", "qa", requests, null });
                 var current = ((IEnumerable)Get(state, "Items")).Cast<object>().Single();
-                Require((string)Get(current, "FullPath") == fourth, "Old modified or corrupt copy displaced the latest PLM copy in workspace UI");
+                Require((string)Get(current, "FullPath") != cached, "Corrupt locked copy displaced verified content in workspace UI");
             }
             Console.WriteLine("PASS: corrupt locked snapshot is bypassed; workspace selects latest server copy rather than old modifications");
 

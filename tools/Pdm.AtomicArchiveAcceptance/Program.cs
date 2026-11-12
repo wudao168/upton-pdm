@@ -82,7 +82,9 @@ try
             CompanyId: directory.Organizations.First().Id), default);
     if (args.Contains("--prepare-only"))
     {
-        await File.WriteAllTextAsync(Path.Combine(root, "tmp/archive-performance-db.txt"), database);
+        var resultIndex = Array.IndexOf(args, "--database-result");
+        var databaseResult = resultIndex >= 0 ? Path.GetFullPath(args[resultIndex + 1]) : Path.Combine(root, "tmp/archive-performance-db.txt");
+        await File.WriteAllTextAsync(databaseResult, database);
         Console.WriteLine("Prepared isolated archive performance fixture " + database);
         return;
     }

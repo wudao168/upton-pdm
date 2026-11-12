@@ -9,7 +9,7 @@ public sealed class PendingArchiveHeartbeatTests
     [Fact]
     public async Task PendingRegistrationRetainsItsSessionUntilCanceledWithoutCreatingVersions()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("QA-PENDING-HB", "临时登记心跳", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var batch = Guid.NewGuid();
@@ -31,7 +31,7 @@ public sealed class PendingArchiveHeartbeatTests
     public async Task ExpiredReservationsAreNotRenewedByHeartbeatAndCleanupIsBounded()
     {
         var clock = new Clock(DateTimeOffset.UtcNow);
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var project = await repository.CreateProjectAsync(new("QA-HB-EXPIRE", "过期暂存", "admin", "vault", "release"), "admin", default);
         var session = Guid.NewGuid();
         var documents = new List<PdmDocument>();

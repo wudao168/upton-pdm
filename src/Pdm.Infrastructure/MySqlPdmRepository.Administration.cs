@@ -424,6 +424,12 @@ public sealed partial class MySqlPdmRepository
     public async Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        return await ListUsersAsync(connection, cancellationToken);
+    }
+
+    // 目录读取已持有连接时复用该连接，避免并发请求占满连接池后嵌套等待。
+    private async Task<IReadOnlyList<UserAccount>> ListUsersAsync(MySqlConnection connection, CancellationToken cancellationToken)
+    {
         var rows = await connection.QueryAsync<AdministrationUserRow>(new CommandDefinition(
             "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,assigned_role_code RoleCode,company_id CompanyId,cross_company_view CrossCompanyView,is_active IsActive,token_version TokenVersion FROM pdm_user ORDER BY username",
             cancellationToken: cancellationToken));

@@ -26,7 +26,7 @@ $manifest = Get-Content -LiteralPath (Join-Path $backupRoot 'manifest.json') -Ra
 $databasePath = Resolve-PdmBackupPath $backupRoot $manifest.databaseDump.relativePath
 $rootClientPath = Join-Path $localRoot 'secrets\mysql-root-client.ini'
 $receipt = Get-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-$mysql = Join-Path $receipt.mysqlHome 'bin\mysql.exe'
+$mysql = Resolve-PdmMySqlTool $projectRoot $receipt 'mysql.exe'
 if (-not (Test-Path -LiteralPath $manifestPath) -or -not (Test-Path -LiteralPath $databasePath)) { throw 'The backup manifest or database dump is missing.' }
 if ($manifest.format -notin @('upton-pdm-backup-v1','upton-pdm-backup-v2')) { throw '备份格式不受支持。' }
 Test-PdmStorageBackupFiles $manifest $backupRoot
@@ -43,7 +43,21 @@ $stdoutPath = Join-Path $restoreLogRoot ($Database + '.stdout.log')
 $stderrPath = Join-Path $restoreLogRoot ($Database + '.stderr.log')
 $defaultsArgument = '--defaults-extra-file="{0}"' -f $rootClientPath
 $arguments = @($defaultsArgument, "--database=$Database", '--batch', '--raw')
-$restore = Start-Process -FilePath $mysql -ArgumentList $arguments -NoNewWindow -Wait -PassThru -RedirectStandardInput $databasePath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+$restoreInputPath = $databasePath
+$compatibleInputPath = $null
+try {
+    # Verify the immutable backup hash above, then adapt only a temporary input.
+    $originalSql = [IO.File]::ReadAllText($databasePath, [Text.Encoding]::UTF8)
+    $compatibleSql = ConvertTo-PdmRestorableSqlDump $originalSql
+    if ($compatibleSql -cne $originalSql) {
+        $compatibleInputPath = Join-Path $restoreLogRoot ($Database + '.' + [Guid]::NewGuid().ToString('N') + '.compatible.sql')
+        [IO.File]::WriteAllText($compatibleInputPath, $compatibleSql, [Text.UTF8Encoding]::new($false))
+        $restoreInputPath = $compatibleInputPath
+    }
+    $restore = Start-Process -FilePath $mysql -ArgumentList $arguments -NoNewWindow -Wait -PassThru -RedirectStandardInput $restoreInputPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+} finally {
+    if ($compatibleInputPath -and (Test-Path -LiteralPath $compatibleInputPath)) { Remove-Item -LiteralPath $compatibleInputPath }
+}
 if ($restore.ExitCode -ne 0) { throw "Database restore failed: $(Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)" }
 
 if ($manifest.format -eq 'upton-pdm-backup-v2') {
@@ -68,7 +82,7 @@ $secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFro
 $env:PDM_DB_PASSWORD = $secrets.databasePassword
 $env:PDM_ACCEPTANCE_CONNECTION = "Server=127.0.0.1;Port=3308;Database=$Database;UserID=pdm_app;GuidFormat=Binary16;SslMode=None;AllowUserVariables=true;ConnectionTimeout=5;DefaultCommandTimeout=30"
 Remove-Item Env:PDM_ACCEPTANCE_SEED -ErrorAction SilentlyContinue
-$verificationJson = (& $dotnet $acceptanceDll | Out-String)
+$verificationJson = (& $dotnet $acceptanceDll --restored-snapshot | Out-String)
 if ($LASTEXITCODE -ne 0) { throw 'Restored database verification failed.' }
 $verification = $verificationJson | ConvertFrom-Json
 $restoredCounts = $verification.tableCounts

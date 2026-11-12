@@ -24,8 +24,8 @@ public sealed class MobileOfficeLayoutTests
         var companies = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.Where(item => item.IsActive).Select(item => item.Id).ToArray();
         foreach (var user in new[] { ("admin", UserRole.Administrator), ("employee", UserRole.Engineer) })
         {
-            await repository.CreateUserAsync(new(Guid.NewGuid(), user.Item1, user.Item1, "unused", user.Item2, true), default);
-            await repository.SetUserCompanyScopeAsync(user.Item1, companies[0], user.Item2 == UserRole.Administrator, [], "admin", default);
+            await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), user.Item1, user.Item1, "unused", user.Item2, true), default);
+            await repository.SetUserCompanyScopeAsync(user.Item1, companies[0], user.Item2 == UserRole.Administrator, user.Item2 == UserRole.Administrator ? companies : [], "admin", default);
         }
         return companies;
     }

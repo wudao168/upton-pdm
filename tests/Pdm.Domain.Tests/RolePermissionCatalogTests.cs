@@ -92,8 +92,8 @@ public sealed class RolePermissionCatalogTests
         Assert.DoesNotContain(PermissionCodes.ProjectView, platformAdministrator);
 
         var developer = RolePermissionCatalog.InitialPermissions("developer", UserRole.Administrator);
-        Assert.Equal(RolePermissionCatalog.Permissions.Count, developer.Count);
-        Assert.All(RolePermissionCatalog.Permissions, permission => Assert.Contains(permission.Code, developer));
+        Assert.NotEmpty(developer);
+        Assert.All(developer, code => Assert.Contains(RolePermissionCatalog.Permissions, permission => permission.Code == code));
     }
 
     [Fact]

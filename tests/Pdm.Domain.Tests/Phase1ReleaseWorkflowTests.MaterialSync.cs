@@ -13,7 +13,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     public async Task CurrentBomAndReleaseUseUpdatedMaterialMaster(string source, string? oldBrand)
     {
         var clock = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         await ConfigureApprovalWorkflowsAsync(repository);
         var materials = new InMemoryMaterialRepository(clock);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), clock,
@@ -60,7 +60,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     public async Task CurrentBomDoesNotReplaceCadIdentityOrUseUnapprovedMaterial()
     {
         var clock = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(clock);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var materials = new InMemoryMaterialRepository(clock);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), clock,
             materialRepository: materials);

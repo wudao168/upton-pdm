@@ -8,8 +8,8 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
     {
         var project = await RequireProjectAsync(projectId, actor, role, ct);
         var settings = (await repository.GetSystemSettingsAsync(ct)).ApprovalWorkflows;
-        var canCreate = await CanCreateAsync(project, actor, role, ct);
-        var canApprove = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, ct);
+        var canCreate = await CanCreateAsync(project.Id, actor, ct);
+        var canApprove = await CanApproveAsync(project.Id, actor, ct);
         var requests = await store.ListAsync(projectId, ct);
         var context = await ProjectFinancialAccessPolicy.CreateContextAsync(repository, actor, ct);
         var access = await ProjectFinancialAccessPolicy.ReadAsync(repository, project, actor, role, ct, context);
@@ -26,7 +26,7 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
     public async Task<ExpenseRoutePreview> PreviewAsync(Guid projectId, SaveExpenseRequest input, string actor, UserRole role, CancellationToken ct)
     {
         var project = await RequireProjectAsync(projectId, actor, role, ct);
-        if (!await CanCreateAsync(project, actor, role, ct)) throw new UnauthorizedAccessException("仅项目经理可发起费用申请。");
+        if (!await CanCreateAsync(project.Id, actor, ct)) throw new UnauthorizedAccessException("当前账号没有本项目的费用申请发起权限。");
         var lines = NormalizeLines(input.Lines, true);
         var amount = lines.Sum(line => line.Amount!.Value);
         var workflow = await WorkflowAsync(input.Department, ct);
@@ -39,8 +39,8 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
     {
         if (id == Guid.Empty) throw new PdmRuleException("申请标识无效，请重新打开申请单。");
         var project = await RequireProjectAsync(projectId, actor, role, ct);
-        var canCreate = await CanCreateAsync(project, actor, role, ct);
-        if (!canCreate) throw new UnauthorizedAccessException("仅项目经理可发起费用申请。");
+        var canCreate = await CanCreateAsync(project.Id, actor, ct);
+        if (!canCreate) throw new UnauthorizedAccessException("当前账号没有本项目的费用申请发起权限。");
         var current = await store.FindAsync(id, ct);
         if (current is not null && (current.ProjectId != projectId || !current.Applicant.Equals(actor, StringComparison.OrdinalIgnoreCase)))
             throw new UnauthorizedAccessException("只能修改本人在当前项目发起的费用申请。");
@@ -80,8 +80,8 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
         var project = await RequireProjectAsync(projectId, actor, role, ct);
         var current = await store.FindAsync(id, ct) ?? throw new PdmNotFoundException("费用申请不存在。");
         if (current.ProjectId != projectId) throw new PdmNotFoundException("当前项目中没有这份费用申请。");
-        if (!current.Applicant.Equals(actor, StringComparison.OrdinalIgnoreCase) || !await CanCreateAsync(project, actor, role, ct))
-            throw new UnauthorizedAccessException("仅当前项目经理可撤回本人发起的费用申请。");
+        if (!current.Applicant.Equals(actor, StringComparison.OrdinalIgnoreCase) || !await CanCreateAsync(project.Id, actor, ct))
+            throw new UnauthorizedAccessException("撤回费用申请需要本人提交记录及本项目的发起权限。");
         if (current.Status != "Pending") throw new PdmConflictException("仅审批中的费用申请可以撤回，请刷新后查看最新状态。");
         var changed = current with { Status = "Withdrawn", UpdatedAt = timeProvider.GetUtcNow() };
         var saved = await store.SaveAsync(changed, input.ExpectedRowVersion, await NotificationsAsync(changed, null, ct), ct);
@@ -93,7 +93,7 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
         var project = await RequireProjectAsync(projectId, actor, role, ct);
         var current = await store.FindAsync(id, ct) ?? throw new PdmNotFoundException("费用申请不存在。");
         if (current.ProjectId != projectId) throw new PdmNotFoundException("当前项目中没有这份费用申请。");
-        var canApprove = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, ct);
+        var canApprove = await CanApproveAsync(project.Id, actor, ct);
         var step = current.CurrentStep ?? throw new PdmConflictException("该申请当前没有待处理的审批节点，请刷新。");
         if (!canApprove || !step.Participants.CanSign(actor)) throw new UnauthorizedAccessException("您不是当前节点的待审批人员。");
         var comment = Text(input.Comment, 1000, "审批意见", !input.Approve);
@@ -111,7 +111,7 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
             await NotificationsAsync(changed, decided.Decision == "Approved" ? decided : null, ct), ct);
         var context = await ProjectFinancialAccessPolicy.CreateContextAsync(repository, actor, ct);
         var access = await ProjectFinancialAccessPolicy.ReadAsync(repository, project, actor, role, ct, context);
-        return View(saved, actor, await CanCreateAsync(project, actor, role, ct), canApprove,
+        return View(saved, actor, await CanCreateAsync(project.Id, actor, ct), canApprove,
             access.ActualFor(ExpenseDepartment(saved, project, context.Directory)));
     }
 
@@ -147,11 +147,14 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
                     throw new PdmRuleException($"“{step.Name}”的部门已失效，请联系管理员检查审批设置。");
                 var user = users.FirstOrDefault(user => user.IsActive && user.Username.Equals(assignee, StringComparison.OrdinalIgnoreCase));
                 if (user is null || project.OrganizationId is not null && user.CompanyId is not null && user.CompanyId != project.OrganizationId
-                    || !await repository.HasProjectContentReadAccessAsync(project.Id, user.Username, user.Role, ct)
-                    || !await repository.HasUserPermissionAsync(user.Username, user.Role, PermissionCodes.ApprovalDecide, ct))
+                    || !await CanApproveAsync(project.Id, user.Username, ct))
                     throw new PdmRuleException($"“{step.Name}”尚未配置可审批本项目的有效人员，请联系管理员检查指定人员及权限。");
                 group = new([user.Username], false, []);
             }
+            else
+                foreach (var member in group.Members)
+                    if (!await CanApproveAsync(project.Id, member, ct))
+                        throw new PdmRuleException($"“{step.Name}”有人员缺少本项目的费用申请查看或审批权限，请检查审批设置和权限中心。");
             var copy = await ApprovalNodeCopies.ResolveAsync(repository, step, project, actor, users, ct);
             result.Add(new(Guid.NewGuid(), step.Name, ApprovalNodeRules.Freeze(group, group.Members[0], step.Policy, copy)!));
         }
@@ -209,16 +212,16 @@ public sealed class ExpenseRequestService(IPdmRepository repository, IExpenseReq
     private async Task<Project> RequireProjectAsync(Guid id, string actor, UserRole role, CancellationToken ct)
     {
         var project = await repository.FindProjectAsync(id, ct) ?? throw new PdmNotFoundException("项目不存在。");
-        if (!await repository.HasProjectContentReadAccessAsync(id, actor, role, ct)) throw new UnauthorizedAccessException("当前账号没有该项目的查看权限。");
+        if (!await AuthorizationPolicy.CanAsync(repository, id, actor, PermissionCodes.ProjectExpenseView, ct))
+            throw new UnauthorizedAccessException("当前账号没有本项目的费用申请查看权限。");
         return project;
     }
 
-    private async Task<bool> CanCreateAsync(Project project, string actor, UserRole role, CancellationToken ct)
-    {
-        var user = await repository.FindUserAsync(actor, ct);
-        return user?.IsActive == true && (string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-            || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase));
-    }
+    private Task<bool> CanCreateAsync(Guid projectId, string actor, CancellationToken ct) =>
+        AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectExpenseSubmit, ct);
+
+    private Task<bool> CanApproveAsync(Guid projectId, string actor, CancellationToken ct) =>
+        AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectExpenseApprove, ct);
 
     internal static IReadOnlyList<ExpenseLine> NormalizeLines(IReadOnlyList<ExpenseLine> input, bool submit)
     {

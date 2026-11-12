@@ -37,7 +37,7 @@ public sealed class MaterialNotificationPermissionApiTests(PdmApiFactory factory
         Authorize(client, username, UserRole.Engineer);
         foreach (var enabled in new[] { false, true, false })
         {
-            await repository.SetRolePermissionsAsync("ProjectManager", enabled ? [PermissionCodes.MaterialView, PermissionCodes.MaterialNotify] : [PermissionCodes.MaterialView], default);
+            await repository.SetRolePermissionsAsync("ProjectManager", enabled ? [PermissionCodes.MaterialView, PermissionCodes.MaterialNotify, AuthorizationActions.BusinessNotifications] : [PermissionCodes.MaterialView], default);
             using var result = JsonDocument.Parse(await client.GetStringAsync("/api/materials/notification-permission"));
             Assert.Equal(enabled, result.RootElement.GetProperty("enabled").GetBoolean());
             Assert.True(await repository.HasUserPermissionAsync(username, UserRole.Engineer, PermissionCodes.MaterialView, default));

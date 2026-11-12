@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import { ref } from 'vue'
 import SideNav from './SideNav.vue'
 import ProjectReport from './ProjectReportPage.vue'
@@ -18,7 +19,7 @@ function toggleTheme() { dark.value = !dark.value; applyPdmTheme(dark.value ? 'c
     </div>
     <div class="report-preview-content">
       <header class="report-preview-header">
-        <strong>{{ companyName }}</strong>
+        <strong><CompanyName :name="companyName" /></strong>
         <div class="report-preview-header__actions">
           <span class="report-preview-disclosure">设计待确认</span>
           <button type="button" @click="toggleTheme">{{ dark ? '浅色主题' : '深色主题' }}</button>

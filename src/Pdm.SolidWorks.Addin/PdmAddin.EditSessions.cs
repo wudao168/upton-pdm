@@ -54,7 +54,7 @@ public sealed partial class PdmAddin
         try
         {
             if (!EnsureEditJournal()) return;
-            if (localEdits.TryGetValue(document.Id, out var existing) && !existing.Closed && existing.CheckedOutAt == document.CheckedOutAt) return;
+            if (localEdits.TryGetValue(document.Id, out var existing) && !existing.Closed && !existing.CheckoutSessionLost && existing.CheckedOutAt == document.CheckedOutAt) return;
             PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var metadata);
             using (var process = Process.GetCurrentProcess())
             {
@@ -104,6 +104,17 @@ public sealed partial class PdmAddin
                 nextArchiveBatchRecoveryUtc = DateTime.UtcNow.AddSeconds(30);
                 if (!await ReconcileArchiveBatchesAsync()) return;
             }
+            // Archive reconciliation can yield to a foreground operation. Reserve
+            // the same workspace gate while retrying acquisition rollback so a
+            // new checkout cannot be mistaken for a failed in-flight acquisition.
+            if (!CanMaintainEdits()) return;
+            if (editJournal.ReadAll().Any(entry => entry.AcquisitionRollbackPending && !entry.Closed))
+            {
+                if (!TryBeginWorkspaceOperation("正在核对未完成的编辑权限")) return;
+                try { await RecoverRecordedAcquisitionsAsync(); }
+                finally { EndWorkspaceOperation(); }
+            }
+            if (!CanMaintainEdits()) return;
             var pending = PrepareClosedEdits();
             TryOfferIdleRelease();
             await ClosePreservedEditsAsync(pending, lifetime.Token);
@@ -120,7 +131,9 @@ public sealed partial class PdmAddin
 
     private IReadOnlyList<LocalEditDraft> PrepareClosedEdits()
     {
-        if (localEdits.Count == 0) return Array.Empty<LocalEditDraft>();
+        // A restarted client can have only retained records from a previous session.
+        // They still need the guarded recovery pass below even without active edits.
+        if (editJournal == null) return Array.Empty<LocalEditDraft>();
         if (IsSolidWorksCommandActive()) return Array.Empty<LocalEditDraft>();
         // Includes invisible component documents still used by an open assembly.
         var loaded = (application.GetDocuments() as Array)?.OfType<IModelDoc2>()
@@ -134,7 +147,7 @@ public sealed partial class PdmAddin
             var closing = false;
             try
             {
-                if (entry.Closed) continue;
+                if (entry.Closed || entry.CheckoutSessionLost || entry.AcquisitionRollbackPending) continue;
                 if (loaded.TryGetValue(entry.SourcePath, out var model))
                 {
                     if (entry.PendingClose) continue;

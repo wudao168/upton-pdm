@@ -46,10 +46,11 @@ public sealed class DingTalkVisitorTests
     {
         using var baseFactory = new PdmApiFactory();
         var repo = baseFactory.Services.GetRequiredService<IPdmRepository>();
-        var numbering = await repo.GetProjectNumberingOptionsAsync(default); var company = numbering.Organizations.First().Id;
+        var numbering = await repo.GetProjectNumberingOptionsAsync(default); var company = (await repo.FindUserAsync("admin", default))!.CompanyId!.Value;
         var customer = (await repo.ListCustomersAsync(false,default)).First().Id;
         await repo.CreateUserAsync(new(Guid.NewGuid(),"responsible","负责人","unused",Upton.Pdm.Domain.UserRole.Administrator,true),default);
         await repo.SetUserCompanyScopeAsync("responsible",company,false,[],"admin",default);
+        await ApiTestAuthorization.GrantRoleAsync(repo, "Administrator", Upton.Pdm.Domain.AuthorizationActions.BusinessNotifications);
         var type = numbering.ProjectTypes.First().Code; var equipment = numbering.EquipmentTypes.First().Code;
         var root = await repo.CreateNumberedProjectAsync(new(company,type,equipment,customer,"访客项目一",null,new(2026,10,13),1,"admin",Path.GetTempPath(),Path.GetTempPath()),default);
         var second = await repo.CreateNumberedProjectAsync(new(company,type,equipment,customer,"访客项目二",null,new(2026,10,13),1,"admin",Path.GetTempPath(),Path.GetTempPath()),default);
@@ -74,7 +75,7 @@ public sealed class DingTalkVisitorTests
         var projects = await client.GetFromJsonAsync<JsonElement>("/api/integrations/dingtalk/opl/guest/projects"); Assert.Equal(2,projects.GetArrayLength());
         Assert.DoesNotContain("rows",projects.GetRawText()); Assert.DoesNotContain("owner",projects.GetRawText());
         var response = await client.PostAsync($"/api/integrations/dingtalk/opl/guest/projects/{root.Id}/submit",Body("现场问题",child.Id));
-        Assert.Equal(HttpStatusCode.OK,response.StatusCode);
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         var receipt = await response.Content.ReadFromJsonAsync<JsonElement>(); Assert.Equal("钉钉访客王工",receipt.GetProperty("submittedBy").GetString()); Assert.True(receipt.GetProperty("notificationSent").GetBoolean());
         var issue = Assert.Single(await factory.Services.GetRequiredService<IProjectOplRepository>().ListAsync(root.Id,default));
         Assert.Equal("钉钉访客王工",issue.CreatedByDisplayName); Assert.StartsWith("dingtalk:",issue.CreatedBy); Assert.Equal("处理中",issue.Status); Assert.Equal("高",issue.Priority); Assert.Equal("现场检查中",issue.Solution); Assert.Equal("responsible",issue.Owner); Assert.Equal(new DateOnly(2026,10,20),issue.DueDate); Assert.Equal(child.Id,issue.RelatedProjectId); Assert.Single(storage.Files);

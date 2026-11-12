@@ -13,7 +13,7 @@ public sealed partial class MaterialRelationServiceTests
     public async Task SavingOneInstanceNeverChangesAnotherSameMaterialOrKitInstance(bool useKit)
     {
         var clock = TimeProvider.System;
-        var pdm = new InMemoryPdmRepository(clock);
+        var pdm = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(clock);
         var materials = new InMemoryMaterialRepository(clock);
         var kits = new InMemoryEngineeringKitRepository();
         var store = new InMemoryMaterialRelationRepository();

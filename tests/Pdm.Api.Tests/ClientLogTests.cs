@@ -164,7 +164,7 @@ public sealed class ClientLogTests : IDisposable
     {
         var repository = services.GetRequiredService<IPdmRepository>();
         var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First(x => x.IsActive).Id;
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
+        await ApiTestAuthorization.EnsureUserAsync(repository, new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
         await repository.SetUserCompanyScopeAsync("admin", company, false, [], "admin", default);
     }
     private static string Token(string username, string role) => new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken("upton-pdm", "upton-pdm-clients",

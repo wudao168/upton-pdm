@@ -1,5 +1,36 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'StorageBackup.Runtime.ps1')
 
+function ConvertTo-PdmRestorableSqlDump([AllowEmptyString()][string]$Sql) {
+    # MySQL's version-comment wrapper can retain a single-statement trigger's
+    # terminator inside the comment. The CLI then rejects the closing comment.
+    # Anchor to mysqldump's CREATE/DEFINER/TRIGGER header; never rewrite row data
+    # or the internal statements of BEGIN/END trigger bodies.
+    $pattern = '(^[ \t]*/\*!\d+\s+CREATE\*/\s+/\*!\d+\s+DEFINER=(?:(?!\*/).)*?\*/\s+/\*!\d+\s+TRIGGER\b(?:(?!\*/).)*?\bFOR\s+EACH\s+ROW\s+)((?:(?!\*/).)*?)(\s*\*/;;)'
+    $options = [Text.RegularExpressions.RegexOptions]::Multiline -bor [Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $expression = [Text.RegularExpressions.Regex]::new($pattern, $options)
+    return $expression.Replace($Sql, [Text.RegularExpressions.MatchEvaluator]{
+        param($match)
+        $body = $match.Groups[2].Value
+        $statement = $body.TrimEnd()
+        if ($statement -notmatch '^(SIGNAL|INSERT)\b' -or -not $statement.EndsWith(';')) { return $match.Value }
+        return $match.Groups[1].Value + $statement.Substring(0, $statement.Length - 1) + $body.Substring($statement.Length) + $match.Groups[3].Value
+    })
+}
+
+function Resolve-PdmMySqlTool([string]$ProjectRoot, $Receipt, [ValidateSet('mysql.exe', 'mysqldump.exe')][string]$FileName) {
+    $recordedHome = [string]$Receipt.mysqlHome
+    if (-not [string]::IsNullOrWhiteSpace($recordedHome)) {
+        $recordedTool = [IO.Path]::Combine($recordedHome, 'bin', $FileName)
+        if ([IO.File]::Exists($recordedTool)) { return $recordedTool }
+    }
+    $version = [string]$Receipt.mysqlVersion
+    if ($version -notmatch '^\d+\.\d+\.\d+$') { throw '部署记录中的数据库版本无效，请核对本机运行环境。' }
+    $relocatedTool = Join-Path $ProjectRoot ('.runtime\mysql-' + $version + '-winx64\bin\' + $FileName)
+    if (-not [IO.File]::Exists($relocatedTool)) { throw '未找到部署记录对应的数据库工具，请核对本机运行目录。' }
+    Assert-PdmOrdinaryBackupPath $relocatedTool
+    return [IO.Path]::GetFullPath($relocatedTool)
+}
 function Resolve-PdmBackupPath([string]$Root, [string]$Relative) {
     if ([IO.Path]::IsPathFullyQualified($Relative)) { throw '备份清单含有绝对目标路径，已停止。' }
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
@@ -36,6 +67,26 @@ function Get-PdmStorageBackupPlan([string]$ProjectRoot, [switch]$IncludeTableCou
             $key = $Matches[1]; $value = $Matches[2]
             $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
             [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+        }
+        if (-not $env:PDM_DB_PASSWORD -and @($serviceEnvironment | Where-Object { $_ }).Count -eq 0) {
+            # 本机启动脚本使用私有配置文件，未注册Windows服务时沿用同一组配置。
+            $secretPath = Join-Path $local 'secrets\pdm-secrets.json'
+            if (Test-Path -LiteralPath $secretPath -PathType Leaf) {
+                $secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $localEnvironment = @{
+                    'ASPNETCORE_ENVIRONMENT' = 'Production'
+                    'PDM_DB_PASSWORD' = [string]$secrets.databasePassword
+                    'PDM_JWT_SIGNING_KEY' = [string]$secrets.jwtSigningKey
+                    'Pdm__Storage__UploadTempRoot' = Join-Path $local 'uploads'
+                    'Pdm__Storage__ProgramTemplateRoot' = Join-Path $local 'program-templates'
+                    'Pdm__PreviewWorker__AllowLocalExecution' = 'false'
+                }
+                foreach ($key in $localEnvironment.Keys) {
+                    if ([Environment]::GetEnvironmentVariable($key, 'Process')) { continue }
+                    $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+                    [Environment]::SetEnvironmentVariable($key, $localEnvironment[$key], 'Process')
+                }
+            }
         }
         if (-not $env:PDM_DB_PASSWORD) { throw '缺少API服务的数据库配置，不能确认实际备份范围。' }
         if ($Database) {
@@ -120,7 +171,7 @@ function Test-PdmStorageBackupFiles($Manifest, [string]$Root) {
         }
         $lookup[$file.relativePath] = $file
     }
-    foreach ($reference in @($Manifest.references)) {
+    foreach ($reference in @($Manifest.references | Where-Object { $null -ne $_ })) {
         $file = $lookup[$reference.relativePath]
         if ($null -eq $file -or [long]$file.length -ne [long]$reference.length -or $file.sha256 -ne $reference.sha256) {
             throw "数据库文件引用未能映射到恢复副本：$($reference.relativePath)"

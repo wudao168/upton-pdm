@@ -416,6 +416,11 @@ internal static partial class Program
    try{NativeFileOpenSafetyScenario(args[2]);}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
   }
+  if(args.Length>1&&args[1]=="--checkout-consistency-regression")
+  {
+   try{CheckoutConsistencyScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
   if(args.Length>1&&args[1]=="--saved-insertion-completion-regression")
   {
    try{SavedInsertionCompletionScenario(args[2]);}
@@ -707,11 +712,11 @@ internal static partial class Program
    }
    return;
   }
-  if(args.Length>1&&(args[1]=="--acquire-window-regression"||args[1]=="--acquire-window-failure-regression"))
+  if(args.Length>1&&(args[1]=="--acquire-window-regression"||args[1]=="--acquire-window-failure-regression"||args[1]=="--acquire-missing-regression"))
   {
    using(var acquireHost=new Form{Opacity=0,ShowInTaskbar=false})
    {
-    acquireHost.Shown+=async(_,__)=>{try{await AcquireWindowRecoveryScenario(args[1]=="--acquire-window-failure-regression");}
+    acquireHost.Shown+=async(_,__)=>{try{await AcquireWindowRecoveryScenario(args[1]=="--acquire-window-failure-regression",args[1]=="--acquire-missing-regression");}
      catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{acquireHost.Close();}};
     Application.Run(acquireHost);
    }
@@ -752,11 +757,20 @@ internal static partial class Program
    }
    return;
   }
-  if(args.Length>1&&args[1]=="--window-tree-speed-regression")
+  if(args.Length>1&&(args[1]=="--window-tree-speed-regression"||args[1]=="--indexed-component-selection-regression"))
   {
    using(var windowHost=new Form{Opacity=0,ShowInTaskbar=false})
    {
-    windowHost.Shown+=async(_,__)=>{try{await WindowTreeSpeedScenario(windowHost);}
+    windowHost.Shown+=async(_,__)=>{try
+     {
+      if(args[1]=="--window-tree-speed-regression") await WindowTreeSpeedScenario(windowHost);
+      else
+      {
+       windowHost.ClientSize=new Size(800,1000);
+       await IndexedComponentSelectionScenario(windowHost);
+       await WindowViewStateScenario(windowHost);
+      }
+     }
      catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{windowHost.Close();}};
     Application.Run(windowHost);
    }
@@ -784,7 +798,8 @@ internal static partial class Program
   }
   if(args.Length>1&&args[1]=="--missing-readonly-open-regression")
   {
-   ControlledNativeFirstScenario(true);
+   try { ControlledNativeFirstScenario(true); }
+   catch(Exception error) { Console.WriteLine("FAIL: "+error.GetType().FullName+": "+error.Message); Environment.ExitCode=1; }
    return;
   }
   if(args.Length>1&&args[1]=="--latest-readonly-working-regression")
@@ -882,6 +897,12 @@ internal static partial class Program
   if(args.Length>1&&args[1]=="--partial-property-card-regression")
   {
    try{PartialPropertyReadCheck();PartialPropertyCardScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--batch-property-write-regression")
+  {
+   try{BatchPropertyWriteScenario();}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
@@ -1658,7 +1679,7 @@ internal static partial class Program
    var rejected=false;
    try{
     var values=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("ReadArchivePreflightProperties",Flags).Invoke(plugin,
-      new object[]{node,cards,new Dictionary<string,IReadOnlyList<string>>{{path,new[]{"Default","Alternate"}}}});
+      new object[]{node,cards,new Dictionary<string,IReadOnlyList<string>>{{path,new[]{"Default","Alternate"}}},null});
     if(!missing&&!unavailable){
      if(values["配置:Default/编号"]!="Default-resolved"||values["配置:Alternate/编号"]!="Alternate-resolved")throw new Exception("Referenced configuration properties were not retained");
      var prepared=new Dictionary<string,string>{{"配置:Default/编号","saved-primary"}};

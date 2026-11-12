@@ -13,7 +13,7 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class AssemblyPreviewTests
 {
     [Fact]
-    public async Task ChildChangeRefreshesPreviewWithoutParentVersionAndFrozenManifestKeepsOriginalCombination()
+    public async Task ConfirmedLatestReferencesRefreshPreviewWithoutParentVersionAndFrozenManifestKeepsOriginalCombination()
     {
         using var fixture = new Fixture();
         await fixture.InitializeAsync();
@@ -68,7 +68,7 @@ public sealed class AssemblyPreviewTests
     private sealed class Fixture : IDisposable
     {
         private readonly string directory = Path.Combine(Path.GetTempPath(), "pdm-assembly-preview-tests", Guid.NewGuid().ToString("N"));
-        public InMemoryPdmRepository Repository { get; } = new(TimeProvider.System);
+        public InMemoryPdmRepository Repository { get; } = BusinessTestRepository.Create(TimeProvider.System);
         public Agent Agent { get; } = new();
         public Project Project { get; private set; } = null!;
         public PdmDocument Parent { get; private set; } = null!;
@@ -98,7 +98,7 @@ public sealed class AssemblyPreviewTests
         }
 
         public Task<ControlledOpenManifest> ManifestAsync(Guid? version = null) => workflow.CreateControlledOpenManifestAsync(
-            Parent.Id, version, false, false, "admin", UserRole.Administrator, default);
+            Parent.Id, version, false, false, "admin", UserRole.Administrator, default, resolveLegacyReferences: !version.HasValue);
 
         public async Task<DocumentVersion> SaveChildAsync(string text)
         {

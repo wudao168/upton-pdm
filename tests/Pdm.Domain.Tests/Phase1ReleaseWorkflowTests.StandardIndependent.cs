@@ -11,7 +11,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [InlineData(true)]
     public async Task StandardIndependentRelease_PendingCadDoesNotBlockFormalOrSupplementLifecycle(bool unclassifiedSource)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var project = (await repository.FindProjectAsync(ProjectId, default))!;
         var session = Guid.NewGuid();
@@ -43,7 +43,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
                 "admin", UserRole.Administrator, default);
             package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
             foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-                package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+                package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
             Assert.Equal(ReleasePackageState.Published, package.State);
             Assert.False(package.LocksDocuments);
             Assert.Empty(package.VersionBindings!);
@@ -55,7 +55,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [Fact]
     public async Task StandardIndependentRelease_ManualBomCanCompleteLifecycleWithoutCadSnapshot()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var project = await repository.CreateProjectAsync(new("STANDARD-NO-CAD", "标准件独立发布", "admin", "vault", "release"), "admin", default);
         await repository.SetMainProjectStaffingAsync(project.Id, new SetMainProjectStaffingCommand("admin", [], ["admin"]), "admin", default);
@@ -67,7 +67,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
         package = await workflow.UpdateReleasePackageDraftAsync(package.Id, "", [item.Id], null, "admin", UserRole.Administrator, default);
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
-            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+            package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Null(package.ReferenceSnapshotId);
         Assert.Equal(2, Assert.Single(package.StandardBomSnapshot).Quantity);

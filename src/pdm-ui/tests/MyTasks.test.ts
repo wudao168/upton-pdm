@@ -4,6 +4,14 @@ import MyTasks from '../src/components/MyTasks.vue'
 import type { MyApprovalTask, UserNotification } from '../src/types'
 
 describe('MyTasks', () => {
+  it.each(['', 'zhangsan'])('密码重置申请缺少姓名或误填账号时不展示账号：%s', displayName => {
+    const wrapper = mount(MyTasks, { props: { tasks: [], locks: [], materialCodeTasks: [],
+      passwordResetTasks: [{ id: 'reset', username: 'zhangsan', displayName, requestedAt: '2026-11-11T00:00:00Z' }],
+      pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    expect(wrapper.text()).toContain('姓名待补充 密码重置申请')
+    expect(wrapper.text()).not.toContain('zhangsan')
+    wrapper.unmount()
+  })
   it('刷新位于工具栏最左侧并保留刷新事件与禁用状态', async () => {
     const wrapper=mount(MyTasks,{props:{tasks:[],notifications:[],locks:[],materialCodeTasks:[],passwordResetTasks:[],pending:false,onRequestRelease:vi.fn(),onForceRelease:vi.fn(),onResetPassword:vi.fn()}})
     expect(wrapper.get('.pdm-task-toolbar').element.firstElementChild?.textContent?.trim()).toBe('刷新')
@@ -325,14 +333,14 @@ describe('MyTasks', () => {
     expect(wrapper.get('[aria-label="待办类型"]').text()).toContain('全部待办（4）')
     expect(wrapper.text()).toContain('P700001 BOM发布审批')
     expect(wrapper.text()).toContain('P700001 BOM料号审批')
-    expect(wrapper.text()).toContain('申请人 engineer')
+    expect(wrapper.text()).toContain('申请人 姓名待补充')
     expect(wrapper.text()).toContain('P700001 · 气密设备')
-    expect(wrapper.text()).toContain('zhangsan 密码重置申请')
+    expect(wrapper.text()).toContain('张三 密码重置申请')
 
     await wrapper.get('[role="tab"][aria-selected="false"]:nth-of-type(4)').trigger('click')
     expect(wrapper.text()).toContain('P700001 · 气密设备')
     expect(wrapper.text()).not.toContain('P700001 BOM发布审批')
-    expect(wrapper.text()).not.toContain('zhangsan 密码重置申请')
+    expect(wrapper.text()).not.toContain('张三 密码重置申请')
   })
 
   it('groups BOM number approvals from the same project into one task row', async () => {

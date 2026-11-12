@@ -92,6 +92,9 @@ describe('立项申请', () => {
   it('展示特殊立项、空订单日期及可筛选列表', async () => {
     const wrapper = render(); await flushPromises()
     expect(wrapper.get('.application-table').text()).toContain('特殊立项')
+    const customer = wrapper.get('.application-table tbody tr td:nth-child(3)')
+    expect(customer.text()).toBe('新客户')
+    expect(customer.get('.pdm-company-name .pdm-person-initial').attributes('data-initial')).toBe('新')
     expect(wrapper.get('.application-table').text()).toContain('未填写')
     await wrapper.get('[aria-label="搜索立项申请"]').setValue('不匹配')
     expect(wrapper.get('.application-table').text()).toContain('没有符合条件的申请')

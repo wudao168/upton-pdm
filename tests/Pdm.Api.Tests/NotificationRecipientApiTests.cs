@@ -18,7 +18,7 @@ public sealed partial class NotificationRecipientApiTests
         signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256)));
 
     [Fact]
-    public async Task MixedAdministratorsReceiveTheirBusinessTasksWithoutAdministrativeFallbackTasks()
+    public async Task MixedRolesReceiveOnlyTasksAllowedByConfiguredApprovalPermissions()
     {
         await using var factory = new PdmApiFactory();
         using var client = factory.CreateClient();
@@ -45,20 +45,31 @@ public sealed partial class NotificationRecipientApiTests
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("mixed-engineer"));
         Assert.Equal(2, (await client.GetFromJsonAsync<UserNotification[]>("/api/notifications/mine"))!.Length);
         var engineerTasks = (await client.GetFromJsonAsync<JsonElement[]>("/api/material-code/applications?status=Pending"))!;
-        Assert.Equal(new[] { assigned.Id, businessEmergency.Id }.Order(), engineerTasks.Select(item => item.GetProperty("id").GetGuid()).Order());
-        Assert.False(engineerTasks.Single(item => item.GetProperty("id").GetGuid() == assigned.Id).GetProperty("canEmergencyDecide").GetBoolean());
+        Assert.Equal(new[] { assigned.Id, administratorOnly.Id, businessEmergency.Id }.Order(), engineerTasks.Select(item => item.GetProperty("id").GetGuid()).Order());
+        Assert.True(engineerTasks.Single(item => item.GetProperty("id").GetGuid() == assigned.Id).GetProperty("canEmergencyDecide").GetBoolean());
         var management = (await client.GetFromJsonAsync<JsonElement[]>("/api/material-code/applications"))!;
-        Assert.True(management.Single(item => item.GetProperty("id").GetGuid() == legacy.Id).GetProperty("canDecide").GetBoolean());
+        Assert.False(management.Single(item => item.GetProperty("id").GetGuid() == legacy.Id).GetProperty("canDecide").GetBoolean());
         Assert.True(management.Single(item => item.GetProperty("id").GetGuid() == administratorOnly.Id).GetProperty("canEmergencyDecide").GetBoolean());
 
         var own = await repository.RegisterDocumentAsync(new(project.Id, "MIXED-OWN", "自己的零件", "MIXED-OWN.SLDPRT", DocumentKind.Part), "admin", default);
         var other = await repository.RegisterDocumentAsync(new(project.Id, "MIXED-OTHER", "其他人的零件", "MIXED-OTHER.SLDPRT", DocumentKind.Part), "admin", default);
         await repository.CheckoutAsync(own.Id, "mixed-engineer", Guid.NewGuid(), "工程电脑", DateTimeOffset.UtcNow.AddMinutes(10), default);
         await repository.CheckoutAsync(other.Id, "admin", Guid.NewGuid(), "其他电脑", DateTimeOffset.UtcNow.AddMinutes(10), default);
-        Assert.Equal(own.Id, Assert.Single((await client.GetFromJsonAsync<JsonElement[]>("/api/edit-locks"))!).GetProperty("documentId").GetGuid());
+        var visibleLocks = (await client.GetFromJsonAsync<JsonElement[]>("/api/edit-locks"))!;
+        Assert.Contains(visibleLocks, item => item.GetProperty("documentId").GetGuid() == own.Id && item.GetProperty("ownedByCurrentUser").GetBoolean());
+        Assert.Contains(visibleLocks, item => item.GetProperty("documentId").GetGuid() == other.Id && !item.GetProperty("ownedByCurrentUser").GetBoolean());
 
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("mixed-approver"));
+        var configuredTasks = (await client.GetFromJsonAsync<JsonElement[]>("/api/material-code/applications?status=Pending"))!;
+        Assert.Equal(new[] { legacy.Id, assigned.Id, administratorOnly.Id }.Order(), configuredTasks.Select(item => item.GetProperty("id").GetGuid()).Order());
+        var authorization = await repository.GetAuthorizationSettingsAsync(default);
+        await repository.SaveAuthorizationSettingsAsync(authorization with {
+            Templates = authorization.Templates.Select(template => template.RoleCode == "Administrator"
+                ? template with { Grants = template.Grants.Where(grant => grant.Permission != PermissionCodes.ApprovalEmergencySubstitute).ToArray() } : template).ToArray()
+        }, authorization.Revision, default);
         Assert.Equal(legacy.Id, Assert.Single((await client.GetFromJsonAsync<JsonElement[]>("/api/material-code/applications?status=Pending"))!).GetProperty("id").GetGuid());
+        client.DefaultRequestHeaders.Authorization = new("Bearer", Token("mixed-engineer"));
+        Assert.Equal(assigned.Id, Assert.Single((await client.GetFromJsonAsync<JsonElement[]>("/api/material-code/applications?status=Pending"))!).GetProperty("id").GetGuid());
     }
 
     [Fact]
@@ -78,8 +89,10 @@ public sealed partial class NotificationRecipientApiTests
                 new(Guid.NewGuid(), actor, "ProjectUpdate", "业务发布结果", "发布已完成", project.Id, null, "business-result", DateTimeOffset.UtcNow, null)
             ], default);
         }
+        await ApiTestAuthorization.GrantRoleAsync(repository, "developer", PermissionCodes.ApprovalDecide, AuthorizationActions.BusinessNotifications);
         var application = await materials.CreateMaterialCodeApplicationAsync(new(Guid.NewGuid(), project.Id, Guid.NewGuid(),
-            MaterialCodeApplicationStatus.Pending, "business-recipient", DateTimeOffset.UtcNow, null, null, null, null, null, 1), default);
+            MaterialCodeApplicationStatus.Pending, "business-recipient", DateTimeOffset.UtcNow, null, null, null, null, null, 1)
+        { ApprovalWorkflow = new("business-inbox-test", 1, [new(Guid.NewGuid(), 1, ApprovalStage.ProcessReview, "业务审批", ["business-recipient"])], []) }, default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("system-recipient"));
         Assert.Equal("System", Assert.Single((await client.GetFromJsonAsync<UserNotification[]>("/api/notifications/mine"))!).Category);
         foreach (var endpoint in new[] { "/api/approval-tasks/mine", "/api/validation-plan-approval-tasks/mine", "/api/quality/validation-plan-approval-tasks/mine", "/api/program-templates/tasks/mine", "/api/edit-locks", "/api/material-code/applications?status=Pending" })
@@ -90,7 +103,7 @@ public sealed partial class NotificationRecipientApiTests
         var invalidRole = await client.PutAsJsonAsync("/api/workflow-notifications/flows/standard-release",
             new SaveWorkflowNotification(true, [new("CompanyRole", null, RoleCode: "Administrator")], catalog.RowVersion, catalog.CompanyId));
         Assert.Equal(HttpStatusCode.BadRequest, invalidRole.StatusCode);
-        Assert.Contains("系统管理员角色不用于业务通知", await invalidRole.Content.ReadAsStringAsync());
+        Assert.Contains("所选岗位未获准接收业务消息", await invalidRole.Content.ReadAsStringAsync());
 
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("business-recipient"));
         Assert.Equal(2, (await client.GetFromJsonAsync<UserNotification[]>("/api/notifications/mine"))!.Length);

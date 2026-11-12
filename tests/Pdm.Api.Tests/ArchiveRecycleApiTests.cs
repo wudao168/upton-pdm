@@ -25,13 +25,13 @@ public sealed class ArchiveRecycleApiTests
         using var factory = new RecycleFactory(); using var client = factory.CreateClient();
         void Authenticate(string role)
         {
-            var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name, "admin"), new(ClaimTypes.Role, role)], expires: DateTime.UtcNow.AddMinutes(10),
+            var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name, role == "Engineer" ? "engineer" : "admin"), new(ClaimTypes.Role, role)], expires: DateTime.UtcNow.AddMinutes(10),
                 signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
             client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));
         }
         Authenticate("Administrator");
         var repository = factory.Services.GetRequiredService<IPdmRepository>(); Assert.Contains("InMemory", repository.GetType().Name);
-        var project = await repository.CreateProjectAsync(new("REC-HTTP-" + Guid.NewGuid().ToString("N"), "批次回收HTTP测试", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("REC-HTTP-" + Guid.NewGuid().ToString("N"), "批次回收HTTP测试", "admin", "vault", "release"), "admin", default);
         var batch = Guid.NewGuid(); var session = Guid.NewGuid(); var registration = new ArchiveRegistrationContext(batch, session, "QA");
         async Task<PdmDocument> Reserve(string name, DocumentKind kind) => await repository.ReserveArchiveDocumentAsync(new(project.Id, name, name, name + (kind == DocumentKind.Assembly ? ".SLDASM" : ".SLDPRT"), kind), "admin", registration, default);
         var part = await Reserve("PART", DocumentKind.Part); var root = await Reserve("ROOT", DocumentKind.Assembly);
@@ -62,7 +62,7 @@ public sealed class ArchiveRecycleApiTests
             signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
         client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));
         var repository = factory.Services.GetRequiredService<IPdmRepository>(); Assert.Contains("InMemory", repository.GetType().Name);
-        var project = await repository.CreateProjectAsync(new("REC-BATCH-" + Guid.NewGuid().ToString("N"), "单项回收隔离测试", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("REC-BATCH-" + Guid.NewGuid().ToString("N"), "单项回收隔离测试", "admin", "vault", "release"), "admin", default);
         var batch = Guid.NewGuid(); var session = Guid.NewGuid(); var registration = new ArchiveRegistrationContext(batch, session, "QA");
         async Task<PdmDocument> Reserve(string name, DocumentKind kind) => await repository.ReserveArchiveDocumentAsync(new(project.Id, name, name, name + (kind == DocumentKind.Assembly ? ".SLDASM" : ".SLDPRT"), kind), "admin", registration, default);
         var free = await Reserve("FREE", DocumentKind.Part); var used = await Reserve("USED", DocumentKind.Part); var root = await Reserve("ROOT", DocumentKind.Assembly);
@@ -92,10 +92,11 @@ public sealed class ArchiveRecycleApiTests
         Assert.Single(await repository.ListDocumentVersionsAsync(free.Id, default));
     }
 
-    private sealed class RecycleFactory : WebApplicationFactory<Program>
+    private sealed class RecycleFactory : PdmApiFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseContentRoot(AppContext.BaseDirectory); builder.UseEnvironment("Development"); builder.ConfigureLogging(logging => logging.ClearProviders());
             builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["Pdm:Database:Provider"] = "InMemory", ["Pdm:Database:RunMigrations"] = "false" }));
             builder.ConfigureServices(services => { foreach (var service in services.Where(item => item.ServiceType == typeof(Microsoft.Extensions.Hosting.IHostedService) && item.ImplementationType?.Namespace == "Upton.Pdm.Api").ToArray()) services.Remove(service); services.AddDataProtection().UseEphemeralDataProtectionProvider(); });

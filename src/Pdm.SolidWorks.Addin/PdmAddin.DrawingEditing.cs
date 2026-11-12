@@ -28,7 +28,10 @@ public sealed partial class PdmAddin
             throw new InvalidOperationException("编辑上下文包含不同图档的同名文件，原有窗口已保留，请核对文件名后重试。");
         return new ControlledOpenManifestDto { Id = Guid.NewGuid(), ProjectId = owner.ProjectId, ProjectCode = owner.ProjectCode,
             RootDocumentId = owner.RootDocumentId, RootVersionId = owner.RootVersionId, RootRevision = owner.RootRevision,
-            RootRelativePath = owner.RootRelativePath, ForEdit = true, Warnings = requested.Warnings,
+            RootRelativePath = owner.RootRelativePath, ForEdit = true,
+            ReferenceIssues = OpenReferenceFindings.Merge((owner.ReferenceIssues ?? new List<OpenReferenceIssueDto>())
+                .Concat(requested.ReferenceIssues ?? new List<OpenReferenceIssueDto>())),
+            Warnings = (owner.Warnings ?? new List<string>()).Concat(requested.Warnings ?? new List<string>()).Distinct().ToList(),
             Files = files.Select(file => new ControlledOpenFileDto { DocumentId = file.DocumentId, VersionId = file.VersionId,
                 Revision = file.Revision, FileName = file.FileName, RelativePath = file.RelativePath, FileLength = file.FileLength,
                 Sha256 = file.Sha256, Configuration = file.Configuration, IsRoot = file.DocumentId == owner.RootDocumentId,

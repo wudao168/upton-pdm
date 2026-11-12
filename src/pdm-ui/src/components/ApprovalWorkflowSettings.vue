@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DepartmentSelectField from './DepartmentSelectField.vue'
 import UserSelect from './UserSelect'
 import { computed, reactive, ref, watch } from 'vue'
 import { ElTabs, ElTabPane } from 'element-plus'
@@ -216,6 +217,10 @@ function unitLabel(unit: OrganizationUnit) {
   const context = [company, ...names.slice(0, -1)].filter(Boolean).join(' / ')
   return `${unit.name}（${manager ? '负责人：' + manager.displayName : '未配置有效负责人'}）${context ? ' · ' + context : ''}`
 }
+function selectedUnitLabel(step: ApprovalWorkflowStepTemplate) {
+  const unit = activeUnits.value.find(item => item.id === step.fixedUnitId)
+  return unit && step.assigneeSource === 'FixedUnitManager' ? unitLabel(unit) : undefined
+}
 function changeSource(step: ApprovalWorkflowStepTemplate) {
   step.parallelDepartments = step.assigneeSource === 'ParallelDepartments' ? [] : undefined
   step.requireAllApprovers = false
@@ -380,18 +385,18 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
             <div v-if="step.assigneeSource === 'ParallelDepartments'" class="workflow-target">
               <p>每个部门独立处理，全部部门通过后流转；同一人负责多个部门时逐部门确认。</p>
               <label v-for="(branch, b) in step.parallelDepartments ?? []" :key="b">并行部门 {{ b + 1 }}
-                <select v-model="branch.unitId" aria-label="并行审批部门"><option value="">请选择部门</option><option v-for="unit in activeUnits" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select>
+                <DepartmentSelectField :name="activeUnits.find(unit => unit.id === branch.unitId)?.name"><select v-model="branch.unitId" aria-label="并行审批部门"><option value="">请选择部门</option><option v-for="unit in activeUnits" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select></DepartmentSelectField>
                 <label><input type="checkbox" v-model="branch.requireAll" />该部门全员通过</label>
                 <button type="button" class="pdm-secondary-action" @click="step.parallelDepartments!.splice(b, 1)">移除部门</button>
               </label>
               <button type="button" class="pdm-secondary-action" @click="(step.parallelDepartments ??= []).push({ unitId: '', requireAll: false })">添加并行部门</button>
             </div>
             <label v-if="step.assigneeSource === 'FixedUnitManager' || step.assigneeSource === 'DepartmentMembers'" class="workflow-target">指定部门
-              <select v-model="step.fixedUnitId" aria-label="指定部门" :disabled="pending || saving">
+              <DepartmentSelectField :name="activeUnits.find(unit => unit.id === step.fixedUnitId)?.name" :label="selectedUnitLabel(step)"><select v-model="step.fixedUnitId" aria-label="指定部门" :disabled="pending || saving">
                 <option :value="null" disabled>请选择部门</option>
                 <option v-if="step.fixedUnitId && !activeUnits.some(unit => unit.id === step.fixedUnitId)" :value="step.fixedUnitId" disabled>原指定部门已停用或不存在，请重新选择</option>
                 <option v-for="unit in activeUnits" :key="unit.id" :value="unit.id" :disabled="step.assigneeSource === 'FixedUnitManager' && !unitManager(unit.id)">{{ step.assigneeSource === 'DepartmentMembers' ? unit.name : unitLabel(unit) }}</option>
-              </select>
+              </select></DepartmentSelectField>
             </label>
             <details v-if="step.assigneeSource === 'Role'" class="workflow-target workflow-role-choices">
               <summary>审批角色：{{ step.roleCodes?.map(roleName).join('、') || '请选择角色' }}</summary>

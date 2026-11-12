@@ -36,7 +36,7 @@ public sealed class ProductionScanApiTests(PdmApiFactory factory) : IClassFixtur
         foreach (var (username, permission) in new[] { ("scan-receive", PermissionCodes.ProductionExecute), ("scan-machine", PermissionCodes.ProductionExecute),
                      ("scan-pack", PermissionCodes.ProductionExecute), ("scan-quality", PermissionCodes.ProductionInspect), ("scan-issue", PermissionCodes.ProductionIssue) })
         {
-            var directory = await repository.CreateRoleAsync("扫码测试-" + username, "接口回归", "ProductionViewer", default);
+            var directory = await ApiTestAuthorization.CreateRoleAsync(repository, "扫码测试-" + username, "接口回归", "ProductionViewer", default);
             var definition = directory.Roles.Single(item => item.Name == "扫码测试-" + username);
             var settings = await repository.GetAuthorizationSettingsAsync(default);
             if (settings.Templates.All(item => item.RoleCode != definition.Role))
@@ -50,7 +50,7 @@ public sealed class ProductionScanApiTests(PdmApiFactory factory) : IClassFixtur
         }
         Project project;
         TenantContext.Set(new(Guid.NewGuid(), company, company, "admin", "Administrator", false, new HashSet<string>()));
-        try { project = await repository.CreateProjectAsync(new("SCAN-API-" + Guid.NewGuid().ToString("N"), "扫码接口回归", "admin", "vault", "release"), "admin", default); }
+        try { project = await ApiTestAuthorization.CreateProjectAsync(repository, new("SCAN-API-" + Guid.NewGuid().ToString("N"), "扫码接口回归", "admin", "vault", "release"), "admin", default); }
         finally { TenantContext.Clear(); }
         var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "02041000013", "垫片", 2, "件", "钢", "7002541.00-02", "W1", true);
         var release = new ReleasePackage(Guid.NewGuid(), project.Id, "RP-SCAN-API", ReleasePackageState.Published, null, "W1", "W1", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "release")

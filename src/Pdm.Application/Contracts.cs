@@ -186,7 +186,12 @@ public sealed record ControlledOpenManifest(
     string RootRelativePath,
     bool ForEdit,
     IReadOnlyList<ControlledOpenFile> Files,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings)
+{
+    public IReadOnlyList<ControlledOpenReferenceIssue> ReferenceIssues { get; init; } = [];
+}
+
+public sealed record ControlledOpenReferenceIssue(string InstancePath, string FileName, string OriginalPath, string Reason);
 
 public sealed record RegisterDocumentCommand(
     Guid ProjectId,
@@ -939,6 +944,7 @@ public interface ITokenIssuer
 public sealed class ReleaseConversionPendingException(string message, Exception innerException) : Exception(message, innerException);
 
 public class PdmRuleException(string message) : InvalidOperationException(message);
+public sealed class PdmReferenceVersionConfirmationException(string message) : PdmRuleException(message);
 
 public sealed class U9MaterialCodeConflictException(string materialCode)
     : PdmRuleException($"U9C已存在料号 {materialCode}，需要按最新分类流水重新分配。")

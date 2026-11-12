@@ -32,7 +32,7 @@ public sealed class ValidationPlanServiceTests
     public async Task EmergencyApproval_UsesTaskPolicyAndKeepsFollowingNodePending()
     {
         var (service, plans, repository, _, project) = await CreateFixtureAsync();
-        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         var draft = await service.SavePlanAsync(project.Id,
             new("管理员", new DateOnly(2026, 10, 15), [new(null, "测试紧急审核", "内部评审", null, null, null, null, null, 1)]),
             "admin", UserRole.Administrator, default);
@@ -530,7 +530,8 @@ public sealed class ValidationPlanServiceTests
     private static async Task<(ValidationPlanService Service, InMemoryValidationPlanRepository Plans, InMemoryPdmRepository Repository, RecordingFileStorage Storage, Project Project)> CreateFixtureAsync(IValidationPlanFileArchive? archive = null)
     {
         var time = TimeProvider.System;
-        var repository = new InMemoryPdmRepository(time);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(time);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "developer", "验证计划维护员", "unused", UserRole.Administrator, true, RoleCode: "developer"), default);
         var plans = new InMemoryValidationPlanRepository();
         var storage = new RecordingFileStorage(time);
         var service = new ValidationPlanService(plans, repository, storage, new StubRecognitionService(), archive ?? new RecordingValidationPlanFileArchive(), time);

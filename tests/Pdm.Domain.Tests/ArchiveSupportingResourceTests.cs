@@ -100,7 +100,7 @@ public sealed class ArchiveSupportingResourceTests
 
     private static async Task<(InMemoryPdmRepository Repository, PdmWorkflowService Workflow, Project Project)> Fixture()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("AUX-" + Guid.NewGuid().ToString("N"), "随附资源", "admin", "vault", "release"), "admin", default);
         return (repository, new(repository, DispatchProxy.Create<IFileStorage, ArchiveBatchReadReuseTests.Files>(), null!, TimeProvider.System), project);
     }

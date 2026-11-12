@@ -1,11 +1,14 @@
 <script setup lang="ts">
+import DepartmentSelectField from './DepartmentSelectField.vue'
 import PersonName from './PersonName.vue'
 import { computed, ref, watch } from 'vue'
+import { ChevronRight } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
 import { diagnosticRequestId } from '../clientDiagnostics'
 import { getAuthorization, saveAuthorization, previewAuthorization, type AuthorizationAssignment, type AuthorizationDirectory, type AuthorizationSettings, type AuthorizationDecision } from '../authorization'
 import { authorizationRelationGroups, authorizationRelationLabel, type RelationOption } from '../authorizationRelations'
+import { authorizationNavigationGroups, permissionNavigationLocation } from '../authorizationNavigation'
 import AuthorizationRelationChoices from './AuthorizationRelationChoices.vue'
 import type { RolePermissionSettings } from '../types'
 
@@ -25,6 +28,10 @@ const resultFilters = [
   { key: 'allowed', label: '允许' },
   { key: 'denied', label: '未授权' },
 ] as const
+const inlineDescriptionCodes = new Set(['financial.budget.maintain', 'project.budget.edit'])
+const budgetPermissionOrder = new Map([
+  'project.budget.view', 'project.budget.edit', 'financial.budget.maintain', 'project.budget.assessment.edit',
+].map((code, order) => [code, order]))
 const data = ref<AuthorizationDirectory>()
 const draft = ref<AuthorizationSettings>()
 const loading = ref(false)
@@ -32,7 +39,8 @@ const saving = ref(false)
 const error = ref('')
 const tab = ref<typeof pages[number]['key']>('templates')
 const selected = ref('')
-const module = ref('')
+const selectedCategory = ref('')
+const expandedEntry = ref('')
 const templateSearch = ref('')
 const permissionSearch = ref('')
 const userSearch = ref('')
@@ -71,20 +79,66 @@ const filteredProjects = computed(() => data.value?.projects.filter(p => matches
 const projectById = computed(() => new Map(data.value?.projects.map(project => [project.id, project])))
 const currentProject = computed(() => projectById.value.get(projectId.value))
 const projectContext = computed(() => currentProject.value ? `${currentProject.value.code} · ${currentProject.value.name}` : '公司级操作')
-const matchingPermissions = computed(() => data.value?.permissions.filter(p => matches(permissionSearch.value, p.name, p.module)) ?? [])
-const permissions = computed(() => matchingPermissions.value.filter(p => !module.value || p.module === module.value))
-const modules = computed(() => {
+const permissionRows = computed(() => (data.value?.permissions ?? []).map(permission => ({
+  ...permission,
+  location: permissionNavigationLocation(permission),
+})).sort((a, b) => a.location.entryOrder - b.location.entryOrder || a.location.sectionOrder - b.location.sectionOrder ||
+  (budgetPermissionOrder.get(a.code) ?? budgetPermissionOrder.size) - (budgetPermissionOrder.get(b.code) ?? budgetPermissionOrder.size)))
+const matchingPermissions = computed(() => {
+  const terms = permissionSearch.value.split(/[\s/／→>＞]+/).filter(Boolean)
+  return permissionRows.value.filter(p => terms.every(term =>
+    matches(term, p.name, p.module, p.code, p.location.groupLabel, p.location.path)))
+})
+function inCategory(location: ReturnType<typeof permissionNavigationLocation>, key: string) {
+  return !key || location.entryKey === key || location.sectionKey === key
+}
+const activeCategory = computed(() => permissionSearch.value.trim() &&
+  !matchingPermissions.value.some(p => inCategory(p.location, selectedCategory.value)) ? '' : selectedCategory.value)
+const permissions = computed(() => matchingPermissions.value.filter(p => inCategory(p.location, activeCategory.value)))
+const categoryPath = computed(() => {
+  const selected = activeCategory.value
+  const section = permissionRows.value.find(p => p.location.sectionKey === selected)
+  if (section) return section.location.path
+  return authorizationNavigationGroups.flatMap(group => group.items).find(item => item.key === selected)?.label ?? '全部模块'
+})
+type PermissionCount = { total: number; enabled: number }
+type SectionCount = PermissionCount & { key: string; label: string }
+const permissionNavigation = computed(() => {
   const granted = new Set(template.value?.grants.filter(g => g.scopes.length).map(g => g.permission))
-  const counts = new Map<string, { total: number; enabled: number }>([['', { total: 0, enabled: 0 }]])
+  const entries = new Map<string, PermissionCount & { children: Map<string, SectionCount> }>()
+  const all = { total: 0, enabled: 0 }
   for (const permission of matchingPermissions.value) {
-    const count = counts.get(permission.module) ?? { total: 0, enabled: 0 }
-    count.total++
-    const all = counts.get('')!
+    const { entryKey, sectionKey, sectionLabel } = permission.location
+    const entry = entries.get(entryKey) ?? { total: 0, enabled: 0, children: new Map<string, SectionCount>() }
+    const enabled = granted.has(permission.code) ? 1 : 0
+    entry.total++
+    entry.enabled += enabled
     all.total++
-    if (granted.has(permission.code)) { count.enabled++; all.enabled++ }
-    counts.set(permission.module, count)
+    all.enabled += enabled
+    if (sectionKey !== entryKey) {
+      const section = entry.children.get(sectionKey) ?? { key: sectionKey, label: sectionLabel, total: 0, enabled: 0 }
+      section.total++
+      section.enabled += enabled
+      entry.children.set(sectionKey, section)
+    }
+    entries.set(entryKey, entry)
   }
-  return [...counts].map(([key, count]) => ({ key, label: key || '全部模块', ...count }))
+  const groups = authorizationNavigationGroups.map(group => ({
+    key: group.key,
+    label: group.label,
+    entries: group.items.flatMap(item => {
+      const entry = entries.get(item.key)
+      return entry ? [{ key: item.key, label: item.label, total: entry.total, enabled: entry.enabled, sections: [...entry.children.values()] }] : []
+    }),
+  })).filter(group => group.entries.length)
+  return { all, groups }
+})
+const visibleExpandedEntry = computed(() => {
+  if (permissionSearch.value.trim() && !activeCategory.value) {
+    const entries = permissionNavigation.value.groups.flatMap(group => group.entries)
+    if (entries.length === 1 && entries[0]!.key !== expandedEntry.value) return entries[0]!.key
+  }
+  return expandedEntry.value
 })
 const scopes = computed(() => ({ ...data.value?.scopes, ...Object.fromEntries((draft.value?.positions ?? []).filter(p => !p.isSystem).map(p => [p.key, `${p.name}（项目分工）`])) }))
 const selectedUser = computed(() => data.value?.users.find(u => u.username === username.value))
@@ -105,6 +159,13 @@ const canAddAssignment = computed(() => Boolean(editable.value && selectedUser.v
 const showInherited = computed(() => assignmentSource.value !== 'direct')
 const showDirect = computed(() => assignmentSource.value !== 'inherited')
 const permissionByCode = computed(() => new Map(data.value?.permissions.map(p => [p.code, p])))
+const budgetGuide = computed(() => {
+  if (activeCategory.value !== 'project-center/预算') return
+  const summary = permissionByCode.value.get('project.budget.edit')
+  const assessment = permissionByCode.value.get('project.budget.assessment.edit')
+  const shared = permissionByCode.value.get('financial.budget.maintain')
+  if (summary && assessment && shared) return { summary: summary.name, assessment: assessment.name, shared: shared.name }
+})
 const relationPermission = computed(() => relationEdit.value ? permissionByCode.value.get(relationEdit.value.code) : undefined)
 const savedRelationScopes = computed(() => relationEdit.value ? grant(relationEdit.value.code)?.scopes ?? [] : [])
 const relationGroups = computed(() => relationPermission.value
@@ -119,9 +180,10 @@ const previewRows = computed(() => decisions.value
   .filter(d => matches(resultSearch.value, d.definition?.name, d.definition?.module, d.permission)))
 const canCheck = computed(() => Boolean(selectedUser.value && data.value && !loading.value && !saving.value && !changed.value))
 
-function searchPermissions(value: string) {
-  permissionSearch.value = value
-  if (module.value && matchingPermissions.value.length && !modules.value.some(item => item.key === module.value)) module.value = ''
+function selectCategory(entry: string, section = entry) {
+  const collapse = entry === section && visibleExpandedEntry.value === entry
+  selectedCategory.value = section
+  expandedEntry.value = collapse ? '' : entry
 }
 
 function reset() {
@@ -142,10 +204,7 @@ async function load() {
     data.value = value
     reset()
     if (!value.settings.templates.some(t => t.key === assignmentTemplateKey.value && t.isActive)) assignmentTemplateKey.value = ''
-    if (!value.permissions.some(p => p.module === module.value)) {
-      const granted = new Set(template.value?.grants.filter(g => g.scopes.length).map(g => g.permission))
-      module.value = (value.permissions.find(p => granted.has(p.code)) ?? value.permissions[0])?.module ?? ''
-    }
+    if (!permissionRows.value.some(p => inCategory(p.location, selectedCategory.value))) selectCategory('')
     if (!value.users.some(u => u.username === username.value)) username.value = ''
     if (!value.projects.some(p => p.id === projectId.value)) projectId.value = ''
   }
@@ -181,7 +240,13 @@ function toggle(code: string, enabled: boolean) {
   const target = template.value
   if (enabled) {
     const seen = new Set<string>()
-    const add = (key: string) => { if (seen.has(key)) return; seen.add(key); if (!target.grants.some(g => g.permission === key)) target.grants.push({ permission: key, scopes: ['company'] }); data.value?.permissions.find(p => p.code === key)?.dependencies?.forEach(add) }
+    const add = (key: string) => {
+      const permission = permissionByCode.value.get(key)
+      if (!permission || seen.has(key)) return
+      seen.add(key)
+      if (!target.grants.some(grant => grant.permission === key)) target.grants.push({ permission: key, scopes: ['company'] })
+      permission.dependencies?.forEach(add)
+    }
     add(code)
   } else {
     const removed = new Set([code]); let expanded = true
@@ -381,7 +446,7 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
         >{{ page.label }}</button>
       </nav>
 
-      <div class="authorization-grid" :class="{ 'authorization-grid--preview': tab === 'preview' }">
+      <div class="authorization-grid" :class="{ 'authorization-grid--templates': tab === 'templates', 'authorization-grid--preview': tab === 'preview' }">
         <section v-if="tab === 'templates'" class="authorization-pane" aria-label="角色列表">
           <div class="authorization-detail-head">
             <h3>角色列表</h3>
@@ -425,18 +490,33 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
         </section>
 
         <section v-if="tab === 'templates'" class="authorization-pane" aria-label="权限模块">
-          <h3>权限模块</h3>
+          <h3>按导航分类</h3>
           <p class="authorization-note">已授权／权限项</p>
-          <div class="authorization-list">
-            <button
-              v-for="item in modules"
-              :key="item.key"
-              type="button"
-              class="authorization-pick"
-              :aria-pressed="module === item.key"
-              @click="module = item.key"
-            ><span>{{ item.label }}</span><small class="authorization-count">{{ item.enabled }}/{{ item.total }}</small></button>
-          </div>
+          <nav class="authorization-list authorization-categories" aria-label="权限分类">
+            <button type="button" class="authorization-pick" :aria-pressed="!activeCategory" @click="selectCategory('')">
+              <span>全部模块</span><small class="authorization-count">{{ permissionNavigation.all.enabled }}/{{ permissionNavigation.all.total }}</small>
+            </button>
+            <div v-for="group in permissionNavigation.groups" :key="group.key" class="authorization-category-group">
+              <p v-if="group.label" class="authorization-category-heading">{{ group.label }}</p>
+              <div v-for="entry in group.entries" :key="entry.key">
+                <button
+                  type="button"
+                  class="authorization-pick authorization-category-entry"
+                  :aria-pressed="activeCategory === entry.key"
+                  :aria-expanded="entry.sections.length ? visibleExpandedEntry === entry.key : undefined"
+                  @click="selectCategory(entry.key)"
+                >
+                  <span class="authorization-category-label"><ChevronRight v-if="entry.sections.length" :size="13" aria-hidden="true" />{{ entry.label }}</span>
+                  <small class="authorization-count">{{ entry.enabled }}/{{ entry.total }}</small>
+                </button>
+                <div v-if="entry.sections.length && visibleExpandedEntry === entry.key" class="authorization-category-children" role="group" :aria-label="entry.label + '子页'">
+                  <button v-for="section in entry.sections" :key="section.key" type="button" class="authorization-pick" :aria-pressed="activeCategory === section.key" @click="selectCategory(entry.key, section.key)">
+                    <span>{{ section.label }}</span><small class="authorization-count">{{ section.enabled }}/{{ section.total }}</small>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </nav>
         </section>
 
         <section v-else-if="tab === 'assignments'" class="authorization-pane" aria-label="授权来源">
@@ -473,15 +553,14 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
         <section v-if="tab === 'templates'" class="authorization-pane authorization-detail" aria-label="权限设置">
           <div class="authorization-detail-head">
             <div>
-              <h3>{{ module || '全部模块' }} · 权限设置</h3>
+              <h3>{{ categoryPath }} · 权限设置</h3>
               <p v-if="template" class="authorization-note">{{ template.name }}</p>
             </div>
             <input
-              :value="permissionSearch"
+              v-model="permissionSearch"
               type="search"
               aria-label="搜索权限"
-              placeholder="权限名称／模块"
-              @input="searchPermissions(($event.target as HTMLInputElement).value)"
+              placeholder="权限名称／页面"
             />
           </div>
           <template v-if="template">
@@ -509,6 +588,10 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
                 公司角色和指定授权可同时生效。同一项权限有多个适用关系时，满足任一项即可。
               </p>
             </div>
+            <div v-if="budgetGuide" class="authorization-budget-guide" aria-label="预算权限怎么选">
+              <p>要改预算汇总，勾选<strong>「{{ budgetGuide.summary }}」</strong>。要填预算评估明细，勾选<strong>「{{ budgetGuide.assessment }}」</strong>。系统会自动补选「{{ budgetGuide.shared }}」。</p>
+              <p>例如，项目经理只改自己负责的主项目及其子项目时，在操作项和共用项的「适用关系」中，都只选「本人负责的主项目及其子项目」。</p>
+            </div>
             <div class="authorization-table">
               <table class="authorization-permission-table pdm-fit-columns">
                 <colgroup><col class="authorization-operation-col" /><col class="authorization-grant-col" /><col /></colgroup>
@@ -518,7 +601,9 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
                     <td data-label="操作">
                       <div :title="p.description || undefined">
                         {{ p.name }}
-                        <small v-if="!module">{{ p.module }}</small>
+                        <small v-if="p.location.sectionKey !== selectedCategory">{{ p.location.path }}</small>
+                        <small v-else-if="p.location.sectionLabel && p.module !== p.location.sectionLabel">{{ p.module }}</small>
+                        <small v-if="p.description && inlineDescriptionCodes.has(p.code)">{{ p.description }}</small>
                         <small v-if="p.sensitive">敏感操作</small>
                       </div>
                     </td>
@@ -590,7 +675,7 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
                       <td data-label="授权目标">
                         <span v-if="a.scope === 'company'">当前公司</span>
                         <div v-else>
-                          <select v-model="a.targetId" :disabled="!editable" aria-label="授权目标" :title="assignmentTarget(a)">
+                          <DepartmentSelectField :name="a.scope === 'department' ? assignmentTarget(a) : ''"><select v-model="a.targetId" :disabled="!editable" aria-label="授权目标" :title="assignmentTarget(a)">
                             <option :value="null">请选择</option>
                             <template v-if="a.scope === 'department'">
                               <option v-for="d in data.departments" :key="d.id" :value="d.id">{{ d.name }}</option>
@@ -598,7 +683,7 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
                             <template v-else>
                               <option v-for="p in data.projects" :key="p.id" :value="p.id">{{ p.code }} · {{ p.name }}</option>
                             </template>
-                          </select>
+                          </select></DepartmentSelectField>
                           <small v-if="assignmentTarget(a).length > 20">{{ assignmentTarget(a) }}</small>
                         </div>
                       </td>
@@ -766,6 +851,9 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
 .authorization-grid--preview {
   grid-template-columns: clamp(200px, 16cqi, 224px) clamp(216px, 18cqi, 248px) minmax(0, 1fr);
 }
+.authorization-grid--templates {
+  grid-template-columns: clamp(200px, 16cqi, 224px) clamp(168px, 14cqi, 200px) minmax(0, 1fr);
+}
 .authorization-pane {
   display: flex;
   flex-direction: column;
@@ -790,6 +878,31 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
   gap: 3px;
   overflow: auto;
   scrollbar-gutter: stable;
+}
+.authorization-category-group,
+.authorization-category-children {
+  display: grid;
+  gap: 2px;
+}
+.authorization-category-heading {
+  margin: 6px 8px 0;
+  color: var(--pdm-muted);
+  font-size: 12px;
+}
+.authorization-category-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.authorization-category-entry svg {
+  flex-shrink: 0;
+  color: var(--pdm-theme-accent);
+}
+.authorization-category-entry[aria-expanded='true'] svg {
+  transform: rotate(90deg);
+}
+.authorization-category-children {
+  margin-inline-start: 15px;
 }
 .authorization-pick {
   display: flex;
@@ -832,6 +945,13 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
 .authorization-count {
   font-variant-numeric: tabular-nums;
 }
+.authorization-budget-guide {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--pdm-blue-soft);
+  line-height: 1.5;
+}
+.authorization-budget-guide p { margin: 0; }
 .authorization-filters label {
   display: flex;
   align-items: center;
@@ -961,7 +1081,8 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
 }
 @container (width < 1000px) {
   .authorization-grid,
-  .authorization-grid--preview {
+  .authorization-grid--preview,
+  .authorization-grid--templates {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-template-rows: auto auto;
     flex: 0 0 auto;
@@ -979,13 +1100,18 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
 }
 @container (width < 520px) {
   .authorization-grid,
-  .authorization-grid--preview {
+  .authorization-grid--preview,
+  .authorization-grid--templates {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto;
   }
   .authorization-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     max-height: 112px;
+  }
+  .authorization-categories {
+    grid-template-columns: minmax(0, 1fr);
+    max-height: 176px;
   }
   .authorization-table table,
   .authorization-table tbody,

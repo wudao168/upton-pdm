@@ -3,6 +3,15 @@ import { installControlSpacing } from '../src/controlSpacing'
 
 let dispose: (() => void) | undefined
 const settle = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+it('纵向弹性侧栏不套用横向工具栏的强制换列规则，改变方向后重新识别', async () => {
+  document.body.innerHTML = '<aside style="display:flex;flex-direction:column;height:400px"><header>AI助手</header><input type="search"><nav>长对话标题</nav><button>刷新</button><button>服务配置</button></aside>'
+  dispose = installControlSpacing(); await settle()
+  const aside = document.querySelector('aside')!
+  expect(aside.getAttribute('data-pdm-control-layout')).toBe('flow-column')
+  aside.style.flexDirection = 'row'
+  await new Promise(resolve => setTimeout(resolve, 0)); await settle()
+  expect(aside.getAttribute('data-pdm-control-layout')).toBe('flow')
+})
 it('手机预览保持移动端原有模块间距', async () => {
   document.body.innerHTML = '<div class="layout-phone"><div class="mobile-layout-grid" style="display:grid"><button>待办</button><button>工时</button></div></div>'
   dispose = installControlSpacing(); await settle()

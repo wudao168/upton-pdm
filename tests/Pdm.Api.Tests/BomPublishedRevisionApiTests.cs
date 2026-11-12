@@ -22,7 +22,7 @@ public sealed class BomPublishedRevisionApiTests(PdmApiFactory factory) : IClass
     {
         using var services = factory.Services.CreateScope();
         var repository = services.ServiceProvider.GetRequiredService<IPdmRepository>();
-        var project = await repository.CreateProjectAsync(new("VERSION-" + Guid.NewGuid().ToString("N"), "BOM版本验证", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("VERSION-" + Guid.NewGuid().ToString("N"), "BOM版本验证", "admin", "vault", "release"), "admin", default);
         var row = new BomItem(Guid.NewGuid(), project.Id, kind, 1, "01020000999", "版本验证物料", 1, "001", null, "MODEL", "W1", true);
         var added = row with { Id = Guid.NewGuid(), Sequence = 2, DrawingNumber = "01020000998" };
         await repository.ReplaceBomAsync(project.Id, kind, [row, added], default);

@@ -11,7 +11,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [InlineData(true)]
     public async Task UnhandledRelationsBlockSubmitApprovalAndBackgroundPublication(bool pendingAtPublication)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var guard = new SwitchableMaterialRelationGuard();
         var publisher = new RecordingPublisher();
@@ -26,13 +26,13 @@ public sealed partial class Phase1ReleaseWorkflowTests
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         var firstTask = package.ApprovalTasks.OrderBy(task => task.StepOrder).First(task => task.Decision is null);
         guard.Pending = true;
-        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.DecideAsync(firstTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, null, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.DecideAsync(firstTask.Id, firstTask.Assignee, UserRole.Approver, ApprovalDecision.Approved, null, default));
         Assert.Null((await repository.FindReleasePackageAsync(package.Id, default))!.ApprovalTasks.Single(task => task.Id == firstTask.Id).Decision);
         guard.Pending = false;
         for (var step = 0; step < 10 && package.State != ReleasePackageState.Publishing; step++)
         {
             var task = package.ApprovalTasks.OrderBy(item => item.StepOrder).First(item => item.Decision is null);
-            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, null, default, publishImmediately: false);
+            package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, null, default, publishImmediately: false);
         }
         Assert.Equal(ReleasePackageState.Publishing, package.State);
         guard.Pending = pendingAtPublication;

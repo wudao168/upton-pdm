@@ -40,7 +40,8 @@ public sealed partial class PdmAddin
             .OrderByDescending(pair => pair.Value.Files.Count).FirstOrDefault();
         if (context.Value == null) throw Conflict("当前工程图的受控引用清单尚未就绪，请从工作区打开后重试");
         if (!PathsEqual(Path.GetDirectoryName(path), context.Key)) throw Conflict("当前工程图的引用目录尚未定位到其工作文件夹，请刷新工作区后重试");
-        var requested = await apiClient.CreateControlledOpenManifestAsync(id, latest.Id, false, false, lifetime.Token);
+        var requested = await apiClient.CreateControlledOpenManifestAsync(id, latest.Id, false, false, lifetime.Token,
+            allowMissingComponents: true);
         var drawing = requested.Files.SingleOrDefault(file => file.DocumentId == id);
         if (requested.ProjectId != projectId || requested.RootDocumentId != id || requested.RootVersionId != latest.Id
             || drawing == null || drawing.VersionId != latest.Id || !string.Equals(drawing.FileName, node.FileName, StringComparison.OrdinalIgnoreCase))
@@ -94,6 +95,7 @@ public sealed partial class PdmAddin
         }
         RequireUnchanged(hash);
         var loaded = FindLoadedDocument(path);
+        var missing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var search = new ControlledReferenceSearchScope(application, path, manifest))
         {
             if (loaded == null) Install();
@@ -121,11 +123,12 @@ public sealed partial class PdmAddin
                     }
                     if (error != 0 || !installed || reopened == null || !PathsEqual(reopened.GetPathName(), path))
                         throw Conflict("工程图最新版重载尚未完成，原副本备份已保留");
-                    ValidateRefreshedDrawingSources(reopened, path, manifest);
+                    if (!(reopened is IDrawingDoc)) throw new IOException("SolidWorks返回的文件不是工程图，未获取权限。");
+                    ValidateControlledLoadedSources(reopened, path, manifest, application, missing, allowMissingDrawingModels: false);
                 }
                 finally { events.FileCloseNotify -= prepare; }
             }
-            search.VerifyLoadedSources();
+            search.VerifyLoadedSources(missing);
         }
         if (!ControlledReferenceMaterializer.Matches(path, drawing)) throw Conflict("工程图最新版的本地内容尚未核验完成");
         foreach (var pair in controlledOpenManifests.Where(pair => pair.Value.ProjectId == projectId))
@@ -149,20 +152,6 @@ public sealed partial class PdmAddin
         catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
         { LogDiagnostic("清理工程图取回临时副本", error); }
         LogOperation("工程图取回最新版完成；document=" + id + "；old=" + binding.Revision + "；latest=" + latest.Revision?.Display + "；模型保存=0；模型切换=0");
-    }
-
-    private static void ValidateRefreshedDrawingSources(IModelDoc2 model, string path, ControlledOpenManifestDto manifest)
-    {
-        if (!(model is IDrawingDoc drawing)) throw new IOException("SolidWorks返回的文件不是工程图，未获取权限。");
-        var expected = ControlledOpenBoundary.Paths(Path.GetDirectoryName(path), manifest);
-        foreach (var view in ((drawing.GetViews() as object[]) ?? Array.Empty<object>()).OfType<object[]>()
-            .SelectMany(sheet => sheet.Skip(1)).OfType<IView>())
-        {
-            var source = (view.ReferencedDocument as IModelDoc2)?.GetPathName();
-            if (string.IsNullOrWhiteSpace(source)) source = view.GetReferencedModelName();
-            if (string.IsNullOrWhiteSpace(source) || !expected.TryGetValue(Path.GetFileName(source), out var target)
-                || !PathsEqual(ArchiveReferencePath.Resolve(source, Path.GetDirectoryName(path), "核对工程图取回来源", path), target))
-                throw new IOException("最新版工程图的实际模型来源未定位到当前受控工作区，未获取权限。原副本备份已保留。");
-        }
+        ReportMissingComponentsOnOpen(missing, "已取回工程图");
     }
 }

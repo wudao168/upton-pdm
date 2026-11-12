@@ -20,6 +20,21 @@ function mountTree(refreshing: boolean) {
 }
 
 describe('DocumentTree', () => {
+  it('仅提交搜索后更新筛选词，清空也等待提交', async () => {
+    const wrapper = mountTree(false)
+    const input = wrapper.get('input[type="search"]')
+    await input.setValue('  70005404.M1-02  ')
+    expect(wrapper.emitted('update:query')).toBeUndefined()
+    await wrapper.get('form.pdm-tree-search').trigger('submit')
+    expect(wrapper.emitted('update:query')).toEqual([['70005404.M1-02']])
+    await wrapper.setProps({ query: '70005404.M1-02' })
+    await input.setValue('')
+    expect(wrapper.emitted('update:query')).toHaveLength(1)
+    await wrapper.get('form.pdm-tree-search').trigger('submit')
+    expect(wrapper.emitted('update:query')).toEqual([['70005404.M1-02'], ['']])
+    wrapper.unmount()
+  })
+
   it('嵌入组件的菜单提示打开父装配，不要求独立登记', async () => {
     const embedded: DocumentNode = { id: 'embedded', drawingNumber: 'PART', name: '嵌入零件', fileName: 'PART^ASM.SLDPRT', kind: 'Part', configuration: '', quantity: 1, version: '—', status: 'Virtual', children: [] }
     const wrapper = mountTree(false)

@@ -12,7 +12,7 @@ public sealed class ArchiveReferenceVersionTests
     [InlineData(true)]
     public async Task PreflightAndBatchCommitUseArchivedParentBaselineWithoutRequiringChildCheckout(bool unknownReference)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var storage = DispatchProxy.Create<IFileStorage, ArchiveBatchReadReuseTests.Files>();
         var workflow = new PdmWorkflowService(repository, storage, null!, TimeProvider.System);
         var project = await repository.CreateProjectAsync(new("REF-" + Guid.NewGuid().ToString("N"), "版本回填", "admin", "vault", "release"), "admin", default);

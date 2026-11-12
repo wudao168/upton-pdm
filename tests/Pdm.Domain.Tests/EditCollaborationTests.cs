@@ -11,13 +11,15 @@ public sealed class EditCollaborationTests
     private readonly Guid session = Guid.NewGuid();
     public EditCollaborationTests()
     {
-        repository = new(clock);
+        repository = BusinessTestRepository.Create(clock);
+        PermissionTestUsers.Ensure(repository, ("helper", UserRole.Administrator), ("another", UserRole.Administrator), ("third", UserRole.Administrator), ("waiting", UserRole.Administrator)).GetAwaiter().GetResult();
+        PermissionTestUsers.Grant(repository, "Administrator", AuthorizationActions.BusinessNotifications).GetAwaiter().GetResult();
         workflow = new(repository, null!, null!, clock);
     }
 
     private async Task<(Project Project, PdmDocument Document)> Editing(string name = "协作零件")
     {
-        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
+        var company = Guid.Parse("70000000-0000-0000-0000-000000000001");
         var customer = (await repository.ListCustomersAsync(true, default)).First().Id;
         var project = await repository.CreateNumberedProjectAsync(new(company, "P", 2, customer, name, null, null, 1, "admin", @"C:\test-vault", @"C:\test-release"), default);
         var document = await repository.RegisterDocumentAsync(new(project.Id, name, name, name + ".SLDPRT", DocumentKind.Part), "admin", default);
@@ -69,7 +71,9 @@ public sealed class EditCollaborationTests
     public async Task FailedBatchDoesNotLeaveHalfHandoffOrVersions()
     {
         var first = await Editing("A");
-        var second = await Editing("B");
+        var secondDocument = await repository.RegisterDocumentAsync(new(first.Project.Id, "B", "B", "B.SLDPRT", DocumentKind.Part), "admin", default);
+        secondDocument = await repository.CheckoutAsync(secondDocument.Id, "admin", session, "设计电脑A", clock.GetUtcNow().AddMinutes(5), default);
+        var second = (Project: first.Project, Document: secondDocument);
         var files = new[] {
             new ArchiveBatchFile(first.Document.Id, Commit(first.Project, first.Document) with { HandoffTo = "helper" }),
             new ArchiveBatchFile(second.Document.Id, Commit(second.Project, second.Document, 'B') with { ExpectedVersionId = Guid.NewGuid(), HandoffTo = "helper" })

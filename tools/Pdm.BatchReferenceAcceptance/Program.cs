@@ -24,7 +24,11 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length != 2 && !(args.Length == 3 && (args[2] == "--archive-state-only" || args[2] == "--reference-cache-only" || args[2] == "--snapshot-only"))) return 2;
+        // Console tests synchronously await async product methods; no WinForms
+        // message loop runs here to dispatch an automatically installed context.
+        WindowsFormsSynchronizationContext.AutoInstall = false;
+        SynchronizationContext.SetSynchronizationContext(null);
+        if (args.Length != 2 && !(args.Length == 3 && (args[2] == "--archive-state-only" || args[2] == "--reference-cache-only" || args[2] == "--snapshot-only" || args[2] == "--tree-health-only"))) return 2;
         directory = Path.GetFullPath(args[1]);
         Directory.CreateDirectory(directory);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) =>
@@ -38,6 +42,12 @@ internal static partial class Program
             .SetValue(null, Path.Combine(directory, "bindings-" + Guid.NewGuid().ToString("N")));
         Type("PdmDocumentIdentityStore").GetField("workspaceRootResolver", Members)
             .SetValue(null, new Func<string>(() => Path.Combine(directory, "workspace")));
+        if (args.Length == 3 && args[2] == "--tree-health-only")
+        {
+            RunTreeHealthChecks();
+            Console.WriteLine($"Passed={passed}; Failed={failed}; actual isolated files, no SolidWorks COM or production API calls.");
+            return failed == 0 ? 0 : 1;
+        }
         if (args.Length == 3 && args[2] == "--snapshot-only")
         {
             Test("modified display state uses recorded root revision without guessing latest", TestRootRevisionDisplay);
@@ -92,6 +102,7 @@ internal static partial class Program
         Test("registration persists identity on the source even after UI tree refresh", TestRegistrationBinding);
         Test("structure actions lock during workspace work and recover afterward", TestSelectionIndependentStructureActions);
         Test("merged archive entry preserves whole-tree, checked, and context-menu scopes", TestMergedArchiveEntry);
+        RunTreeHealthChecks();
         Test("binding failure stops before assigning an in-memory identity", TestBindingFailure);
         Test("incremental plan submits ten new files and parent, not ten unchanged originals", TestIncrementalPlan);
         Test("metadata refresh during base lookup cannot clear repeated reference versions", TestFrozenBatchReferences);
@@ -463,7 +474,7 @@ internal static partial class Program
             && tree.Nodes[0].Nodes[0].IsExpanded, "embedded component rows were hidden or collapsed");
         Assert(((IEnumerable)Get(dialog, "SelectedItems")).Cast<object>().Count() == 1, "embedded components became separate upload items");
         Assert(((string)Call(dialog, "StateText", nested, "tester")).Contains("随父装配"), "embedded status still says unregistered");
-        Assert(((Label)Field(dialog, "selectionSummary")).Text.Contains("3个嵌入式组件"), "selection summary omits embedded contents");
+        Assert(((Label)Field(dialog, "selectionHint")).Text.Contains("3个嵌入式组件"), "selection hint omits embedded contents");
         Call(dialog, "ToggleShowCheckedOnly");
         Assert(tree.Nodes[0].Nodes[0].Nodes.Count == 2, "selected-parent filtering hides its embedded contents");
         using var bitmap = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
@@ -500,7 +511,7 @@ internal static partial class Program
         importDialog.ShowInTaskbar = false; importDialog.Opacity = 0; importDialog.Show(); Application.DoEvents();
         Assert(((IEnumerable)Get(importDialog, "SelectedItems")).Cast<object>().Count() == 1,
             "import UI enabled independent registration of cache files");
-        var importSummary = ((Label)Field(importDialog, "selectionSummary")).Text;
+        var importSummary = ((Label)Field(importDialog, "selectionHint")).Text;
         Assert(importSummary.Contains("3个导入组件") && !importSummary.Contains("3个嵌入式"),
             "import cache counts promise parent-only persistence");
         Assert(((string)Call(importDialog, "StateText", nested, "tester")).Contains("待确认保存归属"),
@@ -679,6 +690,7 @@ internal static partial class Program
         using var pane = (Control)New("PdmTaskPaneControl", "");
         Call(pane, "SetAuthenticatedUser", "设计员", "designer");
         var root = Node("selection-independent/main.SLDASM", Guid.NewGuid(), 0);
+        GrantArchive(root);
         Set(root, "CurrentRevision", "W1");
         Set(root, "LatestRevision", "W2");
         Call(pane, "SetTree", root);
@@ -702,6 +714,9 @@ internal static partial class Program
         Assert(((Control)Field(pane, "tabsHost")).Enabled && ((Control)Field(pane, "projectPanel")).Enabled,
             "plugin actions did not recover after the workspace operation");
         Assert(overall.Enabled && property.Enabled, "selection-independent actions did not recover after the workspace operation");
+        Set(Get(root, "OperationAccess"), "CanArchive", false);
+        Call(pane, "UpdateSelected", root);
+        Assert(!overall.Enabled && !property.Enabled, "revoked server archive permission still enabled actions");
     }
 
     private static void TestMergedArchiveEntry()
@@ -717,9 +732,12 @@ internal static partial class Program
         Call(pane, "SetAuthenticatedUser", "设计员", "designer");
         var root = Node("merged-entry/main.SLDASM", Guid.NewGuid(), 0);
         var unowned = Node("merged-entry/unowned.SLDPRT", Guid.NewGuid());
+        GrantArchive(root);
+        GrantArchive(unowned);
         FixtureFile("merged-entry/main.SLDASM");
         FixtureFile("merged-entry/unowned.SLDPRT");
         Set(root, "CheckedOutBy", "designer");
+        Set(root, "HasCurrentEditSession", true);
         Children(root).Add(unowned);
         Call(pane, "SetTree", root);
         Application.DoEvents();
@@ -815,6 +833,7 @@ internal static partial class Program
                 Set(node, "CurrentRevision", "W1");
                 Set(node, "LatestRevision", "W1");
                 Set(node, "LatestVersionSha256", Hash(File.ReadAllBytes(path)));
+                Set(node, "LatestStructureIndexPending", false);
                 if (i == 0) Set(node, "CheckedOutBy", "another-designer");
             }
             Children(root).Add(node);
@@ -870,7 +889,7 @@ internal static partial class Program
         var file = ControlledFile("part.SLDPRT", content);
         var client = New("PdmApiClient", "http://fixture.invalid/");
         var manager = New("ControlledWorkspaceManager", client, Path.Combine(directory, "manager-workspace"));
-        Call(manager, "MergeManifestFiles", source, target, TypedArray("ControlledOpenFileDto", file));
+        Call(manager, "MergeManifestFiles", source, target, TypedArray("ControlledOpenFileDto", file), null);
         Assert(File.ReadAllBytes(Path.Combine(target, "part.SLDPRT")).SequenceEqual(content), "manifest file was not refreshed");
         Assert(File.ReadAllText(Path.Combine(target, "unrelated.SLDPRT")) == "must remain", "unrelated project file was deleted");
         ((IDisposable)client).Dispose();
@@ -878,7 +897,7 @@ internal static partial class Program
 
     private static void TestWorkspaceChangeGuard()
     {
-        var target = Path.Combine(directory, "change-guard");
+        var target = Path.Combine(directory, "workspace", "change-guard");
         Directory.CreateDirectory(target);
         var expected = new byte[] { 2, 4, 6 };
         var file = ControlledFile("part.SLDPRT", expected);
@@ -886,11 +905,14 @@ internal static partial class Program
         File.WriteAllText(path, "changed");
         File.SetAttributes(path, FileAttributes.ReadOnly);
         var files = TypedArray("ControlledOpenFileDto", file);
-        Assert((bool)Static("ControlledWorkspaceManager", "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "unknown read-only content was not protected");
+        using var client = (IDisposable)New("PdmApiClient", "http://fixture.invalid/");
+        var manager = New("ControlledWorkspaceManager", client, Path.Combine(directory, "workspace"));
+        Assert((bool)Call(manager, "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "unknown read-only content was not protected");
         Assert((bool)Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, Get(file, "DocumentId"), Guid.NewGuid(), Guid.NewGuid(), "W1", Hash(File.ReadAllBytes(path)), new FileInfo(path).Length), "baseline binding failed");
-        Assert(!(bool)Static("ControlledWorkspaceManager", "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "known unchanged read-only baseline blocked safe refresh");
+        Assert(!(bool)Call(manager, "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "known unchanged read-only baseline blocked safe refresh");
         File.SetAttributes(path, FileAttributes.Normal);
-        Assert((bool)Static("ControlledWorkspaceManager", "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "writable changed file was not protected");
+        File.AppendAllText(path, "changed after the verified baseline");
+        Assert((bool)Call(manager, "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "writable changed file was not protected");
     }
 
     private static void TestWorkspaceTraversalGuard()
@@ -952,13 +974,12 @@ internal static partial class Program
         Call(control, "SetTree", root);
 
         var viewButton = (Button)Field(control, "openLatest");
-        var editButton = (Button)Field(control, "openEdit");
         var selectedState = (Label)Field(control, "selectedState");
         var selectedHint = (Label)Field(control, "selectedHint");
         var workspaceLocation = (Label)Field(control, "workspaceLocation");
         var buttonHints = (ToolTip)Field(control, "toolTip");
         Assert(viewButton.Text == "打开最新" && buttonHints.GetToolTip(viewButton).Contains("只读"), "read-only action is ambiguous");
-        Assert(editButton.Text == "获取编辑" && editButton.Enabled && buttonHints.GetToolTip(editButton).Contains("编辑权限"), "edit action does not explain checkout");
+        Assert(viewButton.Enabled, "registered document cannot be opened read-only");
         Assert(selectedState.Text.Contains("本地 W1 = PLM最新 W1"), "selected state does not compare local and PLM versions");
         Assert(selectedHint.Text.Contains("获取编辑"), "selected hint does not explain the next action");
         Assert(workspaceLocation.Text.Contains("View") && workspaceLocation.Text.Contains("P700005-4-4"), "workspace location is not visible");
@@ -967,12 +988,13 @@ internal static partial class Program
 
         Set(root, "CheckedOutBy", "designer");
         Call(control, "SetTree", root);
-        Assert(editButton.Text == "继续编辑" && editButton.Enabled, "owned checkout is not presented as continue editing");
+        Assert(viewButton.Enabled && viewButton.Text == "打开最新", "owned checkout lost read-only latest entry");
         Assert(selectedState.Text.Contains("已由你检出"), "owned checkout guidance differs");
 
         Set(root, "CheckedOutBy", "other.user");
         Call(control, "SetTree", root);
-        Assert(!editButton.Enabled && selectedState.Text.Contains("other.user"), "other-user checkout is not clearly blocked");
+        Assert(viewButton.Enabled && selectedState.Text.Contains("编辑") && !selectedState.Text.Contains("other.user")
+            && selectedHint.Text.Contains("不能取得编辑权限"), "other-user checkout must retain viewing and explain edit restriction without exposing the login name");
 
         Set(root, "CheckedOutBy", "designer");
         Call(control, "SetTree", root);
@@ -995,7 +1017,7 @@ internal static partial class Program
             var selectorControl = (Control)selector;
             var selectorBottom = selectorControl.PointToScreen(Point.Empty).Y + selectorControl.Height;
             var buttonTop = viewButton.PointToScreen(Point.Empty).Y;
-            Assert(buttonTop - selectorBottom == 6, "workspace action row gap is not 6 pixels");
+            Assert(Math.Abs(buttonTop - selectorControl.PointToScreen(Point.Empty).Y) <= 1, "workspace action is not aligned with the current project selector row");
             control.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
             bitmap.Save(Path.Combine(directory, "workspace-guidance.png"));
             host.Hide();
@@ -1024,7 +1046,8 @@ internal static partial class Program
         Set(node, "CurrentRevision", "W1");
         Set(node, "LatestRevision", "W1");
         Call(control, "SetTree", node);
-
+        for (var attempt = 0; attempt < 100 && !string.Equals((string)Get(node, "FullPath"), downloaded, StringComparison.OrdinalIgnoreCase); attempt++)
+        { Application.DoEvents(); Thread.Sleep(20); }
         Assert(string.Equals((string)Get(node, "FullPath"), downloaded, StringComparison.OrdinalIgnoreCase), "downloaded workspace file was not mapped to the project tree");
         Assert((string)Call(control, "LocalStateText", node) == "只读缓存", "mapped workspace file still appears undownloaded");
         control.Dispose();
@@ -1419,6 +1442,9 @@ internal static partial class Program
         var field = client.GetType().GetField("httpClient", Members);
         ((HttpClient)field.GetValue(client)).Dispose();
         field.SetValue(client, new HttpClient(handler) { BaseAddress = new Uri("http://fixture.invalid/") });
+        var verification = client.GetType().GetField("controlledOpenHttpClient", Members);
+        ((HttpClient)verification.GetValue(client)).Dispose();
+        verification.SetValue(client, new HttpClient(new LegacyVerificationHandler()) { BaseAddress = new Uri("http://fixture.invalid/") });
         plugin.GetType().GetField("apiClient", Members).SetValue(plugin, client);
         return plugin;
     }
@@ -1428,6 +1454,107 @@ internal static partial class Program
 
     private static Array Items(params object[] nodes) =>
         TypedArray("BatchOperationItem", nodes.Select(node => New("BatchOperationItem", node, 0)).ToArray());
+
+    private static void RunTreeHealthChecks()
+    {
+        Test("5000 repeated physical references detect deletion and restoration on the next call", TestTreeHealthRepeatedReferences);
+        Test("explicit unloaded status and missing disk paths remain distinct while pending renames stay deferred", TestTreeHealthStatusAndRename);
+        Test("existing findings retain their instance/path identities, reasons and stable merge order", TestTreeHealthExistingFindings);
+    }
+
+    private static object HealthNode(string relative, string instance, bool exists, bool missing = false, bool rename = false)
+    {
+        var node = Node(relative, null);
+        Set(node, "InstancePath", instance);
+        Set(node, "Status", Enum.Parse(Type("CadReferenceStatus"), missing ? "Missing" : "Normal"));
+        Set(node, "IsRenamePendingSave", rename);
+        if (exists) { var path = (string)Get(node, "FullPath"); Directory.CreateDirectory(Path.GetDirectoryName(path)); File.WriteAllText(path, "isolated native reference"); }
+        return node;
+    }
+
+    private static object[] HealthFindings(Control pane, object root)
+    {
+        pane.GetType().GetField("rootNode", Members).SetValue(pane, root);
+        return ((IEnumerable)Call(pane, "MissingReferenceDetails")).Cast<object>().ToArray();
+    }
+
+    private static void TestTreeHealthRepeatedReferences()
+    {
+        using var pane = (Control)New("PdmTaskPaneControl", "");
+        var root = HealthNode("health-repeated/root.SLDASM", "ROOT", true);
+        var first = HealthNode("health-repeated/shared.SLDPRT", "ROOT/P-0", true);
+        Children(root).Add(first);
+        for (var index = 1; index < 5000; index++)
+        {
+            var node = HealthNode("health-repeated/shared.SLDPRT", "ROOT/P-" + index, false);
+            if (index % 2 != 0) Set(node, "FullPath", ((string)Get(node, "FullPath")).ToUpperInvariant());
+            Children(root).Add(node);
+        }
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert(HealthFindings(pane, root).Length == 0, "existing repeated reference became a missing issue");
+        Console.WriteLine("Tree health 5001 nodes: " + watch.ElapsedMilliseconds + " ms");
+        var path = (string)Get(first, "FullPath"); File.Delete(path);
+        var missing = HealthFindings(pane, root);
+        Assert(missing.Length == 1 && (string)Get(missing[0], "InstancePath") == "ROOT/P-0"
+            && (string)Get(missing[0], "OriginalPath") == path, "deleted repeated file was missed or produced one issue per instance");
+        File.WriteAllText(path, "restored native reference");
+        Assert(HealthFindings(pane, root).Length == 0, "restored file retained an earlier missing-cache result");
+        Assert(((IList)Get(root, "OpenReferenceIssues")).Count == 0, "computed findings mutated the stored issue list");
+    }
+
+    private static void TestTreeHealthStatusAndRename()
+    {
+        using var pane = (Control)New("PdmTaskPaneControl", "");
+        var root = HealthNode("health-status/root.SLDASM", "ROOT", true);
+        var unloaded = HealthNode("health-status/unloaded.SLDPRT", "ROOT/UNLOADED", true, missing: true);
+        var absent = HealthNode("health-status/absent.SLDPRT", "ROOT/ABSENT", false);
+        var renamed = HealthNode("health-status/pending-name.SLDPRT", "ROOT/RENAME", false, missing: true, rename: true);
+        var empty = HealthNode("health-status/empty.SLDPRT", "ROOT/EMPTY", false); Set(empty, "FullPath", "");
+        var unnamedMissing = HealthNode("health-status/unnamed.SLDPRT", "ROOT/UNNAMED", false, missing: true); Set(unnamedMissing, "FullPath", "");
+        foreach (var node in new[] { unloaded, absent, renamed, empty, unnamedMissing }) Children(root).Add(node);
+        var findings = HealthFindings(pane, root);
+        Assert(findings.Length == 3 && new HashSet<string>(findings.Select(item => (string)Get(item, "InstancePath")))
+            .SetEquals(new[] { "ROOT/UNLOADED", "ROOT/ABSENT", "ROOT/UNNAMED" }), "explicit missing, disk missing or rename rules changed");
+        Set(unloaded, "Status", Enum.Parse(Type("CadReferenceStatus"), "Normal"));
+        Set(unnamedMissing, "Status", Enum.Parse(Type("CadReferenceStatus"), "Normal"));
+        File.WriteAllText((string)Get(absent, "FullPath"), "restored");
+        Assert(HealthFindings(pane, root).Length == 0, "resolved status or disk findings remained cached");
+        Set(renamed, "IsRenamePendingSave", false);
+        Assert(HealthFindings(pane, root).Length == 1, "completed rename concealed an unresolved missing reference");
+    }
+
+    private static void TestTreeHealthExistingFindings()
+    {
+        using var pane = (Control)New("PdmTaskPaneControl", "");
+        var root = HealthNode("health-existing/root.SLDASM", "ROOT", true);
+        object Finding(string instance, string path, string file, string reason)
+        { var issue = New("OpenReferenceIssueDto"); Set(issue, "InstancePath", instance); Set(issue, "OriginalPath", path); Set(issue, "FileName", file); Set(issue, "Reason", reason); return issue; }
+        var oldPath = Path.Combine(directory, "health-existing", "old-address.SLDPRT");
+        var sharedPath = Path.Combine(directory, "health-existing", "shared.SLDPRT");
+        var renamed = HealthNode("health-existing/renamed.SLDPRT", "ROOT/RENAME", false, missing: true, rename: true);
+        var issues = (IList)Get(root, "OpenReferenceIssues");
+        issues.Add(Finding("ROOT/A", oldPath, "old.SLDPRT", "older reason"));
+        issues.Add(Finding("root/a", oldPath.ToUpperInvariant(), "OLD.SLDPRT", "latest retained reason"));
+        issues.Add(Finding("ROOT/B", sharedPath, "shared.SLDPRT", "first existing instance"));
+        issues.Add(Finding("ROOT/C", sharedPath, "shared.SLDPRT", "second existing instance"));
+        issues.Add(Finding("ROOT/RENAME", (string)Get(renamed, "FullPath"), "renamed.SLDPRT", "preexisting rename finding"));
+        var sameInstance = HealthNode("health-existing/new-address.SLDPRT", "Root/A", false);
+        var samePath = HealthNode("health-existing/shared.SLDPRT", "ROOT/NEW-SHARED", false); Set(samePath, "FullPath", sharedPath.ToUpperInvariant());
+        var fresh = HealthNode("health-existing/fresh.SLDPRT", "ROOT/FRESH", false);
+        var sameFreshInstance = HealthNode("health-existing/another.SLDPRT", "root/fresh", false);
+        var blankA = HealthNode("health-existing/blank-a.SLDPRT", "", false);
+        var blankB = HealthNode("health-existing/blank-b.SLDPRT", "", false);
+        foreach (var node in new[] { sameInstance, samePath, renamed, fresh, sameFreshInstance, blankA, blankB }) Children(root).Add(node);
+        var findings = HealthFindings(pane, root);
+        Assert(findings.Length == 7, "existing instance/path findings were dropped, collapsed, or redundantly appended");
+        Assert((string)Get(findings[0], "Reason") == "latest retained reason"
+            && (string)Get(findings[1], "Reason") == "first existing instance"
+            && (string)Get(findings[2], "Reason") == "second existing instance"
+            && (string)Get(findings[3], "Reason") == "preexisting rename finding", "stored reasons or stable merge order changed");
+        Assert(findings.Count(item => string.Equals((string)Get(item, "OriginalPath"), sharedPath, StringComparison.OrdinalIgnoreCase)) == 2,
+            "distinct existing instances sharing a physical path were collapsed");
+        Assert(issues.Count == 5 && (string)Get(issues[0], "Reason") == "older reason", "health calculation rewrote original evidence");
+    }
 
     private static object Node(string file, Guid? id, int kind = 1)
     {
@@ -1447,6 +1574,13 @@ internal static partial class Program
         Set(version, "Revision", revision);
         Set(version, "Sha256", hash);
         return version;
+    }
+    private static void GrantArchive(object node)
+    {
+        var property = node.GetType().GetProperty("OperationAccess", Members);
+        var access = Activator.CreateInstance(property.PropertyType, true);
+        Set(access, "CanArchive", true);
+        property.SetValue(node, access);
     }
 
     private static Type Type(string name) => addin.GetType("Upton.Pdm.SolidWorks." + name, true);
@@ -1518,6 +1652,16 @@ internal static partial class Program
             };
             var body = new JavaScriptSerializer().Serialize(includeNewerVersion ? versions : versions.Skip(1).ToArray());
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+        }
+    }
+    private sealed class LegacyVerificationHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Assert(request.Method == HttpMethod.Post && request.RequestUri.AbsolutePath == "/api/documents/version-verifications", "unexpected long-operation request");
+            // These history-cache cases explicitly cover the supported legacy
+            // server fallback. The request must never escape to a real network.
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
     }
 }

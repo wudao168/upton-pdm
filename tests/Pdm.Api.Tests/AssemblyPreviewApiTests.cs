@@ -32,7 +32,7 @@ public sealed class AssemblyPreviewApiTests
         Directory.CreateDirectory(Path.GetDirectoryName(source)!);
         await File.WriteAllBytesAsync(source, new byte[100]);
         File.SetAttributes(source, FileAttributes.ReadOnly);
-        var project = await repository.CreateProjectAsync(new($"ASM-PREVIEW-{Guid.NewGuid():N}", "装配预览接口", "admin",
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new($"ASM-PREVIEW-{Guid.NewGuid():N}", "装配预览接口", "admin",
             vault, vault), "admin", default);
         var document = await repository.RegisterDocumentAsync(new(project.Id, "PARENT", "父装配", "PARENT.SLDASM", DocumentKind.Assembly), "admin", default);
         document = await repository.CheckoutAsync(document.Id, "admin", default);

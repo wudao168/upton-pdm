@@ -10,7 +10,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [Fact]
     public async Task SelectedSummaryReplacesBothOldOccurrencesInDraftResubmissionAndApproval()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var first = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "01020003769", "带导杆气缸", 1, "001", null, "MGPM12-20Z", "W1", true);
@@ -44,7 +44,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [InlineData(BomKind.Electrical,ReleaseScope.ElectricalFormal,ReleaseScope.ElectricalSupplement)]
     public async Task QuantitySimulation_AddIncreaseDecreaseDeleteDeferRestoreAndMultiply(BomKind kind, ReleaseScope formalScope, ReleaseScope supplementScope)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository,new UnusedFileStorage(),new RecordingPublisher(),TimeProvider.System);
         BomItem Item(string code,decimal quantity,string unit="001",Guid? kit=null)
@@ -126,7 +126,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
     [Fact]
     public async Task QuantitySimulation_NonStandardApprovedDrawingIncreaseDecreaseDeleteAndRestore()
     {
-        var repository=new InMemoryPdmRepository(TimeProvider.System);
+        var repository=global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow=new PdmWorkflowService(repository,new UnusedFileStorage(),new RecordingPublisher(),TimeProvider.System);
         foreach(var document in await repository.ListCheckedOutDocumentsAsync(default))

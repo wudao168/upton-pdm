@@ -26,6 +26,10 @@ public sealed class ProjectStaffAssignmentApiTests
         await repository.SetProjectExecutionUnitAsync(root.Id, unit.Id, "admin", default);
         await repository.SetMainProjectStaffingAsync(root.Id, new("staff-pm", [], ["staff-pm"]), "admin", default);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectDesignerAssign], default);
+        await ApiTestAuthorization.GrantRoleAsync(repository, "Engineer", ProjectCenterPermissions.Write, "project.phase-owners.manage");
+        var authorization = await repository.GetAuthorizationSettingsAsync(default);
+        await repository.SaveAuthorizationSettingsAsync(authorization with { Templates = authorization.Templates.Select(t => t.RoleCode == "Engineer"
+            ? t with { Grants = t.Grants.Select(g => g.Permission == "project.phase-owners.manage" ? g with { Scopes = ["root-primary-manager"] } : g).ToArray() } : t).ToArray() }, authorization.Revision, default);
         void Authenticate(string username) {
             var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name, username), new(ClaimTypes.Role, "Engineer")], expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
             client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));

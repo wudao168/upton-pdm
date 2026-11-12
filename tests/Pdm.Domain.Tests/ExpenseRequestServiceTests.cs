@@ -1,6 +1,7 @@
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
+using Upton.Pdm.Tests;
 
 namespace Upton.Pdm.Domain.Tests;
 
@@ -251,6 +252,11 @@ public sealed class ExpenseRequestServiceTests
         var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
         foreach (var name in new[] { "manager", "buyer", "supply", "extra" })
             await repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", name == "manager" ? UserRole.Administrator : UserRole.Approver, true, CompanyId: company), default);
+        await FinancialTestActors.GrantAsync(repository, "Administrator",
+            new(PermissionCodes.ProjectExpenseView, ["company"]), new(PermissionCodes.ProjectExpenseSubmit, ["project-manager"]));
+        await FinancialTestActors.GrantAsync(repository, "Approver",
+            new(PermissionCodes.ProjectExpenseView, ["company"]), new(PermissionCodes.ProjectExpenseApprove, ["company"]));
+        await FinancialTestActors.GrantAsync(repository, "ProcurementSpecialist", new AuthorizationGrant(PermissionCodes.ProjectExpenseView, ["company"]));
         var customer = (await repository.ListCustomersAsync(true, default)).First();
         project = await repository.CreateNumberedProjectAsync(new(company, "P", 2, customer.Id, "费用权限验收", null, null, 1, "manager", @"C:\qa-vault", @"C:\qa-release"), default);
         project = await repository.SetMainProjectStaffingAsync(project.Id, new("manager", [], []), "manager", default);

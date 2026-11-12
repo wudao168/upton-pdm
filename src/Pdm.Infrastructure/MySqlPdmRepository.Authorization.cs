@@ -11,6 +11,11 @@ public sealed partial class MySqlPdmRepository
     private async Task<AuthorizationSettings?> ReadAuthorizationSettingsAsync(CancellationToken ct)
     {
         await using var connection = await OpenAsync(ct);
+        return await ReadAuthorizationSettingsAsync(connection, ct);
+    }
+
+    private async Task<AuthorizationSettings?> ReadAuthorizationSettingsAsync(MySqlConnection connection, CancellationToken ct)
+    {
         var json = await connection.ExecuteScalarAsync<string?>(new CommandDefinition("SELECT setting_value FROM pdm_system_setting WHERE setting_key='authorization_center_v1'", cancellationToken: ct));
         return json is null ? null : JsonSerializer.Deserialize<AuthorizationSettings>(json, jsonOptions)
             ?? throw new PdmRuleException("权限配置读取失败，请联系管理员恢复权限配置备份。");

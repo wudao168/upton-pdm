@@ -30,7 +30,7 @@ public sealed class BrowserCadArchiveService(IPdmRepository repository, PdmWorkf
         if (!Administrator(role)) throw new UnauthorizedAccessException("只有管理员可以启用或关闭网页存档入口。");
         await repository.SetBrowserCadArchiveEnabledAsync(enabled, ct);
         await repository.AppendAuditAsync(new(Guid.NewGuid(), clock.GetUtcNow(), actor, "browser-archive.settings", "SystemSettings", "browser-archive",
-            enabled ? "启用项目及标准结构网页存档入口" : "关闭项目及标准结构网页存档入口；插件存档不受影响"), ct);
+            enabled ? "启用标准结构网页存档入口" : "关闭标准结构网页存档入口"), ct);
     }
     public async Task RequireAsync(BrowserCadArchiveTarget target, string actor, UserRole role, CancellationToken ct)
     {

@@ -19,8 +19,8 @@ public sealed class ProductionMobileApiTests(PdmApiFactory factory) : IClassFixt
     {
         var repository = (InMemoryPdmRepository)factory.Services.GetRequiredService<IPdmRepository>();
         var store = factory.Services.GetRequiredService<IProductionTrackingStore>();
-        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First(item => item.IsActive).Id;
-        var directory = await repository.CreateRoleAsync("移动包装回归", "接口测试", "ProductionViewer", default);
+        var company = (await repository.FindUserAsync("admin", default))!.CompanyId!.Value;
+        var directory = await ApiTestAuthorization.CreateRoleAsync(repository, "移动包装回归", "接口测试", "ProductionViewer", default);
         var role = directory.Roles.Single(item => item.Name == "移动包装回归").Role;
         var permissions = new[] { PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProductionExecute, ProductionMobilePermissions.Use };
         await repository.SetRolePermissionsAsync(role, permissions, default);
@@ -28,7 +28,7 @@ public sealed class ProductionMobileApiTests(PdmApiFactory factory) : IClassFixt
         await repository.CreateUserAsync(new(Guid.NewGuid(), actor, "包装测试人员", "unused", UserRole.ProductionViewer, true, CompanyId: company, RoleCode: role), default);
         TenantContext.Set(new(Guid.NewGuid(), company, company, actor, role, false, permissions.ToHashSet()));
         Project project;
-        try { project = await repository.CreateProjectAsync(new("MOBILE-" + Guid.NewGuid().ToString("N"), "移动包装项目", actor, "vault", "release"), actor, default); }
+        try { project = await ApiTestAuthorization.CreateProjectAsync(repository, new("MOBILE-" + Guid.NewGuid().ToString("N"), "移动包装项目", actor, "vault", "release"), actor, default); }
         finally { TenantContext.Clear(); }
         var line = new ProductionLine(Guid.NewGuid(), "material", [], "70006036-10", "连接块", "A", "件", 10, "Normal", null, null, null, null, null);
         var lot = new ProductionLot(Guid.NewGuid(), line.Id, "Self", 10, null, null, null, null, null, 0);
@@ -79,7 +79,24 @@ public sealed class ProductionMobileApiTests(PdmApiFactory factory) : IClassFixt
         await repository.SetRolePermissionsAsync(role, full, default);
         var obsoletePath = $"/api/documents/{document.Id}/obsolete";
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(obsoletePath, new { comment = "图纸更换" })).StatusCode);
-        await repository.SetRolePermissionsAsync(role, full.Append(ProductionMobilePermissions.Obsolete).ToArray(), default);
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        var updated = settings with
+        {
+            Templates = settings.Templates.Select(template => template.RoleCode == role
+                ? template with { Grants = [.. template.Grants, new(ProductionMobilePermissions.Obsolete, ["company"])] }
+                : template).ToArray()
+        };
+        var withInternalGrant = updated with
+        {
+            Templates = updated.Templates.Select(template => template.RoleCode == role
+                ? template with { Grants = [.. template.Grants, new(PermissionCodes.ReleaseManage, ["company"])] }
+                : template).ToArray()
+        };
+        var rejected = await client.PutAsJsonAsync("/api/authorization-center", withInternalGrant);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("内部权限", (await rejected.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>())!.Title);
+        var saved = await client.PutAsJsonAsync("/api/authorization-center", updated);
+        Assert.True(saved.IsSuccessStatusCode, await saved.Content.ReadAsStringAsync());
         var obsolete = await client.PostAsJsonAsync(obsoletePath, new { comment = "图纸更换，停止生产使用" });
         Assert.True(obsolete.IsSuccessStatusCode, await obsolete.Content.ReadAsStringAsync());
         Assert.Equal(DocumentLifecycleState.Obsolete, (await repository.FindDocumentAsync(document.Id, default))!.State);

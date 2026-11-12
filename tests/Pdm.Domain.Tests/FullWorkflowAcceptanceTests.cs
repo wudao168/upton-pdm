@@ -10,7 +10,7 @@ public sealed class FullWorkflowAcceptanceTests
     public async Task IsolatedQa_CompletesProjectDrawingBomPlanningAndValidationWorkflow()
     {
         var time = new FixedTimeProvider(new DateTimeOffset(2026, 9, 13, 8, 0, 0, TimeSpan.Zero));
-        var repository = new InMemoryPdmRepository(time);
+        var repository = BusinessTestRepository.Create(time);
         var storage = new RecordingFileStorage(time);
         var publisher = new RecordingPublisher();
         var projectPlans = new InMemoryProjectPlanningRepository();
@@ -20,7 +20,7 @@ public sealed class FullWorkflowAcceptanceTests
         var validation = new ValidationPlanService(validationPlans, repository, storage, new StubRecognitionService(), new NoOpValidationPlanFileArchive(), time);
 
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
-        var organizationId = numbering.Organizations.First(item => item.IsActive).Id;
+        var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
         var customer = (await repository.ListCustomersAsync(true, default)).First(item => item.IsActive);
         var projectType = numbering.ProjectTypes.First(item => item.IsActive).Code;
         var equipmentType = numbering.EquipmentTypes.First(item => item.IsActive).Code;
@@ -159,6 +159,7 @@ public sealed class FullWorkflowAcceptanceTests
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.ReplaceBomAsync(
             child.Id, BomKind.Electrical, [], "qa_viewer", UserRole.ProductionViewer, default));
 
+        await PermissionTestUsers.Scope(repository, "ProjectManager", "release.mechanical", "project-manager");
         var release = await workflow.CreateReleasePackageAsync(child.Id, null, $"RP-QA-{Guid.NewGuid():N}",
             "qa_reviewer", "qa_approver", "qa_pm", UserRole.Engineer, default);
         release = await workflow.SubmitReleasePackageAsync(release.Id, "qa_pm", UserRole.Engineer, default);

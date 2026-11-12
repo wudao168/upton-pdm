@@ -298,7 +298,7 @@ public sealed class PreviewConversionTests
     [Fact]
     public async Task PreviewAgentRegistration_WaitsForRemoteHostAfterUnregister()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
 
         var registered = await workflow.RegisterPreviewAgentAsync("http://192.168.2.50:5199/", "agent-token", 45, "admin", UserRole.Administrator, default);
@@ -321,7 +321,7 @@ public sealed class PreviewConversionTests
     [Fact]
     public async Task PreviewAgentRegistration_PreservesOtherServersAndRemovesOnlyTheRequestedServer()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await Task.WhenAll(
             workflow.RegisterPreviewAgentAsync("http://first:5199", "first-token", 30, "admin", UserRole.Administrator, default, "一号转图"),
@@ -339,7 +339,7 @@ public sealed class PreviewConversionTests
     [Fact]
     public async Task SystemSettings_RejectsRemoteConversionWithoutValidAddress()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var current = await repository.GetSystemSettingsAsync(default);
 
@@ -367,7 +367,7 @@ public sealed class PreviewConversionTests
         string root,
         PreviewConversionSettings conversion)
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
         var settings = await repository.GetSystemSettingsAsync(default);
         await repository.UpdateSystemSettingsAsync(settings with { PreviewConversion = conversion }, default);
 

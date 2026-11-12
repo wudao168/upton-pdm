@@ -20,7 +20,7 @@ public static class StockedMaterialEndpoints
                 result.Total, result.LowStockCount, result.FormalCount, result.DraftCount, result.ManagementOnlyCount,
                 result.Page, result.PageSize, result.Scope, result.LastSuccessAt, result.LastError,
                 canSynchronize = TenantContext.Current?.HasPermission(AuthorizationActions.StockSynchronize) == true,
-                canManageSettings = TenantContext.Current?.HasPermission(PermissionCodes.StorageSettingsManage) == true });
+                canManageSettings = TenantContext.Current?.HasPermission(PermissionCodes.StockSettingsManage) == true });
         });
         api.MapPost("/memberships", async (AddStandardLibraryMaterialsRequest request, HttpContext context, StockedMaterialService service, CancellationToken ct) =>
         {
@@ -57,7 +57,7 @@ public static class StockedMaterialEndpoints
         {
             var (actor, role) = User(context);
             if (!await repository.HasUserPermissionAsync(actor, role, AuthorizationActions.StockSynchronize, ct))
-                throw new UnauthorizedAccessException("当前账号没有立即同步常备物料的权限，或由系统设置管理员在设置页操作。");
+                throw new UnauthorizedAccessException("当前账号没有立即同步常备物料的权限。");
             var scope = await service.RequireScopeAsync(actor, role, false, ct);
             try { await service.SynchronizeAsync(scope, actor, ct); return Results.Ok(await service.ListAsync(scope, null, null, null, 1, 50, ct)); }
             catch (Exception error) when (error is not (PdmRuleException or PdmConflictException or UnauthorizedAccessException or OperationCanceledException))
@@ -69,7 +69,7 @@ public static class StockedMaterialEndpoints
         api.MapGet("/settings", async (HttpContext context, StockedMaterialService service, IPdmRepository repository, CancellationToken ct) =>
         {
             var (actor, role) = User(context);
-            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, ct)) throw new UnauthorizedAccessException("当前角色无权查看常备件设置。");
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StockSettingsManage, ct)) throw new UnauthorizedAccessException("当前角色无权查看常备件设置。");
             var scope = await service.RequireScopeAsync(actor, role, false, ct); return Results.Ok(await service.SettingsAsync(scope, ct));
         });
         api.MapPut("/settings", async (SaveStockedSettings request, HttpContext context, StockedMaterialService service, CancellationToken ct) =>

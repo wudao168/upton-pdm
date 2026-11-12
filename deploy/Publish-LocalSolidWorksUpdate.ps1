@@ -7,6 +7,12 @@ param(
     [switch]$Activate
 )
 $ErrorActionPreference = 'Stop'
+$releaseMutex = [Threading.Mutex]::new($false, 'Global\UPLM.LocalUiDeployment')
+$releaseLockHeld = $false
+try {
+    try { $releaseLockHeld = $releaseMutex.WaitOne([TimeSpan]::FromSeconds(60)) }
+    catch [Threading.AbandonedMutexException] { $releaseLockHeld = $true }
+    if (!$releaseLockHeld) { throw '其他本机发布仍在进行，未更改插件发布清单。' }
 . (Join-Path $PSScriptRoot 'SystemReleaseHistory.ps1')
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $repo = Split-Path -Parent $PSScriptRoot
@@ -24,6 +30,14 @@ try {
     }
     $reader = [IO.StreamReader]::new($zip.GetEntry('.uplm-version').Open())
     try { if ($reader.ReadToEnd().Trim() -ne $Version) { throw '更新包标记与发布版本不一致' } } finally { $reader.Dispose() }
+    $assemblyCheck = [IO.Path]::GetTempFileName()
+    try {
+        $inputStream = $zip.GetEntry('Upton.Pdm.SolidWorks.Addin.dll').Open()
+        $outputStream = [IO.File]::Create($assemblyCheck)
+        try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose(); $inputStream.Dispose() }
+        $compiledVersion = ([Diagnostics.FileVersionInfo]::GetVersionInfo($assemblyCheck).ProductVersion -split '\+')[0]
+        if ($compiledVersion -ne $Version) { throw '插件程序集实际版本与发布标记不一致，未发布更新。' }
+    } finally { Remove-Item -LiteralPath $assemblyCheck -ErrorAction SilentlyContinue }
 } finally { $zip.Dispose() }
 if (!(Test-Path -LiteralPath $target)) {
     $partial = "$target.$([guid]::NewGuid().ToString('N')).tmp"
@@ -72,3 +86,7 @@ try {
     throw
 }
 [pscustomobject]@{Version=$Version;Sha256=$hash;Activated=$true;Ui=$ui}
+} finally {
+    if ($releaseLockHeld) { $releaseMutex.ReleaseMutex() }
+    $releaseMutex.Dispose()
+}

@@ -111,14 +111,15 @@ public sealed partial class PdmAddin
         }
         var manifest = new ControlledOpenManifestDto { Id = requested.Id, ProjectId = requested.ProjectId, ProjectCode = requested.ProjectCode,
             RootDocumentId = requested.RootDocumentId, RootVersionId = requested.RootVersionId, RootRevision = requested.RootRevision,
-            RootRelativePath = root.RelativePath, Files = files, Warnings = requested.Warnings, ForEdit = false };
+            RootRelativePath = root.RelativePath, Files = files, Warnings = requested.Warnings, ForEdit = false,
+            ReferenceIssues = OpenReferenceFindings.Merge(requested.ReferenceIssues) };
         foreach (var pair in retainedHashes)
         {
             manifest.RetainedWorkingHashes.Add(pair.Key, pair.Value);
             manifest.ResumedDocumentIds.Add(pair.Key);
         }
         var opened = OpenControlledReadOnlyDocumentCore(rootPath, (int)swDocumentTypes_e.swDocDRAWING, string.Empty, manifest, true,
-            allowMissingComponents: !acquirePermission);
+            allowMissingComponents: true, requireDrawingModels: acquirePermission);
         if (opened == null) throw new IOException("工程图尚未打开，已保留原零件、总装窗口及修改，请查看本次操作日志。");
         foreach (var file in files.Where(file => context.Value.Files.All(existing => existing.DocumentId != file.DocumentId)))
         {

@@ -4,6 +4,7 @@ export const projectCenterSchema = 'system.project-center-permissions.v1'
 export const projectCenterAccessKey: InjectionKey<ComputedRef<readonly string[]>> = Symbol('project-center-permissions')
 
 export function canViewProjectTab(permissions: readonly string[], tab: string) {
+  if (tab === 'summary') return permissions.includes('project.summary.view')
   return !permissions.includes(projectCenterSchema) || permissions.includes(`project.tab.${tab}.view`)
 }
 

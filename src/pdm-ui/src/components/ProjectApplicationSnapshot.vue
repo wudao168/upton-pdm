@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CompanyName from './CompanyName.vue'
 import PersonName from './PersonName.vue'
 import type { ProjectApplicationData } from '../projectApplications'
 import ProjectApplicationBudget from './ProjectApplicationBudget.vue'
@@ -9,12 +10,12 @@ defineProps<{ data: ProjectApplicationData }>()
 
 <template>
   <dl class="application-snapshot">
-    <dt>客户名称</dt><dd>{{ data.input.customerName || '—' }}</dd>
+    <dt>客户名称</dt><dd><CompanyName :name="data.input.customerName || '—'" /></dd>
     <dt>项目名称</dt><dd>{{ data.input.projectName || '—' }}</dd>
     <dt>立项方式</dt><dd>{{ data.input.isSpecial ? '特殊立项' : '正常立项' }}</dd>
     <dt>订单日期</dt><dd>{{ data.input.orderDate || '未填写' }}</dd>
     <dt>交货日期</dt><dd>{{ data.input.deliveryDate || '—' }}</dd>
-    <dt>销售经理</dt><dd>{{ data.salesName || '—' }}</dd>
+    <dt>销售经理</dt><dd><PersonName :name="data.salesName || '—'" /></dd>
     <dt>售前工程师</dt><dd><PersonName :name="data.presalesPeople.map(x => x.displayName).join('、') || '—'" /></dd>
     <dt>备注</dt><dd>{{ data.input.remarks || '—' }}</dd>
   </dl>

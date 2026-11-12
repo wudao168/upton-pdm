@@ -34,7 +34,7 @@ public sealed class ProductionExceptionApiTests(PdmApiFactory factory) : IClassF
         if (await repository.FindUserAsync("admin", default) is null)
             await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
         await repository.SetUserCompanyScopeAsync("admin", company, false, [], "admin", default);
-        var project = await repository.CreateProjectAsync(new("EX-API-" + Guid.NewGuid().ToString("N"), "制造异常接口模拟", "admin", "vault", "release"), "admin", default);
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new("EX-API-" + Guid.NewGuid().ToString("N"), "制造异常接口模拟", "admin", "vault", "release"), "admin", default);
         var bom = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "EX-API", "接口模拟件", 10, "件", "钢", "EX-API-MODEL", "B", true);
         var package = new ReleasePackage(Guid.NewGuid(), project.Id, "EX-API-RP", ReleasePackageState.Published, null, "B", "B", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "release")
             { Scope = ReleaseScope.NonStandardWithDrawing, NonStandardBomSnapshot = [bom], SelectedBomItemIds = [bom.Id] };

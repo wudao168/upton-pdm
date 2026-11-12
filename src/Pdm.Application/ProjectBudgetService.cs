@@ -60,7 +60,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
         var canEdit = access.CanMaintainBudget && await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetEdit, ct);
         var canEditActual = access.CanMaintainActual && await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetActualEdit, ct);
         if (!canEdit && !canEditActual)
-            throw new UnauthorizedAccessException("当前账号没有预算维护权限。");
+            throw new UnauthorizedAccessException("当前账号无法维护本项目的预算或实际成本。请在权限中心按项目检查「项目预算」和「财务数据范围」。");
         if (command.Lines is null || command.Lines.Select(line => line.Category).Distinct().Count() != command.Lines.Count
             || command.Lines.Any(line => !ProjectBudgetCategories.All.Contains(line.Category)))
             throw new PdmRuleException("预算分类无效或重复。");
@@ -89,7 +89,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
         }
         var reserve = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetReserve, ct);
         if (!reserve && command.Lines.Any(line => line.Category == ProjectBudgetCategories.Reserve))
-            throw new UnauthorizedAccessException("风险预留仅计划管理可维护。");
+            throw new UnauthorizedAccessException("当前账号没有本项目的风险预留维护权限。");
         var required = ProjectBudgetCategories.All.Where(category => reserve || category != ProjectBudgetCategories.Reserve).ToArray();
         if (required.Any(category => !command.Lines.Any(line => line.Category == category))) throw new PdmRuleException("请填写完整的预算分类。");
         foreach (var line in command.Lines)
@@ -130,7 +130,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
             throw new UnauthorizedAccessException("当前账号没有项目财务备注维护权限。");
         if (command.Category != "Assessment" && !ProjectBudgetCategories.All.Contains(command.Category)) throw new PdmRuleException("预算分类无效。");
         if (command.Category == ProjectBudgetCategories.Reserve && !await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetReserve, ct))
-            throw new UnauthorizedAccessException("风险预留仅计划管理可查看。");
+            throw new UnauthorizedAccessException("当前账号没有本项目的风险预留权限。");
         var content = command.Content?.Trim();
         if (string.IsNullOrEmpty(content) || content.Length > 500) throw new PdmRuleException("备注内容应为1至500字。");
         var current = await budgets.FindAsync(projectId, ct) ?? new(projectId, ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category)).ToArray(), ManualActualAmounts: true);
