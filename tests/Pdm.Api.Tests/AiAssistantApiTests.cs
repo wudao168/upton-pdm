@@ -184,8 +184,19 @@ public sealed partial class AiAssistantApiTests
         Assert.Equal(HttpStatusCode.NotFound, (await f.Client.GetAsync($"/api/ai/conversations/{c.Id}")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await f.Client.DeleteAsync($"/api/ai/conversations/{c.Id}")).StatusCode);
         Assert.Empty((await f.Client.GetFromJsonAsync<JsonElement>("/api/ai/conversations")).EnumerateArray());
+        Assert.Equal(HttpStatusCode.NoContent, (await f.Client.DeleteAsync("/api/ai/conversations")).StatusCode);
+        var otherUserConversation = await f.Conversation();
         f.Login(Fixture.Actor); await f.Repo.SetUserCompanyScopeAsync(Fixture.Actor, f.Company, true, [f.Other], "admin", default); f.CompanyHeader(f.Other);
         Assert.Equal(HttpStatusCode.NotFound, (await f.Client.GetAsync($"/api/ai/conversations/{c.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await f.Client.DeleteAsync("/api/ai/conversations")).StatusCode);
+        f.CompanyHeader(f.Company);
+        Assert.Equal(HttpStatusCode.OK, (await f.Client.GetAsync($"/api/ai/conversations/{c.Id}")).StatusCode);
+        await f.Grant(AiPermissions.Settings);
+        Assert.Equal(HttpStatusCode.Forbidden, (await f.Client.DeleteAsync("/api/ai/conversations")).StatusCode);
+        await f.Grant(AiPermissions.Chat, AiPermissions.Settings, AiPermissions.Cloud);
+        Assert.Equal(HttpStatusCode.NoContent, (await f.Client.DeleteAsync("/api/ai/conversations")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await f.Client.GetAsync($"/api/ai/conversations/{c.Id}")).StatusCode);
+        Assert.NotNull(await ((IAiStore)f.Repo).FindAsync(f.Company, user.Id, otherUserConversation.Id, default));
     }
 
     [Fact]
@@ -219,6 +230,7 @@ public sealed partial class AiAssistantApiTests
         await upstream.Received.Task.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(HttpStatusCode.Conflict, (await f.Client.PostAsJsonAsync($"/api/ai/conversations/{c.Id}/messages", new AiSendInput(Guid.NewGuid(), "重复请求", f.Model))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await f.Client.DeleteAsync($"/api/ai/conversations/{c.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await f.Client.DeleteAsync("/api/ai/conversations")).StatusCode);
         cancellation.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending);
         await upstream.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
         AiConversation? saved = null;
@@ -306,6 +318,10 @@ public sealed partial class AiAssistantApiTests
                 var last = body.GetProperty("messages").EnumerateArray().Last();
                 async Task Chunk(object delta, string? reason = null) { await context.Response.WriteAsync("data: " + JsonSerializer.Serialize(new { id = "mock", @object = "chat.completion.chunk", created = 1, model = "test-model", choices = new[] { new { index = 0, delta, finish_reason = reason } } }) + "\n\n"); await context.Response.Body.FlushAsync(); }
                 var toolCount = body.GetProperty("messages").EnumerateArray().Count(m => m.GetProperty("role").GetString() == "tool");
+                if (body.TryGetProperty("thinking", out var thinking) && thinking.GetProperty("type").GetString() == "enabled") {
+                    await Chunk(new { role = "assistant", reasoning_content = "内部思考-" + toolCount });
+                    await Chunk(new { reasoning_content = "-续段" });
+                }
                 if (toolCount < toolRounds && body.TryGetProperty("tools", out var toolList) && toolList.GetArrayLength() > 0) {
                     var name = requestedTool ?? toolList[0].GetProperty("function").GetProperty("name").GetString()!;
                     await Chunk(new { role = "assistant", tool_calls = new[] { new { index = 0, id = "call-" + toolCount, type = "function", function = new { name, arguments = arguments ?? (name == "connection_check" ? "{}" : name == "SearchWeb" ? "{\"query\":\"DeepSeek 官方搜索文档\"}" : "{\"query\":\"\"}") } } } }, "tool_calls");

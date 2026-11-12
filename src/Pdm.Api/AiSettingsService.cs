@@ -34,6 +34,10 @@ public sealed class AiSettingsService(IAiStore store, AiAccess access, IDataProt
                 if (string.IsNullOrWhiteSpace(model.Id) || model.Id.Length > 150 || string.IsNullOrWhiteSpace(model.Name) || model.Name.Length > 80
                     || model.ContextTokens is < 4096 or > 2000000 || model.OutputTokens is < 128 or > 8192 || model.OutputTokens > model.ContextTokens / 2)
                     throw new PdmRuleException("请检查模型ID、名称及容量；上下文至少4096，输出上限128至8192且不超过上下文的一半。");
+                if (model.ReasoningEffort is not ("low" or "high" or "max"))
+                    throw new PdmRuleException("思考强度请选择低、高或最高。");
+                if (model.Thinking && p.Adapter != "deepseek")
+                    throw new PdmRuleException("当前思考设置仅适用于DeepSeek接口；其他接口请关闭思考模式。");
             }
             var existing = old.Providers.FirstOrDefault(x => x.Id == p.Id);
             if (p.ApiKey?.Length > 4096 || p.ApiKey?.Any(char.IsControl) == true) throw new PdmRuleException("API密钥格式不正确，请重新填写。");
@@ -67,13 +71,16 @@ public sealed class AiSettingsService(IAiStore store, AiAccess access, IDataProt
     {
         await access.RequireAsync(AiPermissions.Settings, null, ct);
         var (_, provider, model) = await ResolveAsync(providerId + ":" + input.ModelId, ct);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(model.Thinking ? 180 : 45));
         var called = false;
         using var client = new FunctionInvokingChatClient(clients.Create(provider, model)) { MaximumIterationsPerRequest = 3 };
-        var options = new ChatOptions { MaxOutputTokens = 128, Tools = input.Tools ? [AIFunctionFactory.Create(() => { called = true; return "连接验证成功"; }, "connection_check", "测试连接时必须调用的只读工具")] : null };
+        var options = new ChatOptions { MaxOutputTokens = model.Thinking ? model.OutputTokens : 128, Tools = input.Tools ? [AIFunctionFactory.Create(() => { called = true; return "连接验证成功"; }, "connection_check", "测试连接时必须调用的只读工具")] : null };
         var text = new System.Text.StringBuilder();
         try {
-            await foreach (var update in client.GetStreamingResponseAsync([new(ChatRole.User, input.Tools ? "请先调用connection_check工具，再用中文简短回复验证结果。" : "请只回复：连接成功。")], options, timeout.Token)) text.Append(update.Text);
+            await foreach (var update in client.GetStreamingResponseAsync([new(ChatRole.User, input.Tools ? "请先调用connection_check工具，再用中文简短回复验证结果。" : "请只回复：连接成功。")], options, timeout.Token)) {
+                if (update.FinishReason == ChatFinishReason.Length) throw new PdmRuleException("测试达到输出上限，请提高输出上限或降低思考强度后重试。");
+                text.Append(update.Text);
+            }
             if (text.Length == 0 || input.Tools && !called) throw new PdmRuleException(input.Tools ? "模型没有完成工具调用，请关闭工具调用或检查模型配置。" : "模型未返回文字，请核对模型名称及兼容接口。");
             return new { success = true, message = input.Tools ? "流式回复与工具调用验证通过。" : "认证与流式回复验证通过。", tools = called };
         } catch (Exception ex) when (ex is not PdmRuleException) {

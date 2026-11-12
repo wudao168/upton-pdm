@@ -33,6 +33,7 @@ internal static class PdmDocumentIdentityStore
     private static string bindingDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON PDM", "document-bindings");
     private static Func<string> workspaceRootResolver = WorkspaceSettingsStore.GetWorkspaceRoot;
+    internal static string CurrentWorkspaceRoot => workspaceRootResolver();
     private static bool isolatedReadScope;
     private static readonly object bindingSync = new object();
 

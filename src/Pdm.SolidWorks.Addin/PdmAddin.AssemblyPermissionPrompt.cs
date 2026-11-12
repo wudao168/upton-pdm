@@ -15,30 +15,49 @@ public sealed partial class PdmAddin
     private bool assemblyPermissionPromptActive;
 
     // IDs from SOLIDWORKS swCommands_e; File > New (1) is deliberately excluded.
-    internal static bool IsAssemblyInsertionCommand(int command) => new[] { 13, 91, 295, 585, 821, 1258, 1259, 1325, 1638 }.Contains(command);
+    internal static bool IsAssemblyInsertionCommand(int command) => command is 13 or 91 or 295 or 585 or 821 or 1258 or 1259 or 1325 or 1638;
+
+    private static bool IsSelectedComponentChange(int command) => command is 14 or 15 or 20 or 21 or 575 or 584
+        or 864 or 957 or 959 or 1260 or 1324 or 1503 or 1504;
+
+    private static string AssemblyStructureOperation(int command)
+    {
+        if (IsAssemblyInsertionCommand(command)) return "插入或粘贴组件";
+        switch (command)
+        {
+            case 90: case 574: case 701: case 750: case 1343: case 1922: case 1944:
+            case 2195: case 2517: case 2518: case 2521: case 2819:
+                return "修改装配配合";
+            case 575: return "替换组件";
+            case 584: return "剪切组件";
+            case 1260: case 1324: return "解散子装配体";
+            case 1016: case 1941: case 1942: case 1943: case 3108: case 3109: case 3126:
+                return "阵列组件";
+            default: return IsSelectedComponentChange(command) ? "修改组件" : null;
+        }
+    }
 
     private int OnAssemblyCommandOpening(int command, int userCommand)
     {
         var previous = nativeUiCommandId;
         if (command > 0) { nativeUiCommandId = command; unknownSavedEpoch = 0; }
-        if (!IsAssemblyInsertionCommand(command)) return 0;
+        var operation = AssemblyStructureOperation(command);
+        if (operation == null) return 0;
         try
         {
             var document = application?.ActiveDoc as IModelDoc2;
             if (!(document is IAssemblyDoc assembly)) return 0;
-            var owner = assembly.GetEditTarget() as IModelDoc2 ?? document;
-            if (!(owner is IAssemblyDoc)) return 0;
-            var path = owner.GetPathName();
-            if (CanDeleteAssemblyComponent(path)) return 0;
-            QueueAssemblyPermission(document, new[] { path }, command, "插入组件");
+            var blockedOwners = AssemblyCommandOwners(document, assembly, command).Where(path => !CanEditAssemblyStructure(path)).ToArray();
+            if (blockedOwners.Length == 0) return 0;
+            QueueAssemblyPermission(document, blockedOwners, command, operation);
             if (nativeUiCommandId == command) nativeUiCommandId = previous;
             return 1; // CommandOpenPreNotify: cancel before the PropertyManager opens.
         }
         catch (Exception error)
         {
             if (nativeUiCommandId == command) nativeUiCommandId = previous;
-            LogDiagnostic("插入组件前核对所属装配体权限", error);
-            taskPaneControl?.SetCheckoutReminder("已停止插入：尚未确认所属装配体权限，请先获取权限后重试。", true);
+            LogDiagnostic("修改结构前核对所属装配体权限", error);
+            taskPaneControl?.SetCheckoutReminder("已停止“" + operation + "”：请核对所属装配体并获取编辑权限后重试。", true);
             return 1;
         }
     }
@@ -49,9 +68,9 @@ public sealed partial class PdmAddin
         {
             var document = assemblyEventDocument;
             if (!(document is IAssemblyDoc assembly)) return 0;
-            var owner = assembly.GetEditTarget() as IModelDoc2 ?? document;
-            if (!(owner is IAssemblyDoc) || CanDeleteAssemblyComponent(owner.GetPathName())) return 0;
-            QueueAssemblyPermission(document, new[] { owner.GetPathName() }, 0, "拖入组件");
+            var blockedOwners = AssemblyCommandOwners(document, assembly, 0).Where(path => !CanEditAssemblyStructure(path)).ToArray();
+            if (blockedOwners.Length == 0) return 0;
+            QueueAssemblyPermission(document, blockedOwners, 0, "拖入组件");
             return 1;
         }
         catch (Exception error)
@@ -60,6 +79,25 @@ public sealed partial class PdmAddin
             taskPaneControl?.SetCheckoutReminder("已停止拖入：请先获取所属装配体权限，再重新拖入组件。", true);
             return 1;
         }
+    }
+
+    private static IEnumerable<string> AssemblyCommandOwners(IModelDoc2 document, IAssemblyDoc assembly, int command)
+    {
+        var target = assembly.GetEditTarget() as IModelDoc2 ?? document;
+        if (!(target is IAssemblyDoc)) yield break;
+        var foundSelectionOwner = false;
+        if (IsSelectedComponentChange(command) && document.SelectionManager is ISelectionMgr selection)
+            for (var index = 1; index <= selection.GetSelectedObjectCount2(-1); index++)
+                if (selection.GetSelectedObject6(index, -1) is IComponent2 component)
+                {
+                    foundSelectionOwner = true;
+                    yield return AssemblyComponentOwnerPath(document, component);
+                }
+        if (foundSelectionOwner) yield break;
+        var path = target.GetPathName();
+        if (!ReferenceEquals(target, document) && (string.IsNullOrWhiteSpace(path) || IsSolidWorksTemporaryVirtualComponentPath(path)))
+            path = assembly.GetEditTargetComponent() is IComponent2 component ? AssemblyComponentOwnerPath(document, component) : document.GetPathName();
+        yield return path;
     }
 
     private void QueueAssemblyPermission(IModelDoc2 document, IEnumerable<string> ownerPaths, int command, string operation)
@@ -99,11 +137,8 @@ public sealed partial class PdmAddin
         if (disconnecting || active == null || !ReferenceEquals(active, pending.Document) || !PathsEqual(active.GetPathName(), pending.Path)) return false;
         if (string.IsNullOrWhiteSpace(pending.Configuration)
             || !string.Equals(active.ConfigurationManager?.ActiveConfiguration?.Name, pending.Configuration, StringComparison.OrdinalIgnoreCase)) return false;
-        if (pending.Command != 16 && active is IAssemblyDoc assembly)
-        {
-            var target = assembly.GetEditTarget() as IModelDoc2 ?? active;
-            if (!pending.OwnerPaths.Any(path => PathsEqual(path, target.GetPathName()))) return false;
-        }
+        if (pending.Command != 16 && active is IAssemblyDoc assembly
+            && pending.OwnerPaths.Any(path => !AssemblyCommandOwners(active, assembly, pending.Command).Any(owner => PathsEqual(path, owner)))) return false;
         var selection = active.SelectionManager as ISelectionMgr;
         if ((selection?.GetSelectedObjectCount2(-1) ?? 0) != pending.Selection.Length) return false;
         for (var index = 0; index < pending.Selection.Length; index++)
@@ -139,14 +174,14 @@ public sealed partial class PdmAddin
             var projects = pending.OwnerPaths.Select(PdmDocumentIdentityStore.ReadProjectId).Distinct().ToArray();
             if (projects.Length != 1 || !projects[0].HasValue) throw new InvalidOperationException("所选装配体不属于同一项目，请分别获取权限后操作。");
             await AcquireExplicitlyFromPlmAsync(nodes.Select(node => new BatchOperationItem(node, 0)).ToArray(), projects[0].Value);
-            if (!PendingAssemblyContextMatches(pending) || pending.OwnerPaths.Any(path => !CanDeleteAssemblyComponent(path)))
+            if (!PendingAssemblyContextMatches(pending) || pending.OwnerPaths.Any(path => !CanEditAssemblyStructure(path)))
             {
                 taskPaneControl.SetCheckoutReminder("获取操作已结束，当前窗口、选择或权限仍需核对；原装配和权限记录已保留，请确认当前PLM工作副本后重新操作。", true);
                 return;
             }
-            // Reopening the native command preserves its normal dialogs. File-drop
-            // coordinates and clipboard contents are not guessed or replayed.
-            if (pending.Command == 0 || pending.Command == 585 || pending.Command == 821)
+            // Replay only the existing commands that reopen the insertion UI. Other
+            // commands may apply a structure change immediately to the selection.
+            if (!IsAssemblyInsertionCommand(pending.Command) || pending.Command is 585 or 821)
                 taskPaneControl.SetCheckoutReminder("所属装配体权限已获取，请重新执行“" + pending.Operation + "”；原装配保持不变。", false);
             else if (!RunTrackedAssemblyCommand(pending.Document, pending.Command))
                 taskPaneControl.SetCheckoutReminder("所属装配体权限已获取，请重新执行原操作。", false);

@@ -138,6 +138,7 @@ internal sealed class CadTreeNode
     public string LatestRevision { get; set; } = string.Empty;
     public string DrawingVersion { get; set; } = "待核对";
     public string PublishedVersion { get; set; } = "未发布";
+    public string LoadedDrawingVersion { get; set; }
     public string BusinessVersionText => string.Concat(DrawingVersion, " / ", PublishedVersion);
 
     public bool StoredVersionStateKnown { get; set; }

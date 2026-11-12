@@ -45,10 +45,11 @@ public sealed partial class QualityReviewService(IPdmRepository repository, IPro
         if (catalog.RowVersion != expected) throw new PdmConflictException("质量台账已被其他人更新，请刷新后重试。");
         return catalog;
     }
-    private async Task<QualityReviewCatalog> SaveAsync(QualityReviewCatalog catalog, string actor, string action, Guid id, CancellationToken ct)
+    private async Task<QualityReviewCatalog> SaveAsync(QualityReviewCatalog catalog, string actor, string action, Guid id, CancellationToken ct,
+        string detail = "质量复盘记录已更新")
     {
         if (!await store.SaveAsync(catalog, catalog.RowVersion, ct)) throw new PdmConflictException("质量台账已被其他人更新，请刷新后重试。");
-        await repository.AppendAuditAsync(new(Guid.NewGuid(), clock.GetUtcNow(), actor, action, "QualityReview", id.ToString(), "质量复盘记录已更新"), ct);
+        await repository.AppendAuditAsync(new(Guid.NewGuid(), clock.GetUtcNow(), actor, action, "QualityReview", id.ToString(), detail), ct);
         return catalog with { RowVersion = catalog.RowVersion + 1 };
     }
     private static string Text(string? value, int length, string label, bool required = false)
@@ -110,7 +111,7 @@ public sealed partial class QualityReviewService(IPdmRepository repository, IPro
         var detail = await CompanyCanAsync(actor, QualityReviewPermissions.Detail, ct);
         var visible = detail ? catalog : catalog with { Profiles = [], Summaries = [] };
         visible = visible with { Experiences = visible.Experiences.Select(e => e with { RecommendedProjectIds = e.ProjectTags.Count == 0 ? []
-            : projects.Where(p => p.IsActive && e.ProjectTags.Any(tag => new[] { p.Code, p.Name, p.DeviceModel, p.ProjectTypeCode }
+            : projects.Where(p => p.IsActive && Root(p) == p.Id && e.ProjectTags.Any(tag => new[] { p.Code, p.Name, p.DeviceModel, p.ProjectTypeCode }
                 .Any(value => value?.Contains(tag, StringComparison.OrdinalIgnoreCase) == true))
                 && !catalog.Adoptions.Any(a => a.ExperienceId == e.Id && a.ProjectId == p.Id)).Select(p => p.Id).ToArray() }).ToArray() };
         var capabilities = new QualityCapabilities(false,
@@ -134,14 +135,28 @@ public sealed partial class QualityReviewService(IPdmRepository repository, IPro
         if (!summary && !issueView) throw new UnauthorizedAccessException("没有查看此项目总结或质量问题的权限。");
         var catalog = await store.ReadAsync(project.OrganizationId!.Value, ct);
         var projects = await ProjectsAsync(catalog.CompanyId, ct);
+        var summarySources = new Dictionary<Guid, RetrospectiveSource>();
+        if (summary && Root(project) == projectId)
+        {
+            var sourceIds = catalog.Summaries.Select(item => item.ProjectId).ToHashSet();
+            foreach (var child in projects.Where(p => p.Id != projectId && Root(p) == projectId && sourceIds.Contains(p.Id)))
+            {
+                if (!await ProjectCanAsync(child.Id, actor, QualityReviewPermissions.SummaryView, ct)) continue;
+                summarySources[child.Id] = new(child.Code,
+                    await ProjectCanAsync(child.Id, actor, QualityReviewPermissions.SummaryManage, ct),
+                    await ProjectCanAsync(child.Id, actor, QualityReviewPermissions.SummaryReview, ct),
+                    await ProjectCanAsync(child.Id, actor, QualityReviewPermissions.SummaryPublish, ct));
+            }
+        }
         var adoptions = summary ? catalog.Adoptions.Where(a => a.ProjectId == projectId).ToArray() : [];
         var ids = adoptions.Select(a => a.ExperienceId).ToHashSet();
-        return new(projectId, catalog.RowVersion, summary ? catalog.Summaries.Where(s => s.ProjectId == projectId).ToArray() : [],
+        return new(projectId, catalog.RowVersion, summary ? catalog.Summaries.Where(s => s.ProjectId == projectId || summarySources.ContainsKey(s.ProjectId)).ToArray() : [],
             issueView ? await RowsAsync(catalog, projects, actor, ct, projectId) : [], catalog.Experiences.Where(e => ids.Contains(e.Id)).ToArray(), adoptions,
             await ProjectCanAsync(projectId, actor, QualityReviewPermissions.SummaryManage, ct),
             await ProjectCanAsync(projectId, actor, QualityReviewPermissions.SummaryReview, ct),
             await ProjectCanAsync(projectId, actor, QualityReviewPermissions.AdoptionConfirm, ct))
         {
+            SummarySources = summarySources,
             CanViewIssues = issueView,
             CanPublish = await ProjectCanAsync(projectId, actor, QualityReviewPermissions.SummaryPublish, ct),
             CanManageIssues = await ProjectCanAsync(projectId, actor, QualityReviewPermissions.IssueManage, ct),
@@ -188,6 +203,15 @@ public sealed partial class QualityReviewService(IPdmRepository repository, IPro
             throw new PdmRuleException("此主题仍有进行中的改善，暂不能停用。");
         var theme = new QualityTheme(id, title, Text(input.Description, 2000, "主题说明"), input.IsActive);
         return await SaveAsync(catalog with { Themes = catalog.Themes.Where(t => t.Id != id).Append(theme).ToArray() }, actor, "quality.theme.save", id, ct);
+    }
+    public async Task<QualityReviewCatalog> DeleteThemeAsync(Guid id, long expectedRowVersion, string actor, UserRole role, CancellationToken ct)
+    {
+        Id(id);
+        var catalog = await LoadAsync(await RequireCompanyAsync(actor, QualityReviewPermissions.Manage, ct), expectedRowVersion, ct);
+        var theme = catalog.Themes.FirstOrDefault(t => t.Id == id) ?? throw new PdmNotFoundException("共性问题主题不存在或已删除，请刷新后重试。");
+        QualityReviewRules.RequireThemeUnreferenced(catalog, id);
+        return await SaveAsync(catalog with { Themes = catalog.Themes.Where(t => t.Id != id).ToArray() }, actor, "quality.theme.delete", id, ct,
+            $"已删除共性问题主题：{theme.Name}");
     }
     public async Task<QualityReviewCatalog> SaveIssueAsync(Guid projectId, Guid issueId, SaveQualityIssueProfile input,
         string actor, UserRole role, CancellationToken ct)

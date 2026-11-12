@@ -17,6 +17,8 @@ public static class QualityReviewEndpoints
             Saved(await service.SaveSettingsAsync(input, Actor(context), Role(context), ct)));
         company.MapPut("/themes/{id:guid}", async (Guid id, SaveQualityTheme input, HttpContext context, QualityReviewService service, CancellationToken ct) =>
             Saved(await service.SaveThemeAsync(id, input, Actor(context), Role(context), ct)));
+        company.MapDelete("/themes/{id:guid}", async (Guid id, long expectedRowVersion, HttpContext context, QualityReviewService service, CancellationToken ct) =>
+            Saved(await service.DeleteThemeAsync(id, expectedRowVersion, Actor(context), Role(context), ct)));
         company.MapPut("/improvements/{id:guid}", async (Guid id, SaveQualityImprovement input, HttpContext context, QualityReviewService service, CancellationToken ct) =>
             Saved(await service.SaveImprovementAsync(id, input, Actor(context), Role(context), ct)));
         company.MapPost("/improvements/{id:guid}/transition", async (Guid id, QualityTransition input, HttpContext context, QualityReviewService service, CancellationToken ct) =>

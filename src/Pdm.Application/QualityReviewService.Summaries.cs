@@ -11,6 +11,8 @@ public sealed partial class QualityReviewService
         var project = await RequireProjectAsync(projectId, actor, QualityReviewPermissions.SummaryManage, ct);
         var catalog = await LoadAsync(project.OrganizationId!.Value, input.ExpectedRowVersion, ct);
         var previous = catalog.Summaries.FirstOrDefault(s => s.Id == id);
+        if (previous is null && Root(project) != projectId)
+            throw new PdmRuleException("项目总结统一在主项目新建，请切换到所属主项目。");
         if (previous is not null && (previous.ProjectId != projectId || previous.State != "草稿"))
             throw new PdmRuleException("只能修改本项目的草稿总结；已发布总结请创建修订。");
         if (previous is not null && previous.Kind != input.Kind) throw new PdmRuleException("已有总结不能变更总结类型，请为另一类型新建记录。");
@@ -90,7 +92,7 @@ public sealed partial class QualityReviewService
         var next = catalog.Adoptions.ToList();
         foreach (var projectId in ids)
         {
-            if (!projects.Any(p => p.Id == projectId)) throw new PdmRuleException("适用项目不存在或不属于当前公司。");
+            if (!projects.Any(p => p.Id == projectId && Root(p) == p.Id)) throw new PdmRuleException("经验采用任务只能创建在当前公司的主项目。");
             if (!await ProjectCanAsync(projectId, owner, QualityReviewPermissions.AdoptionConfirm, ct)) throw new PdmRuleException("所选负责人没有目标项目的经验采用确认权限，请调整负责人或授权。");
             if (!next.Any(a => a.ProjectId == projectId && a.ExperienceId == input.ExperienceId))
                 next.Add(new(Guid.NewGuid(), input.ExperienceId, projectId, owner, input.DueOn, "待检查", ""));

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import CompanyName from './CompanyName.vue'
 import PersonName from './PersonName.vue'
+import PlmCubeIcon from './PlmCubeIcon.vue'
 import SearchField from './SearchField.vue'
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import { heartbeatSession, listMyApprovalTasks, listProjects, listUserNotifications, loginDingTalkOffice, logoutSession, markUserNotificationRead, readDingTalkOfficeBootstrap, readProjectPlan, readWorkHours, readPublishedMobileOfficeLayout } from '../api'
@@ -37,7 +38,7 @@ const requestedOplIssueId = ref<string>()
 const search = ref(''), taskFilter = ref<'pending' | 'read'>('pending'), selectedTask = ref<MyApprovalTask>()
 const workHours = ref<Guard>(), opl = ref<Guard>(), approval = ref<Guard>(), workHoursVisited = ref(false), workHoursProject = ref('')
 const todayHours = ref<number | null>(null), version = ref(''), todayHoursError = ref('')
-const layout = ref(defaultMobileOfficeLayout()), layoutVersion = ref(0), layoutNotice = ref(''), layoutRefreshing = ref(false)
+const layout = ref(defaultMobileOfficeLayout()), layoutVersion = ref(0), layoutNotice = ref('')
 const token = computed(() => session.value?.accessToken ?? '')
 const permissions = computed(() => session.value?.permissions ?? [])
 const selectedProject = computed(() => projects.value.find(project => project.id === projectId.value))
@@ -108,17 +109,8 @@ async function loadLayout() {
     if (!published?.layout || published.layout.schemaVersion !== 1) throw new Error('移动端页面配置格式无效，请联系管理员核对发布版本。')
     layout.value = published.layout; layoutVersion.value = published.version; layoutNotice.value = ''
   } catch (cause) {
-    if (!disposed && currentToken === token.value) layoutNotice.value = failure(cause, '移动端布局读取失败，请检查网络后刷新。') + ' 当前继续使用已加载布局或系统默认布局。'
+    if (!disposed && currentToken === token.value) layoutNotice.value = failure(cause, '移动端布局读取失败，请检查网络后重新进入。') + ' 当前继续使用已加载布局或系统默认布局。'
   }
-}
-async function refreshPage() {
-  if (layoutRefreshing.value || refreshing.value || !canLeave()) return
-  layoutRefreshing.value = true
-  try {
-    await loadLayout()
-    if (!visibleNavigation.value.some(item => item.key === page.value)) navigate(mobileOfficeInitialPage(layout.value, canViewProjects.value))
-    await refresh()
-  } finally { layoutRefreshing.value = false }
 }
 async function verifyBinding() {
   if (pending.value || !/^[0-9a-f]{8}$/i.test(bindingCode.value)) return
@@ -254,7 +246,10 @@ onBeforeUnmount(() => { disposed = true; generation++; projectGeneration++; docu
 </script>
 <template>
   <div class="mobile-office" :data-layout-theme="layout.theme">
-    <header class="mobile-office-header"><div><strong>UPLM</strong><span>移动办公</span></div><small v-if="session"><CompanyName :name="session.activeCompanyName" /> · {{ session.displayName }}</small><button v-if="session" :disabled="pending || refreshing || layoutRefreshing" @click="refreshPage">刷新</button></header>
+    <header class="mobile-office-header">
+      <div class="mobile-office-brand"><PlmCubeIcon /><strong>UPLM</strong></div>
+      <small v-if="session" class="mobile-office-user" :title="session.displayName || '姓名待补充'">{{ session.displayName || '姓名待补充' }}</small>
+    </header>
     <main class="mobile-office-main">
       <p v-if="error" class="mobile-error" role="alert">{{ error }}</p><p v-if="notice" class="mobile-notice" role="status">{{ notice }}</p>
       <p v-if="session && layoutNotice" class="mobile-notice" role="status">{{ layoutNotice }}</p>
@@ -271,18 +266,18 @@ onBeforeUnmount(() => { disposed = true; generation++; projectGeneration++; docu
         </details>
       </section>
       <template v-else>
-        <MobileOfficeHome v-if="page === 'home'" :layout="layout" :display-name="session.displayName" :today="chinaToday()" :tasks="tasks" :projects="projects" :unread="unread" :today-hours="todayHours" :today-hours-error="todayHoursError" :refreshing="refreshing" :can-view-projects="canViewProjects" :reminder-count="reminder.count.value" @navigate="navigate" @open-task="id => { const task = tasks.find(item => item.id === id); if (task) openTask(task) }" @open-project="openProject" />
+        <MobileOfficeHome v-if="page === 'home'" :layout="layout" :display-name="session.displayName" :today="chinaToday()" :tasks="tasks" :projects="projects" :unread="unread" :today-hours="todayHours" :today-hours-error="todayHoursError" :refreshing="refreshing" :can-view-projects="canViewProjects" @navigate="navigate" @open-task="id => { const task = tasks.find(item => item.id === id); if (task) openTask(task) }" @open-project="openProject" />
         <section v-if="page === 'tasks'" aria-label="我的待办">
           <MobileApproval v-if="selectedTask" ref="approval" :key="selectedTask.id" :task="selectedTask" :token="token" :username="session.username" :permissions="permissions" @done="approvalDone" @back="navigate('tasks')" />
-          <template v-else><h1>我的待办</h1><div class="mobile-tabs"><button :aria-pressed="taskFilter === 'pending'" @click="taskFilter = 'pending'">待处理</button><button :aria-pressed="taskFilter === 'read'" @click="taskFilter = 'read'">已读事项</button></div>
+          <template v-else><div class="mobile-tabs"><button :aria-pressed="taskFilter === 'pending'" @click="taskFilter = 'pending'">待处理</button><button :aria-pressed="taskFilter === 'read'" @click="taskFilter = 'read'">已读事项</button></div>
             <template v-if="taskFilter === 'pending'"><h2>待审批（{{ tasks.length }}）</h2><button v-for="task in tasks" :key="task.id" class="mobile-record mobile-record-button" @click="openTask(task)"><strong>{{ task.projectCode }} · {{ task.projectName }}</strong><span>{{ task.releasePackageNumber || '验证 / 验收计划' }} · {{ task.stepName || task.stage }}</span><small>{{ task.createdAt.slice(0, 10) }}</small></button></template>
             <h2>{{ taskFilter === 'read' ? '已读' : '业务' }}事项（{{ visibleNotifications.length }}）</h2>
-            <article v-for="notification in visibleNotifications" :key="notification.id" class="mobile-record"><strong>{{ notification.title }}</strong><p>{{ notification.content }}</p><small>{{ notification.dueDate ? `截止 ${notification.dueDate} · ` : '' }}{{ notification.createdAt.slice(0, 10) }}</small><button @click="openNotification(notification)">{{ notification.projectId ? '查看事项' : '标记已读' }}</button></article>
+            <article v-for="notification in visibleNotifications" :key="notification.id" class="mobile-record"><strong>{{ notification.title }}</strong><p>{{ notification.content }}</p><footer class="mobile-record-footer"><small>{{ notification.dueDate ? `截止 ${notification.dueDate} · ` : '' }}{{ notification.createdAt.slice(0, 10) }}</small><button @click="openNotification(notification)">{{ notification.projectId ? '查看事项' : '标记已读' }}</button></footer></article>
             <p v-if="!refreshing && !visibleNotifications.length && (taskFilter === 'read' || !tasks.length)">暂无符合条件的事项。</p>
           </template>
         </section>
         <section v-if="page === 'projects' && canViewProjects" aria-label="移动项目">
-          <template v-if="!selectedProject"><h1>我的项目</h1><label class="mobile-field">搜索项目<SearchField><input v-model="search" aria-label="搜索项目" placeholder="项目号、名称或客户" /></SearchField></label><button v-for="project in visibleProjects" :key="project.id" class="mobile-record mobile-record-button" @click="openProject(project.id)"><strong>{{ project.code }} · {{ project.name }}</strong><span>{{ project.stage }} · {{ project.parentProjectId ? '子项目' : '主项目' }}</span><small><CompanyName :name="project.customerName" />{{ project.deliveryDate ? ` · 交期 ${project.deliveryDate}` : '' }}</small></button><p v-if="!visibleProjects.length">暂无符合条件的项目。</p></template>
+          <template v-if="!selectedProject"><label class="mobile-field">搜索项目<SearchField><input v-model="search" aria-label="搜索项目" placeholder="项目号、名称或客户" /></SearchField></label><button v-for="project in visibleProjects" :key="project.id" class="mobile-record mobile-record-button" @click="openProject(project.id)"><strong>{{ project.code }} · {{ project.name }}</strong><span>{{ project.stage }} · {{ project.parentProjectId ? '子项目' : '主项目' }}</span><small><CompanyName :name="project.customerName" />{{ project.deliveryDate ? ` · 交期 ${project.deliveryDate}` : '' }}</small></button><p v-if="!visibleProjects.length">暂无符合条件的项目。</p></template>
           <template v-else><button @click="() => { if (canLeave()) { projectGeneration++; projectId = ''; projectSection = 'overview' } }">返回项目列表</button><h1>{{ selectedProject.code }} · {{ selectedProject.name }}</h1><div class="mobile-tabs"><button v-if="canView('overview')" :aria-pressed="projectSection === 'overview'" @click="openProject(selectedProject.id)">项目概况</button><button v-if="canView('opl')" :aria-pressed="projectSection === 'opl'" @click="openProject(selectedProject.id, 'opl')">OPL开口问题</button><button @click="projectHours">填写项目工时</button></div>
             <ProjectOplManager v-if="projectSection === 'opl'" ref="opl" :key="selectedProject.id" :project="selectedProject" :token="token" :mobile="true" :requested-issue-id="requestedOplIssueId" @issue-request-handled="requestedOplIssueId = undefined" @saved="refresh" @open-release="notice = '请在待办中打开对应审批；历史发布资料可在电脑端查看。'" />
             <template v-else><dl class="mobile-project-facts"><dt>项目状态</dt><dd>{{ selectedProject.stage }}</dd><dt>客户</dt><dd><CompanyName :name="selectedProject.customerName || '—'" /></dd><dt>项目经理</dt><dd><PersonName :name="displayUserName(selectedProject.primaryProjectManager || selectedProject.owner)" /></dd><dt>协同经理</dt><dd>{{ selectedProject.collaborativeProjectManagers?.join('、') || '—' }}</dd><dt>设计人员</dt><dd>{{ selectedProject.designers?.join('、') || '—' }}</dd><dt>交付日期</dt><dd>{{ selectedProject.deliveryDate || '—' }}</dd></dl>
@@ -291,7 +286,7 @@ onBeforeUnmount(() => { disposed = true; generation++; projectGeneration++; docu
           </template>
         </section>
         <WorkHoursManager v-if="workHoursVisited" v-show="page === 'work-hours'" ref="workHours" :token="token" :company-id="session.activeCompanyId" :active="page === 'work-hours'" :mobile="true" :initial-project-id="workHoursProject" @changed="workHoursChanged" />
-        <section v-if="page === 'mine'" aria-label="我的账号"><h1>我的账号</h1><dl class="mobile-project-facts"><dt>姓名</dt><dd>{{ session.displayName }}</dd><dt>公司</dt><dd><CompanyName :name="session.activeCompanyName" /></dd><dt>界面版本</dt><dd>{{ version || '开发预览' }}</dd><dt>页面布局版本</dt><dd>{{ layoutVersion ? `V${layoutVersion}` : '系统默认 V0' }}</dd></dl><p>权限和审批规则沿用UPLM设置。工时保存后立即计入汇总；工时缺填在独立入口提醒。</p><button :disabled="pending" @click="reenter">重新验证钉钉身份</button><button :disabled="pending" @click="signOut">退出当前登录</button></section>
+        <section v-if="page === 'mine'" aria-label="我的账号"><dl class="mobile-project-facts"><dt>姓名</dt><dd>{{ session.displayName }}</dd><dt>公司</dt><dd><CompanyName :name="session.activeCompanyName" /></dd><dt>界面版本</dt><dd>{{ version || '开发预览' }}</dd><dt>页面布局版本</dt><dd>{{ layoutVersion ? `V${layoutVersion}` : '系统默认 V0' }}</dd></dl><p>权限和审批规则沿用UPLM设置。工时保存后立即计入汇总；工时缺填在独立入口提醒。</p><button :disabled="pending" @click="reenter">重新验证钉钉身份</button><button :disabled="pending" @click="signOut">退出当前登录</button></section>
       </template>
     </main>
     <MobileOfficeNavigation v-if="session" :layout="layout" :page="page" :can-view-projects="canViewProjects" :task-count="tasks.length + unread" :reminder-count="reminder.count.value" @navigate="navigate" />

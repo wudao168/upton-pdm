@@ -4,13 +4,18 @@ import { aiError, aiJson, aiRequestId, aiSourceUrl, streamAi, type AiBootstrap, 
 const props = defineProps<{ token: string }>()
 const emit = defineEmits<{ openSource: [source: AiSource] }>()
 const boot = ref<AiBootstrap>(), conversations = ref<AiConversation[]>([]), current = ref<AiConversation>()
-const model = ref(''), business = ref(false), draft = ref(''), search = ref(''), error = ref(''), notice = ref(''), busy = ref(false), loading = ref(false)
+const model = ref(''), draft = ref(''), search = ref(''), error = ref(''), notice = ref(''), busy = ref(false), loading = ref(false)
 const web = ref(false)
+const businessChoice = ref<boolean>()
 const messages = ref<HTMLElement>(); let controller: AbortController | undefined, disposed = false
 const filtered = computed(() => conversations.value.filter(c => c.title.includes(search.value)))
 const selected = computed(() => boot.value?.models.find(m => m.key === model.value))
 const businessReason = computed(() => !boot.value?.canBusiness ? '当前账号未获“使用AI只读业务查询”权限，请在权限中心核对。' : !selected.value ? '请先选择模型。' : !selected.value.tools ? '当前模型未开启工具调用，请在系统设置 → AI服务中通过工具测试并开启工具调用。' : '')
 const webReason = computed(() => !boot.value?.canWeb ? '当前账号未获联网查询或云端AI权限，请在权限中心核对。' : !boot.value.webEnabled ? '当前公司尚未启用联网查询，请在系统设置 → AI服务中设置。' : !selected.value?.tools ? '请选择已开启工具调用的模型。' : '')
+const business = computed({
+  get: () => businessChoice.value ?? (!web.value && !businessReason.value),
+  set: value => { businessChoice.value = value },
+})
 const canSend = computed(() => boot.value?.canChat && !!selected.value && !!draft.value.trim() && !busy.value && !loading.value && (!business.value || !businessReason.value) && (!web.value || !webReason.value))
 function enableBusiness() { business.value = true; web.value = false }
 function enableWeb() { web.value = true; business.value = false }
@@ -23,15 +28,23 @@ async function refresh() {
     if (!boot.value.canChat && boot.value.canManage) notice.value = '当前账号仅有配置权限，请从系统设置 → AI服务维护配置。'
   } catch (e) { error.value = aiError(e) } finally { loading.value = false }
 }
-function fresh() { if (busy.value) return; current.value = undefined; draft.value = ''; error.value = ''; notice.value = '' }
+function fresh() { if (busy.value) return; current.value = undefined; businessChoice.value = undefined; web.value = false; draft.value = ''; error.value = ''; notice.value = '' }
 async function open(id: string) {
   if (busy.value) return; loading.value = true; error.value = ''; notice.value = ''
   try { current.value = await aiJson<AiConversation>(`conversations/${id}`, props.token); model.value = current.value.model; business.value = current.value.business; web.value = !!current.value.web; await scroll() }
   catch (e) { current.value = undefined; error.value = aiError(e) } finally { loading.value = false }
 }
-async function remove() {
-  if (!current.value || busy.value || !window.confirm('确定删除本人的这段对话吗？')) return
-  try { await aiJson(`conversations/${current.value.id}`, props.token, 'DELETE'); fresh(); await refresh() } catch (e) { error.value = aiError(e) }
+async function removeConversation(clearAll = false) {
+  if (busy.value || loading.value || !boot.value?.canChat || (!clearAll && !current.value)) return
+  const prompt = clearAll ? '确定清空本人在当前公司的全部对话吗？清空后无法恢复。' : '确定删除本人的这段对话吗？'
+  if (!window.confirm(prompt)) return
+  const path = clearAll ? 'conversations' : `conversations/${current.value!.id}`
+  loading.value = true; error.value = ''
+  try {
+    await aiJson(path, props.token, 'DELETE')
+    fresh()
+    await refresh()
+  } catch (e) { error.value = aiError(e) } finally { loading.value = false }
 }
 async function scroll() { await nextTick(); messages.value?.scrollTo({ top: messages.value.scrollHeight }) }
 async function send(text = draft.value.trim()) {
@@ -69,17 +82,16 @@ onMounted(refresh); onBeforeUnmount(() => { disposed = true; controller?.abort()
 
 <template>
   <section class="ai-workspace" aria-label="AI助手">
-    <aside class="ai-history"><strong>AI助手</strong><header><button :disabled="busy || loading" @click="refresh">刷新</button><button class="ai-primary" :disabled="busy || !boot?.canChat" @click="fresh">新建对话</button></header>
+    <aside class="ai-history"><strong>AI助手</strong><header><button :disabled="busy || loading" @click="refresh">刷新</button><button class="ai-primary" :disabled="busy || loading || !boot?.canChat" @click="fresh">新建对话</button></header>
       <input v-model="search" type="search" placeholder="搜索对话" aria-label="搜索对话" />
-      <nav aria-label="历史对话"><button v-for="c in filtered" :key="c.id" class="ai-history-item" :class="{ 'is-active': c.id === current?.id }" :title="c.title" :disabled="busy" @click="open(c.id)"><span>{{ c.title }}</span><small>{{ c.web ? '联网查询' : c.business ? '业务查询' : '普通对话' }}</small></button></nav>
+      <nav aria-label="历史对话"><button v-for="c in filtered" :key="c.id" class="ai-history-item" :class="{ 'is-active': c.id === current?.id }" :title="c.title" :disabled="busy || loading" @click="open(c.id)"><span>{{ c.title }}</span><small>{{ c.web ? '联网查询' : c.business ? '业务查询' : '普通对话' }}</small></button></nav>
       <p v-if="!filtered.length" class="ai-muted">暂无对话</p>
+      <footer class="ai-history-actions"><button :disabled="busy || loading || !current" @click="removeConversation()">删除对话</button><button :disabled="busy || loading || !boot?.canChat" @click="removeConversation(true)">清空对话</button></footer>
     </aside>
     <main class="ai-chat">
       <header class="ai-chat-header"><div><strong>{{ current?.title ?? '新的对话' }}</strong><p class="ai-muted">{{ web ? '联网查询 · 仅使用本轮问题与公开网页' : business ? '只读查询 · 按当前公司和项目权限读取' : '普通对话 · 不读取PLM业务资料' }}</p></div>
-        <div class="ai-actions"><button v-if="current" :disabled="busy" @click="remove">删除对话</button></div>
       </header>
       <p v-if="error" class="ai-error" role="alert">{{ error }}</p><p v-if="notice" class="ai-notice" role="status">{{ notice }}</p>
-      <div v-if="boot && !business && !web" class="ai-mode-hint"><span>{{ businessReason || '普通对话可问日期和基础使用说明。查询项目状态、BOM等实时资料，请启用只读业务查询。' }}</span><button v-if="!businessReason" :disabled="busy || loading" @click="enableBusiness">启用查询</button></div>
       <details class="ai-capabilities"><summary>可查询的内容与范围</summary><p>基础说明：项目、BOM、物料、权限与AI配置。业务查询：项目状态与交期、BOM明细及发布状态、物料主档，均按实际权限读取。</p><p>联网查询：通过DeepSeek官方服务搜索及读取公开网页，需单独启用和授权，每轮仅使用当前问题。不能读取内网或登录页面。</p><p>暂未开放其他业务明细；不能执行修改、审批或发布。主项目与子项目分别核对。</p></details>
       <div ref="messages" class="ai-messages" aria-label="对话内容" :aria-busy="busy">
         <div v-if="!current?.messages.length" class="ai-welcome"><span class="ai-avatar ai-avatar-large">AI</span><h2>今天需要了解什么？</h2><p>选择模型开始对话，或开启业务查询获取有权查看的资料。</p>
@@ -93,7 +105,7 @@ onMounted(refresh); onBeforeUnmount(() => { disposed = true; controller?.abort()
           <small v-if="m.inputTokens != null" class="ai-muted">输入 {{ m.inputTokens }} · 输出 {{ m.outputTokens ?? 0 }} token</small>
         </article>
       </div>
-      <footer class="ai-composer"><div class="ai-actions"><label :title="businessReason || '可在当前会话切换，从下一条消息生效。'"><input v-model="business" type="checkbox" :disabled="busy || loading || (!business && !!businessReason)" @change="business && enableBusiness()" />只读业务查询</label><label :title="webReason || '仅发送本轮问题，不携带历史业务资料。'"><input v-model="web" type="checkbox" :disabled="busy || loading || (!web && !!webReason)" @change="web && enableWeb()" />联网查询</label><span v-if="!web && selected?.network === 'cloud'" class="ai-muted">云端模型：本次对话与引用资料将发送至该服务</span></div>
+      <footer class="ai-composer"><div class="ai-actions"><label :title="businessReason || '可在当前会话切换，从下一条消息生效。'"><input v-model="business" type="checkbox" :disabled="busy || loading || (!business && !!businessReason)" @change="business && enableBusiness()" />只读业务查询</label><label :title="webReason || '仅发送本轮问题，不携带历史业务资料。'"><input v-model="web" type="checkbox" :disabled="busy || loading || (!web && !!webReason)" @change="web && enableWeb()" />联网查询</label></div>
         <p v-if="web" class="ai-muted ai-web-notice">本轮问题及公开网址会发送至云端；请勿填写内部资料或含密钥的链接。每轮最多 {{ boot?.web?.perTurnLimit ?? 3 }} 次，今日 {{ boot?.webUsage?.today ?? 0 }}/{{ boot?.web?.dailyLimit }}，本月 {{ boot?.webUsage?.month ?? 0 }}/{{ boot?.web?.monthlyLimit }} 次。追问请补充完整问题。</p>
         <p v-if="web && webReason" class="ai-error">{{ webReason }}也可关闭联网查询继续普通对话。</p>
         <p v-if="business && businessReason" class="ai-error">{{ businessReason }}也可关闭只读业务查询继续普通对话。</p>

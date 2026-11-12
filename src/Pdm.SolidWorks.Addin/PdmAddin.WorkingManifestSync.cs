@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.swconst;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -11,12 +14,97 @@ public sealed partial class PdmAddin
     private static ControlledOpenManifestDto WithWorkingFiles(ControlledOpenManifestDto source, IReadOnlyList<ControlledOpenFileDto> files) =>
         new ControlledOpenManifestDto { Id = source.Id, ProjectId = source.ProjectId, ProjectCode = source.ProjectCode,
             RootDocumentId = source.RootDocumentId, RootVersionId = source.RootVersionId, RootRevision = source.RootRevision,
-            RootRelativePath = source.RootRelativePath, ForEdit = source.ForEdit, Files = files.ToList(), Warnings = source.Warnings,
+            RootRelativePath = source.RootRelativePath, ForEdit = source.ForEdit, UsesLatestModelReferences = source.UsesLatestModelReferences,
+            Files = files.ToList(), Warnings = source.Warnings,
             ReferenceIssues = OpenReferenceFindings.Merge(source.ReferenceIssues) };
 
     private static ControlledOpenManifestDto WorkingAcquisitionScope(ControlledOpenManifestDto source, ISet<Guid> drawings) =>
         WithWorkingFiles(source, source.Files.Where(file => DocumentKindFromPath(file.FileName) != CadDocumentKind.Drawing
             || drawings.Contains(file.DocumentId)).ToArray());
+
+    private ControlledOpenFileDto CommittedAssemblySource(string directory, ControlledOpenManifestDto working, ControlledOpenManifestDto latest)
+    {
+        if (working.ProjectId != latest.ProjectId || working.RootDocumentId != latest.RootDocumentId
+            || working.RootVersionId == latest.RootVersionId || !PathsEqual(working.RootRelativePath, latest.RootRelativePath)) return null;
+        var source = working.Files.SingleOrDefault(file => file.IsRoot && file.DocumentId == working.RootDocumentId);
+        var stored = latest.Files.SingleOrDefault(file => file.IsRoot && file.DocumentId == latest.RootDocumentId);
+        if (source == null || stored == null || DocumentKindFromPath(source.FileName) != CadDocumentKind.Assembly
+            || source.IsNativeIsolated || stored.IsNativeIsolated || source.NativeIsolation != null || stored.NativeIsolation != null
+            || source.VersionId != working.RootVersionId || stored.VersionId != latest.RootVersionId || !WorkingHeadPathMatches(source, stored)) return null;
+        var path = ControlledReferenceMaterializer.LocalPath(directory, source);
+        return WorkingReuseBindingMatches(path, working.ProjectId, source) && WorkingReuseCommittedMemoryMatches(path, stored) ? source : null;
+    }
+
+    private static ControlledOpenManifestDto WithCommittedAssemblyRoot(ControlledOpenManifestDto working,
+        ControlledOpenManifestDto latest, ISet<Guid> drawings)
+    {
+        var files = new List<ControlledOpenFileDto>();
+        foreach (var file in WorkingAcquisitionScope(latest, drawings).Files)
+        {
+            var previous = working.Files.SingleOrDefault(candidate => candidate.DocumentId == file.DocumentId);
+            // The root's submitted bytes are proved by the live receipt. Other
+            // documents keep their existing binding and pass the normal checks.
+            files.Add(file.IsRoot ? file : previous ?? file);
+        }
+        files.AddRange(working.Files.Where(file => DocumentKindFromPath(file.FileName) == CadDocumentKind.Drawing
+            && !drawings.Contains(file.DocumentId)));
+        return WithWorkingFiles(latest, files);
+    }
+
+    private ArchiveMemoryCopy VerifyCommittedAssemblySource(string directory, Guid projectId, ControlledOpenFileDto source, ControlledOpenFileDto stored)
+    {
+        var path = ControlledReferenceMaterializer.LocalPath(directory, source);
+        if (!WorkingReuseBindingMatches(path, projectId, source) || !WorkingReuseCommittedMemoryMatches(path, stored))
+            throw new InvalidOperationException("总装存档后，窗口或本地文件已发生变化。已保留图档，请核对后再获取权限。");
+        return archiveMemoryCopies[path];
+    }
+
+    private IModelDoc2 SynchronizeCommittedAssemblyRoot(string directory, ControlledOpenManifestDto manifest,
+        ControlledOpenFileDto source, ControlledOpenFileDto stored)
+    {
+        var path = ControlledReferenceMaterializer.LocalPath(directory, source);
+        var workspace = PdmDocumentIdentityStore.CurrentWorkspaceRoot;
+        if (string.IsNullOrWhiteSpace(manifest.ProjectCode)
+            || !IsPathWithinDirectory(path, ControlledWorkspaceManager.ProjectViewDirectory(workspace, manifest.ProjectCode)))
+            throw new InvalidOperationException("总装工作区路径需要核对，已保留窗口和图档，尚未获取编辑权限。");
+        // Use the same backup and atomic replacement as post-archive cache sync.
+        // The only loaded path eligible here is the root with exact live evidence.
+        var copy = VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
+        void SynchronizeFile()
+        {
+            if (!ControlledWorkspaceManager.SynchronizeConfirmedCache(workspace, manifest.ProjectCode, path,
+                stored.DocumentId, manifest.ProjectId, copy.CommittedVersion, copy.CopyPath, copy.SourceHash, Array.Empty<string>()))
+                throw new IOException("当前文件身份或提交副本需要核对。");
+        }
+        try
+        {
+            try { SynchronizeFile(); }
+            catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
+            {
+                // SOLIDWORKS can keep a non-delete-sharing handle even in read-only
+                // mode. Reattach in the original frame from the exact archived bytes.
+                VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
+                if (!copy.Model.Visible || copy.Model.ForceReleaseLocks() != 1) throw;
+                VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
+                SynchronizeFile();
+                if (!copy.MatchesNativeState())
+                    throw new IOException("重新载入前发现窗口有新的修改，已保留当前窗口。");
+                if (copy.Model.ReloadOrReplace(true, null, true) != (int)swComponentReloadError_e.swReloadOkay)
+                    throw new IOException("SolidWorks未能在原窗口载入已存档总装。");
+            }
+            var model = FindLoadedDocument(path);
+            if (!ReferenceEquals(copy.Model, model) || !WorkingHeadDiskMatches(directory, manifest.ProjectId, stored)
+                || (!model.IsOpenedReadOnly() && (!model.SetReadOnlyState(true) || !model.IsOpenedReadOnly())))
+                throw new IOException("当前窗口和新工作基准需要核对。");
+            LogOperation("原窗口获取权限前已同步刚存档的总装基准 file=" + path + " version=" + stored.VersionId);
+            return model;
+        }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is COMException)
+        {
+            LogDiagnostic("原窗口获取权限前同步已存档总装", error);
+            throw new InvalidOperationException("暂时无法在原窗口同步已存档总装。当前窗口和图档已保留，请保留新增修改，再从工作区打开最新版本后获取权限。");
+        }
+    }
 
     private ControlledOpenManifestDto ReconcileRequestedWorkingArchives(string directory, ControlledOpenManifestDto previous,
         ControlledOpenManifestDto latest, ISet<Guid> drawings)
@@ -116,7 +204,7 @@ public sealed partial class PdmAddin
             try
             {
                 var latest = await apiClient.CreateControlledOpenManifestAsync(context.Value.RootDocumentId, null, false, true, lifetime.Token,
-                    allowMissingComponents: true);
+                    allowMissingComponents: true, useLatestModelReferences: context.Value.UsesLatestModelReferences);
                 var reconciled = ReconcileRequestedWorkingArchives(context.Key, context.Value, latest, new HashSet<Guid>());
                 controlledOpenManifests[context.Key] = await ReconcileStoredWorkingMembershipAsync(context.Key, reconciled, latest,
                     new HashSet<Guid>()); // A baseline update does not acquire or update any drawing.

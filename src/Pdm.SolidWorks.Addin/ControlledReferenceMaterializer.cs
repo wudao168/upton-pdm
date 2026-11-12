@@ -66,6 +66,10 @@ internal static class ControlledReferenceMaterializer
     private static void PrepareCore(ISldWorks app, string rootPath, ControlledOpenManifestDto manifest, bool preserveRecognizedEdits,
         string onlyOwner = null)
     {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var reused = 0;
+        try
+        {
         ControlledOpenBoundary.RequireLoadedSources(app, rootPath, manifest);
         manifest.CompletedReferencePrepasses.Clear();
         var directory = Path.GetDirectoryName(Path.GetFullPath(rootPath));
@@ -79,7 +83,7 @@ internal static class ControlledReferenceMaterializer
             var owner = LocalPath(directory, file);
             if (onlyOwner != null && !string.Equals(owner, onlyOwner, StringComparison.OrdinalIgnoreCase)) continue;
             if (loaded.Contains(owner)) continue;
-            if (!Matches(owner, file))
+            if (!TryReadVerifiedCopyHash(owner, file, out var verifiedHash))
             {
                 if (preserveRecognizedEdits && PdmDocumentIdentityStore.TryReadLocalMetadata(owner, out var edited)
                     && edited.DocumentId == file.DocumentId && edited.ProjectId == manifest.ProjectId && edited.VersionId.HasValue)
@@ -96,13 +100,20 @@ internal static class ControlledReferenceMaterializer
             if (!IsNative(owner)) continue;
             if (ControlledWorkingCopyScope.Contains(owner, file))
                 continue; // A verified saved edit must never be rewritten as a cache projection.
-            if (HasPreparedReferences(owner, file, manifest.ProjectId, preparationKey)) continue;
+            // No native call or file write occurs between the verified read and
+            // this metadata check. Reuse its stable, double-read fingerprint;
+            // rewriting references below still obtains a fresh before/after hash.
+            if (HasPreparedReferencesForHash(owner, file, manifest.ProjectId, preparationKey, verifiedHash))
+            { reused++; continue; }
             var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var untrackedResources = new List<string>();
             var unresolvedSourceRecord = false;
             try
             {
+                var dependencyTimer = System.Diagnostics.Stopwatch.StartNew();
                 var values = app.GetDocumentDependencies2(owner, false, false, false) as Array;
+                if (dependencyTimer.ElapsedMilliseconds >= 250)
+                    PluginDiagnosticLog.Record("引用读取耗时", file.FileName + "；耗时=" + dependencyTimer.ElapsedMilliseconds + "毫秒");
                 if (values == null)
                 {
                     PluginDiagnosticLog.Record("引用重定位", file.FileName + "：旧引用清单未完整读取，将按受控搜索目录原生打开。");
@@ -212,6 +223,12 @@ internal static class ControlledReferenceMaterializer
         }
         // F25/F26: no speculative OpenDoc/Save3, BreakLink or virtual externalization.
         // The actual user-requested open performs the loaded-source verification.
+        }
+        finally
+        {
+            PluginDiagnosticLog.Record("引用准备耗时", Path.GetFileName(rootPath) + "；文件数=" + manifest.Files.Count
+                + "；复用已核对引用=" + reused + "；耗时=" + elapsed.ElapsedMilliseconds + "毫秒");
+        }
     }
 
     private static bool ResolvesControlledSources(ISldWorks app, string owner, IReadOnlyDictionary<string, string> replacements,
@@ -257,13 +274,16 @@ internal static class ControlledReferenceMaterializer
     }
 
     private static bool HasPreparedReferences(string path, ControlledOpenFileDto file, Guid projectId, string key) =>
+        HasPreparedReferencesForHash(path, file, projectId, key, ArchiveFileFingerprint.Read(path));
+
+    private static bool HasPreparedReferencesForHash(string path, ControlledOpenFileDto file, Guid projectId, string key, string verifiedHash) =>
         PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding) && binding.DocumentId == file.DocumentId
         && binding.ProjectId == projectId && binding.VersionId == file.VersionId && binding.PreparedReferenceKey == key
         && string.Equals(binding.Sha256, file.Sha256, StringComparison.OrdinalIgnoreCase)
         && (file.NativeIsolation != null ? binding.NativeIsolationSnapshotId == file.NativeIsolation.ReferenceSnapshotId
             : !file.IsNativeIsolated || binding.NativeIsolationSnapshotId == file.VersionId)
         && !string.IsNullOrWhiteSpace(binding.PreparedReferenceSha256)
-        && string.Equals(binding.PreparedReferenceSha256, ArchiveFileFingerprint.Read(path), StringComparison.OrdinalIgnoreCase);
+        && string.Equals(binding.PreparedReferenceSha256, verifiedHash, StringComparison.OrdinalIgnoreCase);
 
     internal static void RememberVerifiedOpen(string rootPath, ControlledOpenManifestDto manifest)
     {

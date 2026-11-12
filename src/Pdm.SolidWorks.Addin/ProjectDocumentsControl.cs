@@ -16,7 +16,8 @@ internal enum ControlledOpenMode
     LatestEdit,
     SpecificReadOnly,
     PropertyWriteback,
-    Versions
+    Versions,
+    CurrentReference
 }
 
 internal sealed class ControlledOpenEventArgs : EventArgs
@@ -50,11 +51,14 @@ internal sealed class ProjectDocumentsControl : UserControl
     private static readonly Color InputBorderColor = Color.FromArgb(122, 122, 122);
     private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl();
     private readonly Button openLatest = CreateButton("打开最新");
+    private readonly ColumnStyle openLatestColumn = new ColumnStyle(SizeType.Absolute, 96);
+    private readonly Panel projectToolbar;
+    private int toolbarButtonHeight = 30;
     private readonly TreeView tree = new TreeView();
     private readonly Panel treeSurface = new Panel();
     private readonly Panel workspaceBody = new Panel { Dock = DockStyle.Fill };
     private Panel documentTreeHost;
-    private readonly Panel projectPickerHost = new Panel { Dock = DockStyle.Fill, Visible = false, Padding = new Padding(3) };
+    private readonly Panel projectPickerHost = new Panel { Dock = DockStyle.Fill, Visible = false, Padding = new Padding(0, 3, 0, 3) };
     private ProjectBrowserDialog inlineProjectBrowser;
     private Control inlineProjectContent;
     private readonly ImageList structureImages = PdmTaskPaneControl.BuildStructureImages();
@@ -84,7 +88,8 @@ internal sealed class ProjectDocumentsControl : UserControl
         Dock = DockStyle.Fill;
         BackColor = Color.FromArgb(244, 247, 251);
 
-        var projectPanel = new Panel { Dock = DockStyle.Top, Height = 42, BackColor = BackColor, Padding = new Padding(3, 6, 3, 6) };
+        projectToolbar = new Panel { Dock = DockStyle.Top, Height = 36, BackColor = BackColor, Padding = new Padding(0, 0, 0, 6) };
+        projectToolbar.PaddingChanged += (_, _) => UpdateProjectToolbarHeight();
         projectSelector.BrowseButtonText = "选择项目";
         projectSelector.Dock = DockStyle.Fill;
         projectSelector.Margin = Padding.Empty;
@@ -123,11 +128,11 @@ internal sealed class ProjectDocumentsControl : UserControl
         };
         projectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         projectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
-        projectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        projectLayout.ColumnStyles.Add(openLatestColumn);
         projectLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         projectLayout.Controls.Add(projectSelector, 0, 0);
         projectLayout.Controls.Add(openLatest, 2, 0);
-        projectPanel.Controls.Add(projectLayout);
+        projectToolbar.Controls.Add(projectLayout);
 
         tree.Dock = DockStyle.Fill;
         tree.HideSelection = false;
@@ -244,7 +249,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         selectionPanel.Controls.Add(selectedState);
         selectionPanel.Controls.Add(selectedFile);
 
-        var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(3, 0, 3, 3), BackColor = BackColor };
+        var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 3), BackColor = BackColor };
         documentTreeHost = treeHost;
         treeHost.Controls.Add(treeSurface);
         treeHost.Controls.Add(empty);
@@ -254,7 +259,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         workspaceBody.Controls.Add(projectPickerHost);
         Controls.Add(workspaceBody);
         Controls.Add(selectionPanel);
-        Controls.Add(projectPanel);
+        Controls.Add(projectToolbar);
         SetTree(null);
     }
 
@@ -347,12 +352,18 @@ internal sealed class ProjectDocumentsControl : UserControl
         UpdateSelectionState();
     }
 
-    public float BrowseButtonWidth
+    internal void MatchToolbarButtonSizes(Size browseSize, Size openSize)
     {
-        set
-        {
-            projectSelector.BrowseButtonWidth = value;
-        }
+        projectSelector.BrowseButtonWidth = browseSize.Width;
+        if (openLatestColumn.Width != openSize.Width) openLatestColumn.Width = openSize.Width;
+        toolbarButtonHeight = openSize.Height;
+        UpdateProjectToolbarHeight();
+    }
+
+    private void UpdateProjectToolbarHeight()
+    {
+        var height = toolbarButtonHeight + projectToolbar.Padding.Vertical;
+        if (projectToolbar.Height != height) projectToolbar.Height = height;
     }
 
     public void SetProjects(IReadOnlyList<ProjectDto> projects)

@@ -173,6 +173,35 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Single(await repository.ListDocumentVersionsAsync(part.Id, default));
         Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default));
         var receipt = await client.GetAsync("/api/archive-batches/" + batch); receipt.EnsureSuccessStatusCode();
+
+        var savedParent = Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default));
+        var savedChild = Assert.Single(await repository.ListDocumentVersionsAsync(part.Id, default));
+        var nextSession = Guid.NewGuid();
+        part = await repository.CheckoutAsync(part.Id, "admin", nextSession, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        var newerBytes = Encoding.UTF8.GetBytes("new independent child geometry");
+        var newerPath = Path.Combine(".versions", Guid.NewGuid().ToString("N"));
+        await File.WriteAllBytesAsync(Path.Combine(directory, newerPath), newerBytes);
+        File.SetAttributes(Path.Combine(directory, newerPath), FileAttributes.ReadOnly);
+        var now = DateTimeOffset.UtcNow;
+        await repository.CheckInVersionAsync(part.Id, "admin", nextSession,
+            new(new StoredFile(newerPath, newerBytes.Length, Convert.ToHexString(SHA256.HashData(newerBytes)), now),
+                "只更新子件", new Dictionary<string, string?>(), new CadReferenceSnapshot(Guid.NewGuid(), project.Id, part.Id, now,
+                    "admin", child with { Revision = part.Revision }, new string('F', 64)), [], []), default);
+        var latestChild = (await repository.ListDocumentVersionsAsync(part.Id, default))[0];
+        Assert.NotEqual(savedChild.Id, latestChild.Id);
+        var openUrl = $"/api/documents/{root.Id}/open-manifest";
+        var latestResponse = await client.PostAsJsonAsync(openUrl, new { useLatestModelReferences = true });
+        Assert.True(latestResponse.IsSuccessStatusCode, await latestResponse.Content.ReadAsStringAsync());
+        var latest = (await latestResponse.Content.ReadFromJsonAsync<ControlledOpenManifest>())!;
+        Assert.True(latest.UsesLatestModelReferences);
+        Assert.Equal(savedParent.Id, latest.RootVersionId);
+        Assert.Equal(latestChild.Id, Assert.Single(latest.Files, file => file.DocumentId == part.Id).VersionId);
+        var historicalResponse = await client.PostAsJsonAsync(openUrl, new { versionId = savedParent.Id, useLatestModelReferences = true });
+        Assert.True(historicalResponse.IsSuccessStatusCode, await historicalResponse.Content.ReadAsStringAsync());
+        var historical = (await historicalResponse.Content.ReadFromJsonAsync<ControlledOpenManifest>())!;
+        Assert.False(historical.UsesLatestModelReferences);
+        Assert.Equal(savedChild.Id, Assert.Single(historical.Files, file => file.DocumentId == part.Id).VersionId);
+        Assert.Equal(savedParent.Id, Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default)).Id);
     }
 
     [Theory]

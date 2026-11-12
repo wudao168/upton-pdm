@@ -34,6 +34,8 @@
 .pdm-global-status.is-info { color:var(--pdm-text); background: var(--pdm-theme-accent-soft); border-color: var(--pdm-theme-accent-border); }
 .pdm-global-status-detail { max-width: calc(100vw - 32px); }
 .pdm-global-status-detail p { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; }
+button.pdm-header-clock { cursor: pointer; }
+button.pdm-header-clock:hover { color: var(--pdm-text); }
 .pdm-header-clock { height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0 12px; border: 1px solid var(--pdm-border); border-radius: 999px; background: var(--pdm-bg); color: var(--pdm-text-soft); font-family: var(--pdm-font-mono); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pdm-header-control { width: 95px; min-width: 95px; height: 28px; display: inline-flex; flex: 0 0 95px; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid var(--pdm-border); border-radius: 4px; background: var(--pdm-surface); color: var(--pdm-text); font-family: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
 .pdm-titlebar__actions .el-dropdown { flex: 0 0 auto; }

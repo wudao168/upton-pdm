@@ -172,6 +172,7 @@ public sealed record ControlledOpenFile(
     string Configuration,
     bool IsRoot)
 {
+    public string? DrawingVersion { get; init; }
     public NativeFileIsolation? NativeIsolation { get; init; }
     public bool IsNativeIsolated { get; init; }
 }
@@ -188,6 +189,7 @@ public sealed record ControlledOpenManifest(
     IReadOnlyList<ControlledOpenFile> Files,
     IReadOnlyList<string> Warnings)
 {
+    public bool UsesLatestModelReferences { get; init; }
     public IReadOnlyList<ControlledOpenReferenceIssue> ReferenceIssues { get; init; } = [];
 }
 

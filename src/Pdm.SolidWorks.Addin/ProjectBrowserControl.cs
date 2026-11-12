@@ -113,7 +113,7 @@ internal sealed class ProjectBrowserControl : UserControl
         set
         {
             requestedBrowseButtonWidth = value;
-            browseButtonColumn.Width = value;
+            if (browseButtonColumn.Width != value) browseButtonColumn.Width = value;
         }
     }
 

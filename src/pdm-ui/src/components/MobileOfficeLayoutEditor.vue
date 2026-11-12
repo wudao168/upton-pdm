@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import PlmCubeIcon from './PlmCubeIcon.vue'
 import { readMobileOfficeLayout, saveMobileOfficeLayoutDraft, publishMobileOfficeLayout, rollbackMobileOfficeLayout } from '../api'
 import { defaultMobileOfficeLayout, mobileOfficeBlockLabels, mobileOfficePageLabels, type MobileOfficeBlockKey, type MobileOfficeLayout, type MobileOfficeLayoutView, type MobileOfficePage } from '../mobileOfficeLayout'
 import { userErrorMessage } from '../userErrorMessage'
@@ -20,12 +21,13 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const dirty = computed(() => !!view.value && JSON.stringify(draft.value) !== JSON.stringify(view.value.draft))
 const block = computed(() => draft.value.blocks.find(item => item.key === selected.value)!)
 const previewLayout = computed(() => historyPreview.value === null ? draft.value : view.value?.history.find(item => item.version === historyPreview.value)?.layout ?? draft.value)
+const editableBlocks = computed(() => draft.value.blocks.map((item, index) => ({ item, index })).filter(({ item }) => item.key !== 'shortcuts'))
 const previewTasks = Array.from({ length: 3 }, (_, index) => ({ id: `preview-task-${index}`, projectId: 'preview-project', projectCode: 'P700014', projectName: '移动办公示例项目', releasePackageNumber: `REL-00${index + 1}`, stepName: '工程审核', stage: '工程审核', packageState: 'PendingApproval', createdAt: chinaToday() })) satisfies MyApprovalTask[]
 const previewProjectRows = Array.from({ length: 3 }, (_, index) => ({ id: `preview-project-${index}`, code: `P70001${index + 4}`, name: ['装配线改造', '输送设备开发', '工装设计'][index], stage: '设计中', customerName: '示例客户', owner: 'preview', vaultName: '', vaultLocation: '', releaseLocation: '' })) as ProjectSummary[]
 const confirmationText = computed(() => {
   if (confirmation.value?.kind === 'reload') return '重新读取将放弃本页尚未保存的修改，是否继续？'
   if (confirmation.value?.kind === 'reset') return '将当前编辑内容恢复为系统默认布局；保存并发布后才会影响员工。是否继续？'
-  if (confirmation.value?.kind === 'publish') return '将已保存的草稿发布给当前公司的员工，重新进入或刷新移动办公后生效。是否继续？'
+  if (confirmation.value?.kind === 'publish') return '将已保存的草稿发布给当前公司的员工，重新进入移动办公后生效。是否继续？'
   return `将历史版本 V${confirmation.value?.version} 发布为一个新版本，保留当前草稿和全部历史。是否继续？`
 })
 function edited() { historyPreview.value = null; notice.value = ''; confirmation.value = undefined }
@@ -92,8 +94,12 @@ defineExpose({ canLeave })
       <fieldset :disabled="pending" class="layout-workspace">
         <div class="layout-outline">
           <h4>首页模块</h4><p>拖拽调整顺序，也可使用上移和下移。</p>
-          <div v-for="(item, index) in draft.blocks" :key="item.key" class="layout-item" :data-selected="selected === item.key" :draggable="!pending" @dragstart="dragging = { kind: 'blocks', key: item.key }" @dragend="dragging = undefined" @dragover.prevent @drop.prevent="drop('blocks', index)">
-            <button class="layout-select" :aria-pressed="selected === item.key" @click="selected = item.key; historyPreview = null">{{ mobileOfficeBlockLabels[item.key] }}</button><label><input v-model="item.enabled" type="checkbox" :aria-label="`显示${mobileOfficeBlockLabels[item.key]}`" @change="edited">显示</label><div class="layout-actions"><button :disabled="index === 0" :aria-label="`上移${mobileOfficeBlockLabels[item.key]}`" @click="move('blocks', item.key, index - 1)">上移</button><button :disabled="index === draft.blocks.length - 1" :aria-label="`下移${mobileOfficeBlockLabels[item.key]}`" @click="move('blocks', item.key, index + 1)">下移</button></div>
+          <div v-for="({ item, index }, position) in editableBlocks" :key="item.key" class="layout-item" :data-selected="selected === item.key" :draggable="!pending" @dragstart="dragging = { kind: 'blocks', key: item.key }" @dragend="dragging = undefined" @dragover.prevent @drop.prevent="drop('blocks', index)">
+            <button class="layout-select" :aria-pressed="selected === item.key" @click="selected = item.key; historyPreview = null">{{ mobileOfficeBlockLabels[item.key] }}</button><label><input v-model="item.enabled" type="checkbox" :aria-label="`显示${mobileOfficeBlockLabels[item.key]}`" @change="edited">显示</label>
+            <div class="layout-actions">
+              <button :disabled="position === 0" :aria-label="`上移${mobileOfficeBlockLabels[item.key]}`" @click="move('blocks', item.key, editableBlocks[position - 1]!.index)">上移</button>
+              <button :disabled="position === editableBlocks.length - 1" :aria-label="`下移${mobileOfficeBlockLabels[item.key]}`" @click="move('blocks', item.key, editableBlocks[position + 1]!.index)">下移</button>
+            </div>
           </div>
           <h4>底部导航</h4>
           <div v-for="(item, index) in draft.navigation" :key="item.key" class="layout-nav-item" :draggable="!pending" @dragstart="dragging = { kind: 'navigation', key: item.key }" @dragend="dragging = undefined" @dragover.prevent @drop.prevent="drop('navigation', index)">
@@ -105,7 +111,7 @@ defineExpose({ canLeave })
         <div class="layout-preview-column">
           <div class="layout-preview-tools"><label>手机宽度<select v-model="previewWidth" aria-label="手机预览宽度"><option :value="320">320</option><option :value="390">390</option><option :value="430">430</option></select></label><label><input v-model="previewProjects" type="checkbox">预览项目权限</label><button @click="previewPage = 'home'; historyPreview = null">预览当前草稿</button></div>
           <p>{{ historyPreview === null ? '当前草稿预览' : `历史版本 V${historyPreview} 预览` }} · 示例数据，不执行真实业务操作</p>
-          <div class="layout-phone-scroll"><div class="mobile-office layout-phone" :data-layout-theme="previewLayout.theme" :style="{ width: `${previewWidth}px` }" aria-label="手机页面预览"><header class="mobile-office-header"><div><strong>UPLM</strong><span>移动办公</span></div><small>示例公司 · 员工张工</small></header><main class="mobile-office-main"><MobileOfficeHome v-if="previewPage === 'home'" :layout="previewLayout" display-name="员工张工" :today="chinaToday()" :tasks="previewTasks" :projects="previewProjects ? previewProjectRows : []" :unread="2" :today-hours="4.5" :can-view-projects="previewProjects" :reminder-count="2" :selected-block="historyPreview === null ? selected : ''" @select="selected = $event" @navigate="previewPage = $event" @open-task="previewPage = 'tasks'" @open-project="previewPage = 'projects'" /><section v-else><h1>{{ mobileOfficePageLabels[previewPage] }}</h1><p>此处展示导航选中效果，业务页面沿用现有功能。</p><button @click="previewPage = 'home'">返回首页预览</button></section></main><MobileOfficeNavigation :layout="previewLayout" :page="previewPage" :can-view-projects="previewProjects" :task-count="5" :reminder-count="2" @navigate="previewPage = $event" /></div></div>
+          <div class="layout-phone-scroll"><div class="mobile-office layout-phone" :data-layout-theme="previewLayout.theme" :style="{ width: `${previewWidth}px` }" aria-label="手机页面预览"><header class="mobile-office-header"><div class="mobile-office-brand"><PlmCubeIcon /><strong>UPLM</strong></div><small class="mobile-office-user">员工张工</small></header><main class="mobile-office-main"><MobileOfficeHome v-if="previewPage === 'home'" :layout="previewLayout" display-name="员工张工" :today="chinaToday()" :tasks="previewTasks" :projects="previewProjects ? previewProjectRows : []" :unread="2" :today-hours="4.5" :can-view-projects="previewProjects" :selected-block="historyPreview === null ? selected : ''" @select="selected = $event" @navigate="previewPage = $event" @open-task="previewPage = 'tasks'" @open-project="previewPage = 'projects'" /><section v-else><h1>{{ mobileOfficePageLabels[previewPage] }}</h1><p>此处展示导航选中效果，业务页面沿用现有功能。</p><button @click="previewPage = 'home'">返回首页预览</button></section></main><MobileOfficeNavigation :layout="previewLayout" :page="previewPage" :can-view-projects="previewProjects" :task-count="5" :reminder-count="2" @navigate="previewPage = $event" /></div></div>
         </div>
         <div class="layout-properties" @input="edited" @change="edited">
           <h4>{{ mobileOfficeBlockLabels[selected] }}属性</h4><label>模块标题<input v-model="block.title" aria-label="模块标题" maxlength="20"></label>

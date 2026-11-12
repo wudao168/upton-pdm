@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.Remoting.Messaging;
@@ -83,6 +84,21 @@ internal static partial class Program
             Check(reads == 0, "失效处理不读取配置或解析组件");
             active = null; TreeCall(plugin, "RefreshTree", false, false);
             Check(Field(plugin, "currentTree") == null, "关闭所有图档后立即清空，不保留上一图档结构");
+            var healthRoot = New("CadTreeNode"); var healthChild = New("CadTreeNode");
+            var healthRootPath = Path.Combine(output, "健康总装.SLDASM"); var healthChildPath = Path.Combine(output, "健康子件.SLDPRT");
+            File.WriteAllText(healthRootPath, "assembly"); File.WriteAllText(healthChildPath, "part");
+            Set(healthRoot, "FullPath", healthRootPath); Set(healthRoot, "FileName", "健康总装.SLDASM");
+            Set(healthChild, "FullPath", healthChildPath); Set(healthChild, "FileName", "健康子件.SLDPRT");
+            ((IList)Get(healthRoot, "Children")).Add(healthChild); SetField(pane, "rootNode", healthRoot);
+            TreeCall(pane, "UpdateTreeHealth"); var healthLabel = (Label)Field(pane, "treeHealth");
+            Check(healthLabel.Text.Contains("缺失 0"), "结构刷新核对当前文件存在状态");
+            File.Delete(healthChildPath); TreeCall(pane, "UpdateSelected", healthRoot); TreeCall(pane, "UpdateSelected", new object[] { null });
+            Check(healthLabel.Text.Contains("缺失 0"), "选择与取消选择不重复探测整棵树的磁盘文件");
+            var details = (IEnumerable)TreeCall(pane, "MissingReferenceDetails");
+            Check(details.Cast<object>().Any(), "显式详情仍立即重新核对磁盘缺失引用");
+            TreeCall(pane, "UpdateTreeHealth");
+            Check(healthLabel.Text.Contains("缺失 1"), "结构刷新重新核对缺失，不沿用过期健康结果");
+            SetField(pane, "rootNode", null);
             using (var client = (IDisposable)New("PdmApiClient", "http://passive-tree.invalid/"))
             using (var lifetime = new CancellationTokenSource())
             {
@@ -138,29 +154,86 @@ internal static partial class Program
                     Check(network.Relations==1,"根与子装配复用同一关联清单，不逐组件重复读取关联");
                     Check(reads == 0 && network.Writes == 0, "索引展示和展开零原生结构操作、零服务器写入");
                     Check(network.FullHistories == 0, "当前绑定版本无需逐文件读取历史版本");
-                    await PassiveOperationAccessChecks(plugin, pane, root, branch, root2d, project);
+                    await PassiveOperationAccessChecks(plugin, pane, root, branch, root2d, project, output);
                 }
             }
             await PassiveCycleChecks(pane, output);
         }
     }
 
-    static async Task PassiveOperationAccessChecks(object plugin, Control pane, object root, object branch, object drawing, Guid project)
+    static async Task PassiveOperationAccessChecks(object plugin, Control pane, object root, object branch, object drawing, Guid project, string output)
     {
         var docs = (IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(Guid), Type("DocumentDto")));
         var model = New("DocumentDto"); var id = (Guid)Get(branch, "DocumentId"); Set(model, "Id", id); Set(model, "ProjectId", project);
         docs.Add(id, model);
         var source = New("DocumentReferenceNodeDto"); Set(source, "DocumentId", id); Set(source, "Kind", 1); Set(source, "FileName", "权限零件.SLDPRT");
         foreach (var state in new[] { "已授权", "未授权", "撤销", "跨项目拒绝", "跨公司拒绝", "无结果" })
+        foreach (var kind in new[] { 0, 1, 2 })
         {
+            Set(source, "Kind", kind);
             object access = state == "无结果" ? null : New("DocumentOperationAccessDto");
-            if (access != null) { Set(access, "CanCheckout", state == "已授权"); Set(access, "CanArchive", state == "已授权"); Set(access, "Reason", state); }
+            if (access != null) { Set(access, "CanCheckout", state == "已授权"); Set(access, "CanArchive", state == "已授权"); Set(access, "Reason", state == "未授权"
+                ? "权限中心未授权当前图档的获取操作，请联系授权人员核对项目及目录范围。" : state); }
             Set(model, "OperationAccess", access);
             var mapped = TreeCall(plugin, "MapProjectTree", source, docs, true);
-            TreeCall(pane, "UpdateSelected", mapped);
+            Set(mapped, "IsLatestReadOnlyPreview", true);
+            TreeCall(pane, "SetTree", mapped);
+            for (var spin = 0; spin < 150 && (bool)Field(pane, "treeBuildPending"); spin++) await Task.Delay(20);
+            TreeCheck(ReferenceEquals(Get(pane, "SelectedNode"), mapped), "首次打开最新图档必须默认选中当前图档，不依赖手动点击：" + state);
             TreeCheck(((Button)Field(pane, "checkoutButton")).Enabled == (state == "已授权"), "索引权限结果不一致：" + state);
-            Console.WriteLine("PASS: 新建索引按服务端结果判定：" + state);
+            var hint = (Label)Field(pane, "checkoutAccessStatus");
+            TreeCheck((state == "已授权") == string.IsNullOrWhiteSpace(hint.Text), "最新只读图档需直接显示获取禁用原因：" + state);
+            TreeCheck(hint.Parent != null && hint.Enabled && (state == "已授权" || !string.IsNullOrWhiteSpace(hint.AccessibleDescription)),
+                "禁用原因必须显示在可交互区域，不能仅依赖禁用按钮悬停：" + state);
+            if (kind == 1 && (state == "已授权" || state == "未授权"))
+            {
+                var host = pane.FindForm(); var previousSize = host.ClientSize;
+                foreach (var width in new[] { 320, 480 })
+                {
+                    host.ClientSize = new Size(width, 900); host.PerformLayout(); pane.PerformLayout();
+                    await Task.Delay(30);
+                    using (var screenshot = new Bitmap(pane.Width, pane.Height))
+                    {
+                        pane.DrawToBitmap(screenshot, new Rectangle(Point.Empty, pane.Size));
+                        screenshot.Save(Path.Combine(output, "checkout-" + (state == "已授权" ? "allowed" : "denied") + "-" + width + ".png"));
+                    }
+                }
+                host.ClientSize = previousSize;
+            }
+            Console.WriteLine("PASS: 新建索引按服务端结果判定：" + state + "；图档类型=" + kind);
         }
+        var granted = New("DocumentOperationAccessDto"); Set(granted, "CanCheckout", true); Set(granted, "CanArchive", true);
+        Set(model, "OperationAccess", granted);
+        Set(model, "DrawingVersion", "V2"); Set(model, "PublishedVersion", "A"); Set(branch, "LoadedDrawingVersion", "V1");
+        TreeCall(plugin, "ApplyPassiveDocumentAccess", root, docs);
+        var paneType = Type("PdmTaskPaneControl");
+        var versionText = paneType.GetMethod("VersionText", Flags);
+        var outdated = paneType.GetMethod("IsVersionOutdated", Flags);
+        TreeCheck(((string)versionText.Invoke(null, new[] { branch })).Contains("本地 V1")
+            && (bool)outdated.Invoke(null, new[] { branch }), "V2/A和实际工作副本V1独立显示，结构健康统计版本落后");
+        Set(branch, "LoadedDrawingVersion", "V2");
+        TreeCheck(!(bool)outdated.Invoke(null, new[] { branch }), "实际加载V2后版本落后统计清零");
+        TreeCall(pane, "UpdateSelected", branch);
+        TreeCheck(((Button)Field(pane, "checkoutButton")).Enabled, "刷新已有只读子件能获得服务器授权");
+        Set(model, "OperationAccess", null);
+        TreeCall(plugin, "ApplyPassiveDocumentAccess", root, docs);
+        TreeCall(pane, "UpdateSelected", branch);
+        TreeCheck(!((Button)Field(pane, "checkoutButton")).Enabled && Get(branch, "OperationAccess") == null,
+            "最新授权结果缺失时不能沿用已有节点的旧授权");
+        Set(model, "OperationAccess", granted);
+        TreeCall(plugin, "ApplyPassiveDocumentAccess", root, docs);
+        docs.Clear();
+        TreeCall(plugin, "ApplyPassiveDocumentAccess", root, docs);
+        TreeCall(pane, "UpdateSelected", branch);
+        TreeCheck(!((Button)Field(pane, "checkoutButton")).Enabled && Get(branch, "OperationAccess") == null,
+            "图档从当前可访问清单消失后清除旧授权");
+        docs.Add(id, model);
+        Set(branch, "OperationAccess", granted); Set(branch, "LifecycleState", "Obsolete");
+        TreeCall(pane, "UpdateSelected", branch);
+        TreeCheck(!((Button)Field(pane, "checkoutButton")).Enabled && ((Label)Field(pane, "checkoutAccessStatus")).Text.Contains("作废"),
+            "已有授权的作废图档显示业务阻止原因，空授权说明不覆盖原因");
+        Set(branch, "LifecycleState", "");
+        Console.WriteLine("PASS: 已有只读图档的授权缺失、撤销范围及业务原因均可见且保持拒绝");
         var drawingDoc = New("DocumentDto"); Set(drawingDoc, "Id", Get(drawing, "DocumentId")); Set(drawingDoc, "Kind", 2);
         docs.Add(Get(drawing, "DocumentId"), drawingDoc);
         var relations = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("DocumentModelDrawingRelationDto")));

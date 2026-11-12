@@ -33,6 +33,7 @@ const props = withDefaults(defineProps<{
   organizationUnits?: OrganizationUnit[]
   companyId?: string
   activeTab: ProjectTab
+  canViewSummary?: boolean
   releasePackages?: ReleasePackageSummary[]
   releasePreviewIssues?: Record<string, boolean>
   activeProjectDocumentStatus?: string
@@ -140,7 +141,10 @@ const executionEngineers = computed(() => {
   })
 })
 const executionEngineerNames = computed(() => executionEngineers.value.map(item => displayUserName(item)).join('、') || '—')
-const visibleTabs = computed(() => tabs.filter(tab => (tab.key === 'summary' ? props.project.effectiveProjectPermissions?.includes('project.summary.view') : projectAccess.canViewTab(tab.key)) && (props.project.canReadContent || tab.key === 'overview' || tab.key === 'records')))
+const visibleTabs = computed(() => tabs
+  .filter(tab => tab.key === 'summary'
+    ? props.canViewSummary
+    : projectAccess.canViewTab(tab.key) && (props.project.canReadContent || tab.key === 'overview' || tab.key === 'records')))
 const switchConfirmationPending = ref(false)
 const projectSettingsOpen = ref(false)
 const projectBrowserOpen = ref(false)

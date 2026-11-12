@@ -12,13 +12,14 @@ internal sealed class ControlledCacheUsage
 {
     public long UsedBytes { get; set; }
     public long ReclaimableBytes { get; set; }
+    public bool ReclaimableBytesKnown { get; set; } = true;
     public long FreedBytes { get; set; }
     public int SkippedItems { get; set; }
     public int ManagedItems { get; set; }
     public int DeferredItems { get; set; }
     public string Notice { get; set; }
-    public string Message => "缓存占用 " + (UsedBytes / 1073741824d).ToString("0.00") + " GB，可清理约 "
-        + (ReclaimableBytes / 1073741824d).ToString("0.00") + " GB。"
+    public string Message => "缓存占用 " + (UsedBytes / 1073741824d).ToString("0.00") + " GB。"
+        + (ReclaimableBytesKnown ? "可清理约 " + (ReclaimableBytes / 1073741824d).ToString("0.00") + " GB。" : "可清理空间将在手动检查时核对。")
         + (FreedBytes == 0 ? "" : "已释放 " + (FreedBytes / 1048576d).ToString("0.00") + " MB。")
         + (SkippedItems == 0 ? "" : "有 " + SkippedItems + " 项正在使用、含修改或归属未确认，已保留。")
         + (DeferredItems == 0 ? "" : "另有 " + DeferredItems + " 组缓存待确认占用。")
@@ -91,10 +92,14 @@ internal static class ControlledCacheMaintenance
         { PluginDiagnosticLog.Record("旧缓存核对", "旧副本未能确认，已保留：" + error); }
     }
     internal static ControlledCacheUsage Inspect(string root, IReadOnlyCollection<string> protectedPaths, IReadOnlyCollection<Guid> checkedOut)
+        => InspectCore(root, protectedPaths, checkedOut, true);
+    internal static ControlledCacheUsage InspectCapacity(string root)
+        => InspectCore(root, Array.Empty<string>(), Array.Empty<Guid>(), false);
+    private static ControlledCacheUsage InspectCore(string root, IReadOnlyCollection<string> protectedPaths, IReadOnlyCollection<Guid> checkedOut, bool inspectReclaimable)
     {
         lock (Sync)
         {
-            var usage = new ControlledCacheUsage();
+            var usage = new ControlledCacheUsage { ReclaimableBytesKnown = inspectReclaimable };
             foreach (var directory in Directories(root))
             {
                 try { usage.UsedBytes += Files(directory, root).Sum(path => new FileInfo(path).Length); }
@@ -103,6 +108,10 @@ internal static class ControlledCacheMaintenance
             foreach (var entry in Entries(root))
             {
                 usage.ManagedItems++;
+                // Automatic capacity checks only need file lengths. Hashing every
+                // cached assembly on every open competes with CAD interaction.
+                // Candidates actually removed below still receive full verification.
+                if (!inspectReclaimable) continue;
                 if (CanRemove(root, entry, protectedPaths, checkedOut))
                     usage.ReclaimableBytes += Files(entry.Directory, root).Sum(path => new FileInfo(path).Length);
                 else usage.SkippedItems++;
@@ -117,7 +126,7 @@ internal static class ControlledCacheMaintenance
         {
             if (isBusy == null || isBusy()) throw new InvalidOperationException("当前有图档操作正在进行，暂不清理缓存。请待操作完成后重试。");
             var entries = Entries(root).OrderBy(entry => entry.LastUsedUtc).ToArray();
-            var usage = Inspect(root, protectedPaths, checkedOut); long freed = 0; int occupied = 0;
+            var usage = InspectCore(root, protectedPaths, checkedOut, manual); long freed = 0; int occupied = 0;
             foreach (var entry in entries)
             {
                 if (isBusy()) break;
@@ -147,7 +156,8 @@ internal static class ControlledCacheMaintenance
                 { occupied++; PluginDiagnosticLog.Record("安全清理缓存", "占用或归属变化，停止处理该副本：" + error); }
                 finally { foreach (var handle in handles) handle.Dispose(); }
             }
-            var result = Inspect(root, protectedPaths, checkedOut); result.FreedBytes = freed; result.SkippedItems += occupied;
+            var result = freed == 0 && !manual ? usage : InspectCore(root, protectedPaths, checkedOut, manual);
+            result.FreedBytes = freed; result.SkippedItems += occupied;
             return result;
         }
     }

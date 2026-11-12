@@ -2968,6 +2968,7 @@ public sealed partial class PdmAddin : ISwAddin
         target.UpdatedAt = source.UpdatedAt;
         target.Revision = source.Revision;
         target.CurrentRevision = source.CurrentRevision;
+        target.LoadedDrawingVersion = source.LoadedDrawingVersion;
         target.LatestRevision = source.LatestRevision;
         target.DrawingVersion = source.DrawingVersion;
         target.PublishedVersion = source.PublishedVersion;
@@ -3005,6 +3006,12 @@ public sealed partial class PdmAddin : ISwAddin
         var node = eventArgs.Node;
         if (node?.DocumentId.HasValue == true)
         {
+            if (TryGetCurrentReferenceOpen(node, out var projectId, out var versionId))
+            {
+                BeginControlledOpenCore(projectId, node.DocumentId.Value, ControlledOpenMode.CurrentReference,
+                    versionId, null, null, node.FullPath);
+                return;
+            }
             BeginControlledOpen(node, IsCheckedOutByCurrentUser(node) ? ControlledOpenMode.LatestEdit : ControlledOpenMode.LatestReadOnly);
             return;
         }
@@ -3153,13 +3160,13 @@ public sealed partial class PdmAddin : ISwAddin
         => BeginControlledOpenCore(projectId, documentId, mode, versionId, checkoutDocumentId, null);
 
     private void BeginControlledOpenCore(Guid projectId, Guid documentId, ControlledOpenMode mode,
-        Guid? versionId, Guid? checkoutDocumentId, IReadOnlyCollection<Guid> checkoutDocumentIds)
+        Guid? versionId, Guid? checkoutDocumentId, IReadOnlyCollection<Guid> checkoutDocumentIds, string referencePath = null)
     {
         if (taskPaneControl == null || taskPaneControl.IsDisposed) return;
         var uiContext = GetTaskPaneSynchronizationContext();
         if (!uiContext.IsCurrentThread)
         {
-            uiContext.Post(_ => BeginControlledOpenCore(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds), null);
+            uiContext.Post(_ => BeginControlledOpenCore(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds, referencePath), null);
             return;
         }
         ReconcileNativeCommandBeforeUserOperation();
@@ -3171,14 +3178,14 @@ public sealed partial class PdmAddin : ISwAddin
         if (Volatile.Read(ref controlledOpenInProgress) != 0 || Volatile.Read(ref openOperationInProgress) != 0
             || Volatile.Read(ref workspaceOperationInProgress) != 0 || IsSolidWorksCommandActive())
         {
-            QueueControlledOpen(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds);
+            EnqueueControlledOpen(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds, referencePath);
             return;
         }
         MarkCacheOperationBusy(ref controlledOpenInProgress);
         if (!TryBeginWorkspaceOperation("阶段1/3：正在读取PLM受控清单"))
         {
             Interlocked.Exchange(ref controlledOpenInProgress, 0);
-            QueueControlledOpen(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds);
+            EnqueueControlledOpen(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds, referencePath);
             return;
         }
 
@@ -3186,7 +3193,7 @@ public sealed partial class PdmAddin : ISwAddin
         try
         {
             SynchronizationContext.SetSynchronizationContext(uiContext);
-            _ = ExecuteControlledOpenAsync(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds);
+            _ = ExecuteControlledOpenCoreAsync(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds, true, referencePath);
         }
         finally { SynchronizationContext.SetSynchronizationContext(previousContext); }
     }
@@ -3199,6 +3206,11 @@ public sealed partial class PdmAddin : ISwAddin
         Guid? checkoutDocumentId,
         IReadOnlyCollection<Guid> checkoutDocumentIds,
         bool reportErrors = true)
+        => await ExecuteControlledOpenCoreAsync(requestedProjectId, documentId, mode, versionId, checkoutDocumentId,
+            checkoutDocumentIds, reportErrors, null);
+
+    private async Task<bool> ExecuteControlledOpenCoreAsync(Guid requestedProjectId, Guid documentId, ControlledOpenMode mode,
+        Guid? versionId, Guid? checkoutDocumentId, IReadOnlyCollection<Guid> checkoutDocumentIds, bool reportErrors, string referencePath)
     {
         string rootPath = null;
         string openWarning = null;
@@ -3223,8 +3235,12 @@ public sealed partial class PdmAddin : ISwAddin
             var allowMissingComponents = true;
             var opensPropertyWriteback = mode == ControlledOpenMode.PropertyWriteback;
             var opensLatestWorkingCopy = requestsLatestEdit || opensPropertyWriteback || mode == ControlledOpenMode.LatestReadOnly;
+            var useLatestModelReferences = requestsLatestEdit || mode == ControlledOpenMode.LatestReadOnly;
             var releasedOnly = mode == ControlledOpenMode.LatestReleased;
-            var specificVersionId = mode == ControlledOpenMode.SpecificReadOnly ? versionId : null;
+            var opensCurrentReference = mode == ControlledOpenMode.CurrentReference;
+            if (opensCurrentReference && (!versionId.HasValue || string.IsNullOrWhiteSpace(referencePath)))
+                throw new InvalidOperationException("当前装配引用未能确认，请在设计树重新选择图档。");
+            var specificVersionId = mode == ControlledOpenMode.SpecificReadOnly || opensCurrentReference ? versionId : null;
             LogOperation(string.Concat(
                 "ControlledOpen manifest start project=",
                 requestedProjectId,
@@ -3235,7 +3251,8 @@ public sealed partial class PdmAddin : ISwAddin
             try
             {
                 manifest = await apiClient.CreateControlledOpenManifestAsync(documentId, specificVersionId,
-                    releasedOnly, requestsLatestEdit, lifetime.Token, allowMissingComponents: allowMissingComponents);
+                    releasedOnly, requestsLatestEdit, lifetime.Token, allowMissingComponents: allowMissingComponents,
+                    useLatestModelReferences: useLatestModelReferences);
             }
             catch (InvalidOperationException exception) when (specificVersionId == null && !releasedOnly
                 && exception.Message.Contains("引用快照包含同一图档的不同版本"))
@@ -3251,7 +3268,8 @@ public sealed partial class PdmAddin : ISwAddin
                     return false;
                 }
                 manifest = await apiClient.CreateControlledOpenManifestAsync(documentId, null, false,
-                    requestsLatestEdit, lifetime.Token, true, allowMissingComponents: allowMissingComponents);
+                    requestsLatestEdit, lifetime.Token, true, allowMissingComponents: allowMissingComponents,
+                    useLatestModelReferences: useLatestModelReferences);
                 manifest.LatestReferenceVersionsConfirmed = true;
             }
             LogOperation(string.Concat(
@@ -3267,13 +3285,22 @@ public sealed partial class PdmAddin : ISwAddin
                 0,
                 manifest.Files?.Count ?? 0);
             preparedProjectId = manifest.ProjectId;
+            if (opensCurrentReference)
+            {
+                if (manifest.ProjectId != requestedProjectId || manifest.RootDocumentId != documentId || manifest.RootVersionId != versionId
+                    || !await TryOpenModelInLoadedContextCoreAsync(manifest, false, referencePath))
+                    throw new InvalidOperationException("当前装配引用的版本或工作区已变更，请刷新设计树后重新打开图档。");
+                return true;
+            }
             if (requestedProjectId != Guid.Empty && manifest.ProjectId != requestedProjectId)
             {
                 LogOperation("本地项目关联已过期，按PLM图档所属项目打开 document=" + documentId
                     + " requestedProject=" + requestedProjectId + " serverProject=" + manifest.ProjectId);
             }
             var opensDrawing = DocumentKindFromPath(manifest.RootRelativePath) == CadDocumentKind.Drawing;
+            var updatesLoadedAssembly = manifest.UsesLatestModelReferences && HasOutdatedLoadedAssemblyContext(manifest);
             if ((mode == ControlledOpenMode.LatestReadOnly || requestsLatestEdit && requestedEditIds.SetEquals(new[] { documentId }))
+                && !updatesLoadedAssembly
                 && await TryOpenModelInLoadedContextAsync(manifest, requestsLatestEdit))
                 return true;
             if ((mode == ControlledOpenMode.LatestReadOnly || requestsLatestEdit && requestedEditIds.SetEquals(new[] { documentId }))
@@ -3290,7 +3317,7 @@ public sealed partial class PdmAddin : ISwAddin
                     if (owner.Value != null)
                     {
                         var serverOwner = await apiClient.CreateControlledOpenManifestAsync(owner.Value.RootDocumentId,
-                            null, false, false, lifetime.Token, allowMissingComponents: true);
+                            null, false, false, lifetime.Token, allowMissingComponents: true, useLatestModelReferences: true);
                         manifest = MergeEditContext(serverOwner, manifest);
                         LogOperation("编辑上下文从PLM重新读取，不使用旧本地副本；上下文=" + serverOwner.RootRelativePath
                             + "；编辑目标=" + (checkoutDocumentId ?? requestedOpenDocumentId));
@@ -3304,10 +3331,13 @@ public sealed partial class PdmAddin : ISwAddin
                 foreach (var id in requestedEditIds.Where(id => !manifest.Files.Any(file => file.DocumentId == id)).ToArray())
                 {
                     var additional = await apiClient.CreateControlledOpenManifestAsync(id, null, false, requestsLatestEdit, lifetime.Token,
-                        allowMissingComponents: allowMissingComponents);
+                        allowMissingComponents: allowMissingComponents, useLatestModelReferences: useLatestModelReferences);
                     if (additional.ProjectId != manifest.ProjectId) throw new InvalidOperationException("所选图档属于不同项目，请分别获取。");
                     manifest = MergeEditContext(manifest, additional);
                 }
+                var selectedChildren = manifest.Files.Where(file => requestsLatestEdit && file.DocumentId != manifest.RootDocumentId
+                    && requestedEditIds.Contains(file.DocumentId)).ToArray();
+                var selectedVersions = await VerifySelectedWorkingVersionsAsync(selectedChildren);
                 var resumed = await ResumeWorkspaceEditsForOpenAsync(manifest);
                 if (manifest.WorkspaceOpenCanceled) return false;
                 if (resumed.Count > 0) documents = documents.Where(document => resumed.All(item => item.Id != document.Id)).Concat(resumed).ToArray();
@@ -3339,6 +3369,7 @@ public sealed partial class PdmAddin : ISwAddin
                         }
                         finally { plmAuthoritativeCheckouts.Remove(editTargetDocumentId); }
                     }
+                    await VerifySelectedWorkingVersionsAsync(selectedChildren, selectedVersions);
                     rootPath = controlledWorkspace.ApplyWorkingPermissions(manifest, editableDocumentIds, false);
                 }
                 await PrepareRetainedLocalReferencesAsync(rootPath, manifest);
@@ -3368,7 +3399,7 @@ public sealed partial class PdmAddin : ISwAddin
                     EnsureDrawingOpenHasNoConflictingWindows(manifest);
                 else
                 {
-                    var contextWarning = requestsLatestEdit ? CloseLocalContextsForPlmOpenCore(manifest, true, rootPath)
+                    var contextWarning = requestsLatestEdit || updatesLoadedAssembly ? CloseLocalContextsForPlmOpenCore(manifest, true, rootPath)
                         : CloseLocalContextsForPlmOpen(manifest, rootPath);
                     if (!string.IsNullOrEmpty(contextWarning)) openWarning = string.IsNullOrEmpty(openWarning) ? contextWarning : openWarning + "\r\n" + contextWarning;
                     if (!requestsLatestEdit) RetireLocalRecoveryForPlmOpen(manifest);
@@ -5993,7 +6024,9 @@ public sealed partial class PdmAddin : ISwAddin
         // The selection page uses the loaded structure. Expand suppressed assemblies
         // only inside the confirmed archive scope, never before the user selects files.
 
-        var initialProjectId = preferredProjectId ?? GetExplicitProjectId(currentTree.FullPath);
+        var initialProjectId = preferredProjectId ?? GetExplicitProjectId(currentTree.FullPath) ?? currentProjectId;
+        if (initialOperation == BatchOperationKind.CheckIn && initialProjectId.HasValue)
+            await RefreshArchiveSelectionAccessAsync(currentTree, initialProjectId.Value, operationToken);
         if (initialOperation == BatchOperationKind.CheckIn && initialProjectId.HasValue)
             foreach (var item in items) RestoreCommittedSourceIdentity(item.Node, initialProjectId.Value);
         ArchiveSession.Current?.SetStage("正在核对图档归属，准备项目和文件选择…");
@@ -6023,6 +6056,8 @@ public sealed partial class PdmAddin : ISwAddin
                 items = BuildBatchOperationItems(currentTree);
                 initiallySelectedPaths = dialog.SelectedItems.Select(item => item.Node.FullPath).ToArray();
                 initialProjectId = dialog.SelectedProjectId ?? initialProjectId;
+                if (initialOperation == BatchOperationKind.CheckIn && initialProjectId.HasValue)
+                    await RefreshArchiveSelectionAccessAsync(currentTree, initialProjectId.Value, operationToken);
                 initialStandardLibrary = dialog.ArchiveToStandardLibrary;
                 initialStandardDrawingType = dialog.StandardLibraryDrawingType;
                 inheritedDrawingProjects = await ResolveInheritedDrawingProjectsAsync(items, initialProjectId);
@@ -7744,7 +7779,8 @@ public sealed partial class PdmAddin : ISwAddin
                         + "；引用=" + localRevision + "；最新=" + latestRevision);
                     continue;
                 }
-                var outdatedMessage = string.Concat(node.FileName, "（本地", localRevision, "，最新", latestRevision, "）");
+                var outdatedMessage = string.Concat(node.FileName, "（本地 ", matchingHistoricalVersion.FormatBusinessVersion(),
+                    "，最新 ", latest?.FormatBusinessVersion() ?? "待核对", "）");
                 if (!DocumentRuleGate.ShouldBlock("D15", outdatedMessage))
                 {
                     checkInItems.Add(item);
@@ -9945,6 +9981,7 @@ public sealed partial class PdmAddin : ISwAddin
 
     private IModelDoc2 OpenOrActivateDocumentOnSolidWorksThread(string fullPath, int documentType, string configuration, bool readOnly = false)
     {
+        var previousBlockedMessage = Volatile.Read(ref blockedControlledOpenMessage);
         var activeDocument = application.ActiveDoc as IModelDoc2;
         var document = activeDocument != null && PathsEqual(activeDocument.GetPathName(), fullPath)
             ? activeDocument : FindLoadedDocument(fullPath);
@@ -9966,12 +10003,12 @@ public sealed partial class PdmAddin : ISwAddin
             {
                 if ((openErrors & (int)swFileLoadError_e.swFileWithSameTitleAlreadyOpen) != 0)
                 {
-                    ShowError("SolidWorks中已打开另一目录的同名图档，未打开本次工作副本。请先保存并关闭冲突的同名图档后重试；原窗口和文件均已保留。");
+                    ShowNativeOpenFailure("SolidWorks中已打开另一目录的同名图档，未打开本次工作副本。请先保存并关闭冲突的同名图档后重试；原窗口和文件均已保留。", previousBlockedMessage);
                 }
                 else
                 {
-                    ShowError(openErrors == 0 ? "SolidWorks尚未返回目标图档，当前窗口和文件已保留，请稍后重试。"
-                        : string.Concat("SolidWorks打开文件失败，错误码：", openErrors));
+                    ShowNativeOpenFailure(openErrors == 0 ? "SolidWorks尚未返回目标图档，当前窗口和文件已保留，请稍后重试。"
+                        : string.Concat("SolidWorks打开文件失败，错误码：", openErrors), previousBlockedMessage);
                 }
                 return null;
             }
@@ -9986,7 +10023,7 @@ public sealed partial class PdmAddin : ISwAddin
         LogOperation("Open identity requested=" + fullPath + " returned=" + returnedPath + " active=" + activePath);
         if (!PathsEqual(returnedPath, fullPath))
         {
-            ShowError("SolidWorks返回了另一目录中的同名图档，已停止后续切换和权限操作。当前窗口和文件已保留，请核对同名文档所在目录后重新打开。");
+            ShowNativeOpenFailure("SolidWorks返回了另一目录中的同名图档，已停止后续切换和权限操作。当前窗口和文件已保留，请核对同名文档所在目录后重新打开。", previousBlockedMessage);
             return null;
         }
         if (readOnly) EnsureDocumentOpenedReadOnly(document, fullPath);
@@ -10006,7 +10043,7 @@ public sealed partial class PdmAddin : ISwAddin
         {
             LogOperation("Activate identity conflict requested=" + fullPath + " returned=" + returnedPath + " active=" + activePath
                 + " conflicts=" + string.Join(";", sameNamePaths));
-            ShowError("目标副本已加载，但另一目录中的同名图档仍处于打开状态，暂未切换窗口。所有文件和窗口均已保留，请核对同名文档所在目录后重试。");
+            ShowNativeOpenFailure("目标副本已加载，但另一目录中的同名图档仍处于打开状态，暂未切换窗口。所有文件和窗口均已保留，请核对同名文档所在目录后重试。", previousBlockedMessage);
             return null;
         }
         var activationErrors = 0;
@@ -10023,7 +10060,7 @@ public sealed partial class PdmAddin : ISwAddin
         if (activated == null || (activationErrors & (int)swActivateDocError_e.swGenericActivateError) != 0
             || !PathsEqual(activatedPath, fullPath) || !PathsEqual(activePath, fullPath))
         {
-            ShowError("SolidWorks尚未切换到所需图档，当前窗口和文件已保留。请核对已打开文档所在目录后重试，详细路径已写入诊断日志。");
+            ShowNativeOpenFailure("SolidWorks尚未切换到所需图档，当前窗口和文件已保留。请核对已打开文档所在目录后重试，详细路径已写入诊断日志。", previousBlockedMessage);
             return null;
         }
 
@@ -10503,8 +10540,8 @@ public sealed partial class PdmAddin : ISwAddin
             }
             ApplyLatestVersion(node, latest);
 
-            var selectedRevision = selected.Revision?.Display ?? "-";
-            var latestRevision = latest.Revision?.Display ?? "-";
+            var selectedRevision = selected.FormatBusinessVersion();
+            var latestRevision = latest.FormatBusinessVersion();
             var confirmation = node.Kind == CadDocumentKind.Assembly
                 ? string.Concat(
                     "将基于装配体", node.FileName, "的历史版本", selectedRevision, "创建独立派生工作区。\r\n",
@@ -11907,6 +11944,7 @@ public sealed partial class PdmAddin : ISwAddin
             var hasBase = PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var localBase)
                 && localBase.DocumentId == file.DocumentId;
             node.OpenedVersionId = hasBase ? localBase.VersionId : (Guid?)null;
+            node.LoadedDrawingVersion = node.OpenedVersionId == file.VersionId ? file.DrawingVersion : null;
             node.OpenedRevision = hasBase ? localBase.Revision ?? string.Empty : string.Empty;
             node.Revision = node.OpenedRevision;
             node.CurrentRevision = node.OpenedRevision;

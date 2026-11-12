@@ -2075,7 +2075,8 @@ public sealed partial class PdmWorkflowService(
         CancellationToken cancellationToken,
         bool resolveLegacyReferences = false,
         bool treeScopeOnly = false,
-        bool allowMissingComponents = false)
+        bool allowMissingComponents = false,
+        bool useLatestModelReferences = false)
     {
         var rootDocument = await repository.FindDocumentAsync(documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。");
@@ -2146,6 +2147,7 @@ public sealed partial class PdmWorkflowService(
         var normalizedConflictDocumentIds = new HashSet<Guid>();
         var fileNames = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
         var allowCurrentVersionFallback = !versionId.HasValue && !releasedOnly;
+        var usesLatestModelReferences = useLatestModelReferences && allowCurrentVersionFallback && rootDocument.Kind == DocumentKind.Assembly;
         var nativeIndexes = await repository.ListNativeReferenceIndexesAsync(project.Id, cancellationToken);
         var authorizedDocumentIds = new HashSet<Guid> { documentId };
         async Task<IReadOnlyList<DocumentVersion>> ListOpenVersionsAsync(Guid targetDocumentId)
@@ -2199,7 +2201,7 @@ public sealed partial class PdmWorkflowService(
                 warnings.Add("工程图旧存档缺少模型引用版本，本次经确认按已登记图模关系获取最新受控模型；历史快照保持不变。");
             }
         }
-        if (allowCurrentVersionFallback && resolveLegacyReferences)
+        if (usesLatestModelReferences || allowCurrentVersionFallback && resolveLegacyReferences)
         {
             var currentDesigns = versionsByDocument.Where(pair => pair.Value.Count > 0).ToDictionary(pair => pair.Key, pair =>
             {
@@ -2209,6 +2211,39 @@ public sealed partial class PdmWorkflowService(
                     with { Revision = currentVersion.Revision };
             });
             if (restoredLegacyDrawingModels) currentDesigns[documentId] = scopedRoot with { Revision = rootVersion.Revision };
+            if (usesLatestModelReferences)
+            {
+                // Keep the selected root's archived structure and resolve its model
+                // occurrences against each child's current design for this open only.
+                currentDesigns[documentId] = scopedRoot with { Revision = rootVersion.Revision };
+                var visited = new HashSet<Guid> { documentId };
+                var pending = new Queue<DocumentReferenceNode>(scopedRoot.Children);
+                while (pending.TryDequeue(out var reference))
+                {
+                    if (reference.Kind == DocumentKind.Drawing || reference.Status == ReferenceNodeStatus.Virtual) continue;
+                    if (reference.DocumentId is not Guid id)
+                    {
+                        foreach (var child in reference.Children) pending.Enqueue(child);
+                        continue;
+                    }
+                    if (!visited.Add(id)) continue;
+                    if (!currentDesigns.ContainsKey(id) && !currentProjectDocumentsById.ContainsKey(id))
+                    {
+                        var external = await repository.FindDocumentAsync(id, cancellationToken)
+                            ?? throw new PdmNotFoundException($"引用图档{reference.FileName}不存在。");
+                        if (!await repository.HasProjectContentReadAccessAsync(external.ProjectId, actor, role, cancellationToken))
+                            throw new UnauthorizedAccessException("当前用户没有引用图档所属项目的内容读取权限。");
+                        await RequireDocumentAccessAsync(id, actor, role, FolderAccess.View, cancellationToken);
+                        var latest = (await ListOpenVersionsAsync(id)).FirstOrDefault();
+                        if (latest != null) currentDesigns[id] = (treeScopeOnly ? ArchiveSafety.StructureOnly(latest.ReferenceSnapshot) : latest.ReferenceSnapshot)
+                            with { Revision = latest.Revision };
+                    }
+                    var source = currentDesigns.GetValueOrDefault(id);
+                    foreach (var child in (source ?? reference).Children) pending.Enqueue(child);
+                    if (source != null && source.Configuration != reference.Configuration)
+                        foreach (var child in reference.Children) pending.Enqueue(child);
+                }
+            }
             var effectiveIndexes = nativeIndexes.Select(index =>
             {
                 if (index.DocumentId is not Guid id || !currentDesigns.TryGetValue(id, out var design)
@@ -2434,6 +2469,7 @@ public sealed partial class PdmWorkflowService(
                     {
                         VersionId = currentVersion.Id,
                         Revision = currentVersion.Revision.Display,
+                        DrawingVersion = currentVersion.DrawingVersion,
                         FileLength = currentVersion.FileLength,
                         Sha256 = currentVersion.Sha256
                     };
@@ -2483,7 +2519,7 @@ public sealed partial class PdmWorkflowService(
                 version.FileLength,
                 version.Sha256,
                 node.Configuration,
-                isRoot);
+                isRoot) { DrawingVersion = version.DrawingVersion };
             if (isolated != null)
             {
                 item = item with { NativeIsolation = isolated };
@@ -2560,7 +2596,7 @@ public sealed partial class PdmWorkflowService(
                     drawingVersion.FileLength,
                     drawingVersion.Sha256,
                     "图纸",
-                    false);
+                    false) { DrawingVersion = drawingVersion.DrawingVersion };
                 files.Add(drawingFile);
                 filesByDocument.Add(drawingDocument.Id, drawingFile);
                 fileNames[drawingFileName] = drawingDocument.Id;
@@ -2585,7 +2621,8 @@ public sealed partial class PdmWorkflowService(
             rootFile.RelativePath,
             forEdit,
             files,
-            warnings.Distinct(StringComparer.Ordinal).ToArray()) { ReferenceIssues = referenceIssues.Distinct().ToArray() };
+            warnings.Distinct(StringComparer.Ordinal).ToArray())
+        { ReferenceIssues = referenceIssues.Distinct().ToArray(), UsesLatestModelReferences = usesLatestModelReferences };
         await AuditAsync(
             actor,
             forEdit ? "document.open-manifest.edit" : releasedOnly ? "document.open-manifest.released" : "document.open-manifest.readonly",

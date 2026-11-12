@@ -85,11 +85,13 @@ public sealed record QualityIssueWorkspace(long RowVersion, QualityIssueRow Row,
     // Kept for older readers. Daily issue entry no longer enumerates or edits historical issue relationships.
     public IReadOnlyList<QualityIssueRow> RelatedIssues { get; init; } = [];
 }
+public sealed record RetrospectiveSource(string ProjectCode, bool CanEdit, bool CanReview, bool CanPublish);
 public sealed record ProjectRetrospectiveWorkspace(Guid ProjectId, long RowVersion,
     IReadOnlyList<ProjectRetrospective> Summaries, IReadOnlyList<QualityIssueRow> Issues,
     IReadOnlyList<QualityExperience> Experiences, IReadOnlyList<QualityAdoption> Adoptions,
     bool CanEdit, bool CanReview, bool CanAdopt)
 {
+    public IReadOnlyDictionary<Guid, RetrospectiveSource> SummarySources { get; init; } = new Dictionary<Guid, RetrospectiveSource>();
     public IReadOnlyList<QualityTheme> Themes { get; init; } = [];
     public IReadOnlyList<QualityPerson> People { get; init; } = [];
     public bool CanPublish { get; init; }

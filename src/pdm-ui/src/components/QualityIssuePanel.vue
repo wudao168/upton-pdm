@@ -22,7 +22,13 @@ async function refreshCompanyReview(){
     if(run!==generation||themeRun!==themeGeneration||!data.value)return
     const unchanged=JSON.stringify(result.row.profile)===JSON.stringify(data.value.row.profile)
     data.value={...data.value,themes:result.themes,people:result.people,canManageIssues:result.canManageIssues,canVerifyIssues:result.canVerifyIssues,canCloseIssues:result.canCloseIssues,canReopenIssues:result.canReopenIssues,canVoidIssues:result.canVoidIssues}
-    if(unchanged){data.value.rowVersion=result.rowVersion;draft.value.expectedRowVersion=result.rowVersion}
+    if(unchanged){
+      data.value.rowVersion=result.rowVersion;draft.value.expectedRowVersion=result.rowVersion
+      if(draft.value.themeId&&!result.themes.some(theme=>theme.id===draft.value.themeId)){
+        draft.value.themeId=null
+        message.value='所选共性主题已删除，已改为未归类；其他填写内容已保留。'
+      }
+    }
     else error.value='问题闭环资料已被其他人员更新，当前草稿已保留。请先复制需要保留的内容，再刷新核对后保存。'
   }catch(reason){if(run===generation&&themeRun===themeGeneration)error.value=qualityFailure(reason,'公司共性问题读取失败，当前草稿已保留，请稍后重试。')}
 }

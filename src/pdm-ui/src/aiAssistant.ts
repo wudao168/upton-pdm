@@ -1,7 +1,7 @@
 import { apiBase, authenticatedHeaders, requestJson } from './api'
 export { productionRequestId as aiRequestId } from './productionTracking'
 
-export interface AiModel { id: string; name: string; enabled: boolean; tools: boolean; contextTokens: number; outputTokens: number }
+export interface AiModel { id: string; name: string; enabled: boolean; tools: boolean; contextTokens: number; outputTokens: number; thinking?: boolean; reasoningEffort?: 'low' | 'high' | 'max' }
 export interface AiProvider { id: string; name: string; baseUrl: string; network: 'intranet' | 'cloud'; adapter: 'compatible' | 'deepseek'; enabled: boolean; models: AiModel[]; hasKey?: boolean; apiKey?: string; clearKey?: boolean }
 export interface AiWebSettings { enabled: boolean; providerId: string | null; dailyLimit: number; monthlyLimit: number; perTurnLimit: number }
 export interface AiWebUsage { today: number; month: number }

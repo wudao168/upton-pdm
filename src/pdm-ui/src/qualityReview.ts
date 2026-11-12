@@ -19,7 +19,12 @@ export interface QualityExperience { id:string; improvementId:string; title:stri
 export interface QualityAdoption { id:string; experienceId:string; projectId:string; owner:string; dueOn:string; state:string; evidence:string; confirmedBy?:string|null; confirmedAt?:string|null }
 export interface QualityCatalog { companyId:string; rowVersion:number; profiles:QualityIssueProfile[]; themes:QualityTheme[]; summaries:ProjectSummaryReview[]; improvements:QualityImprovement[]; experiences:QualityExperience[]; adoptions:QualityAdoption[]; settings:{windowDays:number;eventThreshold:number;projectThreshold:number} }
 export interface QualityWorkspace { catalog:QualityCatalog; issues:QualityIssueRow[]; metrics:QualityThemeMetric[]; projects:QualityProject[]; people:QualityPerson[]; capabilities:QualityCapabilities; windowFrom:string; windowTo:string }
-export interface RetrospectiveWorkspace { projectId:string; rowVersion:number; summaries:ProjectSummaryReview[]; issues:QualityIssueRow[]; experiences:QualityExperience[]; adoptions:QualityAdoption[]; canEdit:boolean; canReview:boolean; canAdopt:boolean; canPublish?:boolean; canViewIssues?:boolean; people:QualityPerson[]; themes:QualityTheme[]; improvements?:QualityImprovement[] }
+export interface RetrospectiveWorkspace {
+  projectId:string; rowVersion:number; summaries:ProjectSummaryReview[]; issues:QualityIssueRow[]
+  experiences:QualityExperience[]; adoptions:QualityAdoption[]; canEdit:boolean; canReview:boolean; canAdopt:boolean
+  canPublish?:boolean; canViewIssues?:boolean; people:QualityPerson[]; themes:QualityTheme[]; improvements?:QualityImprovement[]
+  summarySources?: Record<string, { projectCode:string; canEdit:boolean; canReview:boolean; canPublish:boolean }>
+}
 export interface QualityIssueWorkspace { rowVersion:number; row:QualityIssueRow; themes:QualityTheme[]; people:QualityPerson[]; relatedIssues:QualityIssueRow[]; canManageIssues:boolean; canVerifyIssues:boolean; canCloseIssues:boolean; canReopenIssues:boolean; canVoidIssues:boolean }
 export interface QualitySettings { rowVersion:number; settings:{windowDays:number;eventThreshold:number;projectThreshold:number} }
 export type SaveIssueProfile = Omit<QualityIssueProfile,'issueId'|'updatedBy'|'updatedAt'|'verifiedBy'|'verifiedAt'> & { expectedRowVersion:number }
@@ -33,6 +38,7 @@ export const readProjectRetrospective = (projectId:string,token:string) => reque
 export const readQualityIssue = (projectId:string,issueId:string,token:string) => requestJson<QualityIssueWorkspace>(`/api/projects/${part(projectId)}/quality-review/issues/${part(issueId)}`,{},token)
 export const saveQualityIssue = (projectId:string,issueId:string,input:SaveIssueProfile,token:string) => write(`/api/projects/${part(projectId)}/quality-review/issues/${part(issueId)}`,input,token)
 export const saveQualityTheme = (id:string,input:{expectedRowVersion:number;name:string;description:string;isActive:boolean},token:string) => write(`/api/quality-review/themes/${part(id)}`,input,token)
+export const deleteQualityTheme = (id:string,expectedRowVersion:number,token:string) => requestJson<Saved>(`/api/quality-review/themes/${part(id)}?expectedRowVersion=${part(String(expectedRowVersion))}`,{method:'DELETE'},token)
 export const saveRetrospective = (projectId:string,id:string,input:SaveSummary,token:string) => write(`/api/projects/${part(projectId)}/retrospectives/${part(id)}`,input,token)
 export const transitionRetrospective = (projectId:string,id:string,expectedRowVersion:number,action:string,note:string,token:string) => write(`/api/projects/${part(projectId)}/retrospectives/${part(id)}/transition`,{expectedRowVersion,action,note},token,'POST')
 export const saveQualityImprovement = (id:string,input:SaveImprovement,token:string) => write(`/api/quality-review/improvements/${part(id)}`,input,token)

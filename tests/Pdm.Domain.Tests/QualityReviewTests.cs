@@ -166,6 +166,78 @@ public sealed class QualityReviewTests
     }
 
     private static QualityReviewCatalog Empty() => new(Guid.NewGuid(), 0, [], [], [], [], [], []);
+
+    [Fact]
+    public async Task ThemeDeletionPreservesHistoricalSummaryAfterLiveIssueIsReclassified()
+    {
+        var f = await Fixture.Create(); f.Act();
+        try
+        {
+            await f.GrantAll(Fixture.Actor);
+            var theme = Guid.NewGuid();
+            var catalog = await f.Service.SaveThemeAsync(theme, new(0, "历史总结中的主题", "", true), Fixture.Actor, UserRole.Engineer, default);
+            var issue = await f.Issue();
+            var profile = new SaveQualityIssueProfile(catalog.RowVersion, "质量", "", "普通", f.Today, theme, null, null, "", "", "", "未验证", "", []);
+            catalog = await f.Service.SaveIssueAsync(f.Project.Id, issue.Id, profile, Fixture.Actor, UserRole.Engineer, default);
+            var summaryId = Guid.NewGuid();
+            catalog = await f.Service.SaveSummaryAsync(f.Project.Id, summaryId,
+                new(catalog.RowVersion, "阶段总结", "阶段复盘", "已完成阶段工作", "保留问题历史", "继续跟踪遗留问题")
+                { CoverageFrom = f.Today.AddDays(-10), CoverageTo = f.Today, TargetResults = "阶段目标已核对" }, Fixture.Actor, UserRole.Engineer, default);
+            foreach (var action in new[] { "submit", "review", "publish", "revise" })
+                catalog = await f.Service.TransitionSummaryAsync(f.Project.Id, summaryId, new(catalog.RowVersion, action), Fixture.Actor, UserRole.Engineer, default);
+            catalog = await f.Service.SaveIssueAsync(f.Project.Id, issue.Id, profile with { ExpectedRowVersion = catalog.RowVersion, ThemeId = null }, Fixture.Actor, UserRole.Engineer, default);
+            Assert.Null(Assert.Single(catalog.Profiles).ThemeId);
+            Assert.Empty(catalog.Summaries.Single(s => s.State == "草稿").Issues);
+            // Removing today's association must not make a frozen earlier revision deletable.
+            var error = await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.DeleteThemeAsync(theme, catalog.RowVersion, Fixture.Actor, UserRole.Engineer, default));
+            Assert.Contains("项目总结快照", error.Message); Assert.Contains("停用", error.Message);
+            var retained = await f.Store.ReadAsync(f.Company, default);
+            Assert.Equal(catalog.RowVersion, retained.RowVersion);
+            Assert.Equal(theme, Assert.Single(retained.Themes).Id);
+            Assert.Equal(theme, Assert.Single(retained.Summaries.Single(s => s.Id == summaryId).Issues).Profile!.ThemeId);
+        }
+        finally { TenantContext.Clear(); }
+    }
+
+    [Theory]
+    [InlineData("problem", "问题闭环资料")]
+    [InlineData("closed", "改善记录")]
+    [InlineData("cancelled", "改善记录")]
+    [InlineData("active", "先结束进行中的改善")]
+    [InlineData("experience", "经验采用任务")]
+    public async Task ThemeDeletionProtectsReferencesEvenWithoutDetailAccess(string kind, string expectedReason)
+    {
+        var f = await Fixture.Create(); f.Act();
+        try
+        {
+            await f.Grant(Fixture.Actor, QualityReviewPermissions.Manage);
+            var theme = Guid.NewGuid();
+            var catalog = await f.Service.SaveThemeAsync(theme, new(0, "已有业务引用", "", false), Fixture.Actor, UserRole.Engineer, default);
+            if (kind == "problem") catalog = catalog with { Profiles = [Profile(Guid.NewGuid(), theme, f.Today)] };
+            else
+            {
+                var improvement = new QualityImprovement(Guid.NewGuid(), theme, "历史改善", kind == "active" ? "实施中" : kind == "cancelled" ? "已撤销" : "已关闭", Fixture.Actor,
+                    "历史根因", "历史目标", f.Today, 1, 1, 0, [], [], null, Fixture.Actor, f.Clock.GetUtcNow(), []);
+                catalog = catalog with { Improvements = [improvement] };
+                if (kind == "experience")
+                {
+                    var experience = new QualityExperience(Guid.NewGuid(), improvement.Id, "已发布经验", "有效措施", "适用项目", Fixture.Actor, f.Clock.GetUtcNow(), 1);
+                    catalog = catalog with { Experiences = [experience], Adoptions = [new(Guid.NewGuid(), experience.Id, f.Project.Id, Fixture.Actor, f.Today, "已采用", "已落实")] };
+                }
+            }
+            Assert.True(await f.Store.SaveAsync(catalog, catalog.RowVersion, default));
+            catalog = await f.Store.ReadAsync(f.Company, default);
+            Assert.False((await f.Service.WorkspaceAsync(Fixture.Actor, UserRole.Engineer, default)).Capabilities.CanViewDetails);
+            var error = await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.DeleteThemeAsync(theme, catalog.RowVersion, Fixture.Actor, UserRole.Engineer, default));
+            Assert.Contains(expectedReason, error.Message); Assert.Contains("停用", error.Message);
+            var retained = await f.Store.ReadAsync(f.Company, default);
+            Assert.Equal(catalog.RowVersion, retained.RowVersion); Assert.Single(retained.Themes);
+            Assert.Equal(catalog.Profiles.Count, retained.Profiles.Count); Assert.Equal(catalog.Improvements.Count, retained.Improvements.Count);
+            Assert.Equal(catalog.Experiences.Count, retained.Experiences.Count); Assert.Equal(catalog.Adoptions.Count, retained.Adoptions.Count);
+        }
+        finally { TenantContext.Clear(); }
+    }
+
     [Fact]
     public async Task ClosedQualityOplRejectsChangedSolutionAndRemovedEvidenceButAllowsUnchangedSave()
     {

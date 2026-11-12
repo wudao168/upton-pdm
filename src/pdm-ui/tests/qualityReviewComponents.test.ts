@@ -1,5 +1,5 @@
 import { mount, flushPromises } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import QualityIssuePanel from '../src/components/QualityIssuePanel.vue'
 import ProjectQualityIssues from '../src/components/ProjectQualityIssues.vue'
@@ -8,6 +8,7 @@ import ProjectRetrospective from '../src/components/ProjectRetrospective.vue'
 import type { QualityWorkspace, QualityIssueWorkspace, QualityIssueProfile, RetrospectiveWorkspace } from '../src/qualityReview'
 
 const api=vi.hoisted(()=>({requestJson:vi.fn()}))
+const confirmedAction='confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>
 vi.mock('../src/api',()=>({...api,PdmApiError:class extends Error{constructor(message:string,public status:number){super(message)}}}))
 const mounted:Array<ReturnType<typeof mount>>=[]
 const issue={id:'issue-1',projectId:'project-1',number:1,description:'传感器误触发',priority:'高',status:'进行中',owner:'account-a',dueDate:null,solution:'检查安装位置',createdBy:'account-b',createdAt:'2026-11-01',completedAt:null,updatedBy:'account-a',updatedAt:'2026-11-01',rowVersion:2,attachments:[]}
@@ -20,15 +21,51 @@ async function click(label:string,root:ParentNode=document.body){const button=[.
 async function create(component:Parameters<typeof mount>[0],props:Record<string,unknown>){const wrapper=mount(component,{props,attachTo:document.body,global:{plugins:[ElementPlus]}});mounted.push(wrapper);await flushPromises();return wrapper}
 async function createIssue(props:InstanceType<typeof QualityIssuePanel>['$props']){const wrapper=mount(QualityIssuePanel,{props,attachTo:document.body,global:{plugins:[ElementPlus]}});mounted.push(wrapper);await flushPromises();return wrapper}
 beforeEach(()=>{vi.clearAllMocks();api.requestJson.mockResolvedValue(company())})
-afterEach(()=>{mounted.splice(0).forEach(wrapper=>wrapper.unmount());document.body.innerHTML=''})
+afterEach(()=>{mounted.splice(0).forEach(wrapper=>wrapper.unmount());document.body.innerHTML='';vi.restoreAllMocks()})
 
 describe('质量与复盘界面权限和流程',()=>{
   it('没有管理能力时只读，人员展示姓名且不显示账号',async()=>{
     const wrapper=await create(QualityReviewWorkbench,{token:'token'})
     expect(wrapper.text()).toContain('张工');expect(wrapper.text()).not.toContain('account-a')
-    await click('共性问题');expect(wrapper.text()).not.toContain('新增主题')
+    await click('共性问题');expect(wrapper.text()).not.toContain('新增主题');expect(wrapper.text()).not.toContain('删除')
     await click('改善事项');expect(wrapper.text()).not.toContain('新增改善')
     expect(wrapper.text()).not.toContain('统计设置')
+  })
+  it('删除主题须确认名称，取消后不发送删除请求',async()=>{
+    const result=company();result.capabilities.canManageThemes=true;api.requestJson.mockResolvedValue(result)
+    const confirm=vi.spyOn(ElMessageBox,'confirm').mockRejectedValue('cancel')
+    await create(QualityReviewWorkbench,{token:'token',themesOnly:true});await click('删除')
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('“传感器选型”'),'删除共性主题',expect.objectContaining({confirmButtonText:'确认删除',cancelButtonText:'取消'}))
+    expect(api.requestJson.mock.calls.some(([,init])=>init?.method==='DELETE')).toBe(false)
+  })
+  it('共性问题表删除成功使用当前版本并清理主题筛选，刷新目录',async()=>{
+    const result=company();result.capabilities.canManageThemes=true;result.metrics=[{themeId:'theme-1',name:'传感器选型',eventCount:0,projectCount:0,majorCount:0,isCandidate:false,activeImprovementId:null,unknownDateCount:0}]
+    api.requestJson.mockImplementation((url,init)=>{if(init?.method==='DELETE'){result.catalog.themes=[];result.metrics=[];result.catalog.rowVersion=8;return Promise.resolve({rowVersion:8})}return Promise.resolve(result)})
+    vi.spyOn(ElMessageBox,'confirm').mockResolvedValue(confirmedAction)
+    const wrapper=await create(QualityReviewWorkbench,{token:'token'})
+    await wrapper.findAll('select')[2]!.setValue('theme-1');await click('共性问题');await click('删除')
+    const call=api.requestJson.mock.calls.find(([,init])=>init?.method==='DELETE')!
+    expect(call[0]).toBe('/api/quality-review/themes/theme-1?expectedRowVersion=7');expect(call[1]).toEqual({method:'DELETE'});expect(call[2]).toBe('token')
+    expect(wrapper.text()).toContain('共性问题主题已删除。');expect(wrapper.text()).not.toContain('主题目录');expect(wrapper.emitted('updated')).toEqual([[]])
+    await click('问题总表');expect(wrapper.findAll('select')[2]!.element.value).toBe('');expect(wrapper.text()).toContain('传感器误触发')
+  })
+  it('主题已有历史引用时保留目录并显示停用建议',async()=>{
+    const result=company();result.capabilities.canManageThemes=true
+    const {PdmApiError}=await import('../src/api')
+    api.requestJson.mockImplementation((url,init)=>init?.method==='DELETE'?Promise.reject(new PdmApiError('该主题已被历史总结引用，请在维护中停用。',400)):Promise.resolve(result))
+    vi.spyOn(ElMessageBox,'confirm').mockResolvedValue(confirmedAction);vi.spyOn(console,'error').mockImplementation(()=>{})
+    const wrapper=await create(QualityReviewWorkbench,{token:'token',themesOnly:true});await click('删除')
+    expect(wrapper.get('[role="alert"]').text()).toContain('请在维护中停用');expect(wrapper.get('table').text()).toContain('传感器选型');expect(wrapper.emitted('updated')).toBeUndefined()
+    await click('维护');expect(document.querySelector('.el-dialog select')?.textContent).toContain('停用')
+  })
+  it('删除确认期间切换公司不对新公司或旧公司发送删除请求',async()=>{
+    const result=company();result.capabilities.canManageThemes=true;api.requestJson.mockResolvedValue(result)
+    let confirmDeletion!:(value:Awaited<ReturnType<typeof ElMessageBox.confirm>>)=>void
+    vi.spyOn(ElMessageBox,'confirm').mockImplementation(()=>new Promise(resolve=>{confirmDeletion=resolve}))
+    const wrapper=mount(QualityReviewWorkbench,{props:{token:'token',companyId:'company-1',themesOnly:true},attachTo:document.body,global:{plugins:[ElementPlus]}});mounted.push(wrapper);await flushPromises();await click('删除')
+    const second=company();second.capabilities.canManageThemes=false;api.requestJson.mockResolvedValue(second)
+    await wrapper.setProps({companyId:'company-2'});await flushPromises();confirmDeletion(confirmedAction);await flushPromises()
+    expect(wrapper.text()).not.toContain('删除');expect(api.requestJson.mock.calls.some(([,init])=>init?.method==='DELETE')).toBe(false)
   })
   it('只有汇总权限时不给出空明细等于全公司无问题的误导',async()=>{
     const result=company();result.capabilities={};result.issues=[];result.metrics=[{themeId:'theme-1',name:'传感器选型',eventCount:4,projectCount:3,majorCount:1,isCandidate:true,activeImprovementId:null,unknownDateCount:0}];api.requestJson.mockResolvedValue(result)
@@ -77,6 +114,16 @@ describe('质量与复盘界面权限和流程',()=>{
     await wrapper.get('form').trigger('submit');await flushPromises()
     const call=api.requestJson.mock.calls.find(([,init])=>init?.method==='PUT')!
     expect(JSON.parse(call[1].body)).toMatchObject({expectedRowVersion:7,immediateAction:'当前人员的草稿'})
+  })
+  it('删除草稿选中的未引用主题后改为未归类，保留其他填写内容',async()=>{
+    const view=issueView();view.canManageIssues=true;view.row={...row,profile:profile()};view.themes=[{id:'theme-1',name:'传感器选型',description:'',isActive:true}];api.requestJson.mockResolvedValue(view)
+    const wrapper=await createIssue({token:'token',projectId:'project-1',issueId:'issue-1'})
+    await wrapper.get('textarea').setValue('尚未保存的处置');await wrapper.get('[aria-label="归入公司共性问题"]').setValue('theme-1')
+    api.requestJson.mockResolvedValue({...view,rowVersion:8,themes:[]});await wrapper.setProps({companyReviewRevision:1});await flushPromises()
+    expect(wrapper.text()).toContain('所选共性主题已删除，已改为未归类；其他填写内容已保留。');expect(wrapper.get('textarea').element.value).toBe('尚未保存的处置')
+    await wrapper.get('form').trigger('submit');await flushPromises()
+    const call=api.requestJson.mock.calls.find(([,init])=>init?.method==='PUT')!
+    expect(JSON.parse(call[1].body)).toMatchObject({expectedRowVersion:8,themeId:null,immediateAction:'尚未保存的处置'})
   })
   it('项目问题显示问题类型，待分类筛选包含空类型并透传维护入口',async()=>{
     const result=project();result.canViewIssues=true;result.issues=[{...row,profile:profile({domain:''})}]
@@ -138,9 +185,23 @@ describe('质量与复盘界面权限和流程',()=>{
     expect(wrapper.text()).toContain('传感器误触发');expect(wrapper.text()).not.toContain('没有符合条件的问题')
     await click('原问题');expect(wrapper.emitted('openIssue')?.at(-1)).toEqual(['child-1','issue-1'])
   })
-  it('仅有总结查看权限时不把隐藏的遗留问题报告为没有问题',async()=>{
-    const result=project();result.issues=[];result.canViewIssues=false;api.requestJson.mockResolvedValue(result)
-    const wrapper=await create(ProjectRetrospective,{token:'token',projectId:'project-1'});await click('遗留跟踪')
-    expect(wrapper.text()).toContain('无法判断遗留问题数量');expect(wrapper.text()).not.toContain('当前没有未关闭')
+  it('安排经验采用时只列出和推荐主项目',async()=>{
+    const result=company()
+    result.capabilities.canPublishExperience=true
+    result.projects.push({id:'child-1',code:'P001-1',name:'装配子项目',rootProjectId:'project-1'})
+    result.catalog.experiences=[{id:'exp-1',improvementId:'improve-1',title:'选型检查',content:'核对负载',applicability:'装配设备',publishedBy:'account-a',publishedAt:'2026-11-10',revision:1,recommendedProjectIds:['project-1','child-1']}]
+    api.requestJson.mockResolvedValue(result)
+    await create(QualityReviewWorkbench,{token:'token'})
+    await click('经验复用');await click('安排采用');await click('采用推荐')
+    const choices=[...document.querySelectorAll<HTMLInputElement>('.el-dialog .quality-review__checklist input')]
+    expect(choices.map(item=>[item.value,item.checked])).toEqual([['project-1',true]])
+  })
+  it('总结包含项目总结和经验采用两个子页签',async()=>{
+    const result=project();result.canEdit=true;api.requestJson.mockResolvedValue(result)
+    const wrapper=await create(ProjectRetrospective,{token:'token',projectId:'project-1'})
+    expect(wrapper.findAll('[role="tab"]').map(tab=>tab.text())).toEqual(['项目总结','经验采用'])
+    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    expect(wrapper.text()).not.toContain('新增总结')
+    expect(wrapper.text()).toContain('当前项目没有经验采用任务。')
   })
 })

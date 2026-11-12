@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -8,6 +10,16 @@ internal enum ArchiveSelectionState { Pending, New, Changed, Unchanged, DrawingU
 
 public sealed partial class PdmAddin
 {
+    private async Task RefreshArchiveSelectionAccessAsync(CadTreeNode root, Guid projectId, CancellationToken token)
+    {
+        if (!EnumerateCadNodes(root).Any(node => node.DocumentId.HasValue)) return;
+        ArchiveSession.Current?.SetStage("正在核对当前项目图档的编辑权限…");
+        var documents = await apiClient.GetDocumentsAsync(projectId, token);
+        token.ThrowIfCancellationRequested();
+        ApplyPassiveDocumentAccess(root, documents.Where(document => document.ProjectId == projectId).ToDictionary(document => document.Id));
+        if (ReferenceEquals(root, currentTree)) taskPaneControl?.SetTree(root);
+    }
+
     private BatchOperationDialog CreateBatchOperationDialog(CadTreeNode root, IReadOnlyList<BatchOperationItem> items,
         IReadOnlyList<ProjectDto> projects, Guid? projectId, string username, BatchOperationKind operation,
         IReadOnlyCollection<string> selectedPaths, IReadOnlyDictionary<string, Guid> inheritedProjects,

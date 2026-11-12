@@ -141,7 +141,11 @@ public sealed partial class WorkHoursService(IPdmRepository repository, IWorkHou
         if (command.Entries.Any(x => x.Date < command.From || x.Date > command.To || x.Hours <= 0 || x.Hours > 24 || x.Hours * 2 != decimal.Truncate(x.Hours * 2)
             || x.Location is not ("厂内" or "厂外") || x.ProjectId == Guid.Empty))
             throw new PdmRuleException("请选择范围内日期、项目和厂内／厂外；工时须大于0，按0.5小时填写且每天合计不超过24小时。");
-        if (command.Entries.GroupBy(x => x.Date).Any(g => g.Sum(x => x.Hours) > 24)) throw new PdmRuleException("同一天所有项目的工时合计不能超过24小时。");
+        foreach (var day in command.Entries.GroupBy(x => x.Date))
+        {
+            RequireDailyProjectLimit(day.Select(x => x.ProjectId));
+            if (day.Sum(x => x.Hours) > 24) throw new PdmRuleException("同一天所有项目的工时合计不能超过24小时。");
+        }
         if (command.Entries.GroupBy(x => Key(x.Date, x.ProjectId, x.Location)).Any(g => g.Count() > 1))
             throw new PdmRuleException("同一天、同一项目、同一所在地只能填写一条，请合并工时。");
         var sheets = (await store.ReadAsync(company, Month(command.From), Month(command.To), ct)).Where(x => Same(x.Username, target)).ToArray();
@@ -183,6 +187,12 @@ public sealed partial class WorkHoursService(IPdmRepository repository, IWorkHou
                 $"{actor}更正了{command.From:yyyy-MM-dd}至{command.To:yyyy-MM-dd}的工时。原因：{reason}。请在工时修改记录中核对修改前后内容。", null, null,
                 $"work-hours-correction:{company:N}:{changed[0].History.Last().Id:N}", clock.GetUtcNow(), null)], ct);
         return await ReadAsync(command.From, command.To, false, actor, role, ct);
+    }
+
+    private static void RequireDailyProjectLimit(IEnumerable<Guid> projectIds)
+    {
+        if (projectIds.Distinct().Skip(3).Any())
+            throw new PdmRuleException("同一天最多填报3个不同项目的工时。");
     }
     public async Task<IReadOnlyList<WorkHourRevision>> HistoryAsync(string month, string actor, CancellationToken ct)
     {

@@ -150,14 +150,15 @@ internal sealed partial class PdmApiClient : IDisposable
         bool forEdit,
         CancellationToken cancellationToken,
         bool resolveLegacyReferences = false,
-        bool allowMissingComponents = true)
+        bool allowMissingComponents = true,
+        bool useLatestModelReferences = false)
     {
         try
         {
             return await PostJsonAsync<ControlledOpenManifestDto>(
                 controlledOpenHttpClient,
                 string.Concat("api/documents/", documentId, "/open-manifest"),
-                new { versionId, releasedOnly, forEdit, resolveLegacyReferences, treeScopeOnly = true, allowMissingComponents },
+                new { versionId, releasedOnly, forEdit, resolveLegacyReferences, treeScopeOnly = true, allowMissingComponents, useLatestModelReferences },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
@@ -169,7 +170,7 @@ internal sealed partial class PdmApiClient : IDisposable
             if (ConfirmReferenceVersions == null || !await ConfirmReferenceVersions(exception.Message))
                 throw new OperationCanceledException("已取消更新引用版本，原有窗口、文件和权限已保留。");
             var confirmed = await CreateControlledOpenManifestAsync(documentId, versionId, releasedOnly, forEdit,
-                cancellationToken, true, allowMissingComponents);
+                cancellationToken, true, allowMissingComponents, useLatestModelReferences);
             confirmed.LatestReferenceVersionsConfirmed = true;
             return confirmed;
         }
@@ -1447,6 +1448,11 @@ internal sealed class DocumentReferenceNodeDto
     public int Role { get; set; }
     public bool IsContextReference { get; set; }
     public bool ReferenceTypeUnverified { get; set; }
+    public bool TreeScopeOnly { get; set; }
+    public bool IncludesDesignDependencies { get; set; }
+    public bool UsesNativeFileInventory { get; set; }
+    public NativeFileIsolationDto NativeIsolation { get; set; }
+    public bool NativeIsolationVerified { get; set; }
     public string Configuration { get; set; }
     public int Quantity { get; set; }
     public int Status { get; set; }
@@ -1568,6 +1574,10 @@ internal sealed class CheckoutPolicyDto
 
 internal sealed class DocumentVersionDto
 {
+    internal string FormatBusinessVersion() => (DrawingVersion ?? "待核对") + " / " + (PublishedVersion ?? "未发布");
+
+    public Guid DocumentId { get; set; }
+    public Guid? SourceVersionId { get; set; }
     public string DrawingVersion { get; set; }
     public string PublishedVersion { get; set; }
     public string LatestPublishedVersion { get; set; }
@@ -1657,6 +1667,7 @@ internal sealed class ArchiveBatchReceiptDto
 
 internal sealed class ControlledOpenManifestDto
 {
+    public bool UsesLatestModelReferences { get; set; }
     public List<OpenReferenceIssueDto> ReferenceIssues { get; set; } = new List<OpenReferenceIssueDto>();
     internal bool LatestReferenceVersionsConfirmed { get; set; }
     // Local proof for resuming an existing checkout, never supplied by the server
@@ -1682,6 +1693,7 @@ internal sealed class ControlledOpenManifestDto
 }
 internal sealed class ControlledOpenFileDto
 {
+    public string DrawingVersion { get; set; }
     public bool IsNativeIsolated { get; set; }
     public NativeFileIsolationDto NativeIsolation { get; set; }
     public Guid DocumentId { get; set; }

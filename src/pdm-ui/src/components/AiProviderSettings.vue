@@ -12,10 +12,10 @@ function add(preset: 'intranet' | 'deepseek' | 'qwen') {
   const p: AiProvider = { id: aiRequestId(), name: preset === 'deepseek' ? 'DeepSeek' : preset === 'qwen' ? '千问' : '内网模型',
     baseUrl: preset === 'deepseek' ? 'https://api.deepseek.com' : preset === 'qwen' ? 'https://dashscope.aliyuncs.com/compatible-mode/v1' : '',
     network: preset === 'intranet' ? 'intranet' : 'cloud', adapter: preset === 'deepseek' ? 'deepseek' : 'compatible', enabled: false,
-    models: [{ id: preset === 'deepseek' ? 'deepseek-flash' : '', name: preset === 'deepseek' ? 'DeepSeek Flash' : '', enabled: true, tools: false, contextTokens: 32768, outputTokens: 2048 }] }
+    models: [{ id: preset === 'deepseek' ? 'deepseek-flash' : '', name: preset === 'deepseek' ? 'DeepSeek Flash' : '', enabled: true, tools: false, contextTokens: 32768, outputTokens: 2048, thinking: false, reasoningEffort: 'high' }] }
   settings.value.providers.push(p); editing.value = p; dirty.value = true
 }
-function edit(p: AiProvider) { editing.value = p }
+function edit(p: AiProvider) { p.models.forEach(m => { m.thinking ??= false; m.reasoningEffort ??= 'high' }); editing.value = p }
 async function save() {
   loading.value = true; error.value = ''; notice.value = ''
   try {
@@ -70,7 +70,7 @@ onMounted(load)
       <form v-if="editing" class="ai-provider-form" @input="dirty = true" @change="dirty = true" @submit.prevent="save">
         <label>服务名称<input v-model="editing.name" maxlength="60" required /></label>
         <div class="ai-field-row"><label>网络范围<select v-model="editing.network"><option value="intranet">内网</option><option value="cloud">云端</option></select></label>
-          <label>接口类型<select v-model="editing.adapter"><option value="deepseek">DeepSeek兼容（非思考模式）</option><option value="compatible">通用兼容接口</option></select></label></div>
+          <label>接口类型<select v-model="editing.adapter" @change="editing.models.forEach(m => { if (editing?.adapter !== 'deepseek') m.thinking = false })"><option value="deepseek">DeepSeek兼容</option><option value="compatible">通用兼容接口</option></select></label></div>
         <label>API基础地址<input v-model="editing.baseUrl" placeholder="例如 http://内网服务器:11434/v1" maxlength="300" required /></label>
         <label>API密钥<input v-model="editing.apiKey" type="password" autocomplete="new-password" :placeholder="editing.hasKey ? '已保存，留空保留原密钥' : '本地服务可不填'" maxlength="4096" /></label>
         <div class="ai-actions"><label><input v-model="editing.clearKey" type="checkbox" />清除原密钥</label><label><input v-model="editing.enabled" type="checkbox" />启用服务</label></div>
@@ -78,10 +78,15 @@ onMounted(load)
         <div v-for="(m, index) in editing.models" :key="index" class="ai-model-form">
           <div class="ai-field-row"><label>模型ID<input v-model="m.id" maxlength="150" required placeholder="填写服务提供的准确模型ID" /></label><label>显示名称<input v-model="m.name" maxlength="80" required /></label></div>
           <div class="ai-field-row"><label>上下文容量<input v-model.number="m.contextTokens" type="number" min="4096" max="2000000" required /></label><label>输出上限<input v-model.number="m.outputTokens" type="number" min="128" max="8192" required /></label></div>
+          <div v-if="editing.adapter === 'deepseek'" class="ai-field-row">
+            <label>思考模式<select v-model="m.thinking" :disabled="loading"><option :value="false">关闭（非思考）</option><option :value="true">开启思考</option></select></label>
+            <label>思考强度<select v-model="m.reasoningEffort" :disabled="loading || !m.thinking"><option value="low">低</option><option value="high">高</option><option value="max">最高</option></select></label>
+          </div>
+          <p v-if="editing.adapter === 'deepseek'" class="ai-muted">由管理员统一设置，保存后所有使用此模型的对话生效。关闭时强度不生效，通常更快、更省用量；开启后，思考与回答共用输出上限，强度越高通常耗时和用量越多。</p>
           <div class="ai-actions"><label><input v-model="m.enabled" type="checkbox" />启用模型</label><label><input v-model="m.tools" type="checkbox" />允许工具调用</label><button type="button" :disabled="editing.models.length <= 1" @click="editing.models.splice(index, 1); dirty = true">移除模型</button></div>
         </div>
         <p class="ai-muted">容量按服务实际配置填写。先保存并通过工具测试，再开启工具调用，用于业务查询和联网查询；普通对话无需开启。</p>
-        <div class="ai-actions"><button type="button" :disabled="editing.models.length >= 20" @click="editing.models.push({ id: '', name: '', enabled: true, tools: false, contextTokens: 32768, outputTokens: 2048 }); dirty = true">添加模型</button><button class="ai-primary" type="submit" :disabled="loading">保存</button></div>
+        <div class="ai-actions"><button type="button" :disabled="editing.models.length >= 20" @click="editing.models.push({ id: '', name: '', enabled: true, tools: false, contextTokens: 32768, outputTokens: 2048, thinking: false, reasoningEffort: 'high' }); dirty = true">添加模型</button><button class="ai-primary" type="submit" :disabled="loading">保存</button></div>
         <p v-if="error" class="ai-error" role="alert">{{ error }}</p>
       </form>
     </el-drawer>

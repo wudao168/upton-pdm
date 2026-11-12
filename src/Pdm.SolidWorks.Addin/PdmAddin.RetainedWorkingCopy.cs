@@ -102,7 +102,7 @@ public sealed partial class PdmAddin
     {
         var files = manifest.Files.ToDictionary(file => file.DocumentId);
         var current = await apiClient.CreateControlledOpenManifestAsync(manifest.RootDocumentId, null, false, manifest.ForEdit, lifetime.Token,
-            allowMissingComponents: true);
+            allowMissingComponents: true, useLatestModelReferences: manifest.UsesLatestModelReferences);
         if (current.ProjectId != manifest.ProjectId || current.RootDocumentId != manifest.RootDocumentId
             || current.RootVersionId != manifest.RootVersionId || !PathsEqual(current.RootRelativePath, manifest.RootRelativePath)
             || current.Files.Count != manifest.Files.Count || current.Files.Any(file => !files.TryGetValue(file.DocumentId, out var prior)

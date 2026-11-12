@@ -66,6 +66,14 @@ public sealed partial class PdmAddin
             currentProjectId = GetExplicitProjectId(path);
         }
         if (structureChanged) currentTree.LocalStructureDeferred = true;
+        var context = controlledOpenManifests.FirstOrDefault(entry => IsPathWithinDirectory(path, entry.Key));
+        var loadedFile = context.Value?.Files.FirstOrDefault(file => PathsEqual(path, ControlledReferenceMaterializer.LocalPath(context.Key, file)));
+        if (loadedFile != null)
+        {
+            currentTree.OpenedVersionId = loadedFile.VersionId;
+            currentTree.OpenedRevision = currentTree.CurrentRevision = loadedFile.Revision;
+            currentTree.LoadedDrawingVersion = loadedFile.DrawingVersion;
+        }
         currentTree.IsModifiedInSolidWorks = document.GetSaveFlag();
         if (currentTree.IsModifiedInSolidWorks) currentTree.WorkState = CadWorkState.ModifiedUnsaved;
         else if (currentTree.WorkState == CadWorkState.ModifiedUnsaved)
@@ -94,10 +102,8 @@ public sealed partial class PdmAddin
             var documents = await documentsTask;
             token.ThrowIfCancellationRequested();
             if (!ReferenceEquals(tree, currentTree) || DeferBackgroundTreeRefresh()) return;
-            var byId = documents.ToDictionary(item => item.Id);
-            foreach (var node in EnumerateCadNodes(tree))
-                if (node.DocumentId.HasValue && byId.TryGetValue(node.DocumentId.Value, out var document))
-                    ApplyCheckoutDocument(node, document);
+            var byId = documents.Where(item => item.ProjectId == projectId).ToDictionary(item => item.Id);
+            ApplyPassiveDocumentAccess(tree, byId);
             ReconcilePassiveDrawings(tree, byId, await relationsTask);
             taskPaneControl.SetTree(tree);
             if (tree.LocalStructureDeferred && !tree.Children.Any(child => child.Kind != CadDocumentKind.Drawing
@@ -111,6 +117,26 @@ public sealed partial class PdmAddin
             if (ReferenceEquals(tree, currentTree)) taskPaneControl.SetTreeNotice("图档状态暂未更新，请刷新重试；本地修改已保留。");
         }
         finally { ReleasePassiveMetadataOwner(token); }
+    }
+
+    private void ApplyPassiveDocumentAccess(CadTreeNode tree, IReadOnlyDictionary<Guid, DocumentDto> documents)
+    {
+        foreach (var node in EnumerateCadNodes(tree))
+        {
+            // A fresh read is authoritative even when a file disappeared from the
+            // permitted scope or an older server omitted its authorization result.
+            // Receipts from checkout/save still use ApplyCheckoutDocument directly.
+            node.OperationAccess = null;
+            if (node.DocumentId.HasValue && documents.TryGetValue(node.DocumentId.Value, out var document))
+            {
+                ApplyCheckoutDocument(node, document);
+                node.LatestRevision = document.Revision?.Display ?? string.Empty;
+            }
+        }
+        PluginDiagnosticLog.Record("设计树获取权限", "图档=" + tree.FileName + "；已绑定=" + tree.DocumentId.HasValue
+            + "；授权结果=" + (tree.OperationAccess == null ? "未取得" : tree.OperationAccess.CanCheckout ? "允许" : "拒绝")
+            + "；原因=" + (tree.OperationAccess?.Reason ?? "") + "；业务状态=" + tree.LifecycleState
+            + "；审核锁定=" + tree.DrawingReviewLocked);
     }
 
     private void ReleasePassiveMetadataOwner(CancellationToken token)
@@ -154,7 +180,7 @@ public sealed partial class PdmAddin
                 && !string.Equals(tree.Configuration, indexed.Configuration, StringComparison.OrdinalIgnoreCase)) return;
             var context = controlledOpenManifests.FirstOrDefault(pair => IsPathWithinDirectory(currentTree.FullPath, pair.Key));
             var files = context.Value?.Files ?? new List<ControlledOpenFileDto>();
-            foreach (var node in EnumerateCadNodes(indexed))
+            foreach (var node in EnumerateCadNodes(indexed).ToArray())
             {
                 var matches = files.Where(file => file.DocumentId == node.DocumentId).Take(2).ToArray();
                 if (matches.Length == 1)
@@ -163,6 +189,11 @@ public sealed partial class PdmAddin
                     var candidate = Path.GetFullPath(Path.Combine(context.Key, relative));
                     if (IsPathWithinDirectory(candidate, context.Key)) node.FullPath = candidate;
                     node.OpenedVersionId = matches[0].VersionId;
+                    node.LoadedDrawingVersion = matches[0].DrawingVersion;
+                    if (context.Value.UsesLatestModelReferences && !ReferenceEquals(node, indexed)
+                        && node.Kind == CadDocumentKind.Assembly && !string.Equals(node.CurrentRevision, matches[0].Revision, StringComparison.OrdinalIgnoreCase))
+                        node.Children.Clear(); // Expanding this node reads its own newly loaded version.
+                    node.CurrentRevision = matches[0].Revision;
                 }
                 node.LocalStructureDeferred = true;
                 node.DisplayStructurePending = CadDesignTreeDisplay.IsStructureNode(node)

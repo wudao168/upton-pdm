@@ -46,6 +46,10 @@ internal static partial class Program
   {try{RequiredPropertyIndexScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--committed-child-checkout-regression")
   {try{CommittedChildCheckoutScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--postcheckin-reacquire-regression")
+  {try{PostCheckinReacquireScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--assembly-root-reacquire-regression")
+  {try{AssemblyRootReacquireScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--open-context-metadata-replay")
   {try{OpenContextMetadataReplay(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--registration-wording-regression")
@@ -273,7 +277,17 @@ internal static partial class Program
   }
   if(args.Length>1&&args[1]=="--controlled-open-boundary-regression")
   {
-   try{ControlledOpenBoundaryScenario(args[2]).GetAwaiter().GetResult();}
+   using(var host=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    host.Shown+=async(_,__)=>{try{await ControlledOpenBoundaryScenario(args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};
+    Application.Run(host);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--release-promotion-open-regression")
+  {
+   try{ReleasePromotionOpenScenario(args.Length>2?args[2]:null);}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
@@ -2215,11 +2229,13 @@ internal static partial class Program
  sealed class Model:RealProxy,IRemotingTypeInfo
  {
   public string Path;public bool Dirty;public Action OnSave,OnConfigurationNames,OnPropertyRead;bool readOnly=true;readonly List<string> events;
+  public bool ReadOnly=>readOnly;
   readonly System.Type nativeType;readonly List<Delegate> modifyHandlers=new List<Delegate>();readonly List<Delegate> destroyHandlers=new List<Delegate>();readonly List<Delegate> reloadHandlers=new List<Delegate>();
   public int UpdateStamp=1,CopyError,SelectionCount=2;int heldSelection;public string MemoryPayload="current memory";
   public readonly Dictionary<string,string> MemoryProperties=new Dictionary<string,string>{{"物料名称","当前内存属性"}};
   public string TypeName{get=>nativeType.FullName;set{}}
   public bool CanCastTo(System.Type type,object obj)=>type.IsAssignableFrom(nativeType)||type.Name=="IModelDoc2"||type.Name=="ModelDoc2"
+   ||Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)&&(type.Name=="IAssemblyDoc"||type.Name=="AssemblyDoc")
    ||type.Name==(Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?"DAssemblyDocEvents_Event":Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?"DDrawingDocEvents_Event":"DPartDocEvents_Event");
   public void Modify(bool geometry=true){if(geometry)UpdateStamp++;Dirty=true;foreach(var handler in modifyHandlers.ToArray())handler.DynamicInvoke();}
   public void Hide(){foreach(var handler in destroyHandlers.ToArray())handler.DynamicInvoke(1);}
@@ -2259,6 +2275,9 @@ internal static partial class Program
     case "GetType":value=call.MethodBase is MethodInfo info&&info.ReturnType==typeof(System.Type)?(object)nativeType:Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?2:Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?3:1;break;
     case "GetSaveFlag":value=Dirty;break;
     case "GetUpdateStamp":value=UpdateStamp;break;
+    case "GetComponents":value=Array.Empty<object>();break;
+    case "get_Visible":value=true;break;
+    case "ForceReleaseLocks":value=0;break;
     case "GetConfigurationNames":var configRead=OnConfigurationNames;OnConfigurationNames=null;configRead?.Invoke();value=new[]{"Default"};break;
     case "GetEquationMgr":case "GetDesignTable":case "FirstFeature":value=null;break;
     case "SetSaveFlag":Dirty=true;value=null;break;

@@ -328,7 +328,7 @@ public sealed record RestoreVersionRequest(string ChangeNote, Guid? OperationId 
 
 public sealed record PublishDocumentVersionRequest(Guid SourceVersionId, Guid ReleasePackageId, Guid ApprovalTaskId);
 
-public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false, bool TreeScopeOnly = false, bool AllowMissingComponents = false);
+public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false, bool TreeScopeOnly = false, bool AllowMissingComponents = false, bool UseLatestModelReferences = false);
 
 public sealed record CreateReleasePackageRequest(
     Guid ProjectId,

@@ -63,6 +63,7 @@ internal static partial class Program
       native.Modify(false);var file=requestedFiles[1];
       return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(json.Serialize(new[]{new{id=Get(file,"VersionId"),sha256=Get(file,"Sha256"),fileLength=Get(file,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",(string)Get(sources[1],"Sha256")}}}}))};
      }
+     if(request.RequestUri.AbsolutePath.EndsWith("/versions"))return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("[]")};
      throw new Exception("复用不应下载、提交或获取权限："+request.RequestUri.AbsolutePath);
     }))
     using(var http=new HttpClient(handler){BaseAddress=new Uri("http://memory-open.invalid/")})

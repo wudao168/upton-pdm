@@ -104,6 +104,35 @@ internal static partial class Program
    using(var bitmap=new Bitmap(dialog.Width,dialog.Height)){dialog.DrawToBitmap(bitmap,new Rectangle(Point.Empty,bitmap.Size));bitmap.Save(Path.Combine(output,"archive-selection-rules.png"));}
    Check(((Label)Field(dialog,"selectionSummary")).Text.Contains("存档1个，仅处理权限0个"),"summary separates submission from permission handling");
 
+   var changed=nodes[1];var previousBase=Get(changed,"OpenedVersionId");Set(changed,"OpenedVersionId",Guid.NewGuid());
+   await Analyze(dialog);
+   Check(!Selected(dialog).Contains(changed)&&State(dialog,changed).Contains("状态待核对"),"重建后的树在权限尚未返回时复现首次不勾选");
+   var plugin=New("PdmAddin");var project=Guid.NewGuid();var session=(Guid)Field(plugin,"checkoutSessionId");
+   SetField(plugin,"authenticatedUsername","tester");
+   var reads=0;
+   using(var client=(IDisposable)New("PdmApiClient","http://archive-selection.invalid/"))
+   using(var handler=new ReferenceRecoveryHandler(request=>{
+    if(request.RequestUri.AbsolutePath!="/api/projects/"+project+"/documents")throw new Exception("不应提交存档或改变权限");
+    reads++;
+    var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();
+    var body=serializer.Serialize(new[]{new{id=Get(changed,"DocumentId"),projectId=project,checkedOutBy="tester",checkoutSessionId=session,drawingVersion="V2",publishedVersion="A"}});
+    return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.StringContent(body)};
+   }))
+   using(var http=new System.Net.Http.HttpClient(handler){BaseAddress=new Uri("http://archive-selection.invalid/")})
+   {
+    SetField(client,"httpClient",http);SetField(plugin,"apiClient",client);
+    var journalScope=(string)Get(client,"EditJournalScope")+"|tester";
+    SetField(plugin,"editJournalScope",journalScope);SetField(plugin,"editJournal",New("EditDraftJournal",Path.Combine(folder,"journal"),journalScope));
+    await (Task)TreeCall(plugin,"RefreshArchiveSelectionAccessAsync",root,project,CancellationToken.None);
+    using(var firstArchiveDialog=Dialog())
+    {
+     await Analyze(firstArchiveDialog);
+     Check(reads==1&&Selected(firstArchiveDialog).SequenceEqual(new[]{changed})&&Equals(Get(changed,"DrawingVersion"),"V2")
+         &&Equals(Get(changed,"PublishedVersion"),"A"),"首次存档分析读取当前项目权限后立即识别保存的变更，图纸与发布版本分别显示");
+    }
+   }
+   Set(changed,"OpenedVersionId",previousBase);Set(changed,"CheckedOutBy",null);Set(changed,"CheckoutSessionId",null);
+
    Set(nodes[2],"CheckedOutBy","tester");await Analyze(dialog);
    Check(!Selected(dialog).Contains(nodes[2])&&Allowed(dialog,nodes[2])&&State(dialog,nodes[2]).Contains("仅释放权限"),"unchanged own checkout is optional permission-only work and is not automatically selected");
    dialogType.GetMethod("SetAllChecked",Flags).Invoke(dialog,new object[]{true});

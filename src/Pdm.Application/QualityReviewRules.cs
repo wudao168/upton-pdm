@@ -2,6 +2,30 @@ namespace Upton.Pdm.Application;
 
 public static class QualityReviewRules
 {
+    public static void RequireThemeUnreferenced(QualityReviewCatalog catalog, Guid themeId)
+    {
+        // Check the full company catalog, including closed records and every frozen revision.
+        // A filtered workspace or the current frequency window cannot establish that deletion is safe.
+        var references = new List<string>();
+        var profiles = catalog.Profiles.Count(p => p.ThemeId == themeId);
+        if (profiles > 0) references.Add($"{profiles} 条问题闭环资料");
+        var summaries = catalog.Summaries.Count(s => s.Issues.Any(i => i.Profile?.ThemeId == themeId));
+        if (summaries > 0) references.Add($"{summaries} 份项目总结快照（含历史修订）");
+        var referencedImprovements = catalog.Improvements.Where(i => i.ThemeId == themeId).ToArray();
+        var improvements = referencedImprovements.Select(i => i.Id).ToHashSet();
+        if (improvements.Count > 0) references.Add($"{improvements.Count} 项改善记录（含已关闭或已撤销记录）");
+        var experiences = catalog.Experiences.Where(e => improvements.Contains(e.ImprovementId)).Select(e => e.Id).ToHashSet();
+        if (experiences.Count > 0) references.Add($"{experiences.Count} 条发布经验");
+        var adoptions = catalog.Adoptions.Count(a => experiences.Contains(a.ExperienceId));
+        if (adoptions > 0) references.Add($"{adoptions} 项经验采用任务");
+        if (references.Count > 0)
+        {
+            var suggestion = referencedImprovements.Any(i => i.State is not ("已关闭" or "已撤销"))
+                ? "请先结束进行中的改善，再按需停用" : "请改用停用";
+            throw new PdmRuleException($"此共性问题主题已被{string.Join("、", references)}引用，不能删除。{suggestion}，保留已有业务记录和历史追溯。");
+        }
+    }
+
     public static IReadOnlyList<QualityThemeMetric> Metrics(QualityReviewCatalog catalog,
         IReadOnlyList<QualityIssueRow> rows, DateOnly today)
     {

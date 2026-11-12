@@ -52,12 +52,18 @@ export function dayStatus(day: string, hours: number, start: string, today: stri
 export function missingDays(entries: WorkHourInput[], from: string, to: string, start: string, today: string, holidays: HolidayMap) {
   return dateRange(from > start ? from : start, to).filter(day => day < today && workingDay(day, holidays) && hoursOn(entries, day) === 0)
 }
+export const maxWorkHourProjectsPerDay = 3
+
 export function validateHours(entries: WorkHourInput[]) {
   if (entries.some(x => !x.projectId || !['厂内', '厂外'].includes(x.location) || !Number.isFinite(x.hours) || x.hours <= 0 || x.hours > 24 || !Number.isInteger(x.hours * 2)))
     return '请选择项目和所在地，工时须大于0并按0.5小时填写。'
   const keys = entries.map(x => `${x.date}/${x.projectId}/${x.location}`)
   if (new Set(keys).size !== keys.length) return '同一天、同一项目、同一所在地存在重复记录，请合并工时。'
-  if ([...new Set(entries.map(x => x.date))].some(day => hoursOn(entries, day) > 24)) return '同一天所有项目的工时合计不能超过24小时。'
+  for (const date of new Set(entries.map(x => x.date))) {
+    const day = entries.filter(entry => entry.date === date)
+    if (new Set(day.map(entry => entry.projectId)).size > maxWorkHourProjectsPerDay) return '同一天最多填报3个不同项目的工时。'
+    if (hoursOn(day, date) > 24) return '同一天所有项目的工时合计不能超过24小时。'
+  }
   return ''
 }
 

@@ -32,11 +32,12 @@ public sealed class AiModelClientFactory(IDataProtectionProvider protection) : I
                 }
                 throw new HttpRequestException("模型连接失败。", last);
             } };
-        var http = new HttpClient(new AiCompatibilityHandler(provider.Adapter) { InnerHandler = sockets }) { Timeout = Timeout.InfiniteTimeSpan };
+        var http = new HttpClient(new AiCompatibilityHandler(provider.Adapter, model) { InnerHandler = sockets }) { Timeout = Timeout.InfiniteTimeSpan };
         var key = provider.ProtectedKey is null ? "local-no-key" : protection.CreateProtector("UPLM.AI.Keys.v1").Unprotect(provider.ProtectedKey);
         var options = new OpenAI.OpenAIClientOptions { Endpoint = endpoint, Transport = new HttpClientPipelineTransport(http), RetryPolicy = new ClientRetryPolicy(0) };
         var client = new OpenAI.Chat.ChatClient(model.Id, new ApiKeyCredential(key), options).AsIChatClient();
-        return new OwnedClient(client, http);
+        IChatClient owned = new OwnedClient(client, http);
+        return provider.Adapter == "deepseek" && model.Thinking ? new AiDeepSeekThinkingClient(owned, provider, model, protection) : owned;
     }
     private sealed class OwnedClient(IChatClient inner, HttpClient http) : DelegatingChatClient(inner)
     {
@@ -71,14 +72,15 @@ public static class AiEndpointPolicy
     }
 }
 
-// The first release uses DeepSeek's non-thinking chat mode so tool round trips do not lose provider-specific reasoning state.
-public sealed class AiCompatibilityHandler(string adapter) : DelegatingHandler
+public sealed class AiCompatibilityHandler(string adapter, AiModel model) : DelegatingHandler
 {
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         if (request.Content is not null && adapter == "deepseek") {
             var body = JsonNode.Parse(await request.Content.ReadAsStringAsync(ct))!.AsObject();
-            body["thinking"] = new JsonObject { ["type"] = "disabled" };
+            body["thinking"] = new JsonObject { ["type"] = model.Thinking ? "enabled" : "disabled" };
+            if (model.Thinking) body["reasoning_effort"] = model.ReasoningEffort;
+            else body.Remove("reasoning_effort");
             if (body.Remove("max_completion_tokens", out var limit)) body["max_tokens"] = limit;
             request.Content.Dispose(); request.Content = new StringContent(body.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
         }

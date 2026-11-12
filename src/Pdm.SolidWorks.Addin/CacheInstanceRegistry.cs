@@ -53,7 +53,9 @@ internal static class CacheInstanceRegistry
         WithGate(root, () => { PublishCore(root, busy, paths, checkedOut); return true; });
     // Idle notifications run on the CAD UI thread. A heartbeat must never wait
     // behind a potentially long hash/deletion pass; stale state remains protected.
-    internal static bool TryPublish(string root, bool busy, string[] paths, Guid[] checkedOut)
+    internal static bool TryPublish(string root, bool busy, string[] paths, Guid[] checkedOut) =>
+        TryPublishCurrent(root, busy, paths, checkedOut, null);
+    internal static bool TryPublishCurrent(string root, bool busy, string[] paths, Guid[] checkedOut, Func<bool> stillCurrent)
     {
         using (var mutex = new Mutex(false, GateName(root)))
         {
@@ -62,6 +64,9 @@ internal static class CacheInstanceRegistry
             {
                 try { acquired = mutex.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
                 if (!acquired) return false;
+                // Recheck under the same gate as synchronous busy publication. A delayed
+                // background snapshot must not turn a newer operation back into idle.
+                if (stillCurrent != null && !stillCurrent()) return false;
                 PublishCore(root, busy, paths, checkedOut);
                 return true;
             }

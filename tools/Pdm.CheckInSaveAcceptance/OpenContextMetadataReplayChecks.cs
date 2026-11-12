@@ -45,7 +45,7 @@ internal static partial class Program
    {
     http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");
     SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);
-    var task=(Task)TreeCall(plugin,"VerifiedOpenContextIdsAsync",requested);await task;
+    var task=(Task)TreeCall(plugin,"VerifiedOpenContextIdsAsync",requested,false);await task;
     var actual=new HashSet<Guid>(((IEnumerable)Get(task,"Result")).Cast<Guid>());
     Assert(actual.SetEquals(expected),name+"：真实W3快照仅识别两个已确认装配环境");
     Assert(!actual.Contains((Guid)Get(root,"DocumentId")),name+"：当前图档和实际视图模型不会当成上下文放行");

@@ -13,6 +13,44 @@ namespace Upton.Pdm.Api.Tests;
 public sealed class WorkHoursApiTests
 {
     [Fact]
+    public async Task DailyLimitCountsDistinctProjectsAndRejectsFourthWithoutChangingSavedEntries()
+    {
+        using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        var repo = factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repo.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
+        var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(8)).DateTime);
+        var source = today.AddDays(-1);
+        const string worker = "project-limit-worker";
+        await repo.CreateUserAsync(new(Guid.NewGuid(), worker, "工时测试人员", "unused", UserRole.Engineer, true, CompanyId: company), default);
+        var root = await repo.CreateNumberedProjectAsync(new(company, "P", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "每日项目数测试", null, source, 1, worker, "D:/test", "D:/release"), default);
+        await repo.SetMainProjectStaffingAsync(root.Id, new(worker, [], [worker]), "admin", default);
+        var second = await repo.CreateSubprojectAsync(new(root.Id, "第二项目", null, 1), default);
+        var third = await repo.CreateSubprojectAsync(new(root.Id, "第三项目", null, 1), default);
+        var fourth = await repo.CreateSubprojectAsync(new(root.Id, "第四项目", null, 1), default);
+        var url = $"/api/work-hours?from={source:yyyy-MM-dd}&to={today:yyyy-MM-dd}";
+        var valid = new WorkHourInput[] { new(today, "厂内", 2, root.Id), new(today, "厂外", 2, root.Id), new(today, "厂内", 4, second.Id), new(today, "厂内", 6, third.Id), new(source, "厂内", 2, fourth.Id) };
+        var initial = new SaveWorkHours(source, today, valid, [.. new[] { source, today }.Select(day => day.ToString("yyyy-MM")).Distinct().Select(month => new WorkHoursVersion(month, 0))]);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PutAsJsonAsync("/api/work-hours", initial)).StatusCode);
+        client.DefaultRequestHeaders.Add("X-Company-Id", company.ToString());
+        Authenticate(client, worker, UserRole.Engineer);
+        var save = await client.PutAsJsonAsync("/api/work-hours", initial);
+        Assert.Equal(HttpStatusCode.OK, save.StatusCode);
+        var view = (await client.GetFromJsonAsync<WorkHoursView>(url))!;
+        var versions = view.Sheets.Select(sheet => new WorkHoursVersion(sheet.Month, sheet.RowVersion)).ToArray();
+        var invalid = initial with { Entries = [.. valid, new(today, "厂内", 2, fourth.Id)], Versions = versions };
+        var rejected = await client.PutAsJsonAsync("/api/work-hours", invalid);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("最多填报3个不同项目", (await rejected.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>())!.Title);
+        var move = new MoveWorkHoursDay(company, source, today, versions.Single(x => x.Month == source.ToString("yyyy-MM")).RowVersion,
+            versions.Single(x => x.Month == today.ToString("yyyy-MM")).RowVersion);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/work-hours/move-day", move)).StatusCode);
+        var after = (await client.GetFromJsonAsync<WorkHoursView>(url))!;
+        Assert.Equal(versions, after.Sheets.Select(sheet => new WorkHoursVersion(sheet.Month, sheet.RowVersion)).ToArray());
+        Assert.Equal(5, after.Sheets.SelectMany(sheet => sheet.Entries).Count());
+    }
+
+    [Fact]
     public async Task CalendarMoveRequiresAuthenticationMergesAtomicallyAndRejectsStaleReplay()
     {
         using var factory=new PdmApiFactory();using var client=factory.CreateClient();

@@ -16,8 +16,10 @@
 .quality-review .el-select { min-width:0; width:100%; }
 .quality-review input[type=checkbox] { width:16px; height:16px; accent-color:var(--pdm-theme-accent); }
 .quality-review__filters { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }
+.quality-review__filter-refresh { flex:0 0 auto; margin-inline-start:auto; }
 .quality-review__filters label { display:grid; gap:4px; min-width:120px; max-width:240px; flex:1; }
 .quality-review__form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.quality-review__settings-fields { grid-template-columns:repeat(3,minmax(0,1fr)); }
 .quality-review__form label { display:grid; gap:5px; min-width:0; }
 .quality-review__wide { grid-column:1/-1; }
 .quality-review__hint { color:var(--pdm-muted); line-height:1.6; margin:0; }

@@ -19,7 +19,7 @@ import { chinaToday, monthDays, shiftMonth } from '../projectCalendar'
 import { addDays } from '../projectWorkbench'
 import { loadGlobalStatusContent } from '../globalStatusContent'
 import { downloadProcurementWorkbook } from '../procurementWorkbook'
-import { appendWorkHoursDay, dateRange, departmentPeople, hoursOn, reportRows, validateHours, weekDates, workingDay, workHoursDepartmentTree } from '../workHours'
+import { appendWorkHoursDay, dateRange, departmentPeople, hoursOn, maxWorkHourProjectsPerDay, reportRows, validateHours, weekDates, workingDay, workHoursDepartmentTree } from '../workHours'
 import type { HolidayMap, WorkHourEntry, WorkHourInput, WorkHourRevision, WorkHoursProject, WorkHoursReportRow, WorkHoursView } from '../workHours'
 
 const props = defineProps<{ token: string; companyId: string; active: boolean; mobile?: boolean; initialProjectId?: string }>()
@@ -45,6 +45,10 @@ const missed = computed(() => ownChecks.value.filter(x => x.date >= month.value 
 const incomplete = computed(() => ownChecks.value.filter(x => x.date >= month.value && x.date <= monthEnd.value && x.status === '填写不完整').map(x => x.date))
 const daily = computed(() => entries.value.filter(x => x.date === selected.value))
 const editing = ref(''), form = reactive({ projectId: '', location: '厂内', hours: 4 }), formBaseline = ref('')
+const mobileExtraRows = ref<{ key: number; projectId: string; hours: number }[]>([])
+const mobileRows = computed(() => [form, ...mobileExtraRows.value])
+const mobileQuickHours = [2, 4, 6, 8, 10]
+const mobileDateLabel = computed(() => selected.value.replace(/^(\d{4})-0?(\d+)-0?(\d+)$/, '$1年$2月$3日'))
 const formDirty = computed(() => JSON.stringify(form) !== formBaseline.value)
 let rowSequence = 0, ownGeneration = 0, reportGeneration = 0
 type WeekRow = { key: number; projectId: string; location: string; values: Record<string, number | string> }
@@ -62,12 +66,17 @@ const recent = computed(() => [...new Set([...entries.value].sort((a, b) => b.da
 const projectName = computed(() => allProjects.value.find(x => x.id === form.projectId)?.name ?? (props.mobile ? '' : '选择项目后自动带出'))
 const mobileProjectSearch = ref('')
 const mobileProjects = computed(() => allProjects.value.filter(project => `${project.code} ${project.name}`.toLowerCase().includes(mobileProjectSearch.value.trim().toLowerCase())))
-function syncMobileEntry() {
+function syncMobileEntry(row: { projectId: string; hours: number }) {
   if (!props.mobile || saving.value) return
-  const entry = daily.value.find(item => item.projectId === form.projectId && item.location === form.location)
-  if (entry) form.hours = entry.hours
+  const entry = daily.value.find(item => item.projectId === row.projectId && item.location === form.location)
+  if (entry) row.hours = entry.hours
 }
-watch(() => [form.projectId, form.location], syncMobileEntry)
+function syncMobileEntries() { if (props.mobile) mobileRows.value.forEach(syncMobileEntry) }
+watch(() => form.projectId, () => syncMobileEntry(form))
+watch(() => form.location, syncMobileEntries)
+function addMobileProject() {
+  if (mobileRows.value.length < maxWorkHourProjectsPerDay) mobileExtraRows.value.push({ key: ++rowSequence, projectId: '', hours: 4 })
+}
 let prefilledProjectId = ''
 function prefillProject() {
   const id = props.initialProjectId
@@ -90,7 +99,9 @@ function visibleDayStatus(day: string) {
 }
 function resetForm(entry?: WorkHourEntry) {
   editing.value = entry?.id ?? ''
-  Object.assign(form, { projectId: entry?.projectId ?? '', location: entry?.location ?? entries.value.at(-1)?.location ?? '厂内', hours: entry?.hours ?? 4 })
+  const defaultLocation = props.mobile ? '厂内' : entries.value.at(-1)?.location ?? '厂内'
+  Object.assign(form, { projectId: entry?.projectId ?? '', location: entry?.location ?? defaultLocation, hours: entry?.hours ?? 4 })
+  if (props.mobile) mobileExtraRows.value = []
   formBaseline.value = JSON.stringify(form)
 }
 function makeRow(projectId = '', location = '厂内'): WeekRow { return { key: ++rowSequence, projectId, location, values: Object.fromEntries(week.value.map(day => [day, ''])) } }
@@ -119,7 +130,7 @@ async function loadOwn() {
     own.value = result
     if (!preserveMobileForm) resetForm()
     if (!props.mobile) resetWeek()
-    prefillProject(); syncMobileEntry(); emit('changed')
+    prefillProject(); syncMobileEntries(); emit('changed')
     if (tab.value === 'settings' && !(result.canManageSettings ?? result.canManage)) tab.value = 'entry'
     if (tab.value === 'report' && !report.value) await loadReport()
   } catch (cause) { if (generation === ownGeneration) error.value = failure(cause, '工时读取失败，请检查网络后刷新重试。') }
@@ -129,7 +140,7 @@ async function selectDay(day: string) {
   if (!mayLeave()) return
   selected.value = day
   if (month.value.slice(0, 7) !== day.slice(0, 7)) { month.value = day.slice(0, 7) + '-01'; await loadOwn() }
-  else { if (!props.mobile) { resetForm(); resetWeek() }; syncMobileEntry() }
+  else { if (!props.mobile) { resetForm(); resetWeek() }; syncMobileEntries() }
 }
 function selectMobileDay(event: Event) {
   const input = event.target as HTMLInputElement
@@ -160,8 +171,12 @@ async function persist(from: string, to: string, values: WorkHourInput[]) {
   finally { saving.value = false }
 }
 async function saveDay() {
-  const values: WorkHourInput[] = daily.value.filter(x => props.mobile ? x.projectId !== form.projectId || x.location !== form.location : x.id !== editing.value).map(x => ({ date: x.date, projectId: x.projectId, location: x.location, hours: x.hours }))
-  values.push({ date: selected.value, ...form, hours: Number(form.hours) })
+  const drafts = props.mobile ? mobileRows.value : [form]
+  const unchanged = daily.value.filter(entry => props.mobile
+    ? entry.location !== form.location || !drafts.some(row => row.projectId === entry.projectId)
+    : entry.id !== editing.value)
+  const values: WorkHourInput[] = unchanged.map(({ date, projectId, location, hours }) => ({ date, projectId, location, hours }))
+  for (const row of drafts) values.push({ date: selected.value, projectId: row.projectId, location: form.location, hours: Number(row.hours) })
   await persist(selected.value, selected.value, values)
 }
 async function removeDay(entry: WorkHourEntry) {
@@ -423,17 +438,36 @@ if (!props.mobile) void loadGlobalStatusContent().then(data => { holidays.value 
 <template>
   <section ref="workHoursRoot" class="work-hours" aria-label="工时管理" :aria-busy="loading || reporting || saving">
     <section v-if="mobile" class="wh-mobile-entry" aria-label="填报工时">
-      <h1>填报工时</h1>
       <p v-if="error" class="wh-error" role="alert">{{ error }} <button :disabled="loading || saving" @click="loadOwn">重试</button></p>
       <p v-if="loading" role="status">正在读取工时…</p>
       <form novalidate @submit.prevent="saveDay">
         <fieldset class="wh-mobile-fields" :disabled="saving || loading || !own">
-          <label>日期<input type="date" :value="selected" :max="today" required aria-label="填报日期" @change="selectMobileDay"></label>
+          <label>日期<span class="wh-mobile-date-control">
+            <span aria-hidden="true">{{ mobileDateLabel }}</span>
+            <input type="date" :value="selected" :max="today" required aria-label="填报日期" @change="selectMobileDay">
+          </span></label>
           <label>所在地<select v-model="form.location" aria-label="所在地"><option>厂内</option><option>厂外</option></select></label>
-          <label class="wh-mobile-wide">项目号<el-select v-model="form.projectId" filterable :filter-method="(query: string) => mobileProjectSearch = query" placeholder="选择项目号" aria-label="填报项目" :disabled="saving || loading || !own || selected > today" @visible-change="(open: boolean) => { if (!open) mobileProjectSearch = '' }"><el-option v-for="project in mobileProjects" :key="project.id" :value="project.id" :label="project.code"><span>{{ project.code }} · {{ project.name }}</span></el-option></el-select></label>
-          <label class="wh-mobile-wide">项目名称<input :value="projectName" readonly aria-label="自动带出项目名称"></label>
-          <label class="wh-mobile-wide">工时数<input v-model.number="form.hours" type="number" min="0.5" max="24" step="0.5" required aria-label="工时数"></label>
-          <button type="submit" class="pdm-primary-action wh-mobile-wide" :disabled="!form.projectId || selected > today">{{ saving ? '正在保存…' : '保存' }}</button>
+          <template v-for="(row, index) in mobileRows" :key="index === 0 ? 0 : mobileExtraRows[index - 1]!.key">
+            <div v-if="index > 0" class="wh-mobile-row-heading wh-mobile-wide">
+              <strong>项目 {{ index + 1 }}</strong>
+              <button type="button" :aria-label="`移除项目 ${index + 1}`" @click="mobileExtraRows.splice(index - 1, 1)">移除</button>
+            </div>
+            <label class="wh-mobile-wide">项目号
+              <el-select v-model="row.projectId" filterable :filter-method="(query: string) => mobileProjectSearch = query" placeholder="选择项目号" :aria-label="index ? `填报项目 ${index + 1}` : '填报项目'" :disabled="saving || loading || !own || selected > today" @change="syncMobileEntry(row)" @visible-change="(open: boolean) => { if (!open) mobileProjectSearch = '' }">
+                <el-option v-for="project in mobileProjects" :key="project.id" :value="project.id" :label="project.code" :disabled="mobileRows.some(other => other !== row && other.projectId === project.id)"><span>{{ project.code }} · {{ project.name }}</span></el-option>
+              </el-select>
+            </label>
+            <label class="wh-mobile-wide">项目名称<input :value="allProjects.find(project => project.id === row.projectId)?.name || ''" readonly :aria-label="index ? `项目 ${index + 1} 名称` : '自动带出项目名称'"></label>
+            <label class="wh-mobile-wide">工时数<input v-model.number="row.hours" type="number" min="0.5" max="24" step="0.5" required :aria-label="index ? `项目 ${index + 1} 工时数` : '工时数'"></label>
+            <div class="wh-mobile-quick-hours wh-mobile-wide" role="group" :aria-label="`项目 ${index + 1} 快速选择工时`">
+              <button v-for="hours in mobileQuickHours" :key="hours" type="button" :aria-pressed="row.hours === hours" @click="row.hours = hours">{{ hours }}小时</button>
+            </div>
+          </template>
+          <div class="wh-mobile-row-heading wh-mobile-wide">
+            <small>每天最多 3 个项目</small>
+            <button type="button" :disabled="mobileRows.length >= maxWorkHourProjectsPerDay || mobileRows.some(row => !row.projectId)" @click="addMobileProject">添加项目</button>
+          </div>
+          <button type="submit" class="pdm-primary-action wh-mobile-wide" :disabled="mobileRows.some(row => !row.projectId) || selected > today">{{ saving ? '正在保存…' : '保存' }}</button>
         </fieldset>
       </form>
     </section>
@@ -511,11 +545,17 @@ if (!props.mobile) void loadGlobalStatusContent().then(data => { holidays.value 
 
 <style scoped>
 .wh-mobile-entry{display:grid;gap:16px;width:100%;max-width:480px;margin:0 auto}
-.wh-mobile-entry h1{margin:0;font-size:20px;line-height:28px;font-weight:600}
 .wh-mobile-entry form{margin:0}
 .wh-mobile-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;border:0;padding:0;margin:0;min-width:0}
-.wh-mobile-fields>label{display:grid;gap:4px;min-width:0;font-size:14px;line-height:20px}
-.work-hours .wh-mobile-fields>label>input,.work-hours .wh-mobile-fields select{box-sizing:border-box;width:100%;min-width:0;min-height:42px;padding:8px 12px}
+.wh-mobile-fields>label{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;min-width:0;font-size:14px;line-height:20px}
+.work-hours .wh-mobile-fields > label > :is(input, select){display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;height:42px;min-height:42px;padding:0 12px}
+.wh-mobile-date-control{position:relative;display:flex;align-items:center;width:100%;min-width:0;height:var(--pdm-field-height,32px);padding:0 12px;border:1px solid var(--pdm-border,#cbd5e1);border-radius:999px;background:var(--pdm-surface);white-space:nowrap}
+.wh-mobile-date-control:focus-within{outline:2px solid var(--pdm-primary);outline-offset:2px}
+.wh-mobile-date-control input[type="date"]{position:absolute;inset:0;width:100%;height:100%!important;margin:0;opacity:0;cursor:pointer}
+.wh-mobile-quick-hours{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
+.wh-mobile-row-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.work-hours .wh-mobile-fields :is(.wh-mobile-quick-hours,.wh-mobile-row-heading) > button{height:36px;min-height:36px;padding:0 8px;border-radius:999px;white-space:nowrap}
+.wh-mobile-quick-hours > button[aria-pressed=true]{background:var(--pdm-theme-accent-soft);border-color:var(--pdm-primary);color:var(--pdm-primary)}
 .wh-mobile-fields :deep(.el-select){width:100%;min-width:0}
 .wh-mobile-fields :deep(.el-select__wrapper){min-height:42px}
 .wh-mobile-fields :deep(input.el-select__input){min-height:0;height:24px;border:0;border-radius:0;padding:0;background:transparent;outline:0;box-shadow:none}

@@ -1,9 +1,10 @@
 // Phosphor fill icons, MIT. Source: https://github.com/phosphor-icons/core/tree/2b75f3ad12b420c9504ef05df8d2564a28f8500e
 import { defineComponent, h } from 'vue'
-import { LayoutDashboard as OutlineLayoutDashboard, FolderKanban as OutlineFolderKanban, Clock as OutlineClock, ClipboardCheck as OutlineClipboardCheck, FileText as OutlineFileText, Library as OutlineLibrary, FileCode as OutlineFileCode, Boxes as OutlineBoxes, Settings as OutlineSettings, Tag as OutlineTag, Package as OutlinePackage, Warehouse as OutlineWarehouse, Link2 as OutlineLink2, ListTree as OutlineListTree, Hash as OutlineHash } from '@lucide/vue'
-const regularIcons = {LayoutDashboard: OutlineLayoutDashboard, FolderKanban: OutlineFolderKanban, Clock: OutlineClock, ClipboardCheck: OutlineClipboardCheck, FileText: OutlineFileText, Library: OutlineLibrary, FileCode: OutlineFileCode, Boxes: OutlineBoxes, Settings: OutlineSettings, Tag: OutlineTag, Package: OutlinePackage, Warehouse: OutlineWarehouse, Link2: OutlineLink2, ListTree: OutlineListTree, Hash: OutlineHash}
+import { Bot as OutlineBot, LayoutDashboard as OutlineLayoutDashboard, FolderKanban as OutlineFolderKanban, Clock as OutlineClock, ClipboardCheck as OutlineClipboardCheck, FileText as OutlineFileText, Library as OutlineLibrary, FileCode as OutlineFileCode, Boxes as OutlineBoxes, Settings as OutlineSettings, Tag as OutlineTag, Package as OutlinePackage, Warehouse as OutlineWarehouse, Link2 as OutlineLink2, ListTree as OutlineListTree, Hash as OutlineHash } from '@lucide/vue'
+const regularIcons = {Bot: OutlineBot, LayoutDashboard: OutlineLayoutDashboard, FolderKanban: OutlineFolderKanban, Clock: OutlineClock, ClipboardCheck: OutlineClipboardCheck, FileText: OutlineFileText, Library: OutlineLibrary, FileCode: OutlineFileCode, Boxes: OutlineBoxes, Settings: OutlineSettings, Tag: OutlineTag, Package: OutlinePackage, Warehouse: OutlineWarehouse, Link2: OutlineLink2, ListTree: OutlineListTree, Hash: OutlineHash}
 
 const paths = {
+  "Bot": ["M120 24h16v32h56a24 24 0 0 1 24 24v112a24 24 0 0 1-24 24H64a24 24 0 0 1-24-24V80a24 24 0 0 1 24-24h56V24ZM80 104v24h16v-24H80Zm80 0v24h16v-24h-16Zm-80 56v16h96v-16H80ZM16 104h16v64H16Zm208 0h16v64h-16Z"],
   "LayoutDashboard": [
     "M120,56v48a16,16,0,0,1-16,16H56a16,16,0,0,1-16-16V56A16,16,0,0,1,56,40h48A16,16,0,0,1,120,56Zm80-16H152a16,16,0,0,0-16,16v48a16,16,0,0,0,16,16h48a16,16,0,0,0,16-16V56A16,16,0,0,0,200,40Zm-96,96H56a16,16,0,0,0-16,16v48a16,16,0,0,0,16,16h48a16,16,0,0,0,16-16V152A16,16,0,0,0,104,136Zm96,0H152a16,16,0,0,0-16,16v48a16,16,0,0,0,16,16h48a16,16,0,0,0,16-16V152A16,16,0,0,0,200,136Z"
   ],
@@ -79,3 +80,5 @@ export const Warehouse = icon('Warehouse', 'lucide-warehouse')
 export const Link2 = icon('Link2', 'lucide-link2')
 export const ListTree = icon('ListTree', 'lucide-list-tree')
 export const Hash = icon('Hash', 'lucide-hash')
+
+export const Bot = icon('Bot', 'lucide-bot')

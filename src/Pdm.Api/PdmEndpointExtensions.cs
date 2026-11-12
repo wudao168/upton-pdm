@@ -1261,7 +1261,8 @@ public static class PdmEndpointExtensions
                 cancellationToken,
                 request.ResolveLegacyReferences,
                 request.TreeScopeOnly,
-                request.AllowMissingComponents));
+                request.AllowMissingComponents,
+                request.UseLatestModelReferences));
         });
 
         api.MapGet("/documents/{documentId:guid}/versions/compare", async (Guid documentId, Guid left, Guid right, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>

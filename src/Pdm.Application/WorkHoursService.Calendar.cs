@@ -42,6 +42,7 @@ public sealed partial class WorkHoursService
                     option.Code, option.Name, option.RootProjectId, option.RootProjectCode, option.RootProjectName);
             }
         }
+        RequireDailyProjectLimit(merged.Values.Select(x => x.ProjectId));
         if (merged.Values.Sum(x => x.Hours) > 24) throw new PdmRuleException("目标日期的工时合计不能超过24小时；源日期记录未删除。");
         var changed = new List<WorkHoursMonth>();
         foreach (var month in new[] { sourceMonth, targetMonth }.Distinct())

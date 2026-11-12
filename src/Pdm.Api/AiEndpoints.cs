@@ -27,6 +27,7 @@ public static class AiEndpoints
         api.MapPut("/settings", async (AiSettingsInput input, AiSettingsService service, CancellationToken ct) => Results.Ok(await service.SaveAsync(input, ct)));
         api.MapPost("/providers/{id:guid}/test", async (Guid id, AiTestInput input, AiSettingsService service, CancellationToken ct) => Results.Ok(await service.TestAsync(id, input, ct)));
         api.MapGet("/conversations", async (AiChatService service, CancellationToken ct) => Results.Ok(await service.ListAsync(ct)));
+        api.MapDelete("/conversations", async (AiChatService service, CancellationToken ct) => { await service.ClearAsync(ct); return Results.NoContent(); });
         api.MapPost("/conversations", async (AiCreateInput input, AiChatService service, CancellationToken ct) => Results.Ok(await service.CreateAsync(input, ct)));
         api.MapGet("/conversations/{id:guid}", async (Guid id, AiChatService service, CancellationToken ct) => Results.Ok(await service.FindAsync(id, ct)));
         api.MapDelete("/conversations/{id:guid}", async (Guid id, AiChatService service, CancellationToken ct) => { await service.DeleteAsync(id, ct); return Results.NoContent(); });

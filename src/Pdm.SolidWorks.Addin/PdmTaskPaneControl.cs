@@ -17,6 +17,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly TaskPaneSynchronizationContext uiContext;
     private const int StructureSelectionColumnWidth = 28;
     private const int StructureVersionColumnWidth = 105;
+    private const int TaskPaneSideInset = 1;
+    private const int TabContentTopInset = 8;
     private const int StructureTreeLeftPadding = 4;
     private const int StructureTreeIndentWidth = 16;
     private const int StructureExpanderSize = 9;
@@ -55,6 +57,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Button openClientButton = new Button();
     private readonly Button workHoursButton = new Button();
     private readonly Button checkoutButton = new Button();
+    private readonly Label checkoutAccessStatus = new Label();
     private readonly Button checkinButton = new Button();
     private readonly Button propertyEditButton = new Button();
     private readonly Button settingsButton = new Button();
@@ -165,7 +168,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         BuildTabs();
         ConfigurePluginVersion();
         tabsHost.Dock = DockStyle.Fill;
-        tabsHost.Padding = new Padding(15, 0, 15, 0);
+        tabsHost.Padding = new Padding(TaskPaneSideInset, 0, TaskPaneSideInset, 0);
         tabsHost.BackColor = Color.FromArgb(244, 247, 251);
         tabsHost.Controls.Add(tabs);
         tabsHost.Layout += (_, _) => ResizeTabHeaders();
@@ -414,7 +417,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             versionList.Items.Clear();
             foreach (var version in versions)
             {
-                var item = new ListViewItem(version.Revision?.Display ?? "-") { Tag = version };
+                var item = new ListViewItem(version.FormatBusinessVersion()) { Tag = version };
                 item.SubItems.Add(version.Status == 1 ? "正式" : "工作");
                 item.SubItems.Add(DisplayUserName(version.CreatedBy));
                 item.SubItems.Add(version.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm"));
@@ -729,7 +732,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private Control BuildProjectPanel()
     {
-        var panel = new Panel { Dock = DockStyle.Top, Height = 75, BackColor = Color.White, Padding = new Padding(15, 5, 15, 5) };
+        var panel = new Panel { Dock = DockStyle.Top, Height = 75, BackColor = Color.White, Padding = new Padding(TaskPaneSideInset, 5, TaskPaneSideInset, 5) };
         var actions = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -749,11 +752,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 5));
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        actions.SizeChanged += (_, _) =>
-        {
-            MatchProjectButtonWidths(actions, clientButtonColumn, userButtonColumn);
-            projectDocuments.BrowseButtonWidth = userButtonColumn.Width;
-        };
+        actions.SizeChanged += (_, _) => MatchProjectButtonWidths(actions, clientButtonColumn, userButtonColumn);
         currentProject.ReadOnly = true;
         currentProject.TabStop = false;
         currentProject.ShortcutsEnabled = false;
@@ -776,6 +775,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         workHoursButton.Enabled = false;
         actionToolTip.SetToolTip(workHoursButton, "打开工时管理，填写本人工时");
         workHoursButton.Click += (_, _) => WorkHoursRequested?.Invoke(this, EventArgs.Empty);
+        void MatchWorkspaceButtons(object sender, EventArgs args)
+        {
+            projectDocuments.MatchToolbarButtonSizes(openClientButton.Size, workHoursButton.Size);
+        }
+        openClientButton.SizeChanged += MatchWorkspaceButtons;
+        workHoursButton.SizeChanged += MatchWorkspaceButtons;
         actions.Layout += (_, _) =>
         {
             var contentHeight = actions.RowStyles.Cast<RowStyle>().Sum(row => (int)Math.Round(row.Height));
@@ -854,7 +859,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.SizeChanged += (_, _) => ResizeTabHeaders();
         structureTab = BuildStructureTab();
         tabs.TabPages.Add(structureTab);
-        var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
+        var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(0, TabContentTopInset, 0, 8) };
         projectDocuments.OpenRequested += (_, args) =>
         {
             tabs.SelectedTab = structureTab;
@@ -865,7 +870,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.TabPages.Add(projectTab);
         versionsTab = BuildVersionsTab();
         tabs.TabPages.Add(versionsTab);
-        diagnosticsTab = new TabPage("日志") { BackColor = Color.White, Padding = new Padding(8) };
+        diagnosticsTab = new TabPage("日志") { BackColor = Color.White, Padding = new Padding(0, TabContentTopInset, 0, 8) };
         diagnosticsTab.Controls.Add(new DiagnosticLogControl(installedPluginVersion));
         tabs.TabPages.Add(diagnosticsTab);
         foreach (TabPage tab in tabs.TabPages)
@@ -930,7 +935,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private TabPage BuildStructureTab()
     {
-        var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = Padding.Empty };
+        var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(0, TabContentTopInset, 0, 0) };
         var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 35, ColumnCount = 7, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 5) };
         ConfigureStructureActionColumns(actions);
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -956,7 +961,17 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.Controls.Add(checkinButton, 2, 0);
         actions.Controls.Add(propertyEditButton, 4, 0);
         actions.Controls.Add(settingsButton, 6, 0);
-        tabs.AlignWith(actions);
+        tabs.AlignWith(actions, workHoursButton);
+
+        // Disabled WinForms buttons do not receive hover messages. Keep the
+        // actual blocking reason on an enabled surface next to the action.
+        checkoutAccessStatus.Dock = DockStyle.Top;
+        checkoutAccessStatus.Height = 42;
+        checkoutAccessStatus.Padding = new Padding(3, 2, 3, 3);
+        checkoutAccessStatus.AutoEllipsis = true;
+        checkoutAccessStatus.ForeColor = Color.FromArgb(152, 86, 24);
+        checkoutAccessStatus.Visible = false;
+        checkoutAccessStatus.AccessibleName = "获取权限提示";
 
         workspaceOperationPanel.Dock = DockStyle.Bottom;
         workspaceOperationPanel.Height = 72;
@@ -1140,7 +1155,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             }
         };
 
-        var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(3, 0, 3, 3) };
+        var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 3) };
         treeHost.Controls.Add(structureTreeSurface);
 
         var detail = new Panel { Dock = DockStyle.Bottom, Height = 118, BackColor = Color.White, Padding = new Padding(9, 7, 9, 5) };
@@ -1159,6 +1174,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tab.Controls.Add(detail);
         tab.Controls.Add(treeHealth);
         tab.Controls.Add(searchToolbar);
+        tab.Controls.Add(checkoutAccessStatus);
         tab.Controls.Add(actions);
         return tab;
     }
@@ -1453,7 +1469,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             return "— / —";
         }
 
-        return node.BusinessVersionText;
+        return !string.IsNullOrWhiteSpace(node.LoadedDrawingVersion) && node.LoadedDrawingVersion != node.DrawingVersion
+            ? node.BusinessVersionText + " · 本地 " + node.LoadedDrawingVersion : node.BusinessVersionText;
     }
 
     private void DrawNodeImage(Graphics graphics, TreeNode node, Rectangle bounds, bool selected)
@@ -1624,19 +1641,15 @@ internal sealed class PdmTaskPaneControl : UserControl
             canOpenInSolidWorks && (registered ? authenticated : localFileExists && node.Status != CadReferenceStatus.Missing),
             !canOpenInSolidWorks
                 ? "该文件类型不能在SolidWorks中打开"
-                : registered ? "从PLM重新打开图档，本地文件不作为打开前提"
+                : registered ? "打开所选图档；当前受控装配的子件按装配引用版本打开"
                 : !localFileExists || node.Status == CadReferenceStatus.Missing
                     ? "当前结构引用的本地文件不存在"
                     : "打开或激活当前结构实际引用的工作图档");
-        var currentRevision = string.IsNullOrWhiteSpace(node.CurrentRevision)
-            ? string.IsNullOrWhiteSpace(node.Revision) ? "待识别" : node.Revision
-            : node.CurrentRevision;
-        var latestRevision = string.IsNullOrWhiteSpace(node.LatestRevision) ? "待识别" : node.LatestRevision;
         SetContextState(contextUpdateLatest, registered && authenticated && canOpenInSolidWorks,
-            registered ? "从PLM重新取回当前版本，本地修改、缺失或只读状态不拦截获取" : "该图档尚未入库");
+            registered ? "从PLM请求图档的最新受控版本" : "该图档尚未入库");
         contextVersionInfo.Text = registered
-            ? string.Concat("当前 ", currentRevision, " / 最新 ", latestRevision)
-            : "当前 未入库 / 最新 -";
+            ? "图纸 / 发布  " + node.BusinessVersionText
+            : "未入库";
 
         SetContextState(
             contextOpenDrawing,
@@ -1875,14 +1888,14 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private TabPage BuildVersionsTab()
     {
-        var tab = new TabPage("版本信息") { BackColor = Color.White, Padding = new Padding(8) };
+        var tab = new TabPage("版本信息") { BackColor = Color.White, Padding = new Padding(0, TabContentTopInset, 0, 8) };
         versionList.Dock = DockStyle.Fill;
         versionList.View = View.Details;
         versionList.FullRowSelect = true;
         versionList.MultiSelect = true;
         versionList.HideSelection = false;
         versionList.AccessibleName = "图档历史版本";
-        versionList.Columns.Add("版本", 62);
+        versionList.Columns.Add("图纸 / 发布", 88);
         versionList.Columns.Add("状态", 62);
         versionList.Columns.Add("创建人", 76);
         versionList.Columns.Add("时间", 118);
@@ -1896,7 +1909,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             Height = 36,
             ColumnCount = 7,
             RowCount = 1,
-            Padding = new Padding(3)
+            Padding = new Padding(0, 3, 0, 3)
         };
         ConfigureStructureActionColumns(actions);
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -2500,6 +2513,12 @@ internal sealed class PdmTaskPaneControl : UserControl
             }
         }
 
+        // A newly opened CAD file has no previous tree selection. Bind the
+        // current file itself so its authorized actions are available immediately.
+        // Do not forward this presentation selection back into SolidWorks.
+        if (structureTree.SelectedNode == null && plan.Root != null)
+            SelectTreeNodeWithoutNotification(plan.Root);
+
         if (!plan.ExpandAll && plan.Root != null)
         {
             Task.Delay(1).ContinueWith(_ => RunOnUiThread(() =>
@@ -2922,17 +2941,15 @@ internal sealed class PdmTaskPaneControl : UserControl
             return "未存档";
         }
 
-        var historicalSourceRevision = IsVersionOutdated(node)
-            ? (node.CurrentRevision ?? string.Empty).TrimEnd('*')
-            : string.Empty;
+        var basedOnOlderVersion = IsVersionOutdated(node);
         string editState;
         switch (node.WorkState)
         {
             case CadWorkState.ModifiedUnsaved: editState = node.DocumentId.HasValue && string.IsNullOrWhiteSpace(node.CheckedOutBy)
                     ? "未获取权限 · 内存状态待核对" : node.CheckoutSessionLost ? "权限已失效 · 修改已保留"
                     : !node.DocumentId.HasValue ? "库外文件 · 需保存" : "修改未保存"; break;
-            case CadWorkState.PendingCheckIn: editState = string.IsNullOrWhiteSpace(historicalSourceRevision) ? "待提交" : string.Concat("基于", historicalSourceRevision, "待提交"); break;
-            case CadWorkState.Editable: editState = string.IsNullOrWhiteSpace(historicalSourceRevision) ? "可编辑" : string.Concat("基于", historicalSourceRevision, "编辑"); break;
+            case CadWorkState.PendingCheckIn: editState = basedOnOlderVersion ? "基于旧图纸版本待提交" : "待提交"; break;
+            case CadWorkState.Editable: editState = basedOnOlderVersion ? "基于旧图纸版本编辑" : "可编辑"; break;
             case CadWorkState.EditingByOther: editState = node.CheckoutSessionLost ? "编辑权限已失效" : string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "他人编辑中" : string.Concat(DisplayUserName(node.CheckedOutBy), "编辑中"); break;
             default: editState = !node.DocumentId.HasValue
                 ? "未入库"
@@ -3001,7 +3018,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 && workspaceOperationActive == false;
             settingsButton.Enabled = true;
             ApplyStructureActionButtonAppearances();
-            UpdateTreeHealth();
+            SetCheckoutAccessStatus("请在设计树中选择需要获取的图档。");
             return;
         }
 
@@ -3032,7 +3049,9 @@ internal sealed class PdmTaskPaneControl : UserControl
             "\r\n业务状态：", LifecycleText(node.LifecycleState), editState, "　编辑：", editor,
             "\r\n配置：", string.IsNullOrWhiteSpace(node.Configuration) ? "默认" : node.Configuration,
             "　版本：", selectedVersionText,
-            embedded || node.IsInterconnectImport ? string.Empty : string.Concat("\r\n存档版本：", node.CurrentRevision ?? node.Revision, " / ", node.LatestRevision),
+            !embedded && !node.IsInterconnectImport && !string.IsNullOrWhiteSpace(node.LoadedDrawingVersion)
+                ? "\r\n工作副本图纸版本：" + node.LoadedDrawingVersion
+                : !embedded && !node.IsInterconnectImport && IsVersionOutdated(node) ? "\r\n本地版本早于服务器当前图纸版本" : string.Empty,
             "\r\n描述：", string.IsNullOrWhiteSpace(node.Description) ? "-" : node.Description,
             "　材料：", string.IsNullOrWhiteSpace(node.Material) ? "-" : node.Material,
             provenance,
@@ -3099,8 +3118,9 @@ internal sealed class PdmTaskPaneControl : UserControl
                 ? string.Concat("检查并整批提交已勾选的", checkedActionNodes.Count, "个图档，自动纳入必要的关联文件")
                 : rootNode?.IsReadOnlyPreview == true ? "只读预览不能提交存档；请先获取编辑权限"
                     : "选择存档范围，统一检查后整批提交；未勾选时自动选择整套变更项");
-        if (node.DocumentId.HasValue && !checkoutButton.Enabled)
-            actionToolTip.SetToolTip(checkoutButton, node.OperationAccess?.Reason ?? "正在核对当前账号的图档权限，请刷新后重试。");
+        var blockedNode = checkedActionNodes.Count > 0
+            ? checkedActionNodes.FirstOrDefault(item => item.DocumentId.HasValue && item.OperationAccess?.CanCheckout != true) ?? node : node;
+        SetCheckoutAccessStatus(checkoutButton.Enabled ? string.Empty : CheckoutUnavailableReason(blockedNode));
         if (workspaceOperationActive)
         {
             var operationText = string.Concat(workspaceOperationStatus.Text, "，完成后按钮会自动恢复");
@@ -3108,7 +3128,39 @@ internal sealed class PdmTaskPaneControl : UserControl
             actionToolTip.SetToolTip(checkinButton, operationText);
             actionToolTip.SetToolTip(propertyEditButton, operationText);
         }
-        UpdateTreeHealth();
+        // Selection changes do not change whole-tree health. SetTree/rebuild and
+        // the explicit details action refresh it without probing every file here.
+    }
+
+    private void SetCheckoutAccessStatus(string reason)
+    {
+        checkoutAccessStatus.Text = reason ?? string.Empty;
+        checkoutAccessStatus.AccessibleDescription = checkoutAccessStatus.Text;
+        checkoutAccessStatus.Visible = !string.IsNullOrWhiteSpace(reason);
+        actionToolTip.SetToolTip(checkoutAccessStatus, checkoutAccessStatus.Text);
+        checkoutButton.AccessibleDescription = checkoutAccessStatus.Text;
+        if (!checkoutButton.Enabled) actionToolTip.SetToolTip(checkoutButton, checkoutAccessStatus.Text);
+    }
+
+    private string CheckoutUnavailableReason(CadTreeNode node)
+    {
+        if (workspaceOperationActive) return "当前操作尚未结束，完成后会重新核对获取权限。";
+        if (node == null) return "请在设计树中选择需要获取的图档。";
+        if (string.IsNullOrWhiteSpace(authenticatedUsername)) return "请先登录PLM，再获取图档编辑权限。";
+        if (node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath))
+            return "嵌入式组件随所属装配处理，请选择所属装配获取。";
+        if (node.DrawingReviewLocked || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase))
+            return "图档正在审核中，审核结束后才能获取编辑权限。";
+        if (string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase))
+            return "图档已作废，不能获取编辑权限。";
+        if (node.DocumentId.HasValue && node.OperationAccess?.CanCheckout != true)
+            return !string.IsNullOrWhiteSpace(node.OperationAccess?.Reason) ? node.OperationAccess.Reason
+                : node.OperationAccess == null ? "尚未取得当前图档的授权结果，请刷新设计树；仍未恢复时检查服务连接。"
+                : "权限中心未授权当前图档的获取操作，请联系授权人员核对项目及目录范围。";
+        if (!string.IsNullOrWhiteSpace(node.CheckedOutBy) && !IsEditingByCurrentUser(node)
+            && !(node.CheckoutSessionLost && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)))
+            return "当前图档由“" + DisplayUserName(node.CheckedOutBy) + "”编辑，请先完成或释放该编辑会话。";
+        return "当前图档不能获取，请核对所选文件是否存在且为支持的图档类型。";
     }
 
     private bool CanOpenArchiveDialog => !string.IsNullOrWhiteSpace(authenticatedUsername)
@@ -3490,11 +3542,14 @@ internal sealed class PdmTaskPaneControl : UserControl
         node != null && (node.WorkState == CadWorkState.ModifiedUnsaved || node.WorkState == CadWorkState.PendingCheckIn
             || !string.IsNullOrWhiteSpace(node.DrawingUpdatePendingReason));
 
-    private static bool IsVersionOutdated(CadTreeNode node) =>
-        node != null
-        && !string.IsNullOrWhiteSpace(node.LatestRevision)
-        && !string.IsNullOrWhiteSpace(node.CurrentRevision)
-        && !string.Equals(node.CurrentRevision.TrimEnd('*'), node.LatestRevision, StringComparison.OrdinalIgnoreCase);
+    private static bool IsVersionOutdated(CadTreeNode node)
+    {
+        if (node == null) return false;
+        bool Parse(string value, out int number) => int.TryParse(value?.Length > 1 && value[0] == 'V' ? value.Substring(1) : null, out number);
+        if (Parse(node.LoadedDrawingVersion, out var local) && Parse(node.DrawingVersion, out var latest)) return local < latest;
+        return !string.IsNullOrWhiteSpace(node.LatestRevision) && !string.IsNullOrWhiteSpace(node.CurrentRevision)
+            && !string.Equals(node.CurrentRevision.TrimEnd('*'), node.LatestRevision, StringComparison.OrdinalIgnoreCase);
+    }
 
     private enum StructureHealthFilter
     {

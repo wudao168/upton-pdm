@@ -80,6 +80,8 @@ internal static class Program
                         Assert(((TextBox)Field(pane, "searchBox")).Height == 30, "search height differs");
                         Assert(((TextBox)Field(pane, "currentProject")).Height == 30, "project height differs");
                     }
+                    VerifyPageEdges(pane, tabs, tab, key);
+                    if (tab.Text == "工作区") VerifyWorkspaceAlignment(pane, tabs, key);
                     Save(pane, key);
                 }
             }
@@ -102,6 +104,8 @@ internal static class Program
                     var key = "scaled-pane-" + width + "-" + tabs.SelectedIndex;
                     VerifyControls(pane, key, true, 45);
                     if (tab.Text == "设计树") VerifyToolbarAlignment(pane, tabs, primary, 1.5F);
+                    VerifyPageEdges(pane, tabs, tab, key);
+                    if (tab.Text == "工作区") VerifyWorkspaceAlignment(pane, tabs, key);
                     Save(pane, key);
                 }
             }
@@ -122,9 +126,106 @@ internal static class Program
                 VerifyToolbarAlignment(pane, tabs, primary, 1.25F);
                 VerifyControls(pane, "pane-125-" + width, true, 38);
                 Save(pane, "pane-125-" + width);
+                foreach (TabPage tab in tabs.TabPages)
+                {
+                    tabs.SelectedTab = tab; Pump();
+                    VerifyPageEdges(pane, tabs, tab, "pane-125-" + width);
+                    if (tab.Text == "工作区") VerifyWorkspaceAlignment(pane, tabs, "pane-125-" + width);
+                }
+                tabs.SelectedIndex = 0; Pump();
             }
         }
     }
+
+    static void VerifyPageEdges(Control pane, TabControl tabs, TabPage tab, string key)
+    {
+        var outer = pane.RectangleToScreen(pane.ClientRectangle);
+        var inner = tabs.RectangleToScreen(tabs.ClientRectangle);
+        Assert(inner.Left - outer.Left <= 2 && outer.Right - inner.Right <= 2
+            && inner.Left > outer.Left && outer.Right > inner.Right, key + " tabs should have a one-pixel side inset");
+        if ((int)Call(tabs, "get_HeaderHeight") == 30)
+            Assert(inner.Left - outer.Left == 1 && outer.Right - inner.Right == 1, key + " expected exactly 1px at 100%");
+
+        var project = ScreenBounds((Control)Field(pane, "currentProject"));
+        var workHours = ScreenBounds((Control)Field(pane, "workHoursButton"));
+        Assert(project.Left == inner.Left && Math.Abs(workHours.Right - inner.Right) <= 2, key + " top toolbar edges differ from tabs");
+
+        Control firstContent;
+        var fullWidth = new List<Control>();
+        if (tab.Text == "设计树")
+        {
+            firstContent = (Control)Field(pane, "checkoutButton");
+            fullWidth.Add((Control)Field(pane, "searchBox"));
+            fullWidth.Add((Control)Field(pane, "structureTreeSurface"));
+        }
+        else if (tab.Text == "版本信息")
+        {
+            firstContent = (Control)Field(pane, "versionList");
+            fullWidth.Add(firstContent);
+            fullWidth.Add(((Control)Field(pane, "openCurrentButton")).Parent);
+        }
+        else if (tab.Text == "日志")
+        {
+            var log = tab.Controls[0];
+            fullWidth.Add((Control)Field(log, "content"));
+            firstContent = log.Controls.OfType<TableLayoutPanel>().Single();
+            fullWidth.Add(firstContent);
+        }
+        else
+        {
+            firstContent = (Control)Field(Field(pane, "projectDocuments"), "openLatest");
+        }
+        var headerHeight = (int)Call(tabs, "get_HeaderHeight");
+        var headerGap = (int)Call(tabs, "get_HeaderGap");
+        var contentGap = ScreenBounds(firstContent).Top - inner.Top - headerHeight;
+        Assert(contentGap == headerGap + tab.Padding.Top, key + " " + tab.Text + " adds an extra gap above the first control");
+        if (headerHeight == 30)
+        {
+            Assert(inner.Top - workHours.Bottom == 5, key + " top tab gap must be 5px");
+            Assert(contentGap == 13, key + " first control must start 13px below the tabs");
+        }
+
+        foreach (var control in fullWidth)
+        {
+            var bounds = ScreenBounds(control);
+            Assert(bounds.Left == inner.Left && bounds.Right == inner.Right,
+                key + " " + tab.Text + " content edges differ from tabs: " + bounds + " vs " + inner);
+        }
+    }
+
+    static void VerifyWorkspaceAlignment(Control pane, TabControl tabs, string key)
+    {
+        var first = tabs.RectangleToScreen((Rectangle)Call(tabs, "GetSegmentBounds", 0));
+        var last = tabs.RectangleToScreen((Rectangle)Call(tabs, "GetSegmentBounds", tabs.TabCount - 1));
+        var rightEdge = Math.Min(last.Right, tabs.RectangleToScreen(tabs.ClientRectangle).Right);
+        var workspace = Field(pane, "projectDocuments");
+        var selector = Field(workspace, "projectSelector");
+        var search = ScreenBounds((Control)Field(selector, "selectedProject"));
+        var browse = ScreenBounds((Control)Field(selector, "browse"));
+        var open = ScreenBounds((Control)Field(workspace, "openLatest"));
+        Assert(Math.Abs(search.Left - first.Left) <= 2 && Math.Abs(open.Right - rightEdge) <= 2,
+            key + " workspace toolbar edges differ from tabs: " + search.Left + "/" + open.Right + " vs " + first.Left + "/" + rightEdge);
+        Assert(search.Right <= browse.Left && browse.Right <= open.Left, key + " workspace toolbar controls overlap");
+        Assert(browse.Size == ((Button)Field(pane, "openClientButton")).Size
+            && open.Size == ((Button)Field(pane, "workHoursButton")).Size,
+            key + " workspace button sizes differ from the main toolbar: " + browse.Size + " / " + open.Size);
+        Call(workspace, "ShowProjectBrowser"); Pump();
+        try
+        {
+            var browser = Field(workspace, "inlineProjectBrowser");
+            foreach (var field in new[] { "mainProjects", "childProjects" })
+            {
+                var list = (Control)Field(browser, field);
+                var bounds = ScreenBounds(list);
+                Assert(list.Visible && Math.Abs(bounds.Left - first.Left) <= 2 && Math.Abs(bounds.Right - rightEdge) <= 2,
+                    key + " " + field + " edges differ from tabs: " + bounds + " vs " + first.Left + "/" + rightEdge);
+            }
+            Save(pane, key + "-project-picker");
+        }
+        finally { Call(workspace, "CloseProjectBrowser"); Pump(); }
+    }
+
+    static Rectangle ScreenBounds(Control control) => control.Parent.RectangleToScreen(control.Bounds);
 
     static void InspectDialogs(Form host)
     {
@@ -183,12 +284,15 @@ internal static class Program
             var button = primary[index].RectangleToScreen(primary[index].ClientRectangle);
             Assert(Math.Abs(segment.Left - button.Left) <= 2 && Math.Abs(segment.Right - button.Right) <= 2, "tab and action columns differ " + index + " " + segment + " vs " + button + " tabs=" + tabs.Bounds + " page=" + tabs.TabPages[0].Bounds + " parent=" + primary[0].Parent.Bounds + " columns=" + string.Join(",", ((TableLayoutPanel)primary[0].Parent).GetColumnWidths()));
             Assert(Math.Abs(segment.Height - button.Height) <= 1, "tab and action heights differ");
-            Assert(Math.Abs(button.Top - segment.Bottom - 5 * scale) <= 1, "tab/action vertical gap must be 5px " + segment + " " + button);
+            Assert(Math.Abs(button.Top - segment.Bottom - 13 * scale) <= 1, "tab/action vertical gap must match the log page " + segment + " " + button);
         }
         Assert(Math.Abs(first.Left - project.PointToScreen(Point.Empty).X) <= Math.Ceiling(2 * scale), "tabs/action left does not match project input");
         Assert(Math.Abs(last.Right - login.PointToScreen(new Point(login.Width, 0)).X) <= Math.Ceiling(2 * scale), "tabs/action right does not match user button");
         var search = (TextBox)Field(pane, "searchBox");
-        Assert(Math.Abs(search.Parent.PointToScreen(search.Location).Y - first.Bottom - 5 * scale) <= 1, "action/search vertical gap must be 5px actual=" + (search.Parent.PointToScreen(search.Location).Y - first.Bottom));
+        var accessNotice = tabs.TabPages[0].Controls.Cast<Control>()
+            .FirstOrDefault(control => control.Visible && control.AccessibleName == "获取权限提示");
+        var gap = search.Parent.PointToScreen(search.Location).Y - first.Bottom - (accessNotice?.Height ?? 0);
+        Assert(Math.Abs(gap - 5 * scale) <= 1, "action/search vertical gap outside access notice must be 5px actual=" + gap);
     }
 
     static object Callback(Type delegateType)

@@ -29,6 +29,7 @@ const props = withDefaults(defineProps<{
   onChangePassword?: (currentPassword: string, password: string) => Promise<void>
   desktopAvailable?: boolean
   canBindDingTalk?: boolean
+  canOpenCalendar?: boolean
 }>(), {
   userName: '',
   username: '',
@@ -43,7 +44,7 @@ const props = withDefaults(defineProps<{
   desktopAvailable: false,
 })
 
-const emit = defineEmits<{ openActivity: [item: ProjectActivity]; login: []; logout: []; notifications: []; theme: [theme: PdmTheme]; company: [companyId: string]; toggleSidebar: [] }>()
+const emit = defineEmits<{ openActivity: [item: ProjectActivity]; openCalendar: []; login: []; logout: []; notifications: []; theme: [theme: PdmTheme]; company: [companyId: string]; toggleSidebar: [] }>()
 const headerNow = ref(new Date())
 const personalInfoVisible = ref(false)
 const personalSettingsTab = ref('profile')
@@ -205,7 +206,10 @@ onUnmounted(() => {
     <div class="pdm-titlebar__actions">
       <template v-if="props.userName">
         <GlobalStatusBar :key="(props.username || props.userName) + props.activeCompanyId" :token="props.activityToken" :scope="JSON.stringify([props.username, props.activeCompanyId])" @open-activity="emit('openActivity', $event)" />
-        <time class="pdm-header-clock" :datetime="headerNow.toISOString()">{{ headerDateTime }}</time>
+        <button v-if="canOpenCalendar" class="pdm-header-clock" type="button" aria-label="打开项目日历" title="打开项目日历" @click="emit('openCalendar')">
+          <time :datetime="headerNow.toISOString()">{{ headerDateTime }}</time>
+        </button>
+        <time v-else class="pdm-header-clock" :datetime="headerNow.toISOString()">{{ headerDateTime }}</time>
         <slot name="quick-actions" />
         <button type="button" class="pdm-header-control pdm-message-button" @click="emit('notifications')">
           <Bell :size="17" aria-hidden="true" />

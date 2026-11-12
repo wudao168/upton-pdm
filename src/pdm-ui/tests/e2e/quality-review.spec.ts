@@ -7,8 +7,14 @@ test('company review supports classification, improvement, empty state and narro
   page.setDefaultTimeout(15_000)
   const errors: string[] = [], writes: string[] = []
   let reviewLoads = 0
+  let themeDeleteRequests = 0
   page.on('pageerror', error => errors.push(error.message))
-  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  page.on('console', message => {
+    if (message.type() !== 'error') return
+    const expectedRejection = message.text().includes('400') && message.location().url.includes(`/api/quality-review/themes/${themeId}`)
+      || message.text().includes('[质量与改善]') && message.text().includes('该主题已被问题记录引用，无法删除')
+    if (!expectedRejection) errors.push(message.text())
+  })
   const projectId = '11111111-1111-1111-1111-111111111111', issueId = '22222222-2222-2222-2222-222222222222'
   const themeId = '33333333-3333-3333-3333-333333333333'
   const permissions = ['quality.review.view', 'quality.review.detail', 'quality.review.manage', 'quality.improvement.manage']
@@ -37,6 +43,14 @@ test('company review supports classification, improvement, empty state and narro
       return fulfill(method === 'PUT' ? { rowVersion: catalog.rowVersion } : { rowVersion: catalog.rowVersion, row, themes: catalog.themes, people, relatedIssues: [], canManageIssues: true, canVerifyIssues: true, canCloseIssues: false, canReopenIssues: false, canVoidIssues: false })
     }
     if (path.startsWith('/api/quality-review/themes/') && method === 'PUT') { const input = route.request().postDataJSON(); catalog.themes.push({ ...input, id: path.split('/').at(-1) }); catalog.rowVersion++; writes.push('theme'); return fulfill({ rowVersion: catalog.rowVersion }) }
+    if (path.startsWith('/api/quality-review/themes/') && method === 'DELETE') {
+      themeDeleteRequests++
+      expect(new URL(route.request().url()).searchParams.get('expectedRowVersion')).toBe(String(catalog.rowVersion))
+      const id = path.split('/').at(-1)
+      if (id === themeId) return route.fulfill({ status: 400, json: { detail: '该主题已被问题记录引用，无法删除。请在维护中将主题停用。' } })
+      catalog.themes = catalog.themes.filter(theme => theme.id !== id); catalog.rowVersion++; writes.push('theme-delete')
+      return fulfill({ rowVersion: catalog.rowVersion })
+    }
     if (path.startsWith('/api/quality-review/improvements/') && method === 'PUT') { const input = route.request().postDataJSON(); catalog.improvements.push({ ...input, id: path.split('/').at(-1), state: '草稿', observations: [], history: [], createdBy: 'engineer', createdAt: '2026-11-11T01:00:00Z', observationStartedAt: null }); catalog.rowVersion++; writes.push('improvement'); return fulfill({ rowVersion: catalog.rowVersion }) }
     if (path === '/api/quality-review/settings' && method === 'PUT') { const input = route.request().postDataJSON(); catalog.settings = input; catalog.rowVersion++; writes.push('settings'); return fulfill({ rowVersion: catalog.rowVersion }) }
     return fulfill([])
@@ -59,13 +73,34 @@ test('company review supports classification, improvement, empty state and narro
   await expect(tabs).toHaveClass(/\bwh-tabs\b/)
   const refresh = panel.getByRole('button', { name: '刷新', exact: true })
   const refreshBox = (await refresh.boundingBox())!
-  const tabsBox = (await tabs.boundingBox())!
-  expect(refreshBox.y).toBeGreaterThanOrEqual(tabsBox.y + tabsBox.height)
+  const keywordBox = (await panel.getByLabel('关键词').boundingBox())!
+  expect(Math.abs(refreshBox.y + refreshBox.height - keywordBox.y - keywordBox.height)).toBeLessThan(2)
+  expect(refreshBox.x).toBeGreaterThanOrEqual(keywordBox.x + keywordBox.width)
   const cards = panel.locator('.quality-review__stats > article')
   await expect(cards).toHaveCount(3)
   await expect(cards.nth(1)).toHaveClass(/is-warning/)
   await refresh.click()
   await expect.poll(() => reviewLoads).toBe(2)
+
+  for (const [tabName, addName] of [
+    ['共性问题', '新增主题'], ['改善事项', '新增改善'],
+    ['经验复用', ''], ['项目总结', ''], ['统计设置', ''],
+  ]) {
+    await tabs.getByRole('tab', { name: tabName, exact: true }).click()
+    await expect(refresh).toHaveCount(1)
+    const button = (await refresh.boundingBox())!
+    const card = (await cards.first().boundingBox())!
+    expect(button.y).toBeGreaterThan(card.y + card.height)
+    if (addName) {
+      const add = (await panel.getByRole('button', { name: addName, exact: true }).boundingBox())!
+      expect(Math.abs(button.y - add.y)).toBeLessThan(2)
+      expect(button.x + button.width).toBeLessThanOrEqual(add.x)
+    }
+    const before = reviewLoads
+    await refresh.click()
+    await expect.poll(() => reviewLoads).toBe(before + 1)
+  }
+  await tabs.getByRole('tab', { name: '问题总表', exact: true }).click()
   await expect(cards.first()).toHaveCSS('height', '100px')
   await expect(panel.getByText('张工', { exact: true })).toBeVisible()
   await panel.getByLabel('关键词').fill('无结果')
@@ -97,11 +132,32 @@ test('company review supports classification, improvement, empty state and narro
   await themeDialog.getByRole('button', { name: '保存主题', exact: true }).click()
   await expect(directory.getByText('共性问题主题已保存。')).toBeVisible()
   await expect(directory.getByText('新建共性问题验收', { exact: true })).toBeVisible()
+  await directory.getByRole('button', { name: /关闭/ }).click()
+  await expect(directory).not.toBeVisible()
+  await expect(page.locator('[data-pdm-genie-layer]')).toHaveCount(0)
+  await dialog.getByRole('combobox', { name: '归入公司共性问题', exact: true }).selectOption(catalog.themes.find(theme => theme.name === '新建共性问题验收')!.id)
+  await dialog.getByRole('button', { name: '维护共性问题', exact: true }).click()
+  await expect(directory).toBeVisible()
+  const newThemeRow = directory.getByRole('row').filter({ hasText: '新建共性问题验收' })
+  await newThemeRow.getByRole('button', { name: '删除', exact: true }).click()
+  const deleteConfirmation = page.getByRole('dialog', { name: '删除共性主题', exact: true })
+  await expect(deleteConfirmation).toContainText('新建共性问题验收')
+  await deleteConfirmation.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(deleteConfirmation).not.toBeVisible()
+  expect(themeDeleteRequests).toBe(0)
+  await expect(newThemeRow).toBeVisible()
+  await newThemeRow.getByRole('button', { name: '删除', exact: true }).click()
+  await deleteConfirmation.getByRole('button', { name: '确认删除', exact: true }).click()
+  await expect(deleteConfirmation).not.toBeVisible()
+  await expect(newThemeRow).toHaveCount(0)
+  await expect(directory.getByText('共性问题主题已删除。', { exact: true })).toBeVisible()
   await expect(page.locator('[data-pdm-genie-layer]')).toHaveCount(0)
   await page.screenshot({ path: join(tmpdir(), 'pdm-quality-company-directory.png'), fullPage: true })
   await directory.getByRole('button', { name: /关闭/ }).click()
   await expect(dialog.getByLabel('纠正措施')).toHaveValue('维护主题期间保留的措施草稿')
-  await expect(dialog.getByRole('combobox', { name: '归入公司共性问题', exact: true }).locator('option')).toContainText(['未归类', '定位基准不一致', '新建共性问题验收'])
+  await expect(dialog.getByRole('combobox', { name: '归入公司共性问题', exact: true }).locator('option:checked')).toHaveText('未归类')
+  await expect(dialog.getByRole('combobox', { name: '归入公司共性问题', exact: true }).locator('option')).toContainText(['未归类', '定位基准不一致'])
+  await expect(dialog.getByRole('combobox', { name: '归入公司共性问题', exact: true }).locator('option')).toHaveCount(2)
   await dialog.getByRole('combobox', { name: '归入公司共性问题', exact: true }).selectOption(themeId)
   await dialog.getByLabel('临时处置').fill('隔离待装配部件')
   await dialog.getByLabel('原因分析').fill('图纸定位基准未统一')
@@ -110,6 +166,13 @@ test('company review supports classification, improvement, empty state and narro
   await expect(dialog.getByText('问题闭环资料已保存。')).toBeVisible()
   await dialog.getByRole('button', { name: /关闭/ }).click()
   await panel.getByRole('tab', { name: '共性问题', exact: true }).click()
+  await panel.getByRole('row').filter({ hasText: '定位基准不一致' }).first().getByRole('button', { name: '删除', exact: true }).click()
+  await deleteConfirmation.getByRole('button', { name: '确认删除', exact: true }).click()
+  await expect(deleteConfirmation).not.toBeVisible()
+  await expect(panel.getByRole('alert')).toContainText('该主题已被问题记录引用，无法删除')
+  await expect(panel.getByRole('row').filter({ hasText: '定位基准不一致' }).first()).toBeVisible()
+  await expect(page.locator('[data-pdm-genie-layer]')).toHaveCount(0)
+  await page.screenshot({ path: join(tmpdir(), 'pdm-quality-theme-delete-protection.png'), fullPage: true })
   await panel.getByRole('button', { name: '发起改善', exact: true }).click()
   await dialog.getByRole('combobox', { name: /^负责人/ }).click()
   await page.getByRole('option', { name: /张工/ }).click()
@@ -124,6 +187,9 @@ test('company review supports classification, improvement, empty state and narro
   await expect(page.locator('[data-pdm-genie-layer]')).toHaveCount(0)
   await page.screenshot({ path: join(tmpdir(), 'pdm-quality-review-desktop.png'), fullPage: true })
   await panel.getByRole('tab', { name: '统计设置', exact: true }).click()
+  const settingBoxes = await Promise.all(['统计窗口（天）', '事件次数阈值', '涉及项目阈值'].map(name => panel.getByLabel(name, { exact: true }).boundingBox()))
+  expect(settingBoxes.every(box => box && Math.abs(box.y - settingBoxes[0]!.y) < 2)).toBe(true)
+  await panel.locator('form').screenshot({ path: join(tmpdir(), 'pdm-quality-settings-one-row.png') })
   const threshold = panel.getByLabel('事件次数阈值')
   await threshold.focus(); await threshold.press('ArrowUp'); await expect(threshold).toHaveValue('4')
   await threshold.press('ArrowDown'); await expect(threshold).toHaveValue('3')
@@ -139,7 +205,8 @@ test('company review supports classification, improvement, empty state and narro
   }))).toBe(true)
   await page.screenshot({ path: join(tmpdir(), 'pdm-quality-review-narrow.png'), fullPage: true })
   expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 2)).toBe(true)
-  expect(writes).toEqual(['theme', 'issue', 'improvement', 'settings'])
+  expect(writes).toEqual(['theme', 'theme-delete', 'issue', 'improvement', 'settings'])
+  expect(themeDeleteRequests).toBe(2)
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(errors).toEqual([])
 })

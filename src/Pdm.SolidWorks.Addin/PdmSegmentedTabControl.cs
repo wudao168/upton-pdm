@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
@@ -15,10 +14,12 @@ internal sealed class PdmSegmentedTabControl : TabControl
     private Dictionary<string, Color> colors;
     private int hoveredIndex = -1;
     private TableLayoutPanel alignedToolbar;
+    private Button appearanceReference;
 
-    internal void AlignWith(TableLayoutPanel toolbar)
+    internal void AlignWith(TableLayoutPanel toolbar, Button referenceButton)
     {
         alignedToolbar = toolbar;
+        appearanceReference = referenceButton;
         toolbar.Layout += (_, _) => Invalidate();
     }
 
@@ -132,41 +133,36 @@ internal sealed class PdmSegmentedTabControl : TabControl
     {
         e.Graphics.Clear(Parent?.BackColor ?? SystemColors.Control);
         if (colors == null || Width < 2) return;
+        var background = appearanceReference?.BackColor ?? SystemColors.Window;
+        var foreground = appearanceReference?.ForeColor ?? SystemColors.ControlText;
+        var borderColor = appearanceReference?.FlatAppearance.BorderColor ?? SystemColors.ControlDark;
+        var selectedBorder = colors.TryGetValue("--pdm-text", out var textColor) ? textColor : foreground;
+        var font = appearanceReference?.Font ?? tabFont;
+        using var brush = new SolidBrush(background);
         for (var index = 0; index < TabCount; index++)
         {
             var bounds = GetSegmentBounds(index);
+            if (bounds.Width <= 2 || bounds.Height <= 2) continue;
             var enabled = TabPages[index].Enabled;
-            var background = !enabled ? Color.FromArgb(224, 228, 233)
-                : index == SelectedIndex ? Color.FromArgb(21, 126, 77) : Color.FromArgb(72, 84, 99);
-            if (enabled && index == hoveredIndex) background = ControlPaint.Light(background, 0.12F);
-            using (var brush = new SolidBrush(background)) e.Graphics.FillRectangle(brush, bounds);
+            var border = enabled && index == SelectedIndex ? selectedBorder : borderColor;
+            if (enabled && index == hoveredIndex) border = ControlPaint.Dark(border);
+            e.Graphics.FillRectangle(brush, bounds);
+            ControlPaint.DrawBorder(e.Graphics, bounds, border, ButtonBorderStyle.Solid);
             var caption = TabPages[index].Text;
-            var fittedSize = tabFont.Size;
+            var fittedSize = font.Size;
             while (fittedSize > 6.5F)
             {
-                using (var candidate = new Font(tabFont.FontFamily, fittedSize, FontStyle.Regular))
+                using (var candidate = new Font(font.FontFamily, fittedSize, font.Style))
                     if (TextRenderer.MeasureText(e.Graphics, caption, candidate, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width <= bounds.Width - 2) break;
                 fittedSize -= 0.25F;
             }
-            using (var fittedFont = new Font(tabFont.FontFamily, fittedSize, FontStyle.Regular))
+            using (var fittedFont = new Font(font.FontFamily, fittedSize, font.Style))
                 TextRenderer.DrawText(e.Graphics, caption, fittedFont, Rectangle.Inflate(bounds, -1, 0),
-                    enabled ? Color.White : Color.FromArgb(145, 151, 159),
+                    enabled ? foreground : SystemColors.GrayText,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             if (index == SelectedIndex && Focused && ShowFocusCues)
-                ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(bounds, -3, -3), Color.White, background);
+                ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(bounds, -3, -3), foreground, background);
         }
-    }
-
-    private static GraphicsPath Rounded(Rectangle bounds, int radius)
-    {
-        var diameter = Math.Max(1, Math.Min(radius * 2, Math.Min(bounds.Width, bounds.Height)));
-        var path = new GraphicsPath();
-        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
-        path.CloseFigure();
-        return path;
     }
 
     internal static Dictionary<string, Color> ReadTheme(string theme)

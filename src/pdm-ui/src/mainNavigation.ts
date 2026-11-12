@@ -1,8 +1,8 @@
-import { Boxes, ClipboardCheck, Clock, FileCode, FileText, FolderKanban, LayoutDashboard, Library, Settings } from './solidMenuIcons'
+import { Bot, Boxes, ClipboardCheck, Clock, FileCode, FileText, FolderKanban, LayoutDashboard, Library, Settings } from './solidMenuIcons'
 import type { NavigationKey } from './navigationAccess'
 
 export const footerNavigationEntries = [
-  { key: 'ai-assistant', label: 'AI助手', icon: FileText, iconColor: '#7165bd' },
+  { key: 'ai-assistant', label: 'AI助手', icon: Bot, iconColor: '#7165bd' },
   { key: 'admin', label: '系统设置', icon: Settings, iconColor: '#8298b2' },
 ] as const
 

@@ -74,7 +74,17 @@ const workHoursReminder = useWorkHoursReminder(() => ({
   username: workspace.currentUsername.value,
 }))
 provide(projectCenterAccessKey, computed(() => workspace.currentPermissions.value))
-const canViewTab = (tab: string) => workspace.hasPermission('project.view') && canViewProjectTab(tab === 'summary' ? workspace.project.value.effectiveProjectPermissions ?? [] : workspace.currentPermissions.value, tab)
+const retrospectiveProject = computed(() => {
+  const current = workspace.project.value
+  const rootId = current.rootProjectId ?? current.parentProjectId
+  if (rootId && rootId !== current.id) {
+    return workspace.projects.value.find(project => project.id === rootId && !project.parentProjectId)
+  }
+  return current.parentProjectId ? undefined : current
+})
+const canViewTab = (tab: string) => workspace.hasPermission('project.view') && (tab === 'summary'
+  ? workspace.project.value.canReadContent && !!retrospectiveProject.value?.canReadContent && canViewProjectTab(retrospectiveProject.value.effectiveProjectPermissions ?? [], tab)
+  : canViewProjectTab(workspace.currentPermissions.value, tab))
 const canProjectOperation = (action: string) => !workspace.currentPermissions.value.includes('system.project-center-permissions.v1') || workspace.hasPermission(`project.content.${action}`)
 const releasePreviewIssues = ref<Record<string, boolean>>({})
 watch(() => workspace.currentUsername.value, () => { releasePreviewIssues.value = {} })
@@ -1299,6 +1309,8 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :activity-token="workspace.getAccessToken()"
           :can-bind-ding-talk="workspace.hasPermission('account.dingtalk.bind')"
           @open-activity="openProjectActivity"
+          :can-open-calendar="canNavigate('project-calendar')"
+          @open-calendar="handleNavigation('project-calendar')"
           :online="workspace.serviceOnline.value"
           :user-name="workspace.currentUser.value"
           :username="workspace.currentUsername.value"
@@ -1547,7 +1559,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         </SystemManagement>
         </div>
         <section v-if="visitedViews.has('workspace')" v-show="activeView === 'workspace'" data-navigation-page="workspace" class="pdm-project-workspace">
-          <ProjectWorkspaceHeader :active="activeView === 'workspace'" :key="projectTabRefreshVersion" :project="workspace.project.value" :projects="workspace.projects.value" :active-tab="projectTab"
+          <ProjectWorkspaceHeader :active="activeView === 'workspace'" :key="projectTabRefreshVersion" :project="workspace.project.value" :projects="workspace.projects.value" :active-tab="projectTab" :can-view-summary="canViewTab('summary')"
             :project-types="workspace.projectNumberingOptions.value.projectTypes" :customers="workspace.customers.value"
             :organization-units="workspace.organizationDirectory.value.units" :company-id="workspace.activeCompanyId.value"
             :release-packages="workspace.releasePackages.value" :release-preview-issues="releasePreviewIssues" :active-project-document-status="activeProjectDocumentStatus" :active-document-counts="workspace.isProjectTabLoaded('documents') ? workspace.documentFilterCounts.value : undefined" :current-username="workspace.currentUsername.value" :switching-project-id="switchingProjectId" :token="workspace.getAccessToken()" :can-copy-content="workspace.hasPermission('project.create')" :can-reset-content="workspace.hasPermission('project.content.reset')" :pending="workspace.operationPending.value" :on-preview-project-copy="workspace.previewProjectCopy" :on-copy-project-content="workspace.copyProjectContent" :on-content-reset-complete="() => workspace.reload(workspace.project.value!.id)" @back="openProjectList" @switch="switchProject" @tab="openProjectTabFromHeader">
@@ -1596,7 +1608,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             />
             <ProjectFileLibrary :requested-archive="requestedFormArchive" @archive-located="requestedFormArchive = undefined" :form-permissions="workspace.project.value.effectiveProjectPermissions ?? []" v-if="projectTab === 'files' && !workspace.moduleErrors.value.some(error => error.tab === 'files' || error.module === '图档工作区')" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
             <ProjectBudgetManager v-else-if="projectTab === 'budget'" :project="workspace.project.value" :bonus-permissions="bonusProjectPermissions" :token="workspace.getAccessToken()" />
-            <ProjectRetrospective v-else-if="projectTab === 'summary'" :key="workspace.project.value.id" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :token="workspace.getAccessToken()" @updated="workspace.refreshApprovalInbox()" />
+            <ProjectRetrospective v-else-if="projectTab === 'summary' && retrospectiveProject" :key="retrospectiveProject.id" :project-id="retrospectiveProject.id" :project-code="retrospectiveProject.code" :token="workspace.getAccessToken()" @updated="workspace.refreshApprovalInbox()" />
             <ProjectOplManager :show-company-review-entry="canOpenCompanyReview" :company-review-revision="qualityThemeRevision" @open-company-review="openCompanyReview" v-else-if="projectTab === 'opl'" :key="workspace.project.value.id" :project="workspace.project.value" :token="workspace.getAccessToken()" :requested-issue-id="requestedOplIssueId" @issue-request-handled="requestedOplIssueId = undefined" @saved="workspace.refreshApprovalInbox()" @open-release="openReleasePackage" />
             <ProjectInformation :customers="workspace.customers.value" :administrator="workspace.hasPermission('settings.storage.manage')" ref="informationPanel" v-if="mountedInformationProjectId === workspace.project.value.id" v-show="projectTab === 'information'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :users="workspace.users.value" :current-username="workspace.currentUsername.value" :directory="workspace.organizationDirectory.value" :on-update-main-staffing="workspace.updateMainProjectStaffing" :on-update-designers="workspace.updateChildProjectDesigners" :on-update-phase-owners="workspace.updateProjectPhaseOwners" :can-edit-application-order-date="workspace.hasPermission('project.application.approve') || workspace.hasPermission('project.edit')" :can-view-applications="workspace.hasPermission('project.application.submit') || workspace.hasPermission('project.application.approve')" @open-application="async id => { requestedApplicationId = id; await handleNavigation('project-applications') }" />
             <ProjectPlanManager :requested-task-id="requestedPlanTaskId" :single-plan="showSingleProjectPlan" @task-request-handled="requestedPlanTaskId = undefined" v-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />

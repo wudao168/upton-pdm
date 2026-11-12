@@ -205,7 +205,8 @@ public sealed partial class PdmAddin
         foreach (var context in controlledOpenManifests.Where(pair => pair.Value?.ProjectId == job.ProjectId && IsPathWithinDirectory(fullPath, pair.Key)).ToArray())
         {
             foreach (var file in (context.Value.Files ?? new List<ControlledOpenFileDto>()).Where(file => file.DocumentId == job.DocumentId))
-            { file.VersionId = version.Id; file.Revision = revision; file.Sha256 = recorded.Sha256; file.FileLength = recorded.FileLength.Value; }
+            { file.VersionId = version.Id; file.Revision = revision; file.DrawingVersion = version.DrawingVersion;
+                file.Sha256 = recorded.Sha256; file.FileLength = recorded.FileLength.Value; }
             if (context.Value.RootDocumentId == job.DocumentId) { context.Value.RootVersionId = version.Id; context.Value.RootRevision = revision; }
         }
         return true;

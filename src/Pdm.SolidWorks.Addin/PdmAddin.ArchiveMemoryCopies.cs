@@ -59,9 +59,12 @@ public sealed partial class PdmAddin
             else throw new InvalidOperationException("无法跟踪当前图档的内存变化，未生成提交副本：" + Path.GetFileName(path));
         }
         internal bool MatchesMemory()
+            => !string.IsNullOrWhiteSpace(CopyPath) && File.Exists(CopyPath) && MatchesNativeState();
+
+        internal bool MatchesNativeState()
         {
-            try { return !Closed && !string.IsNullOrWhiteSpace(CopyPath) && File.Exists(CopyPath)
-                && PathsEqual(Model.GetPathName(), SourcePath) && Revision == CapturedRevision && Model.GetUpdateStamp() == Stamp; }
+            try { return !Closed && PathsEqual(Model.GetPathName(), SourcePath)
+                && Revision == CapturedRevision && Model.GetUpdateStamp() == Stamp; }
             catch (COMException) { return false; }
             catch (InvalidComObjectException) { return false; }
         }

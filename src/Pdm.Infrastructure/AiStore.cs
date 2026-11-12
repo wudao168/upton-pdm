@@ -48,6 +48,18 @@ public sealed partial class MySqlPdmRepository : IAiStore
         if (await db.ExecuteAsync(new CommandDefinition("DELETE FROM ai_conversations WHERE id=@id AND company_id=@company AND user_id=@user AND revision=@revision", new { company, user, id, revision }, cancellationToken: ct)) != 1)
             throw new PdmConflictException("会话已变化，请刷新后重试。");
     }
+    async Task IAiStore.DeleteAllAsync(Guid company, Guid user, DateTimeOffset now, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await using var transaction = await db.BeginTransactionAsync(ct);
+        const string scope = " WHERE company_id=@company AND user_id=@user";
+        var args = new { company, user };
+        var rows = await db.QueryAsync<string>(new CommandDefinition("SELECT payload_json FROM ai_conversations" + scope + " FOR UPDATE", args, transaction, cancellationToken: ct));
+        if (rows.Any(row => JsonSerializer.Deserialize<AiConversation>(row)!.BusyUntil > now))
+            throw new PdmRuleException("有对话正在生成，请等待结束后再清空。");
+        await db.ExecuteAsync(new CommandDefinition("DELETE FROM ai_conversations" + scope, args, transaction, cancellationToken: ct));
+        await transaction.CommitAsync(ct);
+    }
 }
 
 public sealed partial class InMemoryPdmRepository : IAiStore
@@ -73,5 +85,17 @@ public sealed partial class InMemoryPdmRepository : IAiStore
     Task IAiStore.DeleteAsync(Guid company, Guid user, Guid id, long revision, CancellationToken ct) {
         lock (aiGate) { if (!aiConversations.TryGetValue(id, out var c) || c.CompanyId != company || c.UserId != user || c.Revision != revision) throw new PdmConflictException("会话已变化，请刷新后重试。");
             aiConversations.Remove(id); } return Task.CompletedTask;
+    }
+    Task IAiStore.DeleteAllAsync(Guid company, Guid user, DateTimeOffset now, CancellationToken ct)
+    {
+        lock (aiGate)
+        {
+            ct.ThrowIfCancellationRequested();
+            var conversations = aiConversations.Values.Where(c => c.CompanyId == company && c.UserId == user).ToArray();
+            if (conversations.Any(c => c.BusyUntil > now))
+                throw new PdmRuleException("有对话正在生成，请等待结束后再清空。");
+            foreach (var conversation in conversations) aiConversations.Remove(conversation.Id);
+        }
+        return Task.CompletedTask;
     }
 }

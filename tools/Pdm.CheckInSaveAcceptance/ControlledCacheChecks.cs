@@ -57,17 +57,25 @@ internal static partial class Program
     File.SetAttributes(part,FileAttributes.Normal);File.AppendAllText(part,"|technical reference relocation");var metadata=Metadata(part);
     Check((bool)identity.GetMethod("TryRecordResolvedReferences",Flags).Invoke(null,new[]{(object)part,metadata,WorkingReuseHash(part)}),"记录引用调整的技术指纹");File.SetAttributes(part,FileAttributes.ReadOnly);
     Check(await Prepare(manager,manifest)==first&&handler.Requests==4,"已核对的引用调整不误判为未提交修改或触发下载");
-    // Real unsubmitted content in the old context is retained once. New server view
-    // uses a deterministic directory across sessions, not a new GUID on every open.
+    // Real unsubmitted content requires an explicit recovery choice. A verified
+    // backup permits updating this same stable workspace, never silent replacement.
     File.SetAttributes(part,FileAttributes.Normal);File.AppendAllText(part,"|unsubmitted feature change");File.SetAttributes(part,FileAttributes.ReadOnly);var local=File.ReadAllText(part);
-    var server=await Prepare(manager,manifest);Check(server!=first&&File.ReadAllText(part)==local,"旧工作区真实差异保留，服务器内容在独立固定目录准备");
-    Check(((string)Get(manager,"LocalCacheNotice")).Contains(directory),"明确告知保留修改的旧目录");
+    Exception firstConflict=null;try{await Prepare(manager,manifest);}catch(Exception error){firstConflict=error;}
+    Check(firstConflict?.GetType().Name=="WorkspaceCacheConflictException"&&handler.Requests==4&&File.ReadAllText(part)==local,
+     "未提交内容要求明确恢复选择，选择前零下载且原字节保持");
+    var backup=DiscardCall(manager,"BackupWorkingConflicts",manifest,firstConflict,CancellationToken.None);
+    var recoveryPart=Path.Combine((string)Get(backup,"RecoveryDirectory"),"PART.SLDPRT");
+    Check(File.ReadAllText(recoveryPart)==local&&File.ReadAllText(part)==local,"模拟选择保留备份后先核对完整备份，仍不修改原文件");
+    var prepareBackedUp=(Task)DiscardCall(manager,"PrepareBackedUpWorkingCopyAsync",manifest,new Guid[0],backup,CancellationToken.None);
+    await prepareBackedUp;var server=(string)Get(prepareBackedUp,"Result");
+    Check(server==first&&File.ReadAllText(part)=="next part version"&&File.ReadAllText(recoveryPart)==local,"确认备份后只更新原固定工作区，未提交内容完整保留在恢复目录");
+    Check(((string)Get(manager,"LocalCacheNotice")).Contains((string)Get(backup,"RecoveryDirectory")),"明确告知保留修改的恢复备份目录");
     var count=handler.Requests;var contexts=Directory.GetDirectories(Path.Combine(root,"View","QA","装配工作区")).Length;
     Check(await Prepare(Manager(),manifest)==server&&handler.Requests==count&&contexts==Directory.GetDirectories(Path.Combine(root,"View","QA","装配工作区")).Length,"重新启动后仍复用服务器目录，不持续增加整套缓存");
     var serverPart=Path.Combine(Path.GetDirectoryName(server),"PART.SLDPRT");File.SetAttributes(serverPart,FileAttributes.Normal);File.AppendAllText(serverPart,"|new local edit");File.SetAttributes(serverPart,FileAttributes.ReadOnly);
     Exception failure=null;try{await Prepare(Manager(),manifest);}catch(Exception error){failure=error;}
-    Check(failure is InvalidDataException&&handler.Requests==count,"固定目录再次有真实修改时提前停止，既不下载也不再建第三套目录");
-    Check(File.ReadAllText(serverPart).Contains("new local edit")&&File.ReadAllText(part)==local,"冲突时两处修改均保留");
+    Check(failure?.GetType().Name=="WorkspaceCacheConflictException"&&handler.Requests==count,"固定目录再次有真实修改时重新要求选择，既不下载也不再增加工作区");
+    Check(File.ReadAllText(serverPart).Contains("new local edit")&&File.ReadAllText(recoveryPart)==local,"再次冲突时新的本地修改与之前恢复备份均保留");
     var message=(string)Type("PdmAddin").GetMethod("OpenDocumentErrorMessage",Flags).Invoke(null,new object[]{new InvalidDataException("工作区有未提交修改，已保留文件。")});
     Check(message=="工作区有未提交修改，已保留文件。","本地内容冲突显示实际中文原因，不误报插件未加载");
     var technical=(string)Type("PdmAddin").GetMethod("OpenDocumentErrorMessage",Flags).Invoke(null,new object[]{new InvalidDataException("invalid payload")});
@@ -130,10 +138,35 @@ internal static partial class Program
     finally{release.Set();}
     await Task.WhenAll(first,next);Check(second.IsSet,"清理结束后等待的图档操作可继续");
     Check((bool)protection.GetMethod("TryPublish",Flags).Invoke(null,new object[]{output,false,new string[0],new Guid[0]}),"清理结束后闲置心跳恢复发布");
+    var sessionFile=Directory.GetFiles(Path.Combine(output,".uplm","CacheSessions"),"*.json").Single();
+    protection.GetMethod("Publish",Flags).Invoke(null,new object[]{output,true,new[]{"new-operation"},new Guid[0]});
+    var busyRecord=File.ReadAllText(sessionFile);
+    var delayed=protection.GetMethod("TryPublishCurrent",Flags);
+    Check(!(bool)delayed.Invoke(null,new object[]{output,false,new[]{"old-snapshot"},new Guid[0],new Func<bool>(()=>false)})
+     &&File.ReadAllText(sessionFile)==busyRecord,"过期或被新操作取代的后台快照不能覆盖忙碌保护");
+    Check((bool)delayed.Invoke(null,new object[]{output,false,new[]{"current-snapshot"},new Guid[0],new Func<bool>(()=>true)})
+     &&File.ReadAllText(sessionFile).Contains("current-snapshot"),"新鲜且仍属于当前代次的后台快照可恢复保护心跳");
    }
    var cleaner=Type("ControlledCacheMaintenance");
    object Record(string rootFolder,string directory,object package,string kind){cleaner.GetMethod("Record",Flags).Invoke(null,new object[]{rootFolder,directory,package,kind});return package;}
    object Clean(string rootFolder,string[] paths,Guid[] ids,long limit,bool manual,Func<bool> busy=null)=>cleaner.GetMethod("Clean",Flags).Invoke(null,new object[]{rootFolder,paths,ids,limit,manual,busy??(()=>false)});
+   var belowRoot=Path.Combine(output,"below-quota-no-content-read");
+   var belowPackage=Manifest("ROOT.SLDASM","ROOT.SLDASM");Content(((IList)Get(belowPackage,"Files"))[0],"verified cached bytes");
+   var belowDir=Path.Combine(belowRoot,"View","QA","装配工作区",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(belowDir);
+   var belowFile=Path.Combine(belowDir,"ROOT.SLDASM");File.WriteAllText(belowFile,"verified cached bytes",new UTF8Encoding(false));File.SetAttributes(belowFile,FileAttributes.ReadOnly);
+   Record(belowRoot,belowDir,belowPackage,"working");
+   using(var held=new FileStream(belowFile,FileMode.Open,FileAccess.Read,FileShare.None))
+   {
+    var below=Clean(belowRoot,new string[0],new Guid[0],long.MaxValue,false);
+    Check((long)Get(below,"UsedBytes")==held.Length&&(int)Get(below,"SkippedItems")==0&&(long)Get(below,"FreedBytes")==0,
+     "未超容量的自动维护仅统计长度，不读取被独占锁定的CAD文件内容");
+    Check(!(bool)Get(below,"ReclaimableBytesKnown")&&((string)Get(below,"Message")).Contains("手动检查"),"未做完整核对时不把可清理空间误报为零");
+   }
+   var detailed=cleaner.GetMethod("Inspect",Flags).Invoke(null,new object[]{belowRoot,new string[0],new Guid[0]});
+   Check((bool)Get(detailed,"ReclaimableBytesKnown")&&(long)Get(detailed,"ReclaimableBytes")>0,"手动空间检查仍完整核对内容并提供可清理量");
+   File.SetAttributes(belowFile,FileAttributes.Normal);File.WriteAllText(belowFile,"unsubmitted content!",new UTF8Encoding(false));File.SetAttributes(belowFile,FileAttributes.ReadOnly);
+   var changedAuto=Clean(belowRoot,new string[0],new Guid[0],0,false);
+   Check(File.Exists(belowFile)&&(long)Get(changedAuto,"FreedBytes")==0,"超容量自动回收仍校验内容并保留已修改文件");
    foreach(var mode in new[]{"normal","protected-reference","checkout","writable","tampered","locked","extra-file","busy","original","recovery"})
    {
     var folder=Path.Combine(output,"cleanup-"+mode);var package=Manifest("ROOT.SLDASM","ROOT.SLDASM","PART.SLDPRT");var entries=((IEnumerable)Get(package,"Files")).Cast<object>().ToArray();
