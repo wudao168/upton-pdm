@@ -105,8 +105,16 @@ internal static partial class Program
                     Set(manifest,"Files",files);((IDictionary)Field(plugin,"controlledOpenManifests"))[output]=manifest;
                     await (Task)TreeCall(plugin, "RefreshPassiveMetadataAsync", root, project, CancellationToken.None);
                     var branch = ((IList)Get(root, "Children"))[0];
+                    SetField(pane, "authenticatedUsername", "permission-fixture");
+                    TreeCall(pane, "UpdateSelected", branch);
+                    Check(((Button)Field(pane, "checkoutButton")).Enabled,
+                        "首次打开新建子节点即可获取，不需要第二次刷新补权限");
                     var root2d=((IList)Get(root,"Children")).Cast<object>().SingleOrDefault(node=>Equals(Get(node,"DocumentId"),network.RootDrawing));
                     Check(root2d!=null,"工作区打开后的轻量设计树补入总装关联工程图");
+                    TreeCall(pane, "UpdateSelected", root2d);
+                    Check(((Button)Field(pane, "checkoutButton")).Enabled,
+                        "首次补入关联工程图同步服务端权限结果");
+                    Check((string)Get(root2d, "DrawingVersion") == "V2", "新增工程图立即显示服务端图纸版本");
                     Check((string)Get(root2d,"FullPath")==Path.Combine(output,network.RootDrawing.ToString("N")+".SLDDRW")
                         && ReferenceEquals(((IList)Get(root2d,"ReferencedModels"))[0],root),"总装工程图绑定受控清单路径及实际模型节点");
                     Check(!File.Exists((string)Get(root2d,"FullPath")),"已入库但尚未加载的2D按关联显示，不要求先打开或搜索磁盘");
@@ -119,6 +127,8 @@ internal static partial class Program
                     var embedded = ((IList)Get(branch, "Children"))[0];
                     Check(((IList)Get(embedded, "Children")).Count == 1 && Get(embedded, "DocumentId") == null, "虚拟组件及内部层级保留嵌入归属，不独立登记");
                     var sub2d=((IList)Get(branch,"Children")).Cast<object>().Single(node=>Equals(Get(node,"DocumentId"),network.SubDrawing));
+                    TreeCall(pane, "UpdateSelected", sub2d);
+                    Check(((Button)Field(pane, "checkoutButton")).Enabled, "按需展开新增工程图也有权限，不依赖刷新");
                     Check((string)Get(sub2d,"FullPath")==Path.Combine(output,network.SubDrawing.ToString("N")+".SLDDRW")
                         && ReferenceEquals(((IList)Get(sub2d,"ReferencedModels"))[0],branch),"按需展开的子装配保留配套2D及受控路径");
                     await (Task)TreeCall(plugin,"RefreshPassiveMetadataAsync",root,project,CancellationToken.None);
@@ -128,10 +138,46 @@ internal static partial class Program
                     Check(network.Relations==1,"根与子装配复用同一关联清单，不逐组件重复读取关联");
                     Check(reads == 0 && network.Writes == 0, "索引展示和展开零原生结构操作、零服务器写入");
                     Check(network.FullHistories == 0, "当前绑定版本无需逐文件读取历史版本");
+                    await PassiveOperationAccessChecks(plugin, pane, root, branch, root2d, project);
                 }
             }
             await PassiveCycleChecks(pane, output);
         }
+    }
+
+    static async Task PassiveOperationAccessChecks(object plugin, Control pane, object root, object branch, object drawing, Guid project)
+    {
+        var docs = (IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(Guid), Type("DocumentDto")));
+        var model = New("DocumentDto"); var id = (Guid)Get(branch, "DocumentId"); Set(model, "Id", id); Set(model, "ProjectId", project);
+        docs.Add(id, model);
+        var source = New("DocumentReferenceNodeDto"); Set(source, "DocumentId", id); Set(source, "Kind", 1); Set(source, "FileName", "权限零件.SLDPRT");
+        foreach (var state in new[] { "已授权", "未授权", "撤销", "跨项目拒绝", "跨公司拒绝", "无结果" })
+        {
+            object access = state == "无结果" ? null : New("DocumentOperationAccessDto");
+            if (access != null) { Set(access, "CanCheckout", state == "已授权"); Set(access, "CanArchive", state == "已授权"); Set(access, "Reason", state); }
+            Set(model, "OperationAccess", access);
+            var mapped = TreeCall(plugin, "MapProjectTree", source, docs, true);
+            TreeCall(pane, "UpdateSelected", mapped);
+            TreeCheck(((Button)Field(pane, "checkoutButton")).Enabled == (state == "已授权"), "索引权限结果不一致：" + state);
+            Console.WriteLine("PASS: 新建索引按服务端结果判定：" + state);
+        }
+        var drawingDoc = New("DocumentDto"); Set(drawingDoc, "Id", Get(drawing, "DocumentId")); Set(drawingDoc, "Kind", 2);
+        docs.Add(Get(drawing, "DocumentId"), drawingDoc);
+        var relations = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("DocumentModelDrawingRelationDto")));
+        var relation = New("DocumentModelDrawingRelationDto"); Set(relation, "ModelDocumentId", Get(root, "DocumentId")); Set(relation, "DrawingDocumentId", Get(drawing, "DocumentId")); relations.Add(relation);
+        TreeCall(plugin, "ReconcileProjectDrawings", root, docs, relations);
+        TreeCall(pane, "UpdateSelected", drawing);
+        TreeCheck(!((Button)Field(pane, "checkoutButton")).Enabled && Get(drawing, "OperationAccess") == null, "工程图不得保留旧授权");
+        Console.WriteLine("PASS: 关联工程图再次核对无授权时清除旧结果");
+        var local = New("CadTreeNode"); Set(local, "Kind", Enum.Parse(Type("CadDocumentKind"), "Drawing"));
+        Set(local, "FileName", "本机工程图.SLDDRW"); Set(local, "IsModifiedInSolidWorks", true);
+        ((IList)Get(root, "Children")).Add(local);
+        relations.Clear();
+        TreeCall(plugin, "ReconcileProjectDrawings", root, docs, relations);
+        TreeCheck(!((IList)Get(root, "Children")).Contains(drawing), "服务端纠正关联后不得残留合成工程图节点");
+        TreeCheck(((IList)Get(root, "Children")).Contains(local) && (bool)Get(local, "IsModifiedInSolidWorks"), "本机未存档工程图和修改需保留");
+        Console.WriteLine("PASS: 刷新删除已撤销的服务端配套投影，保留本机工程图及未保存修改");
+        await Task.CompletedTask;
     }
 
     static void PassiveDrawingDataReplay(string jsonPath)
@@ -187,7 +233,9 @@ internal static partial class Program
                 response = new[] { new { Id = root, ProjectId = project, FileName = "受控总装.SLDASM", Kind = 0, Name = "总装", StoredVersionCount = 1 },
                     new { Id = sub, ProjectId = project, FileName = "子装配.SLDASM", Kind = 0, Name = "子装配", StoredVersionCount = 1 },
                     new { Id = RootDrawing, ProjectId = project, FileName = RootDrawing.ToString("N")+".SLDDRW", Kind = 2, Name = "总装工程图", StoredVersionCount = 1 },
-                    new { Id = SubDrawing, ProjectId = project, FileName = SubDrawing.ToString("N")+".SLDDRW", Kind = 2, Name = "子装配工程图", StoredVersionCount = 1 } };
+                    new { Id = SubDrawing, ProjectId = project, FileName = SubDrawing.ToString("N")+".SLDDRW", Kind = 2, Name = "子装配工程图", StoredVersionCount = 1 } }
+                    .Select(doc => new { doc.Id, doc.ProjectId, doc.FileName, doc.Kind, doc.Name, doc.StoredVersionCount,
+                        DrawingVersion = "V2", OperationAccess = new { CanCheckout = true, CanArchive = true } }).ToArray();
             else if(request.RequestUri.AbsolutePath.EndsWith("/document-relations"))
             {
                 Relations++; response=new[]{new{ModelDocumentId=root,DrawingDocumentId=RootDrawing},new{ModelDocumentId=sub,DrawingDocumentId=SubDrawing}};

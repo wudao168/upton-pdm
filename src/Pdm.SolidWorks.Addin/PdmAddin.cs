@@ -90,7 +90,6 @@ public sealed partial class PdmAddin : ISwAddin
     private Guid? pendingPropertyWritebackProjectId;
     private int checkoutHeartbeatInProgress;
     private int staleCheckoutResolutionInProgress;
-    private int automaticDrawingOperationInProgress;
     private readonly Guid checkoutSessionId = Guid.NewGuid();
     private readonly string checkoutMachineName = System.Environment.MachineName;
     private readonly object checkoutDocumentSync = new object();
@@ -158,6 +157,7 @@ public sealed partial class PdmAddin : ISwAddin
             taskPaneControl.SetConnectionState(false, "等待SolidWorks启动完成");
             RefreshTree(false);
             SetInitialUpdateSnapshot();
+            PublishCacheProtection(true);
             LogOperation("ConnectToSW success elapsedMs=" + connectTimer.ElapsedMilliseconds + " serverSync=deferred pid=" + Process.GetCurrentProcess().Id);
             return true;
         }
@@ -234,6 +234,7 @@ public sealed partial class PdmAddin : ISwAddin
     public bool DisconnectFromSW()
     {
         if (archiveReaderAddin) { archiveReaderAddin = false; return true; }
+        PublishCacheProtection(true);
         disconnecting = true;
         try
         {
@@ -355,10 +356,7 @@ public sealed partial class PdmAddin : ISwAddin
         taskPaneControl.BatchPropertyEditRequested += OnBatchPropertyEditRequested;
         taskPaneControl.BatchPropertyCardRequested += OnBatchPropertyCardRequested;
         taskPaneControl.SettingsRequested += OnSettingsRequested;
-        taskPaneControl.AutomaticDrawingGenerateRequested += OnAutomaticDrawingGenerateRequested;
-        taskPaneControl.AutomaticDrawingOpenRequested += OnAutomaticDrawingOpenRequested;
-        taskPaneControl.AutomaticDrawingImportAnnotationsRequested += OnAutomaticDrawingImportAnnotationsRequested;
-        taskPaneControl.AutomaticDrawingSubmitRequested += OnAutomaticDrawingSubmitRequested;
+        taskPaneControl.RelatedDrawingOpenRequested += OnRelatedDrawingOpenRequested;
         taskPaneControl.VersionsRequested += OnVersionsRequested;
         taskPaneControl.OpenHistoryRequested += OnOpenHistoryRequested;
         taskPaneControl.EditHistoricalVersionRequested += OnEditHistoricalVersionRequested;
@@ -402,10 +400,7 @@ public sealed partial class PdmAddin : ISwAddin
         taskPaneControl.BatchPropertyEditRequested -= OnBatchPropertyEditRequested;
         taskPaneControl.BatchPropertyCardRequested -= OnBatchPropertyCardRequested;
         taskPaneControl.SettingsRequested -= OnSettingsRequested;
-        taskPaneControl.AutomaticDrawingGenerateRequested -= OnAutomaticDrawingGenerateRequested;
-        taskPaneControl.AutomaticDrawingOpenRequested -= OnAutomaticDrawingOpenRequested;
-        taskPaneControl.AutomaticDrawingImportAnnotationsRequested -= OnAutomaticDrawingImportAnnotationsRequested;
-        taskPaneControl.AutomaticDrawingSubmitRequested -= OnAutomaticDrawingSubmitRequested;
+        taskPaneControl.RelatedDrawingOpenRequested -= OnRelatedDrawingOpenRequested;
         taskPaneControl.VersionsRequested -= OnVersionsRequested;
         taskPaneControl.OpenHistoryRequested -= OnOpenHistoryRequested;
         taskPaneControl.EditHistoricalVersionRequested -= OnEditHistoricalVersionRequested;
@@ -683,6 +678,7 @@ public sealed partial class PdmAddin : ISwAddin
         if (Volatile.Read(ref nativeFileOpenInProgress) == 0) nativeFileOpenCommandId = nativeUiCommandId;
         ObserveNativeFileOpening(fileName);
         Interlocked.Exchange(ref nativeFileOpenInProgress, 1);
+        PublishCacheProtection(true, fileName);
         LogOperation("原生文件开始打开 command=" + nativeFileOpenCommandId + " path=" + fileName);
         ScheduleTreeRefresh(forceScan: false);
         return 0;
@@ -900,6 +896,7 @@ public sealed partial class PdmAddin : ISwAddin
         // SolidWorks can send idle notifications while an Insert Component/Mate command is open.
         // Scanning (which may resolve components), saving, or activating documents can interrupt it.
         if (IsSolidWorksCommandActive()) return 0;
+        PublishCacheProtection();
         if (Volatile.Read(ref batchDialogInProgress) == 0 && Volatile.Read(ref checkInOperationInProgress) == 0) PruneArchiveMemoryCopies();
         if (ShowBlockedControlledOpen()) return 0;
         if (TryStartAssemblyPermissionPrompt()) return 0;
@@ -1246,6 +1243,7 @@ public sealed partial class PdmAddin : ISwAddin
                 ServerAddress = serverAddress,
                 AutomaticUpdatesEnabled = pluginSettings?.AutomaticUpdatesEnabled != false,
                 PlannedTaskScrollIntervalSeconds = pluginSettings?.PlannedTaskScrollIntervalSeconds ?? 30,
+                CacheLimitGigabytes = pluginSettings?.CacheLimitGigabytes ?? 20,
                 BlockArchiveOnMissingReferences = pluginSettings?.BlockArchiveOnMissingReferences == true,
             },
             GetClientUpdateSnapshot(),
@@ -2131,7 +2129,7 @@ public sealed partial class PdmAddin : ISwAddin
             snapshot.AvailableVersion = pendingVersion;
             snapshot.Status = string.IsNullOrWhiteSpace(pendingError)
                 ? PendingPluginStatus()
-                : "上次安装未完成，请检查更新后重试";
+                : pluginSettings.AutomaticUpdatesEnabled ? "上次更新未完成，后台将自动重试" : "上次安装未完成，请检查更新后重试";
             snapshot.UpdateAvailable = true;
             snapshot.ReadyToInstall = ClientPackageUpdater.PendingUpdateHasFileHashes("solidworks-addin");
         }
@@ -2173,6 +2171,16 @@ public sealed partial class PdmAddin : ISwAddin
         await clientUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (ClientPackageUpdater.IsPluginDownloadRunning())
+            {
+                ChangeClientUpdateSnapshot(snapshot =>
+                {
+                    snapshot.Busy = true;
+                    snapshot.ProgressPercentage = null;
+                    snapshot.Status = "正在后台下载并校验更新，退出 SolidWorks 后将继续完成静默更新";
+                });
+                return GetClientUpdateSnapshot();
+            }
             ChangeClientUpdateSnapshot(snapshot =>
             {
                 snapshot.Busy = true;
@@ -2201,11 +2209,11 @@ public sealed partial class PdmAddin : ISwAddin
             if (ready && (!ClientPackageUpdater.IsUpdateAvailable(pendingVersion, availableVersion)
                 || ClientPackageUpdater.IsInstallerRunning("solidworks-addin")))
             {
-                if (launchInstaller) LaunchVisiblePluginInstaller();
+                if (launchInstaller || pluginSettings.AutomaticUpdatesEnabled) ScheduleSilentPluginInstaller(!launchInstaller);
                 var pendingSnapshot = new PluginUpdateSnapshot
                 {
                     InstalledVersion = installedVersion, AvailableVersion = pendingVersion, LastCheckedAt = checkedAt,
-                    Status = launchInstaller ? "安装窗口已打开，请保存图纸并关闭 SolidWorks" : PendingPluginStatus(),
+                    Status = PendingPluginStatus(launchInstaller),
                     ReadyToInstall = true, UpdateAvailable = !launchInstaller, ProgressPercentage = 100
                 };
                 SetClientUpdateSnapshot(pendingSnapshot);
@@ -2255,32 +2263,16 @@ public sealed partial class PdmAddin : ISwAddin
                 snapshot.Busy = true;
                 snapshot.Status = "正在下载并校验更新包…";
             });
-            var progress = new CallbackProgress<ClientUpdateProgress>(value => ChangeClientUpdateSnapshot(snapshot =>
-            {
-                snapshot.ProgressPercentage = value.Percentage;
-                snapshot.Status = value.Percentage.HasValue
-                    ? string.Concat("正在下载更新包：", value.Percentage.Value, "%")
-                    : "正在下载更新包…";
-            }));
-            await ClientPackageUpdater.StageAsync(
-                "solidworks-addin",
-                bootstrap.SolidWorksAddin,
-                addinDirectory,
-                cancellationToken,
-                progress).ConfigureAwait(false);
-            if (!ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out var stagedVersion, out var stageError)
-                || !string.IsNullOrWhiteSpace(stageError) || !ClientPackageUpdater.PendingUpdateHasFileHashes("solidworks-addin"))
-                throw new InvalidOperationException("插件更新尚未就绪，请稍后重新检查。");
-            if (launchInstaller) LaunchVisiblePluginInstaller();
+            if (!ClientPackageUpdater.StagePluginInBackground(bootstrap.SolidWorksAddin, addinDirectory,
+                Process.GetCurrentProcess().Id, !launchInstaller))
+                throw new InvalidOperationException("未能启动后台更新，请稍后重新检查。");
             var stagedSnapshot = new PluginUpdateSnapshot
             {
                 InstalledVersion = installedVersion,
-                AvailableVersion = stagedVersion,
+                AvailableVersion = availableVersion,
                 LastCheckedAt = checkedAt,
-                ProgressPercentage = 100,
-                Status = launchInstaller ? "安装窗口已打开，请保存图纸并关闭 SolidWorks，在安装窗口查看结果" : PendingPluginStatus(),
-                UpdateAvailable = !launchInstaller,
-                ReadyToInstall = true
+                Status = "正在后台下载并校验更新，退出 SolidWorks 后将继续完成静默更新",
+                Busy = true
             };
             SetClientUpdateSnapshot(stagedSnapshot);
             return stagedSnapshot.Clone();
@@ -2322,17 +2314,18 @@ public sealed partial class PdmAddin : ISwAddin
         }
     }
 
-    private string PendingPluginStatus() => pluginSettings.AutomaticUpdatesEnabled
-        ? "更新已就绪，正常退出全部 SolidWorks 窗口后自动安装" : "更新已就绪，请点击安装更新";
+    private string PendingPluginStatus(bool explicitlyScheduled = false) => explicitlyScheduled || pluginSettings.AutomaticUpdatesEnabled
+        ? "更新已就绪，退出全部 SolidWorks 后自动静默安装，无需确认" : "更新已就绪，请点击安装更新";
 
     private static string LoadedPluginVersion => typeof(PdmAddin).Assembly
         .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
         .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().First().InformationalVersion.Split('+')[0];
 
-    private void LaunchVisiblePluginInstaller()
+    private void ScheduleSilentPluginInstaller(bool automaticInstall)
     {
-        if (!ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", Process.GetCurrentProcess().Id, string.Empty, true))
-            throw new InvalidOperationException("未能打开安装窗口，可能已有安装进程。请检查更新状态后重试。");
+        if (!ClientPackageUpdater.IsInstallerRunning("solidworks-addin")
+            && !ClientPackageUpdater.SchedulePluginUpdate(Process.GetCurrentProcess().Id, automaticInstall))
+            throw new InvalidOperationException("未能安排静默更新，请稍后重新检查。");
     }
 
     private async Task<PluginConnectionResult> TestPluginConnectionAsync(string serverAddress)
@@ -2370,8 +2363,7 @@ public sealed partial class PdmAddin : ISwAddin
             throw new InvalidOperationException("插件更新正在进行，请等待完成后再切换服务器。");
         if (Volatile.Read(ref openOperationInProgress) != 0
             || Volatile.Read(ref checkInOperationInProgress) != 0
-            || Volatile.Read(ref workspaceOperationInProgress) != 0
-            || Volatile.Read(ref automaticDrawingOperationInProgress) != 0)
+            || Volatile.Read(ref workspaceOperationInProgress) != 0)
             throw new InvalidOperationException("当前图档操作尚未完成，请完成后再切换服务器。");
 
         var normalizedAddress = PluginSettingsStore.NormalizeServerAddress(requestedSettings.ServerAddress);
@@ -2772,68 +2764,14 @@ public sealed partial class PdmAddin : ISwAddin
         catch (Exception exception) { ShowError(exception.Message); }
     }
 
-    private void OnAutomaticDrawingGenerateRequested(object sender, AutomaticDrawingRequestEventArgs eventArgs)
-    {
-        if (Interlocked.Exchange(ref automaticDrawingOperationInProgress, 1) != 0)
-        {
-            ShowError("已有自动出图操作正在进行，请稍候再试。");
-            return;
-        }
-
-        try
-        {
-            var source = eventArgs.Source;
-            ValidateAutomaticDrawingSource(source);
-            var drawingPath = AutomaticDrawingControl.GetDrawingPath(source);
-            var existed = File.Exists(drawingPath);
-            if (!existed) Directory.CreateDirectory(Path.GetDirectoryName(drawingPath));
-            var projectId = currentProjectId ?? GetExplicitProjectId(source.FullPath);
-            if (existed)
-            {
-                UpdateAutomaticDrawing(source, drawingPath, eventArgs.Options);
-            }
-            else
-            {
-                CreateAutomaticDrawing(source, drawingPath, eventArgs.Options);
-            }
-
-            if (projectId.HasValue)
-            {
-                RememberExplicitProjectPath(drawingPath, projectId.Value);
-            }
-
-            RefreshTree(true);
-            if (projectId.HasValue)
-            {
-                currentProjectId = projectId;
-                taskPaneControl.SelectProject(projectId);
-            }
-            taskPaneControl.SetGeneratedDrawing(source, drawingPath);
-            taskPaneControl.SetAutomaticDrawingOperationResult(
-                existed
-                    ? "工程图已更新，可继续手工编辑或重新整理自动标注。"
-                    : "工程图已生成，可继续手工编辑并执行自动标注。");
-            LogOperation(string.Concat(existed ? "Automatic drawing updated path=" : "Automatic drawing created path=", drawingPath));
-        }
-        catch (Exception exception)
-        {
-            LogDiagnostic("Automatic drawing generation", exception);
-            ShowError(exception.Message);
-        }
-        finally
-        {
-            Interlocked.Exchange(ref automaticDrawingOperationInProgress, 0);
-        }
-    }
-
-    private void OnAutomaticDrawingOpenRequested(object sender, AutomaticDrawingRequestEventArgs eventArgs)
+    private void OnRelatedDrawingOpenRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
         try
         {
-            var drawingPath = AutomaticDrawingControl.GetDrawingPath(eventArgs.Source);
+            var drawingPath = RelatedDrawingPath.ForSource(eventArgs.Node);
             if (string.IsNullOrWhiteSpace(drawingPath) || !File.Exists(drawingPath))
             {
-                throw new FileNotFoundException("尚未生成关联工程图。");
+                throw new FileNotFoundException("未找到关联工程图。");
             }
 
             var drawingNode = FindCadNodeByPath(currentTree, drawingPath);
@@ -2849,483 +2787,14 @@ public sealed partial class PdmAddin : ISwAddin
                 string.Empty);
             if (document != null)
             {
-                taskPaneControl.SetGeneratedDrawing(eventArgs.Source, drawingPath);
                 ScheduleTreeRefresh();
             }
         }
         catch (Exception exception)
         {
-            LogDiagnostic("Open automatic drawing", exception);
+            LogDiagnostic("Open related drawing", exception);
             ShowError(exception.Message);
         }
-    }
-
-    private void OnAutomaticDrawingImportAnnotationsRequested(object sender, AutomaticDrawingRequestEventArgs eventArgs)
-    {
-        if (Interlocked.Exchange(ref automaticDrawingOperationInProgress, 1) != 0)
-        {
-            ShowError("已有自动出图操作正在进行，请稍候再试。");
-            return;
-        }
-
-        try
-        {
-            var drawingPath = AutomaticDrawingControl.GetDrawingPath(eventArgs.Source);
-            if (string.IsNullOrWhiteSpace(drawingPath) || !File.Exists(drawingPath))
-            {
-                throw new FileNotFoundException("请先生成工程图草稿。");
-            }
-
-            EnsureDrawingCanBeChanged(drawingPath);
-            var drawingModel = OpenOrActivateDocumentOnSolidWorksThread(
-                drawingPath,
-                (int)swDocumentTypes_e.swDocDRAWING,
-                string.Empty);
-            var drawing = drawingModel as IDrawingDoc;
-            if (drawing == null)
-            {
-                throw new InvalidOperationException("当前文件不是SolidWorks工程图。");
-            }
-
-            ApplyGbDrawingStandard(drawingModel);
-            var rules = AutomaticDrawingRuleStore.Load();
-            var ruleDecision = ResolveAutomaticDrawingRuleDecision(eventArgs.Source, drawing, rules);
-
-            var annotationTypes = 0;
-            if (eventArgs.Options.ImportMarkedDimensions)
-            {
-                annotationTypes |= (int)swInsertAnnotation_e.swInsertDimensionsMarkedForDrawing;
-                annotationTypes |= (int)swInsertAnnotation_e.swInsertTolerancedDims;
-                if (rules.ImportUnmarkedModelDimensions)
-                {
-                    annotationTypes |= (int)swInsertAnnotation_e.swInsertDimensionsNotMarkedForDrawing;
-                }
-            }
-            if (eventArgs.Options.ImportHoleDimensions)
-            {
-                annotationTypes |= (int)swInsertAnnotation_e.swInsertHoleWizardProfileDimensions;
-                annotationTypes |= (int)swInsertAnnotation_e.swInsertHoleWizardLocationDimensions;
-                annotationTypes |= (int)swInsertAnnotation_e.swInsertholeCallout;
-            }
-            if (annotationTypes == 0)
-            {
-                throw new InvalidOperationException("请至少选择一种需要导入的模型标注。");
-            }
-
-            var dimensionsBeforeImport = CountDrawingDimensions(drawing);
-            var annotations = drawing.InsertModelAnnotations3(
-                (int)swImportModelItemsSource_e.swImportModelItemsFromEntireModel,
-                annotationTypes,
-                true,
-                true,
-                false,
-                false);
-            var count = annotations is Array annotationArray ? annotationArray.Length : annotations == null ? 0 : 1;
-            var dimensionsAfterImport = CountDrawingDimensions(drawing);
-            var fallbackDimensions = 0;
-            if (dimensionsBeforeImport == 0
-                && dimensionsAfterImport == 0
-                && eventArgs.Source.Kind == CadDocumentKind.Part
-                && rules.EnableFallbackAutoDimension)
-            {
-                fallbackDimensions = AutoDimensionPrimaryView(drawingModel, drawing, ruleDecision);
-                count += fallbackDimensions;
-            }
-
-            var centerMarksAdded = rules.GenerateCenterMarks
-                ? InsertAutomaticDrawingCenterMarks(drawingModel, drawing, rules)
-                : 0;
-            var centerLinesAdded = rules.GenerateSymmetryCenterlines
-                ? InsertAutomaticDrawingCenterlines(drawingModel, drawing, ruleDecision)
-                : 0;
-            var standardizedChamfers = rules.Standardize45DegreeChamfers
-                ? Standardize45DegreeChamferDimensions(drawing)
-                : 0;
-            var hiddenDuplicates = HideDuplicateDrawingDimensions(drawingModel, drawing);
-            var arrangedViews = ArrangeDrawingDimensions(drawingModel, drawing, rules.DimensionSpacingMeters);
-            drawingModel.ForceRebuild3(false);
-            SaveSolidWorksDocument(drawingModel);
-            var visibleDimensions = CountVisibleDrawingDimensions(drawing);
-            AutomaticDrawingLearningStore.Record(
-                new AutomaticDrawingLearningRecord
-                {
-                    RuleVersion = rules.RuleVersion,
-                    SourceFileName = Path.GetFileName(eventArgs.Source.FullPath),
-                    SourceKind = eventArgs.Source.Kind.ToString(),
-                    PartFamily = ruleDecision.PartFamily.ToString(),
-                    DatumStrategy = ruleDecision.DatumStrategy.ToString(),
-                    DimensionsBefore = dimensionsBeforeImport,
-                    ImportedAnnotations = count,
-                    VisibleDimensionsAfter = visibleDimensions,
-                    StandardizedChamfers = standardizedChamfers,
-                    HiddenDuplicates = hiddenDuplicates,
-                    ArrangedViews = arrangedViews,
-                    UsedFallbackAutoDimension = fallbackDimensions > 0,
-                    CenterMarksAdded = centerMarksAdded,
-                    CenterLinesAdded = centerLinesAdded,
-                    IncludedIsometricView = EnumerateDrawingModelViews(drawing).Any(IsIsometricDrawingView)
-                },
-                rules.MaximumLearningRecords);
-            var centerAnnotationSummary = centerMarksAdded > 0 || centerLinesAdded > 0
-                ? string.Concat("；新增中心标记", centerMarksAdded, "、中心线", centerLinesAdded)
-                : string.Empty;
-            taskPaneControl.SetGeneratedDrawing(eventArgs.Source, drawingPath);
-            taskPaneControl.SetAutomaticDrawingOperationResult(
-                count > 0
-                    ? string.Concat(
-                        "规则 ", rules.RuleVersion, " · ", ruleDecision.PartFamilyText,
-                        "（", ruleDecision.DatumStrategyText, "）：已导入或补充", count,
-                        "项标注，并重新整理现有尺寸", centerAnnotationSummary, "。")
-                    : arrangedViews > 0
-                        ? string.Concat(
-                            "规则 ", rules.RuleVersion, " · ", ruleDecision.PartFamilyText,
-                            "（", ruleDecision.DatumStrategyText, "）：未新增重复尺寸，已重新整理",
-                            arrangedViews, "个视图的现有标注", centerAnnotationSummary, "。")
-                        : string.Concat(
-                            "规则 ", rules.RuleVersion, " · ", ruleDecision.PartFamilyText,
-                            "（", ruleDecision.DatumStrategyText,
-                            "）：现有标注无需新增，工程图已重新检查并保存",
-                            centerAnnotationSummary,
-                            "。"));
-            LogOperation(string.Concat(
-                "Automatic drawing annotations ruleVersion=",
-                rules.RuleVersion,
-                " partFamily=",
-                ruleDecision.PartFamily,
-                " datumStrategy=",
-                ruleDecision.DatumStrategy,
-                " importedCount=",
-                count,
-                " standardizedChamfers=",
-                standardizedChamfers,
-                " hiddenDuplicates=",
-                hiddenDuplicates,
-                " centerMarksAdded=",
-                centerMarksAdded,
-                " centerLinesAdded=",
-                centerLinesAdded,
-                " arrangedViews=",
-                arrangedViews,
-                " path=",
-                drawingPath));
-        }
-        catch (Exception exception)
-        {
-            LogDiagnostic("Import automatic drawing annotations", exception);
-            ShowError(exception.Message);
-        }
-        finally
-        {
-            Interlocked.Exchange(ref automaticDrawingOperationInProgress, 0);
-        }
-    }
-
-    private void OnAutomaticDrawingSubmitRequested(object sender, AutomaticDrawingRequestEventArgs eventArgs)
-    {
-        try
-        {
-            var source = eventArgs.Source;
-            if (source?.DocumentId.HasValue != true)
-            {
-                throw new InvalidOperationException("源三维模型尚未入库。请先提交三维模型，再提交关联工程图，以保证版本关联正确。");
-            }
-
-            var drawingPath = AutomaticDrawingControl.GetDrawingPath(source);
-            if (string.IsNullOrWhiteSpace(drawingPath) || !File.Exists(drawingPath))
-            {
-                throw new FileNotFoundException("请先生成工程图草稿。");
-            }
-
-            var projectId = currentProjectId ?? GetExplicitProjectId(drawingPath) ?? GetExplicitProjectId(source.FullPath);
-            if (!projectId.HasValue)
-            {
-                throw new InvalidOperationException("未识别工程图所属项目，请先打开源三维模型并确认当前项目。");
-            }
-
-            RememberExplicitProjectPath(drawingPath, projectId.Value);
-            var drawingNode = FindCadNodeByPath(currentTree, drawingPath);
-            if (drawingNode == null)
-            {
-                var drawingModel = OpenOrActivateDocumentOnSolidWorksThread(
-                    drawingPath,
-                    (int)swDocumentTypes_e.swDocDRAWING,
-                    string.Empty);
-                if (drawingModel == null)
-                {
-                    return;
-                }
-                RefreshTree(true);
-                currentProjectId = projectId;
-                taskPaneControl.SelectProject(projectId);
-                drawingNode = FindCadNodeByPath(currentTree, drawingPath);
-            }
-
-            if (drawingNode == null)
-            {
-                drawingNode = new CadTreeNode
-                {
-                    FileName = Path.GetFileName(drawingPath),
-                    FullPath = drawingPath,
-                    InstancePath = drawingPath,
-                    DisplayName = Path.GetFileNameWithoutExtension(drawingPath),
-                    Kind = CadDocumentKind.Drawing,
-                    Status = CadReferenceStatus.Normal
-                };
-            }
-            drawingNode.RelatedModelDocumentId = source.DocumentId;
-
-            var sourceInDrawingTree = FindCadNodeByPath(currentTree, source.FullPath);
-            if (sourceInDrawingTree != null && !sourceInDrawingTree.DocumentId.HasValue)
-            {
-                CopyPdmIdentity(source, sourceInDrawingTree);
-            }
-
-            if (drawingNode.DocumentId.HasValue && !IsCheckedOutByCurrentUser(drawingNode))
-            {
-                throw new InvalidOperationException(string.IsNullOrWhiteSpace(drawingNode.CheckedOutBy)
-                    ? "请先在设计树中为工程图获取编辑权限，再提交存档。"
-                    : string.Concat("该工程图正在由", ResolveUserDisplayName(drawingNode.CheckedOutBy), "编辑。"));
-            }
-
-            OnCheckInRequested(
-                this,
-                new CadTreeNodeEventArgs(drawingNode, new[] { drawingNode }, true));
-        }
-        catch (Exception exception)
-        {
-            LogDiagnostic("Submit automatic drawing", exception);
-            ShowError(exception.Message);
-        }
-    }
-
-    private void ValidateAutomaticDrawingSource(CadTreeNode source)
-    {
-        if (source == null || (source.Kind != CadDocumentKind.Part && source.Kind != CadDocumentKind.Assembly))
-        {
-            throw new InvalidOperationException("请选择零件或装配体后再生成工程图。");
-        }
-        if (source.IsHistoricalPreview || IsHistoricalPreviewPath(source.FullPath))
-        {
-            throw new InvalidOperationException("历史版本不能直接生成当前工程图，请先打开需要出图的当前模型版本。");
-        }
-        if (string.IsNullOrWhiteSpace(source.FullPath) || !File.Exists(source.FullPath))
-        {
-            throw new FileNotFoundException("本地三维模型不存在，不能生成工程图。");
-        }
-    }
-
-    private IModelDoc2 EnsureAutomaticDrawingSourceLoaded(CadTreeNode source)
-    {
-        var loaded = FindLoadedDocument(source.FullPath);
-        if (loaded != null)
-        {
-            return loaded;
-        }
-
-        var errors = 0;
-        var warnings = 0;
-        var documentType = source.Kind == CadDocumentKind.Assembly
-            ? (int)swDocumentTypes_e.swDocASSEMBLY
-            : (int)swDocumentTypes_e.swDocPART;
-        LogOperation(string.Concat("Automatic drawing source OpenDoc6 start path=", source.FullPath));
-        loaded = application.OpenDoc6(
-            source.FullPath,
-            documentType,
-            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
-            source.Configuration ?? string.Empty,
-            ref errors,
-            ref warnings);
-        LogOperation(string.Concat(
-            "Automatic drawing source OpenDoc6 end path=", source.FullPath,
-            " errors=", errors,
-            " warnings=", warnings,
-            " null=", loaded == null));
-        if (loaded == null)
-        {
-            throw new InvalidOperationException(string.Concat(
-                "SolidWorks未能加载三维模型，不能生成工程图。错误码：", errors,
-                "，警告码：", warnings));
-        }
-        return loaded;
-    }
-
-    private void CreateAutomaticDrawing(CadTreeNode source, string drawingPath, AutomaticDrawingOptions options)
-    {
-        var template = ResolveDrawingTemplate(options?.TemplatePath);
-        EnsureAutomaticDrawingSourceLoaded(source);
-        IModelDoc2 drawingModel = null;
-        var saved = false;
-        try
-        {
-            drawingModel = application.NewDocument(template, 0, 0, 0) as IModelDoc2;
-            var drawing = drawingModel as IDrawingDoc;
-            if (drawing == null)
-            {
-                throw new InvalidOperationException("SolidWorks未能创建工程图，请检查工程图模板。");
-            }
-
-            EnsureDrawingSheetEditMode(drawing);
-            ApplyGbDrawingStandard(drawingModel);
-            CreateAutomaticDrawingViews(drawingModel, drawing, source.FullPath, options ?? new AutomaticDrawingOptions());
-            drawingModel.ForceRebuild3(false);
-            var errors = 0;
-            var warnings = 0;
-            saved = drawingModel.Extension.SaveAs(
-                drawingPath,
-                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                null,
-                ref errors,
-                ref warnings);
-            if (!saved || errors != 0)
-            {
-                throw new IOException(string.Concat("SolidWorks保存工程图失败，错误码：", errors, "，警告码：", warnings));
-            }
-        }
-        finally
-        {
-            if (!saved && drawingModel != null)
-            {
-                application.CloseDoc(drawingModel.GetTitle());
-            }
-        }
-    }
-
-    private void UpdateAutomaticDrawing(CadTreeNode source, string drawingPath, AutomaticDrawingOptions options)
-    {
-        EnsureDrawingCanBeChanged(drawingPath);
-        EnsureAutomaticDrawingSourceLoaded(source);
-        var drawingModel = OpenOrActivateDocumentOnSolidWorksThread(
-            drawingPath,
-            (int)swDocumentTypes_e.swDocDRAWING,
-            string.Empty);
-        var drawing = drawingModel as IDrawingDoc;
-        if (drawing == null)
-        {
-            throw new InvalidOperationException("关联文件不是SolidWorks工程图。");
-        }
-
-        var switchedFromTemplateEdit = EnsureDrawingSheetEditMode(drawing);
-        ApplyGbDrawingStandard(drawingModel);
-        TryResolveDrawingViews(drawing, drawingModel);
-        var existingViews = EnumerateDrawingModelViews(drawing).ToList();
-        var firstModelView = existingViews.FirstOrDefault();
-        if (switchedFromTemplateEdit || firstModelView == null || !HasVisibleDrawingGeometry(existingViews))
-        {
-            LogOperation(string.Concat(
-                "Automatic drawing rebuilding empty views path=", drawingPath,
-                " existingViewCount=", existingViews.Count,
-                " switchedFromTemplateEdit=", switchedFromTemplateEdit));
-            CreateAutomaticDrawingViews(drawingModel, drawing, source.FullPath, options ?? new AutomaticDrawingOptions());
-        }
-        else if (!ReferencesSource(firstModelView.GetReferencedModelName(), source.FullPath))
-        {
-            throw new InvalidOperationException("现有工程图引用了其他三维模型，不能自动覆盖。请核对同名文件。");
-        }
-        else
-        {
-            ArrangeExistingAutomaticDrawingViews(
-                drawingModel,
-                drawing,
-                source.FullPath,
-                options ?? new AutomaticDrawingOptions());
-        }
-        drawingModel.ForceRebuild3(false);
-        SaveSolidWorksDocument(drawingModel);
-    }
-
-    private static bool EnsureDrawingSheetEditMode(IDrawingDoc drawing)
-    {
-        if (drawing == null || drawing.GetEditSheet())
-        {
-            return false;
-        }
-
-        drawing.EditSheet();
-        return true;
-    }
-
-    private static void TryResolveDrawingViews(IDrawingDoc drawing, IModelDoc2 drawingModel)
-    {
-        try
-        {
-            drawing.ResolveOutOfDateLightWeightComponents();
-            foreach (var view in EnumerateDrawingModelViews(drawing))
-            {
-                PrepareAutomaticDrawingView(view);
-            }
-            drawingModel.ForceRebuild3(false);
-        }
-        catch (COMException)
-        {
-            // Some drawing modes do not expose lightweight resolution; geometry checks below remain authoritative.
-        }
-    }
-
-    private static bool HasVisibleDrawingGeometry(IEnumerable<IView> views)
-    {
-        foreach (var view in views ?? Enumerable.Empty<IView>())
-        {
-            try
-            {
-                var referencedModel = view.GetReferencedModelName() ?? string.Empty;
-                var outline = GetDrawingViewOutline(view);
-                if (!view.GetVisible()
-                    || string.IsNullOrWhiteSpace(referencedModel)
-                    || outline.Width <= 0.000001f
-                    || outline.Height <= 0.000001f)
-                {
-                    continue;
-                }
-
-                var splinePointCount = 0;
-                var polylinePointCount = 0;
-                if (view.GetLineCount2(0) > 0
-                    || view.GetArcCount() > 0
-                    || view.GetEllipseCount() > 0
-                    || view.GetParabolaCount() > 0
-                    || view.GetSplineCount(out splinePointCount) > 0
-                    || view.GetPolyLineCount5(0, out polylinePointCount) > 0)
-                {
-                    return true;
-                }
-            }
-            catch (COMException)
-            {
-                // Continue checking the remaining model views.
-            }
-        }
-        return false;
-    }
-
-    private static void PrepareAutomaticDrawingView(IView view)
-    {
-        if (view == null)
-        {
-            return;
-        }
-
-        view.SetLightweightToResolved();
-        view.SetVisible(true, true);
-        view.SetDisplayMode3(
-            false,
-            (int)swDisplayMode_e.swHIDDEN,
-            false,
-            true);
-        view.UpdateViewDisplayGeometry();
-    }
-
-    private static void ApplyGbDrawingStandard(IModelDoc2 drawingModel)
-    {
-        if (drawingModel?.Extension == null)
-        {
-            return;
-        }
-
-        drawingModel.Extension.SetUserPreferenceInteger(
-            (int)swUserPreferenceIntegerValue_e.swDetailingDimensionStandard,
-            (int)swUserPreferenceOption_e.swDetailingNoOptionSpecified,
-            (int)swDetailingStandard_e.swDetailingStandardGB);
     }
 
     private static string ReadResolvedCustomProperty(IModelDoc2 model, string configuration, string propertyName)
@@ -3343,1439 +2812,6 @@ public sealed partial class PdmAddin : ISwAddin
             if (!string.IsNullOrWhiteSpace(value)) return value;
         }
         return string.Empty;
-    }
-
-    private static int AutoDimensionPrimaryView(
-        IModelDoc2 drawingModel,
-        IDrawingDoc drawing,
-        AutomaticDrawingRuleDecision ruleDecision)
-    {
-        var views = EnumerateDrawingModelViews(drawing).ToList();
-        IView frontView;
-        IView topView;
-        IView sideView;
-        IView isometricView;
-        ResolveAutomaticDrawingViews(
-            views,
-            out frontView,
-            out topView,
-            out sideView,
-            out isometricView);
-        if (frontView == null)
-        {
-            return 0;
-        }
-
-        drawingModel.ClearSelection2(true);
-        var viewName = frontView.GetName2();
-        drawing.ActivateView(viewName);
-        if (!drawingModel.Extension.SelectByID2(viewName, "DRAWINGVIEW", 0, 0, 0, false, 0, null, 0))
-        {
-            return 0;
-        }
-
-        var before = CountDrawingDimensions(drawing);
-        var useOrdinate = ruleDecision?.UseOrdinateFallback == true;
-        var horizontalScheme = useOrdinate
-            ? (int)swAutodimScheme_e.swAutodimSchemeOrdinate
-            : (int)swAutodimScheme_e.swAutodimSchemeBaseline;
-        var verticalScheme = horizontalScheme;
-        var horizontalPlacement = useOrdinate
-            ? (int)swAutodimHorizontalPlacement_e.swAutodimHorizontalPlacementBelow
-            : (int)swAutodimHorizontalPlacement_e.swAutodimHorizontalPlacementAbove;
-        var verticalPlacement = useOrdinate
-            ? (int)swAutodimVerticalPlacement_e.swAutodimVerticalPlacementLeft
-            : (int)swAutodimVerticalPlacement_e.swAutodimVerticalPlacementRight;
-        var status = drawing.AutoDimension(
-            (int)swAutodimEntities_e.swAutodimEntitiesAll,
-            horizontalScheme,
-            horizontalPlacement,
-            verticalScheme,
-            verticalPlacement);
-        drawingModel.ClearSelection2(true);
-        if (status != (int)swAutodimStatus_e.swAutodimStatusSuccess)
-        {
-            return 0;
-        }
-
-        return Math.Max(0, CountDrawingDimensions(drawing) - before);
-    }
-
-    private static int CountDrawingDimensions(IDrawingDoc drawing)
-    {
-        return EnumerateDrawingModelViews(drawing).Sum(view => Math.Max(0, view.GetDisplayDimensionCount()));
-    }
-
-    private static int CountVisibleDrawingDimensions(IDrawingDoc drawing)
-    {
-        var count = 0;
-        foreach (var view in EnumerateDrawingModelViews(drawing))
-        {
-            var dimension = view.GetFirstDisplayDimension5() as IDisplayDimension;
-            while (dimension != null)
-            {
-                var annotation = dimension.GetAnnotation() as IAnnotation;
-                if (annotation != null
-                    && annotation.Visible != (int)swAnnotationVisibilityState_e.swAnnotationHidden)
-                {
-                    count++;
-                }
-                dimension = dimension.GetNext5() as IDisplayDimension;
-            }
-        }
-        return count;
-    }
-
-    private static int InsertAutomaticDrawingCenterMarks(
-        IModelDoc2 drawingModel,
-        IDrawingDoc drawing,
-        AutomaticDrawingRuleProfile rules)
-    {
-        const int allSupportedCircularFeatures =
-            (int)swAutoInsertCenterMarkTypes_e.swAutoInsertCenterMarkType_Hole
-            | (int)swAutoInsertCenterMarkTypes_e.swAutoInsertCenterMarkType_Fillets
-            | (int)swAutoInsertCenterMarkTypes_e.swAutoInsertCenterMarkType_Slots;
-        const int connectionLines =
-            (int)swCenterMarkConnectionLine_e.swCenterMark_ShowLinearConnectLines
-            | (int)swCenterMarkConnectionLine_e.swCenterMark_ShowCircularConnectLines
-            | (int)swCenterMarkConnectionLine_e.swCenterMark_ShowBaseCenterMarkLines;
-        var inserted = 0;
-        foreach (var view in EnumerateDrawingModelViews(drawing).Where(view => !IsIsometricDrawingView(view)))
-        {
-            var before = Math.Max(0, view.GetCenterMarkCount());
-            var name = view.GetName2();
-            if (string.IsNullOrWhiteSpace(name) || !drawing.ActivateView(name))
-            {
-                continue;
-            }
-            var activeView = drawing.ActiveDrawingView as IView ?? view;
-            activeView.AutoInsertCenterMarks2(
-                allSupportedCircularFeatures,
-                connectionLines,
-                true,
-                true,
-                false,
-                rules.CenterMarkSizeMeters,
-                rules.CenterMarkGapMeters,
-                true,
-                true,
-                0d);
-            inserted += Math.Max(0, activeView.GetCenterMarkCount() - before);
-            inserted += InsertMissingFullCircleCenterMarks(drawingModel, drawing, activeView);
-        }
-        drawingModel.ClearSelection2(true);
-        return inserted;
-    }
-
-    private static int InsertMissingFullCircleCenterMarks(
-        IModelDoc2 drawingModel,
-        IDrawingDoc drawing,
-        IView view)
-    {
-        var markedEntities = GetCenterMarkedEntityKeys(drawingModel, view);
-        var components = (view.GetVisibleComponents() as object[])?
-            .OfType<Component2>()
-            .ToList()
-            ?? new List<Component2>();
-        var rootComponent = view.RootDrawingComponent?.Component as Component2;
-        if (rootComponent != null && !components.Contains(rootComponent))
-        {
-            components.Add(rootComponent);
-        }
-        if (components.Count == 0)
-        {
-            components.Add(null);
-        }
-
-        var inserted = 0;
-        foreach (var component in components)
-        {
-            Array visibleEdges;
-            try
-            {
-                visibleEdges = view.GetVisibleEntities2(
-                    component,
-                    (int)swViewEntityType_e.swViewEntityType_Edge) as Array;
-            }
-            catch (COMException)
-            {
-                continue;
-            }
-            if (visibleEdges == null)
-            {
-                continue;
-            }
-            foreach (var item in visibleEdges)
-            {
-                var edge = item as IEdge;
-                var curve = edge?.GetCurve() as ICurve;
-                if (curve == null || !curve.IsCircle())
-                {
-                    continue;
-                }
-                var start = 0d;
-                var end = 0d;
-                var closed = false;
-                var periodic = false;
-                if (!curve.GetEndParams(out start, out end, out closed, out periodic) || !closed)
-                {
-                    continue;
-                }
-
-                var entityKey = GetDrawingEntityPersistenceKey(drawingModel, edge);
-                if (!string.IsNullOrWhiteSpace(entityKey) && markedEntities.Contains(entityKey))
-                {
-                    continue;
-                }
-                drawingModel.ClearSelection2(true);
-                if (!view.SelectEntity(edge, false))
-                {
-                    continue;
-                }
-                var centerMark = drawing.InsertCenterMark3(
-                    (int)swCenterMarkStyle_e.swCenterMark_Single,
-                    true,
-                    false) as ICenterMark;
-                if (centerMark != null)
-                {
-                    inserted++;
-                    if (!string.IsNullOrWhiteSpace(entityKey))
-                    {
-                        markedEntities.Add(entityKey);
-                    }
-                }
-            }
-        }
-        return inserted;
-    }
-
-    private static HashSet<string> GetCenterMarkedEntityKeys(IModelDoc2 drawingModel, IView view)
-    {
-        var keys = new HashSet<string>(StringComparer.Ordinal);
-        var centerMark = view?.GetFirstCenterMark() as ICenterMark;
-        while (centerMark != null)
-        {
-            var annotation = centerMark.GetAnnotation() as IAnnotation;
-            var attached = annotation?.GetAttachedEntities3() as Array;
-            if (attached != null)
-            {
-                foreach (var entity in attached)
-                {
-                    var key = GetDrawingEntityPersistenceKey(drawingModel, entity);
-                    if (!string.IsNullOrWhiteSpace(key))
-                    {
-                        keys.Add(key);
-                    }
-                }
-            }
-            centerMark = centerMark.GetNext() as ICenterMark;
-        }
-        return keys;
-    }
-
-    private static string GetDrawingEntityPersistenceKey(IModelDoc2 drawingModel, object entity)
-    {
-        try
-        {
-            var reference = drawingModel?.Extension?.GetPersistReference3(entity) as byte[];
-            return reference == null || reference.Length == 0
-                ? string.Empty
-                : Convert.ToBase64String(reference);
-        }
-        catch (COMException)
-        {
-            return string.Empty;
-        }
-    }
-
-    private static int InsertAutomaticDrawingCenterlines(
-        IModelDoc2 drawingModel,
-        IDrawingDoc drawing,
-        AutomaticDrawingRuleDecision ruleDecision)
-    {
-        const string layerName = "UPTON_AUTO_CENTERLINE";
-        var layerManager = drawingModel.GetLayerManager() as ILayerMgr;
-        var previousLayer = layerManager?.GetCurrentLayer() ?? string.Empty;
-        if (layerManager?.GetLayer(layerName) == null)
-        {
-            drawing.CreateLayer2(
-                layerName,
-                "PLM自动中心线",
-                0,
-                (int)swLineStyles_e.swLineCENTER,
-                (int)swLineWeights_e.swLW_THIN,
-                true,
-                true);
-        }
-
-        var inserted = 0;
-        try
-        {
-            foreach (var view in EnumerateDrawingModelViews(drawing).Where(view => !IsIsometricDrawingView(view)))
-            {
-                if (view.GetCenterLineCount() > 0 || HasAutomaticCenterline(view, layerName))
-                {
-                    continue;
-                }
-
-                var outline = GetDrawingViewOutline(view);
-                if (outline.Width <= 0 || outline.Height <= 0)
-                {
-                    continue;
-                }
-
-                var centerX = (outline.Left + outline.Right) / 2d;
-                var centerY = (outline.Top + outline.Bottom) / 2d;
-                var tolerance = Math.Max(0.0005d, Math.Min(outline.Width, outline.Height) * 0.025d);
-                var centerMarks = GetCenterMarkPositions(view);
-                var addVertical = IsCenterMarkPatternSymmetric(centerMarks, centerX, true, tolerance);
-                var addHorizontal = IsCenterMarkPatternSymmetric(centerMarks, centerY, false, tolerance);
-
-                if (ruleDecision?.PartFamily == AutomaticDrawingPartFamily.Axisymmetric)
-                {
-                    if (outline.Width >= outline.Height * 1.15d)
-                    {
-                        addHorizontal = true;
-                    }
-                    else if (outline.Height >= outline.Width * 1.15d)
-                    {
-                        addVertical = true;
-                    }
-                }
-                if (!addVertical && !addHorizontal)
-                {
-                    continue;
-                }
-
-                var name = view.GetName2();
-                if (string.IsNullOrWhiteSpace(name) || !drawing.ActivateView(name))
-                {
-                    continue;
-                }
-                layerManager?.SetCurrentLayer(layerName);
-                var extension = Math.Max(0.003d, Math.Max(outline.Width, outline.Height) * 0.04d);
-                if (addHorizontal)
-                {
-                    inserted += CreateAutomaticCenterlineSegment(
-                        drawingModel,
-                        layerName,
-                        outline.Left - extension,
-                        centerY,
-                        outline.Right + extension,
-                        centerY);
-                }
-                if (addVertical)
-                {
-                    inserted += CreateAutomaticCenterlineSegment(
-                        drawingModel,
-                        layerName,
-                        centerX,
-                        outline.Top - extension,
-                        centerX,
-                        outline.Bottom + extension);
-                }
-            }
-        }
-        finally
-        {
-            layerManager?.SetCurrentLayer(previousLayer);
-            drawingModel.ClearSelection2(true);
-        }
-        return inserted;
-    }
-
-    private static int CreateAutomaticCenterlineSegment(
-        IModelDoc2 drawingModel,
-        string layerName,
-        double x1,
-        double y1,
-        double x2,
-        double y2)
-    {
-        var segment = drawingModel?.SketchManager?.CreateCenterLine(x1, y1, 0d, x2, y2, 0d) as ISketchSegment;
-        if (segment == null)
-        {
-            return 0;
-        }
-        segment.ConstructionGeometry = true;
-        segment.Style = (int)swLineStyles_e.swLineCENTER;
-        segment.Layer = layerName;
-        return 1;
-    }
-
-    private static bool HasAutomaticCenterline(IView view, string layerName)
-    {
-        var sketch = view?.GetSketch() as ISketch;
-        var segments = sketch?.GetSketchSegments() as object[];
-        return segments != null && segments
-            .OfType<ISketchSegment>()
-            .Any(segment => string.Equals(segment.Layer, layerName, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static IReadOnlyList<PointF> GetCenterMarkPositions(IView view)
-    {
-        var positions = new List<PointF>();
-        var centerMark = view?.GetFirstCenterMark() as ICenterMark;
-        while (centerMark != null)
-        {
-            var annotation = centerMark.GetAnnotation() as IAnnotation;
-            var position = annotation?.GetPosition() as double[];
-            if (position != null && position.Length >= 2)
-            {
-                positions.Add(new PointF((float)position[0], (float)position[1]));
-            }
-            centerMark = centerMark.GetNext() as ICenterMark;
-        }
-        return positions;
-    }
-
-    private static bool IsCenterMarkPatternSymmetric(
-        IReadOnlyList<PointF> positions,
-        double axis,
-        bool verticalAxis,
-        double tolerance)
-    {
-        if (positions == null || positions.Count < 2)
-        {
-            return false;
-        }
-
-        var hasOffAxisPair = false;
-        foreach (var point in positions)
-        {
-            var coordinate = verticalAxis ? point.X : point.Y;
-            if (Math.Abs(coordinate - axis) > tolerance)
-            {
-                hasOffAxisPair = true;
-            }
-            var reflectedX = verticalAxis ? 2d * axis - point.X : point.X;
-            var reflectedY = verticalAxis ? point.Y : 2d * axis - point.Y;
-            if (!positions.Any(candidate =>
-                Math.Abs(candidate.X - reflectedX) <= tolerance
-                && Math.Abs(candidate.Y - reflectedY) <= tolerance))
-            {
-                return false;
-            }
-        }
-        return hasOffAxisPair;
-    }
-
-    private AutomaticDrawingRuleDecision ResolveAutomaticDrawingRuleDecision(
-        CadTreeNode source,
-        IDrawingDoc drawing,
-        AutomaticDrawingRuleProfile rules)
-    {
-        var hasSheetMetalFeature = false;
-        var hasRevolvedFeature = false;
-        try
-        {
-            var sourceModel = FindLoadedDocument(source?.FullPath);
-            var feature = sourceModel?.FirstFeature() as IFeature;
-            var inspected = 0;
-            while (feature != null && inspected++ < 10000)
-            {
-                var typeName = feature.GetTypeName2() ?? feature.GetTypeName() ?? string.Empty;
-                hasSheetMetalFeature |= typeName.IndexOf("SheetMetal", StringComparison.OrdinalIgnoreCase) >= 0
-                    || typeName.IndexOf("FlatPattern", StringComparison.OrdinalIgnoreCase) >= 0
-                    || typeName.IndexOf("SMBaseFlange", StringComparison.OrdinalIgnoreCase) >= 0;
-                hasRevolvedFeature |= typeName.IndexOf("Revol", StringComparison.OrdinalIgnoreCase) >= 0
-                    || (feature.Name ?? string.Empty).IndexOf("旋转", StringComparison.OrdinalIgnoreCase) >= 0;
-                feature = feature.GetNextFeature() as IFeature;
-            }
-        }
-        catch (COMException)
-        {
-            // Feature inspection is advisory; view geometry still provides a safe classification fallback.
-        }
-
-        var extents = new List<double>();
-        var views = EnumerateDrawingModelViews(drawing).ToList();
-        IView frontView;
-        IView topView;
-        IView sideView;
-        IView isometricView;
-        ResolveAutomaticDrawingViews(
-            views,
-            out frontView,
-            out topView,
-            out sideView,
-            out isometricView);
-        AddDrawingViewExtents(frontView, extents, true);
-        if (topView != null)
-        {
-            AddDrawingViewExtents(topView, extents, false);
-        }
-        else if (sideView != null)
-        {
-            AddDrawingViewExtents(sideView, extents, false);
-        }
-
-        return AutomaticDrawingRuleEngine.Decide(
-            source?.Kind ?? CadDocumentKind.Other,
-            extents,
-            hasSheetMetalFeature,
-            hasRevolvedFeature,
-            rules);
-    }
-
-    private static void AddDrawingViewExtents(IView view, ICollection<double> extents, bool includeBothAxes)
-    {
-        if (view == null || extents == null || view.ScaleDecimal <= 0)
-        {
-            return;
-        }
-        var outline = GetDrawingViewOutline(view);
-        if (includeBothAxes)
-        {
-            if (outline.Width > 0)
-            {
-                extents.Add(outline.Width / view.ScaleDecimal);
-            }
-            if (outline.Height > 0)
-            {
-                extents.Add(outline.Height / view.ScaleDecimal);
-            }
-            return;
-        }
-
-        var secondaryExtent = outline.Width > 0 && outline.Height > 0
-            ? Math.Min(outline.Width, outline.Height)
-            : Math.Max(outline.Width, outline.Height);
-        if (secondaryExtent > 0)
-        {
-            extents.Add(secondaryExtent / view.ScaleDecimal);
-        }
-    }
-
-    private static int Standardize45DegreeChamferDimensions(IDrawingDoc drawing)
-    {
-        var candidatesByFeature = new Dictionary<string, List<ChamferDimensionCandidate>>(StringComparer.OrdinalIgnoreCase);
-        var standardized = 0;
-
-        foreach (var view in EnumerateDrawingModelViews(drawing))
-        {
-            var viewName = view.GetName2() ?? string.Empty;
-            var displayDimension = view.GetFirstDisplayDimension5() as IDisplayDimension;
-            while (displayDimension != null)
-            {
-                var modelDimension = displayDimension.GetDimension2(0) as IDimension;
-                var feature = modelDimension?.GetFeatureOwner();
-                if (modelDimension != null)
-                {
-                    var dimensionType = displayDimension.Type2;
-                    if (dimensionType == (int)swDimensionType_e.swDimensionTypeUnknown)
-                    {
-                        dimensionType = modelDimension.GetType();
-                    }
-                    if (dimensionType == (int)swDimensionType_e.swChamferDimension)
-                    {
-                        var length = 0d;
-                        var angle = 0d;
-                        if (modelDimension.GetSystemChamferValues(ref length, ref angle)
-                            && Is45DegreeAngle(angle))
-                        {
-                            displayDimension.ChamferTextStyle =
-                                (int)swDetailingChamferDimLeaderTextStyle_e.swDetailChamferDimCDist;
-                            standardized++;
-                        }
-                    }
-                    else
-                    {
-                        var key = GetDimensionFeatureKey(modelDimension);
-                        List<ChamferDimensionCandidate> candidates = null;
-                        if ((dimensionType == (int)swDimensionType_e.swAngularDimension
-                                || IsLinearDimension(dimensionType))
-                            && !string.IsNullOrWhiteSpace(key)
-                            && !candidatesByFeature.TryGetValue(key, out candidates))
-                        {
-                            candidates = new List<ChamferDimensionCandidate>();
-                            candidatesByFeature[key] = candidates;
-                        }
-                        if (candidates != null)
-                        {
-                            candidates.Add(new ChamferDimensionCandidate(
-                                displayDimension,
-                                modelDimension,
-                                dimensionType,
-                                viewName,
-                                GetAnnotationPosition(displayDimension),
-                                IsChamferFeature(feature)));
-                        }
-                    }
-                }
-
-                displayDimension = displayDimension.GetNext5() as IDisplayDimension;
-            }
-        }
-
-        foreach (var candidates in candidatesByFeature.Values)
-        {
-            var usedLengths = new HashSet<ChamferDimensionCandidate>();
-            foreach (var angleDimension in candidates.Where(candidate =>
-                candidate.DimensionType == (int)swDimensionType_e.swAngularDimension
-                && Is45DegreeAngle(candidate.ModelDimension.SystemValue)))
-            {
-                var lengthDimension = candidates
-                    .Where(candidate =>
-                        IsLinearDimension(candidate.DimensionType)
-                        && candidate.ModelDimension.SystemValue > 0
-                        && string.Equals(candidate.ViewName, angleDimension.ViewName, StringComparison.OrdinalIgnoreCase)
-                        && !usedLengths.Contains(candidate))
-                    .OrderBy(candidate => GetDistance(candidate.AnnotationPosition, angleDimension.AnnotationPosition))
-                    .FirstOrDefault();
-                if (lengthDimension == null)
-                {
-                    continue;
-                }
-
-                var annotationDistance = GetDistance(
-                    lengthDimension.AnnotationPosition,
-                    angleDimension.AnnotationPosition);
-                if (!angleDimension.IsChamferFeature
-                    && !lengthDimension.IsChamferFeature
-                    && (angleDimension.AnnotationPosition.IsEmpty
-                        || lengthDimension.AnnotationPosition.IsEmpty
-                        || annotationDistance > 0.035d))
-                {
-                    continue;
-                }
-
-                lengthDimension.DisplayDimension.SetText(
-                    (int)swDimensionTextParts_e.swDimensionTextPrefix,
-                    "C");
-                lengthDimension.DisplayDimension.ShowDimensionValue = true;
-
-                var angleAnnotation = angleDimension.DisplayDimension.GetAnnotation() as IAnnotation;
-                if (angleAnnotation != null)
-                {
-                    angleAnnotation.Visible = (int)swAnnotationVisibilityState_e.swAnnotationHidden;
-                }
-                usedLengths.Add(lengthDimension);
-                standardized++;
-            }
-        }
-
-        return standardized;
-    }
-
-    private static bool IsChamferFeature(IFeature feature)
-    {
-        if (feature == null)
-        {
-            return false;
-        }
-
-        var typeName = feature.GetTypeName2() ?? feature.GetTypeName() ?? string.Empty;
-        return typeName.IndexOf("Chamfer", StringComparison.OrdinalIgnoreCase) >= 0
-            || (feature.Name ?? string.Empty).IndexOf("倒角", StringComparison.OrdinalIgnoreCase) >= 0;
-    }
-
-    private static string GetDimensionFeatureKey(IDimension dimension)
-    {
-        var fullName = dimension?.FullName ?? string.Empty;
-        var separator = fullName.IndexOf('@');
-        return separator >= 0 && separator < fullName.Length - 1
-            ? fullName.Substring(separator + 1)
-            : fullName;
-    }
-
-    private static bool IsLinearDimension(int dimensionType)
-    {
-        return dimensionType == (int)swDimensionType_e.swLinearDimension
-            || dimensionType == (int)swDimensionType_e.swHorLinearDimension
-            || dimensionType == (int)swDimensionType_e.swVertLinearDimension;
-    }
-
-    private static bool Is45DegreeAngle(double systemValue)
-    {
-        var degrees = Math.Abs(systemValue) * 180d / Math.PI % 180d;
-        if (degrees > 90d)
-        {
-            degrees = 180d - degrees;
-        }
-        return Math.Abs(degrees - 45d) <= 0.1d;
-    }
-
-    private static PointF GetAnnotationPosition(IDisplayDimension dimension)
-    {
-        var annotation = dimension?.GetAnnotation() as IAnnotation;
-        var position = annotation?.GetPosition() as double[];
-        return position != null && position.Length >= 2
-            ? new PointF((float)position[0], (float)position[1])
-            : PointF.Empty;
-    }
-
-    private static double GetDistance(PointF left, PointF right)
-    {
-        var x = left.X - right.X;
-        var y = left.Y - right.Y;
-        return Math.Sqrt(x * x + y * y);
-    }
-
-    private static int HideDuplicateDrawingDimensions(IModelDoc2 drawingModel, IDrawingDoc drawing)
-    {
-        // GB/T 4458.4：同一尺寸一般只标注一次，并放在表达最清晰的视图中。
-        var identities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var hidden = 0;
-        foreach (var view in EnumerateDrawingModelViews(drawing))
-        {
-            var dimension = view.GetFirstDisplayDimension5() as IDisplayDimension;
-            while (dimension != null)
-            {
-                var next = dimension.GetNext5() as IDisplayDimension;
-                var annotation = dimension.GetAnnotation() as IAnnotation;
-                if (annotation != null
-                    && annotation.Visible != (int)swAnnotationVisibilityState_e.swAnnotationHidden)
-                {
-                    var identity = GetDrawingDimensionIdentity(drawingModel, view, dimension, annotation);
-                    if (!string.IsNullOrWhiteSpace(identity) && !identities.Add(identity))
-                    {
-                        annotation.Visible = (int)swAnnotationVisibilityState_e.swAnnotationHidden;
-                        hidden++;
-                    }
-                }
-
-                dimension = next;
-            }
-        }
-
-        return hidden;
-    }
-
-    private static string GetDrawingDimensionIdentity(
-        IModelDoc2 drawingModel,
-        IView view,
-        IDisplayDimension displayDimension,
-        IAnnotation annotation)
-    {
-        try
-        {
-            var modelDimension = displayDimension.GetDimension2(0) as IDimension;
-            var fullName = modelDimension?.FullName?.Trim() ?? string.Empty;
-            if (!string.IsNullOrWhiteSpace(fullName) && !displayDimension.IsReferenceDim())
-            {
-                return string.Concat("MODEL|", fullName);
-            }
-
-            var attached = annotation.GetAttachedEntities3() as object[];
-            if (attached == null || attached.Length == 0 || drawingModel?.Extension == null)
-            {
-                return string.Empty;
-            }
-
-            var references = attached
-                .Select(entity => drawingModel.Extension.GetPersistReference3(entity) as byte[])
-                .Where(reference => reference != null && reference.Length > 0)
-                .Select(Convert.ToBase64String)
-                .OrderBy(reference => reference, StringComparer.Ordinal)
-                .ToArray();
-            if (references.Length == 0)
-            {
-                return string.Empty;
-            }
-
-            return string.Concat(
-                "REFERENCE|",
-                view?.GetName2() ?? string.Empty,
-                "|",
-                displayDimension.Type2.ToString(CultureInfo.InvariantCulture),
-                "|",
-                string.Join(";", references));
-        }
-        catch (COMException)
-        {
-            return string.Empty;
-        }
-    }
-
-    private static int ArrangeDrawingDimensions(
-        IModelDoc2 drawingModel,
-        IDrawingDoc drawing,
-        double minimumSpacing)
-    {
-        var selectionManager = drawingModel.SelectionManager as ISelectionMgr;
-        if (selectionManager == null)
-        {
-            return 0;
-        }
-
-        var arrangedViews = 0;
-        foreach (var view in EnumerateDrawingModelViews(drawing))
-        {
-            drawingModel.ClearSelection2(true);
-            var selectData = selectionManager.CreateSelectData();
-            var selected = 0;
-            var dimension = view.GetFirstDisplayDimension5() as IDisplayDimension;
-            while (dimension != null)
-            {
-                dimension.CenterText = true;
-                dimension.DimensionToInside = false;
-                var annotation = dimension.GetAnnotation() as IAnnotation;
-                if (annotation != null
-                    && annotation.Visible != (int)swAnnotationVisibilityState_e.swAnnotationHidden
-                    && annotation.Select3(true, selectData))
-                {
-                    selected++;
-                }
-                dimension = dimension.GetNext5() as IDisplayDimension;
-            }
-
-            if (selected > 0)
-            {
-                if (drawingModel.Extension.AlignDimensions(
-                    (int)swAlignDimensionType_e.swAlignDimensionType_AutoArrange,
-                    minimumSpacing))
-                {
-                    arrangedViews++;
-                }
-            }
-        }
-        drawingModel.ClearSelection2(true);
-        return arrangedViews;
-    }
-
-    private sealed class ChamferDimensionCandidate
-    {
-        public ChamferDimensionCandidate(
-            IDisplayDimension displayDimension,
-            IDimension modelDimension,
-            int dimensionType,
-            string viewName,
-            PointF annotationPosition,
-            bool isChamferFeature)
-        {
-            DisplayDimension = displayDimension;
-            ModelDimension = modelDimension;
-            DimensionType = dimensionType;
-            ViewName = viewName;
-            AnnotationPosition = annotationPosition;
-            IsChamferFeature = isChamferFeature;
-        }
-
-        public IDisplayDimension DisplayDimension { get; }
-
-        public IDimension ModelDimension { get; }
-
-        public int DimensionType { get; }
-
-        public string ViewName { get; }
-
-        public PointF AnnotationPosition { get; }
-
-        public bool IsChamferFeature { get; }
-    }
-
-    private string ResolveDrawingTemplate(string requestedTemplate)
-    {
-        if (!string.IsNullOrWhiteSpace(requestedTemplate))
-        {
-            if (!File.Exists(requestedTemplate))
-            {
-                throw new FileNotFoundException("所选工程图模板不存在，请重新选择模板。", requestedTemplate);
-            }
-            return requestedTemplate;
-        }
-
-        var template = application.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
-        if (string.IsNullOrWhiteSpace(template) || !File.Exists(template))
-        {
-            template = application.GetDocumentTemplate(
-                (int)swDocumentTypes_e.swDocDRAWING,
-                string.Empty,
-                (int)swDwgPaperSizes_e.swDwgPaperA3size,
-                0,
-                0);
-        }
-        if (string.IsNullOrWhiteSpace(template) || !File.Exists(template))
-        {
-            throw new FileNotFoundException("未找到SolidWorks默认工程图模板。请在“自动出图”页签选择.drwDot模板。 ");
-        }
-        return template;
-    }
-
-    private void CreateAutomaticDrawingViews(
-        IModelDoc2 drawingModel,
-        IDrawingDoc drawing,
-        string sourcePath,
-        AutomaticDrawingOptions options)
-    {
-        var sheet = drawing.GetCurrentSheet() as ISheet;
-        var width = 0.42;
-        var height = 0.297;
-        sheet?.GetSize(ref width, ref height);
-        if (width <= 0 || height <= 0)
-        {
-            width = 0.42;
-            height = 0.297;
-        }
-
-        var primaryView = CreateAutomaticDrawingModelView(
-            drawing,
-            sourcePath,
-            new[] { "*Front", "*前视", "*前视图", "*正视图" },
-            sheetWidth: width * 0.30d,
-            sheetHeight: height * 0.66d,
-            "主视图");
-        var topView = CreateAutomaticDrawingModelView(
-            drawing,
-            sourcePath,
-            new[] { "*Top", "*上视", "*俯视", "*俯视图" },
-            sheetWidth: width * 0.30d,
-            sheetHeight: height * 0.30d,
-            "俯视图");
-        var sideView = CreateAutomaticDrawingModelView(
-            drawing,
-            sourcePath,
-            new[] { "*Right", "*右视", "*右视图" },
-            sheetWidth: width * 0.67d,
-            sheetHeight: height * 0.66d,
-            "右视图");
-        IView isometricView = null;
-        var createdViews = new List<IView> { primaryView, topView, sideView };
-
-        if (options.GenerateIsometric && isometricView == null)
-        {
-            isometricView = CreateAutomaticDrawingIsometricView(
-                drawing,
-                sourcePath,
-                width,
-                height);
-            createdViews.Add(isometricView);
-        }
-
-        ArrangeAutomaticDrawingViews(
-            drawingModel,
-            sheet,
-            width,
-            height,
-            primaryView,
-            topView,
-            sideView,
-            isometricView,
-            options);
-
-        foreach (var view in createdViews)
-        {
-            var position = GetDrawingViewPosition(view);
-            var outline = GetDrawingViewOutline(view);
-            LogOperation(string.Concat(
-                "Automatic drawing view name=", view.GetName2(),
-                " orientation=", GetDrawingViewOrientation(view),
-                " scale=", view.ScaleDecimal.ToString("G17", CultureInfo.InvariantCulture),
-                " x=", position.X.ToString("G17", CultureInfo.InvariantCulture),
-                " y=", position.Y.ToString("G17", CultureInfo.InvariantCulture),
-                " left=", outline.Left.ToString("G17", CultureInfo.InvariantCulture),
-                " bottom=", outline.Top.ToString("G17", CultureInfo.InvariantCulture),
-                " right=", outline.Right.ToString("G17", CultureInfo.InvariantCulture),
-                " top=", outline.Bottom.ToString("G17", CultureInfo.InvariantCulture)));
-        }
-
-        if (options.IncludeAssemblyBom
-            && string.Equals(Path.GetExtension(sourcePath), ".SLDASM", StringComparison.OrdinalIgnoreCase))
-        {
-            InsertAssemblyBom(primaryView, width, height);
-        }
-    }
-
-    private static void ArrangeExistingAutomaticDrawingViews(
-        IModelDoc2 drawingModel,
-        IDrawingDoc drawing,
-        string sourcePath,
-        AutomaticDrawingOptions options)
-    {
-        var sheet = drawing.GetCurrentSheet() as ISheet;
-        var width = 0.42;
-        var height = 0.297;
-        sheet?.GetSize(ref width, ref height);
-        var createdViews = EnumerateDrawingModelViews(drawing).ToList();
-        IView frontView;
-        IView topView;
-        IView sideView;
-        IView isometricView;
-        ResolveAutomaticDrawingViews(
-            createdViews,
-            out frontView,
-            out topView,
-            out sideView,
-            out isometricView);
-        if (frontView == null)
-        {
-            throw new InvalidOperationException("现有工程图中未找到可重新布局的主视图。");
-        }
-
-
-        if (options?.GenerateIsometric == true && isometricView == null)
-        {
-            isometricView = CreateAutomaticDrawingIsometricView(
-                drawing,
-                sourcePath,
-                width,
-                height);
-        }
-
-        ArrangeAutomaticDrawingViews(
-            drawingModel,
-            sheet,
-            width,
-            height,
-            frontView,
-            topView,
-            sideView,
-            isometricView,
-            options);
-    }
-
-    private static IView CreateAutomaticDrawingIsometricView(
-        IDrawingDoc drawing,
-        string sourcePath,
-        double sheetWidth,
-        double sheetHeight)
-    {
-        var view = drawing.CreateDrawViewFromModelView3(
-            sourcePath,
-            "*Isometric",
-            sheetWidth * 0.68d,
-            sheetHeight * 0.30d,
-            0d) as IView;
-        if (view == null)
-        {
-            throw new InvalidOperationException("SolidWorks未能创建轴测图，请确认模型包含标准轴测视图。");
-        }
-        PrepareAutomaticDrawingView(view);
-        return view;
-    }
-
-    private static IView CreateAutomaticDrawingModelView(
-        IDrawingDoc drawing,
-        string sourcePath,
-        IReadOnlyList<string> orientations,
-        double sheetWidth,
-        double sheetHeight,
-        string viewName)
-    {
-        foreach (var orientation in orientations ?? Array.Empty<string>())
-        {
-            var view = drawing.CreateDrawViewFromModelView3(
-                sourcePath,
-                orientation,
-                sheetWidth,
-                sheetHeight,
-                0d) as IView;
-            if (view != null)
-            {
-                PrepareAutomaticDrawingView(view);
-                return view;
-            }
-        }
-        throw new InvalidOperationException(string.Concat(
-            "SolidWorks未能创建", viewName,
-            "。请确认零件可正常打开，并检查标准视图是否完整。"));
-    }
-
-    private static void ResolveAutomaticDrawingViews(
-        IReadOnlyList<IView> createdViews,
-        out IView frontView,
-        out IView topView,
-        out IView sideView,
-        out IView isometricView)
-    {
-        var resolvedIsometricView = createdViews.FirstOrDefault(IsIsometricDrawingView);
-        var resolvedFrontView = createdViews.FirstOrDefault(view =>
-            string.Equals(GetDrawingViewOrientation(view), "*Front", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(GetDrawingViewOrientation(view), "*前视", StringComparison.OrdinalIgnoreCase))
-            ?? createdViews.FirstOrDefault(view => !ReferenceEquals(view, resolvedIsometricView));
-        var projectedViews = createdViews.Where(view =>
-            !ReferenceEquals(view, resolvedFrontView)
-            && !ReferenceEquals(view, resolvedIsometricView)).ToList();
-        var frontPosition = GetDrawingViewPosition(resolvedFrontView);
-        var resolvedTopView = projectedViews.FirstOrDefault(view =>
-            string.Equals(GetDrawingViewOrientation(view), "*Top", StringComparison.OrdinalIgnoreCase))
-            ?? projectedViews.OrderBy(view => Math.Abs(GetDrawingViewPosition(view).X - frontPosition.X)).FirstOrDefault();
-        var resolvedSideView = projectedViews.FirstOrDefault(view =>
-            !ReferenceEquals(view, resolvedTopView)
-            && string.Equals(GetDrawingViewOrientation(view), "*Left", StringComparison.OrdinalIgnoreCase))
-            ?? projectedViews.FirstOrDefault(view =>
-                !ReferenceEquals(view, resolvedTopView)
-                && string.Equals(GetDrawingViewOrientation(view), "*Right", StringComparison.OrdinalIgnoreCase))
-            ?? projectedViews.FirstOrDefault(view => !ReferenceEquals(view, resolvedTopView));
-        frontView = resolvedFrontView;
-        topView = resolvedTopView;
-        sideView = resolvedSideView;
-        isometricView = resolvedIsometricView;
-    }
-
-    private static bool IsIsometricDrawingView(IView view)
-    {
-        var orientation = GetDrawingViewOrientation(view);
-        var name = view?.GetName2() ?? string.Empty;
-        return orientation.IndexOf("Isometric", StringComparison.OrdinalIgnoreCase) >= 0
-            || orientation.IndexOf("等轴测", StringComparison.OrdinalIgnoreCase) >= 0
-            || name.IndexOf("Isometric", StringComparison.OrdinalIgnoreCase) >= 0
-            || name.IndexOf("等轴测", StringComparison.OrdinalIgnoreCase) >= 0;
-    }
-
-    private static void ArrangeAutomaticDrawingViews(
-        IModelDoc2 drawingModel,
-        ISheet sheet,
-        double sheetWidth,
-        double sheetHeight,
-        IView frontView,
-        IView topView,
-        IView sideView,
-        IView isometricView,
-        AutomaticDrawingOptions options)
-    {
-        var rules = AutomaticDrawingRuleStore.Load();
-        var primaryViewMaximumSheetFraction = AutomaticDrawingOptions.NormalizePrimaryViewMaximumSheetFraction(
-            options?.PrimaryViewMaximumSheetFraction
-                ?? AutomaticDrawingOptions.DefaultPrimaryViewMaximumSheetFraction);
-        var frameLeft = sheetWidth * 0.05;
-        var frameRight = sheetWidth * 0.95;
-        var frameBottom = sheetHeight * 0.18;
-        var frameTop = sheetHeight * 0.94;
-        var maximumScale = GetMaximumDrawingViewScale(
-            frontView,
-            sheetWidth * primaryViewMaximumSheetFraction,
-            sheetHeight * primaryViewMaximumSheetFraction);
-        maximumScale = Math.Min(maximumScale, GetMaximumDrawingViewScale(
-            topView,
-            sheetWidth * 0.34,
-            sheetHeight * 0.36));
-        maximumScale = Math.Min(maximumScale, GetMaximumDrawingViewScale(
-            sideView,
-            sheetWidth * 0.30,
-            sheetHeight * 0.36));
-        if (isometricView != null)
-        {
-            maximumScale = Math.Min(
-                maximumScale,
-                GetMaximumDrawingViewScale(
-                    isometricView,
-                    sheetWidth * 0.30,
-                    sheetHeight * 0.30) / rules.IsometricScaleRatio);
-        }
-        if (double.IsInfinity(maximumScale) || maximumScale == double.MaxValue)
-        {
-            maximumScale = frontView.ScaleDecimal;
-        }
-        var targetScale = SelectStandardDrawingScale(maximumScale, rules);
-
-        ApplyDrawingSheetScale(sheet, targetScale);
-        ApplyAutomaticDrawingViewScales(
-            frontView,
-            topView,
-            sideView,
-            isometricView,
-            targetScale,
-            targetScale,
-            targetScale,
-            targetScale * rules.IsometricScaleRatio);
-        drawingModel.ForceRebuild3(false);
-
-        var frontX = sheetWidth * 0.30;
-        var sideX = sheetWidth * 0.67;
-        var upperY = sheetHeight * 0.66;
-        frontView.Position = new double[] { frontX, upperY };
-        if (topView != null)
-        {
-            topView.Position = new double[] { frontX, sheetHeight * 0.30 };
-        }
-        if (sideView != null)
-        {
-            sideView.Position = new double[] { sideX, upperY };
-        }
-        if (isometricView != null)
-        {
-            isometricView.Position = new double[] { sideX, sheetHeight * 0.30d };
-        }
-        drawingModel.ForceRebuild3(false);
-
-        var annotationFrameReserve = rules.AnnotationFrameReserveMeters;
-        var annotationViewGap = rules.ViewAnnotationGapMeters;
-        var boundaryFactor = 1.0d;
-        foreach (var view in new[] { frontView, topView, sideView, isometricView }.Where(view => view != null))
-        {
-            boundaryFactor = Math.Min(boundaryFactor, GetDrawingViewBoundaryScaleFactor(
-                view,
-                frameLeft + annotationFrameReserve,
-                frameRight - annotationFrameReserve,
-                frameBottom + annotationFrameReserve,
-                frameTop - annotationFrameReserve));
-        }
-        boundaryFactor = Math.Min(boundaryFactor, GetVerticalDrawingViewGapScaleFactor(
-            frontView, topView, annotationViewGap));
-        boundaryFactor = Math.Min(boundaryFactor, GetHorizontalDrawingViewGapScaleFactor(
-            frontView, sideView, annotationViewGap));
-        boundaryFactor = Math.Min(boundaryFactor, GetVerticalDrawingViewGapScaleFactor(
-            sideView, isometricView, annotationViewGap));
-        boundaryFactor = Math.Min(boundaryFactor, GetHorizontalDrawingViewGapScaleFactor(
-            topView, isometricView, annotationViewGap));
-        if (boundaryFactor < 0.999d)
-        {
-            var reducedScale = SelectStandardDrawingScale(targetScale * boundaryFactor, rules);
-            if (reducedScale < targetScale)
-            {
-                ApplyDrawingSheetScale(sheet, reducedScale);
-                ApplyAutomaticDrawingViewScales(
-                    frontView,
-                    topView,
-                    sideView,
-                    isometricView,
-                    reducedScale,
-                    reducedScale,
-                    reducedScale,
-                    reducedScale * rules.IsometricScaleRatio);
-                drawingModel.ForceRebuild3(false);
-            }
-        }
-    }
-
-    private static double GetVerticalDrawingViewGapScaleFactor(
-        IView upperView,
-        IView lowerView,
-        double minimumGap)
-    {
-        if (upperView == null || lowerView == null)
-        {
-            return 1.0d;
-        }
-        var upperOutline = GetDrawingViewOutline(upperView);
-        var lowerOutline = GetDrawingViewOutline(lowerView);
-        var upperPosition = GetDrawingViewPosition(upperView);
-        var lowerPosition = GetDrawingViewPosition(lowerView);
-        var currentExtents = upperPosition.Y - upperOutline.Top
-            + lowerOutline.Bottom - lowerPosition.Y;
-        var availableExtents = upperPosition.Y - lowerPosition.Y - minimumGap;
-        return currentExtents > 0d
-            ? Math.Max(0.05d, availableExtents / currentExtents)
-            : 1.0d;
-    }
-
-    private static double GetHorizontalDrawingViewGapScaleFactor(
-        IView leftView,
-        IView rightView,
-        double minimumGap)
-    {
-        if (leftView == null || rightView == null)
-        {
-            return 1.0d;
-        }
-        var leftOutline = GetDrawingViewOutline(leftView);
-        var rightOutline = GetDrawingViewOutline(rightView);
-        var leftPosition = GetDrawingViewPosition(leftView);
-        var rightPosition = GetDrawingViewPosition(rightView);
-        var currentExtents = leftOutline.Right - leftPosition.X
-            + rightPosition.X - rightOutline.Left;
-        var availableExtents = rightPosition.X - leftPosition.X - minimumGap;
-        return currentExtents > 0d
-            ? Math.Max(0.05d, availableExtents / currentExtents)
-            : 1.0d;
-    }
-
-    private static double GetMaximumDrawingViewScale(IView view, double maximumWidth, double maximumHeight)
-    {
-        if (view == null || view.ScaleDecimal <= 0)
-        {
-            return double.MaxValue;
-        }
-        var outline = GetDrawingViewOutline(view);
-        if (outline.Width <= 0 || outline.Height <= 0)
-        {
-            return double.MaxValue;
-        }
-        return Math.Min(
-            maximumWidth / (outline.Width / view.ScaleDecimal),
-            maximumHeight / (outline.Height / view.ScaleDecimal));
-    }
-
-    private static double SelectStandardDrawingScale(
-        double maximumScale,
-        AutomaticDrawingRuleProfile rules)
-    {
-        var standardScales = rules?.StandardScales;
-        if (standardScales == null || standardScales.Length == 0)
-        {
-            standardScales = new[] { 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01 };
-        }
-        foreach (var scale in standardScales)
-        {
-            if (scale <= maximumScale + 0.0000001)
-            {
-                return scale;
-            }
-        }
-        return standardScales[standardScales.Length - 1];
-    }
-
-    private static void ApplyDrawingSheetScale(ISheet sheet, double scale)
-    {
-        var properties = sheet?.GetProperties2() as double[];
-        if (properties == null || properties.Length < 8)
-        {
-            return;
-        }
-        var numerator = scale >= 1 ? scale : 1;
-        var denominator = scale >= 1 ? 1 : 1 / scale;
-        sheet.SetProperties2(
-            (int)properties[0],
-            (int)properties[1],
-            numerator,
-            denominator,
-            true,
-            properties[5],
-            properties[6],
-            properties[7] != 0);
-    }
-
-    private static void ApplyAutomaticDrawingViewScales(
-        IView frontView,
-        IView topView,
-        IView sideView,
-        IView isometricView,
-        double frontScale,
-        double topScale,
-        double sideScale,
-        double isometricScale)
-    {
-        frontView.UseParentScale = false;
-        frontView.ScaleDecimal = frontScale;
-        if (topView != null)
-        {
-            topView.UseParentScale = false;
-            topView.ScaleDecimal = topScale;
-        }
-        if (sideView != null)
-        {
-            sideView.UseParentScale = false;
-            sideView.ScaleDecimal = sideScale;
-        }
-        if (isometricView != null)
-        {
-            isometricView.UseParentScale = false;
-            isometricView.ScaleDecimal = isometricScale;
-        }
-    }
-
-    private static double GetDrawingViewBoundaryScaleFactor(
-        IView view,
-        double frameLeft,
-        double frameRight,
-        double frameBottom,
-        double frameTop)
-    {
-        var outline = GetDrawingViewOutline(view);
-        var position = GetDrawingViewPosition(view);
-        var factor = 1.0;
-        var leftExtent = position.X - outline.Left;
-        var rightExtent = outline.Right - position.X;
-        var bottomExtent = position.Y - outline.Top;
-        var topExtent = outline.Bottom - position.Y;
-        if (leftExtent > 0)
-        {
-            factor = Math.Min(factor, (position.X - frameLeft) / leftExtent);
-        }
-        if (rightExtent > 0)
-        {
-            factor = Math.Min(factor, (frameRight - position.X) / rightExtent);
-        }
-        if (bottomExtent > 0)
-        {
-            factor = Math.Min(factor, (position.Y - frameBottom) / bottomExtent);
-        }
-        if (topExtent > 0)
-        {
-            factor = Math.Min(factor, (frameTop - position.Y) / topExtent);
-        }
-        return Math.Max(0.05, factor);
-    }
-
-    private static PointF GetDrawingViewPosition(IView view)
-    {
-        var position = view?.Position as double[];
-        return position != null && position.Length >= 2
-            ? new PointF((float)position[0], (float)position[1])
-            : PointF.Empty;
-    }
-
-    private static RectangleF GetDrawingViewOutline(IView view)
-    {
-        var outline = view?.GetOutline() as double[];
-        return outline != null && outline.Length >= 4
-            ? RectangleF.FromLTRB((float)outline[0], (float)outline[1], (float)outline[2], (float)outline[3])
-            : RectangleF.Empty;
-    }
-
-    private static IEnumerable<IView> EnumerateDrawingModelViews(IDrawingDoc drawing)
-    {
-        var view = (drawing.GetFirstView() as IView)?.GetNextView() as IView;
-        while (view != null)
-        {
-            yield return view;
-            view = view.GetNextView() as IView;
-        }
-    }
-
-    private static string GetDrawingViewOrientation(IView view)
-    {
-        try
-        {
-            return view?.GetOrientationName() ?? string.Empty;
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
-
-    private void InsertAssemblyBom(IView view, double sheetWidth, double sheetHeight)
-    {
-        if (view == null)
-        {
-            throw new InvalidOperationException("未找到可用于生成BOM的装配体视图。");
-        }
-
-        var template = ResolveBomTemplate();
-        var bom = view.InsertBomTable4(
-            true,
-            Math.Max(0.01, sheetWidth - 0.01),
-            Math.Max(0.01, sheetHeight - 0.01),
-            (int)swBOMConfigurationAnchorType_e.swBOMConfigurationAnchor_TopRight,
-            (int)swBomType_e.swBomType_Indented,
-            string.Empty,
-            template,
-            false,
-            (int)swNumberingType_e.swNumberingType_Detailed,
-            true);
-        if (bom == null)
-        {
-            throw new InvalidOperationException("SolidWorks未能生成装配体BOM，请检查BOM模板和装配体配置。");
-        }
-    }
-
-    private string ResolveBomTemplate()
-    {
-        var candidates = new List<string>();
-        var configuredFolders = application.GetUserPreferenceStringListValue((int)swUserPreferenceStringValue_e.swFileLocationsBOMTemplates);
-        foreach (var folder in (configuredFolders ?? string.Empty).Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
-        {
-            candidates.Add(Path.Combine(folder.Trim(), "bom-standard.sldbomtbt"));
-        }
-
-        var executableDirectory = Path.GetDirectoryName(application.GetExecutablePath()) ?? string.Empty;
-        var language = application.GetCurrentLanguage();
-        if (!string.IsNullOrWhiteSpace(language))
-        {
-            candidates.Add(Path.Combine(executableDirectory, "lang", language, "bom-standard.sldbomtbt"));
-        }
-        candidates.Add(Path.Combine(executableDirectory, "lang", "chinese-simplified", "bom-standard.sldbomtbt"));
-        candidates.Add(Path.Combine(executableDirectory, "lang", "english", "bom-standard.sldbomtbt"));
-
-        var template = candidates.FirstOrDefault(File.Exists);
-        if (string.IsNullOrWhiteSpace(template))
-        {
-            throw new FileNotFoundException("未找到SolidWorks标准BOM模板。请在SolidWorks文件位置中配置BOM模板。 ");
-        }
-        return template;
     }
 
     private void EnsureDrawingCanBeChanged(
@@ -5138,7 +3174,7 @@ public sealed partial class PdmAddin : ISwAddin
             QueueControlledOpen(projectId, documentId, mode, versionId, checkoutDocumentId, checkoutDocumentIds);
             return;
         }
-        Interlocked.Exchange(ref controlledOpenInProgress, 1);
+        MarkCacheOperationBusy(ref controlledOpenInProgress);
         if (!TryBeginWorkspaceOperation("阶段1/3：正在读取PLM受控清单"))
         {
             Interlocked.Exchange(ref controlledOpenInProgress, 0);
@@ -5514,7 +3550,7 @@ public sealed partial class PdmAddin : ISwAddin
             return;
         }
 
-        if (disconnecting || taskPaneControl == null || taskPaneControl.IsDisposed || Interlocked.Exchange(ref openOperationInProgress, 1) != 0)
+        if (disconnecting || taskPaneControl == null || taskPaneControl.IsDisposed || MarkCacheOperationBusy(ref openOperationInProgress) != 0)
         {
             return;
         }
@@ -5870,11 +3906,6 @@ public sealed partial class PdmAddin : ISwAddin
                 currentProjectId.Value,
                 registrationDecisions);
             taskPaneControl.SetTree(currentTree);
-            taskPaneControl.RefreshAutomaticDrawingState();
-            if (acquireItems.Any(item => item.Node.Kind == CadDocumentKind.Drawing))
-            {
-                taskPaneControl.SetAutomaticDrawingOperationResult("已获取工程图权限，可更新、手工编辑或重新执行自动标注。");
-            }
             LogOperation(string.Concat(
                 "Checkout completed files=", result.CheckedOutFiles,
                 " updated=", result.UpdatedFiles,
@@ -6483,7 +4514,7 @@ public sealed partial class PdmAddin : ISwAddin
             ShowWorkspaceOperationBusy();
             return;
         }
-        if (Interlocked.Exchange(ref checkInOperationInProgress, 1) != 0)
+        if (MarkCacheOperationBusy(ref checkInOperationInProgress) != 0)
         {
             EndWorkspaceOperation();
             ShowError("已有提交存档任务正在进行，请稍候再试。");
@@ -8079,7 +6110,7 @@ public sealed partial class PdmAddin : ISwAddin
             if (dialog.Operation == BatchOperationKind.CheckIn)
             {
                 if (Volatile.Read(ref openOperationInProgress) > 0
-                    || Interlocked.Exchange(ref checkInOperationInProgress, 1) != 0)
+                    || MarkCacheOperationBusy(ref checkInOperationInProgress) != 0)
                 {
                     EndWorkspaceOperation();
                     ShowError("正在打开图档或已有提交存档任务，请稍候再试。");
@@ -11813,6 +9844,7 @@ public sealed partial class PdmAddin : ISwAddin
     {
         var directory = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "checkin", documentId.ToString("N"), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
+        ArchiveTemporaryCopyLease.Start(directory);
         var copyPath = Path.Combine(directory, Path.GetFileName(sourcePath));
         var saveErrors = 0;
         var saveWarnings = 0;
@@ -11857,6 +9889,7 @@ public sealed partial class PdmAddin : ISwAddin
     {
         var directory = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "checkin", documentId.ToString("N"), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
+        ArchiveTemporaryCopyLease.Start(directory);
         var copyPath = Path.Combine(directory, Path.GetFileName(sourcePath));
         LogOperation(string.Concat("Batch check-in file copy start source=", sourcePath, " target=", copyPath));
         try
@@ -11886,6 +9919,7 @@ public sealed partial class PdmAddin : ISwAddin
         try
         {
             var directory = Path.GetDirectoryName(copyPath);
+            if (!string.IsNullOrWhiteSpace(directory)) ArchiveTemporaryCopyLease.Release(directory);
             if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
             {
                 Directory.Delete(directory, true);
@@ -12787,7 +10821,6 @@ public sealed partial class PdmAddin : ISwAddin
             }
             CacheActiveTree(activeTreeKey, currentTree, currentProjectId);
             taskPaneControl.SetTree(currentTree);
-            taskPaneControl.SetActiveDrawingSource(activeDrawingSource);
             if (string.Equals(failedTreeRefreshKey, activeTreeKey, StringComparison.OrdinalIgnoreCase))
                 taskPaneControl.SetCheckoutReminder(string.Empty, false);
             failedTreeRefreshKey = string.Empty;
@@ -12945,7 +10978,6 @@ public sealed partial class PdmAddin : ISwAddin
         var activeDrawingSource = ResolveActiveDrawingSource(currentTree, previousTree);
         RefreshLoadedDocumentModificationFlags(currentTree);
         taskPaneControl.SetTree(currentTree);
-        taskPaneControl.SetActiveDrawingSource(activeDrawingSource);
         CacheActiveTree(cacheKey, currentTree, currentProjectId);
         LogOperation(string.Concat(
             "RefreshTree cache hit nodes=", CountTreeNodes(currentTree),
@@ -13304,6 +11336,7 @@ public sealed partial class PdmAddin : ISwAddin
             CheckoutLastHeartbeatAt = document?.CheckoutLastHeartbeatAt,
             LifecycleState = LifecycleStateName(document?.State ?? 0),
             DrawingReviewLocked = document?.DrawingReviewLocked == true,
+            OperationAccess = document?.OperationAccess,
             UpdatedAt = document?.UpdatedAt
         };
         var seenInstancePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -13332,6 +11365,14 @@ public sealed partial class PdmAddin : ISwAddin
 
         if (!node.DocumentId.HasValue || node.Kind == CadDocumentKind.Drawing) return;
 
+        var relatedIds = new HashSet<Guid>(relations.Where(item => item.ModelDocumentId == node.DocumentId.Value)
+            .Select(item => item.DrawingDocumentId));
+        // Remove only server-generated projections. Native drawings and unsaved local
+        // discoveries have their own evidence and must not be discarded by a list refresh.
+        node.Children.RemoveAll(child => child.Kind == CadDocumentKind.Drawing && child.DocumentId.HasValue
+            && child.RelatedModelDocumentId == node.DocumentId
+            && (child.InstancePath ?? string.Empty).EndsWith("/drawing:" + child.DocumentId.Value.ToString("N"), StringComparison.Ordinal)
+            && !relatedIds.Contains(child.DocumentId.Value));
         var existingDrawingIds = new HashSet<Guid>(node.Children
             .Where(child => child.Kind == CadDocumentKind.Drawing && child.DocumentId.HasValue)
             .Select(child => child.DocumentId.Value));
@@ -13355,6 +11396,7 @@ public sealed partial class PdmAddin : ISwAddin
                     existingDrawing.LatestRevision = revision;
                     existingDrawing.DrawingVersion = drawing.DrawingVersion ?? "待核对";
                     existingDrawing.PublishedVersion = drawing.PublishedVersion ?? "未发布";
+                    existingDrawing.OperationAccess = drawing.OperationAccess;
                 }
                 continue;
             }
@@ -13381,6 +11423,9 @@ public sealed partial class PdmAddin : ISwAddin
                 CheckoutLastHeartbeatAt = drawing.CheckoutLastHeartbeatAt,
                 LifecycleState = LifecycleStateName(drawing.State),
                 DrawingReviewLocked = drawing.DrawingReviewLocked,
+                OperationAccess = drawing.OperationAccess,
+                DrawingVersion = drawing.DrawingVersion ?? "待核对",
+                PublishedVersion = drawing.PublishedVersion ?? "未发布",
                 UpdatedAt = drawing.UpdatedAt
             });
             existingDrawingIds.Add(drawing.Id);
@@ -14799,7 +12844,7 @@ public sealed partial class PdmAddin : ISwAddin
 
     private bool TryBeginWorkspaceOperation(string description)
     {
-        if (Interlocked.CompareExchange(ref workspaceOperationInProgress, 1, 0) != 0)
+        if (MarkCacheOperationBusy(ref workspaceOperationInProgress) != 0)
         {
             return false;
         }

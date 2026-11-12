@@ -664,7 +664,7 @@ describe('PLM client workspace', () => {
     const originalFetch = vi.mocked(fetch).getMockImplementation()!
     vi.mocked(fetch).mockImplementation((input, init) => {
       const url = String(input)
-      if (url.endsWith('/health') || url.endsWith('/api/auth/resume')) return new Promise<Response>(() => {})
+      if (url.endsWith('/health') || url.endsWith('/api/auth/resume') || url.endsWith('/api/me/table-preferences')) return new Promise<Response>(() => {})
       return originalFetch(input, init)
     })
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
@@ -672,6 +672,32 @@ describe('PLM client workspace', () => {
     expect(wrapper.find('[aria-label="正在恢复登录状态"]').exists()).toBe(false)
     expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(false)
     expect(wrapper.find('.pdm-sidebar__nav').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(['standard-library', 'program-templates'])('opens independent %s while unrelated global data is still pending', async page => {
+    window.localStorage.setItem('upton-pdm-active-navigation', page)
+    window.localStorage.setItem('upton-pdm-session', JSON.stringify({
+      accessToken: 'test-token', expiresAt: '2099-01-01T00:00:00Z',
+      username: 'engineer', displayName: '真实工程师', role: 'Engineer', permissions: ['project.view', 'standard-library.view', 'program-template.view'],
+    }))
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input, init) => String(input).endsWith('/api/customers') ? new Promise<Response>(() => {}) : originalFetch(input, init))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.find(`[data-navigation-page="${page}"]`).isVisible()).toBe(true)
+    expect(wrapper.text()).not.toContain('正在加载权限内项目和待办任务')
+    wrapper.unmount()
+  })
+
+  it('does not open an unauthorized independent remembered page while global data is pending', async () => {
+    window.localStorage.setItem('upton-pdm-active-navigation', 'standard-library')
+    window.localStorage.setItem('upton-pdm-session', JSON.stringify({accessToken:'test-token', expiresAt:'2099-01-01T00:00:00Z', username:'engineer', role:'Engineer', permissions:['project.view']}))
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input, init) => String(input).endsWith('/api/customers') ? new Promise<Response>(() => {}) : originalFetch(input, init))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.find('[data-navigation-page="standard-library"]').exists()).toBe(false)
     wrapper.unmount()
   })
   it('renews a still-valid restored session on startup so newly granted permissions are visible', async () => {
@@ -695,6 +721,24 @@ describe('PLM client workspace', () => {
     expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').some(item => item.text().includes('标准物料'))).toBe(true)
     expect(wrapper.find('[aria-label="正在恢复登录状态"]').exists()).toBe(false)
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith('/api/auth/resume'))).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('ends session restoration after expired credentials renew even while project data is pending', async () => {
+    window.localStorage.setItem('upton-pdm-session', JSON.stringify({
+      accessToken: 'expired-token', expiresAt: '2000-01-01T00:00:00Z', resumeToken: 'test-resume-token',
+      username: 'engineer', displayName: '真实工程师', role: 'Engineer', permissions: ['project.view'],
+    }))
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      if (String(input).endsWith('/api/projects')) return new Promise<Response>(() => {})
+      return originalFetch(input, init)
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(window.localStorage.getItem('upton-pdm-session')).toContain('renewed-token')
+    expect(wrapper.find('[aria-label="正在恢复登录状态"]').exists()).toBe(false)
+    expect(wrapper.find('.pdm-sidebar__nav').exists()).toBe(true)
     wrapper.unmount()
   })
 

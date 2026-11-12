@@ -23,7 +23,7 @@ import type { AuditEntry, OrganizationUnit, PdmUser } from '../types'
 import type { OplInput, OplRow, OplView } from '../projectOpl'
 import { chinaToday } from '../projectCalendar'
 
-const props = defineProps<{ users: PdmUser[]; token: string; currentUsername: string; companyId: string; organizationUnits?: OrganizationUnit[] }>()
+const props = withDefaults(defineProps<{ users: PdmUser[]; token: string; currentUsername: string; companyId: string; organizationUnits?: OrganizationUnit[]; active?: boolean }>(), { active: true })
 const emit = defineEmits<{ open: [projectId: string, tab?: WorkbenchTab, taskId?: string] }>()
 const data = ref<WorkbenchData>(), loading = ref(false), error = ref(''), scope = ref('company')
 const selectedId = ref(''), query = ref(''), unit = ref(''), phaseFilter = ref(''), managerFilter = ref('')
@@ -51,7 +51,7 @@ const overdue = (row: OplRow) => !closed(row) && !!row.issue.dueDate && row.issu
 const all = computed(() => (data.value?.projects ?? []).filter(item => !['Completed', 'Cancelled', 'Terminated', '已完成', '已取消', '已终止'].includes(item.project.businessStatus || item.plan?.currentStage || '')))
 const rootId = (item: WorkbenchProject) => all.value.some(parent => parent.project.id === (item.project.rootProjectId || item.project.parentProjectId)) ? item.project.rootProjectId || item.project.parentProjectId! : item.project.id
 const roots = computed(() => all.value.filter(item => rootId(item) === item.project.id))
-const listAttention = useProjectAttention(() => props.token, () => roots.value.map(item => item.project.id))
+const listAttention = useProjectAttention(() => props.token, () => roots.value.map(item => item.project.id), () => props.active)
 const projectWarnings = (item: WorkbenchProject) => listAttention.reasons(item.project.id, item, true)
 const familyOf = (root: WorkbenchProject) => all.value.filter(item => rootId(item) === root.project.id)
 const units = computed(() => {

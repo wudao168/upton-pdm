@@ -6,6 +6,7 @@ public static class AiPermissions
     public const string Settings = "ai.settings.manage";
     public const string Business = "ai.business.read";
     public const string Cloud = "ai.cloud.use";
+    public const string Web = "ai.web.search";
 
     internal static IEnumerable<PermissionDefinition> Definitions()
     {
@@ -17,5 +18,7 @@ public static class AiPermissions
             { Scope = "project", Action = "view", Dependencies = [Chat] };
         yield return new(Cloud, "使用云端AI模型", "AI助手", "允许将对话及获准引用的业务资料发送至显式配置的云端模型。", true)
             { Scope = "company", Action = "view", Dependencies = [Chat] };
+        yield return new(Web, "使用AI联网搜索与网页读取", "AI助手", "将本轮问题或公开网页地址发送至DeepSeek官方搜索服务，按公司配额计数；不读取PLM业务记录。", true)
+            { Scope = "company", Action = "view", Dependencies = [Chat, Cloud] };
     }
 }

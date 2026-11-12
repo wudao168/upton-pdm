@@ -39,6 +39,11 @@ foreach ($scenario in @('success', 'version', 'hash', 'rollback', 'plugin-archiv
     }
     $pending = $state | ConvertTo-Json -Compress
     $arguments = $buildArguments.Invoke($null, [object[]]@(0, $pendingPath.ToString(), ($pendingPath + '.launched'), '', $pending.ToString()))
+    # These packages only target private temporary fixture directories. Isolate the
+    # host query so a live user's SolidWorks session is neither waited on nor touched.
+    $bootstrap = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String(($arguments -split ' ')[-1]))
+    $isolateHost = "function Get-Process { param([string]`$Name); if (`$Name -ne 'SLDWORKS') { Microsoft.PowerShell.Management\Get-Process -Name `$Name -ErrorAction SilentlyContinue } }; "
+    $arguments = '-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($isolateHost + $bootstrap))
     if ($scenario -eq 'rollback') {
         # Fault injection: candidate hashes pass, installed-file hashes fail after the directory swap.
         $bootstrap = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String(($arguments -split ' ')[-1]))

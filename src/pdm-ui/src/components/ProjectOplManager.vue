@@ -19,8 +19,8 @@ import { downloadOplWorkbook } from '../oplWorkbook'
 
 const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
 const QualityIssuePanel = defineAsyncComponent(() => import('./QualityIssuePanel.vue'))
-const props = defineProps<{ project: ProjectSummary; token: string; mobile?: boolean; requestedIssueId?: string }>()
-const emit = defineEmits<{ openRelease: [projectId: string, releasePackageId: string]; issueRequestHandled: []; saved: [] }>()
+const props = defineProps<{ project: ProjectSummary; token: string; mobile?: boolean; requestedIssueId?: string; showCompanyReviewEntry?: boolean; companyReviewRevision?: number }>()
+const emit = defineEmits<{ openRelease: [projectId: string, releasePackageId: string]; issueRequestHandled: []; saved: []; openCompanyReview: [] }>()
 const displayUserName = useUserDisplayName()
 const view = ref<OplView>({ rows: [], people: [] })
 const loading = ref(false), saving = ref(false), error = ref(''), drawer = ref(false), readonly = ref(false)
@@ -294,7 +294,7 @@ void load()
       <label v-if="mobile && !readonly" class="opl-file-picker">拍照添加图片<input type="file" accept="image/*" capture="environment" :disabled="saving" aria-label="拍照添加问题图片" @change="selectFiles"></label>
       <p v-if="editing && !detailMode" class="opl-meta">提交人：<PersonName :name="editing.issue.createdByDisplayName || name(editing.issue.createdBy)" /> · 提交日期：{{ date(editing.issue.createdAt) }} · 最近更新：<PersonName :name="editing.issue.updatedBy === editing.issue.createdBy ? (editing.issue.createdByDisplayName || name(editing.issue.updatedBy)) : name(editing.issue.updatedBy)" /></p>
       <el-alert v-if="formError" :title="formError" type="error" :closable="false" />
-      <QualityIssuePanel v-if="drawer && editing && project.effectiveProjectPermissions?.includes('project.quality.view')" :key="editing.issue.id" :project-id="editing.issue.relatedProjectId || editing.issue.projectId" :issue-id="editing.issue.id" :token="token" @updated="load" />
+      <QualityIssuePanel v-if="drawer && editing && project.effectiveProjectPermissions?.includes('project.quality.view')" :key="editing.issue.id" :project-id="editing.issue.relatedProjectId || editing.issue.projectId" :issue-id="editing.issue.id" :token="token" :show-company-review-entry="showCompanyReviewEntry" :company-review-revision="companyReviewRevision" @open-company-review="emit('openCompanyReview')" @updated="load" />
       <template #footer><el-checkbox v-if="editing && !readonly" v-model="notifyUpdates" :disabled="saving">保存后通知钉钉群</el-checkbox><el-button :disabled="saving || speechBusy" @click="close()">{{ readonly ? '关闭' : '取消' }}</el-button><el-button v-if="!readonly" type="primary" :loading="saving" :disabled="speechBusy" @click="save">保存问题</el-button></template>
     </el-drawer>
     <el-dialog :model-value="!!previewUrl" :title="previewName" width="min(1000px, 95vw)" append-to-body @close="closePreview"><PdfDrawingViewer v-if="previewUrl && previewKind === 'pdf'" :url="previewUrl" /><audio v-else-if="previewUrl && previewKind === 'audio'" :src="previewUrl" controls aria-label="回听OPL录音" style="width:100%"></audio><img v-else-if="previewUrl" :src="previewUrl" alt="问题附件预览" style="display:block;max-width:100%;max-height:75vh;margin:auto"><template #footer><a v-if="projectDownload" :href="previewUrl" :download="previewName">下载附件</a></template></el-dialog>

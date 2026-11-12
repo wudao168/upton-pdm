@@ -11,6 +11,7 @@ public sealed record AuthorizationSettings(long Revision, IReadOnlyList<Authoriz
     DateTimeOffset MigratedAt, bool RolesUnified = false)
 {
     public bool DingTalkSelfBindingDefaultsApplied { get; init; }
+    public bool AiWebDefaultsApplied { get; init; }
 }
 
 public static class AuthorizationActions

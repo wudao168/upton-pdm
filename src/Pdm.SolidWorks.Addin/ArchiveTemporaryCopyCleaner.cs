@@ -10,9 +10,11 @@ internal sealed class ArchiveTemporaryCopyCleanupResult
     public int DeletedFiles { get; set; }
     public long FreedBytes { get; set; }
     public int SkippedItems { get; set; }
+    public int UnconfirmedCopies { get; set; }
     public string Message => (DeletedFiles == 0 ? "没有清理到可删除的存档临时副本。" : "已清理" + DeletedFiles + "个临时文件，释放"
         + (FreedBytes / 1048576d).ToString("0.00", CultureInfo.InvariantCulture) + " MB。")
-        + (SkippedItems == 0 ? string.Empty : "另有" + SkippedItems + "项被占用、只读或无法确认归属，已跳过。");
+        + (SkippedItems == 0 ? string.Empty : "另有" + SkippedItems + "项被占用、只读或无法确认归属，已跳过。")
+        + (UnconfirmedCopies == 0 ? string.Empty : "其中 " + UnconfirmedCopies + " 个旧上传副本尚无法确认其他实例是否使用，已保留。");
 }
 
 internal static class ArchiveTemporaryCopyCleaner
@@ -20,12 +22,12 @@ internal static class ArchiveTemporaryCopyCleaner
     private static string directory = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "checkin");
     internal static string DirectoryPath => Path.GetFullPath(directory);
 
-    internal static ArchiveTemporaryCopyCleanupResult Clean(Func<bool> isBusy)
+    internal static ArchiveTemporaryCopyCleanupResult Clean(Func<bool> isBusy, Func<bool> hasUnconfirmedInstances = null)
     {
         void RequireIdle()
         {
             if (isBusy == null || isBusy())
-                throw new InvalidOperationException("当前有图档操作或其他SolidWorks实例运行，暂不清理。请待操作结束并退出其他实例后重试。");
+                throw new InvalidOperationException("当前有图档操作正在进行，暂不清理上传副本。请待操作完成后重试。");
         }
         RequireIdle();
         var result = new ArchiveTemporaryCopyCleanupResult();
@@ -65,12 +67,27 @@ internal static class ArchiveTemporaryCopyCleaner
         {
             if (isBusy()) { result.SkippedItems += candidates.Count - index; break; }
             var copy = candidates[index];
+            FileStream lease = null;
+            var held = new List<FileStream>();
             try
             {
                 CheckPath(copy);
-                var files = Directory.GetFiles(copy);
+                var leasePath = Path.Combine(copy, ArchiveTemporaryCopyLease.FileName);
+                if (File.Exists(leasePath))
+                {
+                    CheckPath(leasePath);
+                    lease = new FileStream(leasePath, FileMode.Open, FileAccess.Read, FileShare.Delete);
+                }
+                else if (hasUnconfirmedInstances?.Invoke() == true)
+                { result.SkippedItems++; result.UnconfirmedCopies++; continue; }
+                var files = Array.FindAll(Directory.GetFiles(copy), path => !string.Equals(Path.GetFileName(path), ArchiveTemporaryCopyLease.FileName, StringComparison.OrdinalIgnoreCase));
                 if (Directory.GetDirectories(copy).Length > 0) { result.SkippedItems++; continue; }
-                foreach (var file in files) CheckPath(file);
+                foreach (var file in files)
+                {
+                    CheckPath(file);
+                    held.Add(new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Delete));
+                }
+                if (isBusy()) { result.SkippedItems++; continue; }
                 foreach (var file in files)
                 {
                     CheckPath(file);
@@ -79,6 +96,8 @@ internal static class ArchiveTemporaryCopyCleaner
                     result.DeletedFiles++;
                     result.FreedBytes += length;
                 }
+                foreach (var stream in held) stream.Dispose(); held.Clear();
+                if (lease != null) { File.Delete(leasePath); lease.Dispose(); lease = null; }
                 CheckPath(copy);
                 Directory.Delete(copy, false);
                 var parent = Path.GetDirectoryName(copy);
@@ -87,6 +106,7 @@ internal static class ArchiveTemporaryCopyCleaner
             }
             catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidOperationException)
             { result.SkippedItems++; PluginDiagnosticLog.Record("清理存档临时副本", error.ToString()); }
+            finally { foreach (var stream in held) stream.Dispose(); lease?.Dispose(); }
         }
         return result;
     }

@@ -70,10 +70,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Label pluginVersion = new Label();
     private readonly string installedPluginVersion;
     private readonly ProjectDocumentsControl projectDocuments = new ProjectDocumentsControl();
-    private readonly AutomaticDrawingControl automaticDrawing = new AutomaticDrawingControl();
-    private CadTreeNode activeDrawingSource;
     private TabPage structureTab;
-    private TabPage automaticDrawingTab;
     private TabPage versionsTab;
     private TabPage diagnosticsTab;
     private bool suppressVersionTabRequest;
@@ -98,7 +95,6 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly ToolStripMenuItem contextCheckIn = new ToolStripMenuItem();
 
     private readonly ToolStripMenuItem contextDiscardCheckout = new ToolStripMenuItem();
-    private readonly ToolStripMenuItem contextGenerateDrawing = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextOpenDrawing = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextDrawingVersions = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextVersions = new ToolStripMenuItem();
@@ -169,7 +165,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         BuildTabs();
         ConfigurePluginVersion();
         tabsHost.Dock = DockStyle.Fill;
-        tabsHost.Padding = new Padding(0, 5, 0, 0);
+        tabsHost.Padding = new Padding(15, 0, 15, 0);
         tabsHost.BackColor = Color.FromArgb(244, 247, 251);
         tabsHost.Controls.Add(tabs);
         tabsHost.Layout += (_, _) => ResizeTabHeaders();
@@ -250,10 +246,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     public event EventHandler<CadTreeNodeEventArgs> BatchPropertyEditRequested;
     public event EventHandler<CadTreeNodeEventArgs> BatchPropertyCardRequested;
     public event EventHandler SettingsRequested;
-    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingGenerateRequested;
-    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingOpenRequested;
-    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingImportAnnotationsRequested;
-    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingSubmitRequested;
+    public event EventHandler<CadTreeNodeEventArgs> RelatedDrawingOpenRequested;
     public event EventHandler<CadTreeNodeEventArgs> VersionsRequested;
     public event EventHandler<DocumentVersionEventArgs> OpenHistoryRequested;
     public event EventHandler<DocumentVersionEventArgs> EditHistoricalVersionRequested;
@@ -339,32 +332,6 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         if (structureTab != null) tabs.SelectedTab = structureTab;
     });
-
-    public void ShowAutomaticDrawing(CadTreeNode node) => RunOnUiThread(() =>
-    {
-        automaticDrawing.SetSource(node, FindRelatedDrawing(node));
-        if (automaticDrawingTab != null)
-        {
-            tabs.SelectedTab = automaticDrawingTab;
-        }
-    });
-
-    public void SetGeneratedDrawing(CadTreeNode source, string drawingPath) =>
-        RunOnUiThread(() => automaticDrawing.SetGeneratedDrawing(source, drawingPath));
-
-    public void SetActiveDrawingSource(CadTreeNode source) => RunOnUiThread(() =>
-    {
-        activeDrawingSource = source;
-        if (rootNode?.Kind == CadDocumentKind.Drawing)
-        {
-            automaticDrawing.SetSource(source, rootNode);
-        }
-    });
-
-    public void RefreshAutomaticDrawingState() => RunOnUiThread(automaticDrawing.RefreshState);
-
-    public void SetAutomaticDrawingOperationResult(string message) =>
-        RunOnUiThread(() => automaticDrawing.SetOperationResult(message));
 
     public void SetWorkspaceOperationState(bool active, string message)
     {
@@ -509,6 +476,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         RunOnUiThread(() =>
         {
             loginButton.Text = string.IsNullOrWhiteSpace(authenticatedUsername) ? "登录" : PersonDisplayName.Format(authenticatedUsername, displayName);
+            ApplyLoginButtonAppearance();
             workHoursButton.Enabled = !string.IsNullOrWhiteSpace(authenticatedUsername);
             plannedTaskTimer.Stop();
             plannedTaskRefreshTimer.Stop();
@@ -761,7 +729,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private Control BuildProjectPanel()
     {
-        var panel = new Panel { Dock = DockStyle.Top, Height = 84, BackColor = Color.White, Padding = new Padding(12, 6, 12, 6) };
+        var panel = new Panel { Dock = DockStyle.Top, Height = 75, BackColor = Color.White, Padding = new Padding(15, 5, 15, 5) };
         var actions = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -769,7 +737,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             ColumnCount = 5,
             RowCount = 3,
             Margin = Padding.Empty,
-            Padding = new Padding(3)
+            Padding = Padding.Empty
         };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
@@ -779,7 +747,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var userButtonColumn = new ColumnStyle(SizeType.Absolute, 60);
         actions.ColumnStyles.Add(userButtonColumn);
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 6));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 5));
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         actions.SizeChanged += (_, _) =>
         {
@@ -799,7 +767,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         actionToolTip.SetToolTip(openClientButton, "打开PLM客户端");
         openClientButton.Click += (_, _) => OpenClientRequested?.Invoke(this, EventArgs.Empty);
         loginButton.Text = "登录";
-        ConfigureStructureToolbarButton(loginButton);
+        ConfigureCompactActionButton(loginButton, "登录", DiscardCheckoutAvailableColor);
+        ApplyLoginButtonAppearance();
         loginButton.Click += (_, _) => LoginRequested?.Invoke(this, EventArgs.Empty);
         workHoursButton.Text = "工时";
         workHoursButton.AccessibleName = "填写工时";
@@ -807,6 +776,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         workHoursButton.Enabled = false;
         actionToolTip.SetToolTip(workHoursButton, "打开工时管理，填写本人工时");
         workHoursButton.Click += (_, _) => WorkHoursRequested?.Invoke(this, EventArgs.Empty);
+        actions.Layout += (_, _) =>
+        {
+            var contentHeight = actions.RowStyles.Cast<RowStyle>().Sum(row => (int)Math.Round(row.Height));
+            var requiredHeight = panel.Padding.Vertical + actions.Padding.Vertical + contentHeight;
+            if (panel.Height != requiredHeight) panel.Height = requiredHeight;
+        };
         actions.Controls.Add(currentProject, 0, 0);
         actions.Controls.Add(openClientButton, 2, 0);
         actions.Controls.Add(loginButton, 4, 0);
@@ -876,6 +851,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.SizeMode = TabSizeMode.Fixed;
         tabs.ShowToolTips = true;
         tabs.FontChanged += (_, _) => ResizeTabHeaders();
+        tabs.SizeChanged += (_, _) => ResizeTabHeaders();
         structureTab = BuildStructureTab();
         tabs.TabPages.Add(structureTab);
         var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
@@ -887,20 +863,11 @@ internal sealed class PdmTaskPaneControl : UserControl
         projectDocuments.ProjectSelected += (_, args) => ProjectBrowseRequested?.Invoke(this, args);
         projectTab.Controls.Add(projectDocuments);
         tabs.TabPages.Add(projectTab);
-        automaticDrawingTab = new TabPage("自动出图") { BackColor = Color.FromArgb(244, 247, 251), Padding = Padding.Empty };
-        automaticDrawing.GenerateRequested += (_, args) => AutomaticDrawingGenerateRequested?.Invoke(this, args);
-        automaticDrawing.AcquireEditRequested += (_, args) => CheckoutRequested?.Invoke(this, args);
-        automaticDrawing.OpenRequested += (_, args) => AutomaticDrawingOpenRequested?.Invoke(this, args);
-        automaticDrawing.ImportAnnotationsRequested += (_, args) => AutomaticDrawingImportAnnotationsRequested?.Invoke(this, args);
-        automaticDrawing.SubmitRequested += (_, args) => AutomaticDrawingSubmitRequested?.Invoke(this, args);
-        automaticDrawingTab.Controls.Add(automaticDrawing);
-        tabs.TabPages.Add(automaticDrawingTab);
         versionsTab = BuildVersionsTab();
         tabs.TabPages.Add(versionsTab);
         diagnosticsTab = new TabPage("日志") { BackColor = Color.White, Padding = new Padding(8) };
         diagnosticsTab.Controls.Add(new DiagnosticLogControl(installedPluginVersion));
         tabs.TabPages.Add(diagnosticsTab);
-        tabs.TabPages.Add(new TabPage { AccessibleName = "预留页签", ToolTipText = "预留页签", BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) });
         foreach (TabPage tab in tabs.TabPages)
             if (!string.IsNullOrWhiteSpace(tab.Text)) tab.ToolTipText = tab.Text;
         PluginDiagnosticLog.Record("启动", "插件已加载，版本：" + installedPluginVersion);
@@ -929,8 +896,8 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private void ResizeTabHeaders()
     {
-        if (tabs.TabCount == 0 || tabsHost.ClientSize.Width <= 4) return;
-        var itemSize = new Size(Math.Max(1, (tabsHost.ClientSize.Width - 4) / tabs.TabCount), Math.Max(27, tabs.Font.Height + 12));
+        if (tabs.TabCount == 0 || tabs.ClientSize.Width <= 4) return;
+        var itemSize = new Size(Math.Max(1, (tabs.ClientSize.Width - 4) / tabs.TabCount), Math.Max(27, tabs.Font.Height + 12));
         if (tabs.ItemSize != itemSize) tabs.ItemSize = itemSize;
     }
 
@@ -963,8 +930,8 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private TabPage BuildStructureTab()
     {
-        var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
-        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 36, ColumnCount = 7, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(3) };
+        var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = Padding.Empty };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 35, ColumnCount = 7, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 5) };
         ConfigureStructureActionColumns(actions);
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
@@ -989,6 +956,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.Controls.Add(checkinButton, 2, 0);
         actions.Controls.Add(propertyEditButton, 4, 0);
         actions.Controls.Add(settingsButton, 6, 0);
+        tabs.AlignWith(actions);
 
         workspaceOperationPanel.Dock = DockStyle.Bottom;
         workspaceOperationPanel.Height = 72;
@@ -1019,11 +987,11 @@ internal sealed class PdmTaskPaneControl : UserControl
         workspaceOperationLayout.Controls.Add(workspaceOperationProgress, 0, 1);
         workspaceOperationPanel.Controls.Add(workspaceOperationLayout);
 
-        var searchToolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 36, ColumnCount = 1, RowCount = 1, Margin = Padding.Empty };
+        var searchToolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 35, ColumnCount = 1, RowCount = 1, Margin = Padding.Empty };
         searchToolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         searchBox.AutoSize = false;
         searchBox.Dock = DockStyle.Fill;
-        searchBox.Margin = new Padding(3);
+        searchBox.Margin = new Padding(0, 0, 0, 5);
         searchBox.AccessibleName = "搜索图号、名称或文件名";
         searchBox.TextChanged += (_, _) => { if (!restoringTreeViewState) RebuildTree(searchBox.Text); };
         searchToolbar.Controls.Add(searchBox, 0, 0);
@@ -1505,7 +1473,6 @@ internal sealed class PdmTaskPaneControl : UserControl
         contextCheckout.Text = "获取编辑权限";
         contextCheckIn.Text = "提交存档";
         contextDiscardCheckout.Text = "放弃编辑";
-        contextGenerateDrawing.Text = "生成工程图...";
         contextOpenDrawing.Text = "打开关联工程图";
         contextDrawingVersions.Text = "关联工程图版本...";
         contextVersions.Text = "查看/对比历史版本...";
@@ -1541,12 +1508,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         contextCheckIn.Click += (_, _) => RaiseSelected(CheckInRequested);
 
         contextDiscardCheckout.Click += (_, _) => RaiseSelected(DiscardCheckoutRequested);
-        contextGenerateDrawing.Click += (_, _) => ShowAutomaticDrawing(SelectedNode);
-        contextOpenDrawing.Click += (_, _) =>
-        {
-            automaticDrawing.SetSource(SelectedNode);
-            automaticDrawing.RequestOpen();
-        };
+        contextOpenDrawing.Click += (_, _) => RaiseSelected(RelatedDrawingOpenRequested);
         contextDrawingVersions.Click += (_, _) =>
         {
             var drawing = FindRelatedDrawing(SelectedNode);
@@ -1612,7 +1574,6 @@ internal sealed class PdmTaskPaneControl : UserControl
             contextCheckIn,
 
             new ToolStripSeparator(),
-            contextGenerateDrawing,
             contextOpenDrawing,
             contextDrawingVersions,
             new ToolStripSeparator(),
@@ -1654,7 +1615,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var lifecycleObsolete = string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase);
         var drawingReviewLocked = node.DrawingReviewLocked;
         var drawingSource = node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly;
-        var drawingPath = AutomaticDrawingControl.GetDrawingPath(node);
+        var drawingPath = RelatedDrawingPath.ForSource(node);
         var drawingExists = drawingSource && !string.IsNullOrWhiteSpace(drawingPath) && File.Exists(drawingPath);
         var relatedDrawing = drawingExists ? FindRelatedDrawing(node) : null;
 
@@ -1677,13 +1638,6 @@ internal sealed class PdmTaskPaneControl : UserControl
             ? string.Concat("当前 ", currentRevision, " / 最新 ", latestRevision)
             : "当前 未入库 / 最新 -";
 
-        contextGenerateDrawing.Text = drawingExists ? "更新工程图..." : "生成工程图...";
-        SetContextState(
-            contextGenerateDrawing,
-            drawingSource && localFileExists && !historicalPreview,
-            historicalPreview
-                ? "请打开当前模型版本后生成工程图"
-                : drawingSource ? "本地模型不存在，不能生成工程图" : "请选择零件或装配体");
         SetContextState(
             contextOpenDrawing,
             drawingExists,
@@ -1884,7 +1838,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private CadTreeNode FindRelatedDrawing(CadTreeNode source)
     {
-        var drawingPath = AutomaticDrawingControl.GetDrawingPath(source);
+        var drawingPath = RelatedDrawingPath.ForSource(source);
         if (string.IsNullOrWhiteSpace(drawingPath) || rootNode == null)
         {
             return null;
@@ -1921,7 +1875,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private TabPage BuildVersionsTab()
     {
-        var tab = new TabPage("版本记录") { BackColor = Color.White, Padding = new Padding(8) };
+        var tab = new TabPage("版本信息") { BackColor = Color.White, Padding = new Padding(8) };
         versionList.Dock = DockStyle.Fill;
         versionList.View = View.Details;
         versionList.FullRowSelect = true;
@@ -3035,9 +2989,6 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private void UpdateSelected(CadTreeNode node)
     {
-        var automaticDrawingSource = node?.Kind == CadDocumentKind.Drawing ? activeDrawingSource : node;
-        var relatedDrawing = node?.Kind == CadDocumentKind.Drawing ? node : FindRelatedDrawing(automaticDrawingSource);
-        automaticDrawing.SetSource(automaticDrawingSource, relatedDrawing);
         if (node == null)
         {
             selectedFile.Text = "未选择图档";
@@ -3711,6 +3662,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         button.FlatAppearance.MouseOverBackColor = ControlPaint.Light(availableColor, 0.12F);
         button.FlatAppearance.MouseDownBackColor = ControlPaint.Dark(availableColor, 0.10F);
         button.Cursor = Cursors.Hand;
+    }
+
+    private void ApplyLoginButtonAppearance()
+    {
+        // 与网页常规按钮的 --pdm-button-accent 保持相同绿色。
+        ApplyActionButtonAppearance(loginButton, string.IsNullOrWhiteSpace(authenticatedUsername)
+            ? DiscardCheckoutAvailableColor : Color.FromArgb(16, 185, 129));
     }
 
     private void ApplyStructureActionButtonAppearances()

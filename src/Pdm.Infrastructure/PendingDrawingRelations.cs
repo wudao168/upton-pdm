@@ -19,7 +19,7 @@ internal static class PendingDrawingRelations
             var root = source.Root;
             if (!root.StructureIndexPending || root.Kind != DocumentKind.Drawing || root.DocumentId != source.DocumentId
                 || !string.Equals(root.FileName, source.FileName, StringComparison.OrdinalIgnoreCase)) continue;
-            foreach (var node in root.Children)
+            foreach (var node in DrawingModelRelations.KnownModels(root))
             {
                 if (node.Kind is not (DocumentKind.Assembly or DocumentKind.Part)
                     || node.Status is ReferenceNodeStatus.Missing or ReferenceNodeStatus.Virtual

@@ -73,8 +73,7 @@ public sealed partial class PdmAddin
         taskPaneControl.SetProjectContextAvailable(true);
         taskPaneControl.SelectProject(currentProjectId);
         taskPaneControl.SetTree(currentTree);
-        taskPaneControl.SetActiveDrawingSource(currentTree.Kind == CadDocumentKind.Drawing
-            ? currentTree.ReferencedModels.Concat(currentTree.Children).FirstOrDefault(node => node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly) : null);
+
         CacheActiveTree(currentTreeCacheKey, currentTree, currentProjectId);
         taskPaneControl.SetTreeNotice(currentTree.LocalStructureDeferred
             ? "结构按需读取；执行PLM操作时核对实际图档。" : string.Empty);

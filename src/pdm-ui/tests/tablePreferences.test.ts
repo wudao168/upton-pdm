@@ -17,6 +17,23 @@ beforeEach(() => {
 })
 
 describe('账号列设置', () => {
+  it('快速切页复用最近列设置，显式刷新仍读取服务端', async () => {
+    await initializeTablePreferences('engineer', 'company', 'token')
+    await refreshTablePreferences(30_000)
+    await refreshTablePreferences(30_000)
+    expect(api.readUserTablePreferences).toHaveBeenCalledTimes(1)
+    await refreshTablePreferences()
+    expect(api.readUserTablePreferences).toHaveBeenCalledTimes(2)
+  })
+  it('首次后台读取不能覆盖读取期间用户保存的新列设置', async () => {
+    let finish!: (value: { preferences: Record<string, string> }) => void
+    api.readUserTablePreferences.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const loading = initializeTablePreferences('engineer', 'company', 'token')
+    await writeTablePreference(key('engineer'), 'new-columns')
+    finish({ preferences: { [key('engineer')]: 'old-columns' } })
+    await loading
+    expect(readTablePreference(key('engineer'))).toBe('new-columns')
+  })
   it('远端列设置未变化时不触发布局更新，变化后仍立即恢复', async () => {
     await initializeTablePreferences('alice', 'company', 'alice-token')
     const version = tablePreferenceVersion.value

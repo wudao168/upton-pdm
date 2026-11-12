@@ -43,10 +43,13 @@ export function useProjectAttention(token: () => string | undefined, ids: () => 
   let generation = 0
   async function refresh() {
     const currentToken = token(), projectIds = [...new Set(ids())]
-    if (!currentToken || !enabled() || !projectIds.length) return
+    if (!currentToken || !enabled() || document.hidden || !projectIds.length) return
     const run = ++generation
     loading.value = true; error.value = ''; today.value = chinaToday()
-    await Promise.all(projectIds.map(async id => {
+    // 分批提交，切走页面时不继续把整份项目目录压入共享请求队列。
+    for (let index = 0; index < projectIds.length; index += 2) {
+      if (run !== generation || !enabled() || document.hidden) break
+      await Promise.all(projectIds.slice(index, index + 2).map(async id => {
       try {
         const family = await readProjectAttentionFamily(id, currentToken)
         if (run !== generation) return
@@ -56,10 +59,12 @@ export function useProjectAttention(token: () => string | undefined, ids: () => 
           if (run === generation) releases.value[item.project.id] = packages
         }))
       } catch { if (run === generation) error.value = '部分项目状态暂时无法读取，请刷新后重试。' }
-    }))
+      }))
+    }
     if (run === generation) loading.value = false
   }
-  watch([token, () => ids().join('|'), enabled], () => { generation++; entries.value = {}; releases.value = {}; void refresh() }, { immediate: true })
+  watch([token, () => ids().join('|')], () => { generation++; entries.value = {}; releases.value = {}; void refresh() }, { immediate: true })
+  watch(enabled, active => { generation++; loading.value = false; if (active) void refresh() })
   const timer = window.setInterval(() => { void refresh() }, 60000)
   onBeforeUnmount(() => { generation++; window.clearInterval(timer) })
   function details(id: string, fallback?: WorkbenchProject, aggregate = false) {

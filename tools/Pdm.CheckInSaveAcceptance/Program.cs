@@ -265,9 +265,9 @@ internal static partial class Program
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
-  if(args.Length>1&&args[1]=="--controlled-cache-regression")
+  if(args.Length>1&&(args[1]=="--controlled-cache-regression"||args[1]=="--cache-cleanup-regression"))
   {
-   try{ControlledCacheScenario(args[2]).GetAwaiter().GetResult();}
+   try{ControlledCacheScenario(args[2],args[1]=="--cache-cleanup-regression").GetAwaiter().GetResult();}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }

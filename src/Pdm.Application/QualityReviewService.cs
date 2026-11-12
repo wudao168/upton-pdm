@@ -157,15 +157,13 @@ public sealed partial class QualityReviewService(IPdmRepository repository, IPro
         await RequireProjectAsync(projectId, actor, QualityReviewPermissions.IssueView, ct);
         var view = await ProjectAsync(projectId, actor, role, ct);
         var row = view.Issues.SingleOrDefault(r => r.Issue.Id == issueId) ?? throw new PdmNotFoundException("问题不存在或不在可访问项目范围内。");
-        var catalog = await store.ReadAsync(await CompanyAsync(actor, ct), ct);
-        var related = await RowsAsync(catalog, await ProjectsAsync(catalog.CompanyId, ct), actor, ct);
         var actual = row.Issue.RelatedProjectId ?? row.Issue.ProjectId;
         return new(view.RowVersion, row, view.Themes, view.People,
             await ProjectCanAsync(actual, actor, QualityReviewPermissions.IssueManage, ct),
             await ProjectCanAsync(actual, actor, QualityReviewPermissions.IssueVerify, ct),
             await ProjectCanAsync(actual, actor, QualityReviewPermissions.IssueClose, ct),
             await ProjectCanAsync(actual, actor, QualityReviewPermissions.IssueReopen, ct),
-            await ProjectCanAsync(actual, actor, QualityReviewPermissions.IssueVoid, ct)) { RelatedIssues = related.Where(r => r.Issue.Id != issueId && r.CanOpenProject).ToArray() };
+            await ProjectCanAsync(actual, actor, QualityReviewPermissions.IssueVoid, ct));
     }
     public async Task<QualitySettingsWorkspace> SettingsAsync(string actor, UserRole role, CancellationToken ct)
     {
@@ -200,21 +198,22 @@ public sealed partial class QualityReviewService(IPdmRepository repository, IPro
         var catalog = await LoadAsync(await CompanyAsync(actor, ct), input.ExpectedRowVersion, ct);
         var before = catalog.Profiles.FirstOrDefault(p => p.IssueId == issueId)
             ?? new QualityIssueProfile(issueId, "", "", "普通", null, null, null, null, "", "", "", "未验证", "", [], "", default);
-        var next = new QualityIssueProfile(issueId, Text(input.Domain, 60, "问题领域"), Text(input.Category, 100, "问题分类"), input.Severity,
-            input.OccurredOn, input.ThemeId, input.DuplicateOfIssueId, input.RecurrenceOfIssueId,
+        // Historical classification and event relationships are read-only. Do not clear them when a simplified
+        // client omits those fields, or recreate the retired operations through an older API client.
+        var next = new QualityIssueProfile(issueId, Text(input.Domain, 60, "问题类型"), before.Category, input.Severity,
+            input.OccurredOn, input.ThemeId, before.DuplicateOfIssueId, before.RecurrenceOfIssueId,
             Text(input.ImmediateAction, 4000, "临时措施"), Text(input.RootCause, 4000, "根因分析"), Text(input.CorrectiveAction, 4000, "纠正措施"),
             input.VerificationResult, Text(input.EvidenceNote, 4000, "验证证据"), (input.EvidenceAttachmentIds ?? []).Distinct().ToArray(), actor, clock.GetUtcNow())
             { VerifiedBy = before.VerifiedBy, VerifiedAt = before.VerifiedAt, VerifiedIssueRowVersion = before.VerifiedIssueRowVersion,
                 CorrectiveActionBy = before.CorrectiveActionBy };
         if (next.Severity is not ("普通" or "重大" or "严重") || next.VerificationResult is not ("未验证" or "通过" or "未通过"))
             throw new PdmRuleException("请选择有效的严重程度和验证结果。");
-        if (next.Domain is not ("" or "质量" or "设计" or "采购" or "生产" or "进度" or "成本" or "其他")) throw new PdmRuleException("请选择列表中的问题领域。");
-        if (before.Domain == "质量" && next.Domain != "质量") throw new PdmRuleException("已纳入质量闭环的问题不能通过更改领域退出闭环；错误记录请按权限作废并说明原因。");
+        if (next.Domain is not ("" or "质量" or "设计" or "采购" or "生产" or "进度" or "成本" or "其他")) throw new PdmRuleException("请选择列表中的问题类型。");
+        if (before.Domain == "质量" && next.Domain != "质量") throw new PdmRuleException("已纳入质量闭环的问题不能通过更改类型退出闭环；错误记录请按权限作废并说明原因。");
         if (next.OccurredOn > Today) throw new PdmRuleException("实际发生日期不能晚于今天；日期不详请留空。");
         if (next.ThemeId is { } theme && !catalog.Themes.Any(t => t.Id == theme && t.IsActive)) throw new PdmRuleException("所选主题不存在或已停用。");
-        var manageChanged = before.Domain != next.Domain || before.Category != next.Category || before.Severity != next.Severity
-            || before.OccurredOn != next.OccurredOn || before.ThemeId != next.ThemeId || before.DuplicateOfIssueId != next.DuplicateOfIssueId
-            || before.RecurrenceOfIssueId != next.RecurrenceOfIssueId || before.ImmediateAction != next.ImmediateAction
+        var manageChanged = before.Domain != next.Domain || before.Severity != next.Severity
+            || before.OccurredOn != next.OccurredOn || before.ThemeId != next.ThemeId || before.ImmediateAction != next.ImmediateAction
             || before.RootCause != next.RootCause || before.CorrectiveAction != next.CorrectiveAction;
         var verifyChanged = before.VerificationResult != next.VerificationResult || before.EvidenceNote != next.EvidenceNote
             || !before.EvidenceAttachmentIds.Order().SequenceEqual(next.EvidenceAttachmentIds.Order());
@@ -235,23 +234,6 @@ public sealed partial class QualityReviewService(IPdmRepository repository, IPro
         // Updating the remedy invalidates an earlier verification until an authorized verifier confirms it again.
         if (manageChanged && (before.CorrectiveAction != next.CorrectiveAction || before.RootCause != next.RootCause) && !verifyChanged)
             next = next with { VerificationResult = "未验证", VerifiedBy = null, VerifiedAt = null, VerifiedIssueRowVersion = null };
-        if (next.DuplicateOfIssueId.HasValue && next.RecurrenceOfIssueId.HasValue) throw new PdmRuleException("同一条问题不能同时标为重复录入和新发生的复发事件。");
-        foreach (var targetId in new[] { next.DuplicateOfIssueId, next.RecurrenceOfIssueId }.OfType<Guid>())
-        {
-            var linked = view.RelatedIssues.FirstOrDefault(r => r.Issue.Id == targetId) ?? throw new PdmRuleException("关联问题不在当前可访问范围内。");
-            if (linked.Issue.Status == "已作废" || linked.Profile?.DuplicateOfIssueId is not null)
-                throw new PdmRuleException("不能关联已作废或已标记为重复录入的问题，请选择原始事件。");
-            if (next.DuplicateOfIssueId == targetId && catalog.Profiles.Any(p => p.DuplicateOfIssueId == issueId))
-                throw new PdmRuleException("该问题已作为其他重复记录的原始事件，不能再形成重复关联链。");
-            if (next.RecurrenceOfIssueId == targetId && linked.Issue.Status != "已完成") throw new PdmRuleException("复发应关联已关闭的原始问题；仍在处理的事件请使用重复录入关联。");
-            if (linked.Profile?.ThemeId is Guid linkedTheme)
-            {
-                if (next.ThemeId is Guid selected && selected != linkedTheme) throw new PdmRuleException("重复或复发事件应归入原问题的同一主题，便于追踪共同改善。");
-                next = next with { ThemeId = linkedTheme };
-            }
-            if (next.RecurrenceOfIssueId == targetId && (next.OccurredOn is null || linked.Profile?.OccurredOn is { } previousDate && next.OccurredOn < previousDate))
-                throw new PdmRuleException("请填写本次独立复发的实际发生日期，日期不能早于原问题。");
-        }
         return await SaveAsync(catalog with { Profiles = catalog.Profiles.Where(p => p.IssueId != issueId).Append(next).ToArray() }, actor, "quality.issue.save", issueId, ct);
     }
     public async Task RequireTransitionAsync(OplIssue issue, string nextStatus, string actor, CancellationToken ct)

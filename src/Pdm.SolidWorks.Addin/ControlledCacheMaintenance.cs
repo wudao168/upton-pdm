@@ -14,10 +14,15 @@ internal sealed class ControlledCacheUsage
     public long ReclaimableBytes { get; set; }
     public long FreedBytes { get; set; }
     public int SkippedItems { get; set; }
+    public int ManagedItems { get; set; }
+    public int DeferredItems { get; set; }
+    public string Notice { get; set; }
     public string Message => "缓存占用 " + (UsedBytes / 1073741824d).ToString("0.00") + " GB，可清理约 "
         + (ReclaimableBytes / 1073741824d).ToString("0.00") + " GB。"
         + (FreedBytes == 0 ? "" : "已释放 " + (FreedBytes / 1048576d).ToString("0.00") + " MB。")
-        + (SkippedItems == 0 ? "" : "有 " + SkippedItems + " 项正在使用、含修改或归属未确认，已保留。");
+        + (SkippedItems == 0 ? "" : "有 " + SkippedItems + " 项正在使用、含修改或归属未确认，已保留。")
+        + (DeferredItems == 0 ? "" : "另有 " + DeferredItems + " 组缓存待确认占用。")
+        + (Notice ?? string.Empty);
 }
 
 internal sealed class ControlledCacheEntry
@@ -97,6 +102,7 @@ internal static class ControlledCacheMaintenance
             }
             foreach (var entry in Entries(root))
             {
+                usage.ManagedItems++;
                 if (CanRemove(root, entry, protectedPaths, checkedOut))
                     usage.ReclaimableBytes += Files(entry.Directory, root).Sum(path => new FileInfo(path).Length);
                 else usage.SkippedItems++;
@@ -109,9 +115,9 @@ internal static class ControlledCacheMaintenance
     {
         lock (Sync)
         {
-            if (isBusy == null || isBusy()) throw new InvalidOperationException("当前有图档操作或其他SolidWorks实例运行，暂不清理缓存。");
+            if (isBusy == null || isBusy()) throw new InvalidOperationException("当前有图档操作正在进行，暂不清理缓存。请待操作完成后重试。");
             var entries = Entries(root).OrderBy(entry => entry.LastUsedUtc).ToArray();
-            var usage = Inspect(root, protectedPaths, checkedOut); long freed = 0;
+            var usage = Inspect(root, protectedPaths, checkedOut); long freed = 0; int occupied = 0;
             foreach (var entry in entries)
             {
                 if (isBusy()) break;
@@ -138,10 +144,10 @@ internal static class ControlledCacheMaintenance
                     File.Delete(Path.Combine(IndexRoot(root), Key(entry.Directory) + ".json"));
                 }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
-                { PluginDiagnosticLog.Record("安全清理缓存", "占用或归属变化，停止处理该副本：" + error); }
+                { occupied++; PluginDiagnosticLog.Record("安全清理缓存", "占用或归属变化，停止处理该副本：" + error); }
                 finally { foreach (var handle in handles) handle.Dispose(); }
             }
-            var result = Inspect(root, protectedPaths, checkedOut); result.FreedBytes = freed;
+            var result = Inspect(root, protectedPaths, checkedOut); result.FreedBytes = freed; result.SkippedItems += occupied;
             return result;
         }
     }
@@ -159,6 +165,7 @@ internal static class ControlledCacheMaintenance
             {
                 var file = expected[path];
                 if ((checkedOut ?? Array.Empty<Guid>()).Contains(file.DocumentId) || (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0) return false;
+                if (held == null && !ControlledReferenceMaterializer.Matches(path, file)) return false;
                 if (held != null)
                 {
                     var stream = held.Single(handle => string.Equals(handle.Name, path, StringComparison.OrdinalIgnoreCase)); stream.Position = 0;

@@ -6,7 +6,7 @@ using Upton.Pdm.Domain;
 namespace Upton.Pdm.Api;
 
 public sealed record AiProviderInput(Guid Id, string Name, string BaseUrl, string Network, string Adapter, string? ApiKey, bool ClearKey, bool Enabled, AiModel[] Models);
-public sealed record AiSettingsInput(long Revision, AiProviderInput[] Providers, string? DefaultModel);
+public sealed record AiSettingsInput(long Revision, AiProviderInput[] Providers, string? DefaultModel, AiWebSettings? Web = null);
 public sealed record AiTestInput(string ModelId, bool Tools = false);
 
 public sealed class AiSettingsService(IAiStore store, AiAccess access, IDataProtectionProvider protection, IAiModelClientFactory clients, ILogger<AiSettingsService> log)
@@ -14,9 +14,10 @@ public sealed class AiSettingsService(IAiStore store, AiAccess access, IDataProt
     public static string Key(AiProvider provider, AiModel model) => provider.Id + ":" + model.Id;
     public async Task<object> ReadAsync(CancellationToken ct) {
         await access.RequireAsync(AiPermissions.Settings, null, ct);
-        return View(await store.SettingsAsync(access.Tenant.CompanyId, ct));
+        return await ViewAsync(await store.SettingsAsync(access.Tenant.CompanyId, ct), ct);
     }
-    private static object View(AiSettings settings) => new { settings.Revision, settings.DefaultModel,
+    private async Task<object> ViewAsync(AiSettings settings, CancellationToken ct) => new { settings.Revision, settings.DefaultModel, web = settings.Web ?? new(),
+        webUsage = await store.WebUsageAsync(access.Tenant.CompanyId, DateTimeOffset.UtcNow, ct),
         providers = settings.Providers.Select(p => new { p.Id, p.Name, p.BaseUrl, p.Network, p.Adapter, p.Enabled, p.Models, hasKey = p.ProtectedKey is not null }) };
     public async Task<object> SaveAsync(AiSettingsInput input, CancellationToken ct)
     {
@@ -43,9 +44,14 @@ public sealed class AiSettingsService(IAiStore store, AiAccess access, IDataProt
         }
         if (input.DefaultModel is not null && !rows.Any(p => p.Enabled && p.Models.Any(m => m.Enabled && Key(p, m) == input.DefaultModel)))
             throw new PdmRuleException("默认模型必须是已启用的模型。");
-        await store.SaveSettingsAsync(access.Tenant.CompanyId, new(input.Revision, rows.ToArray(), input.DefaultModel), ct);
+        var web = input.Web ?? old.Web ?? new();
+        if (web.DailyLimit is < 1 or > 10000 || web.MonthlyLimit is < 1 or > 100000 || web.DailyLimit > web.MonthlyLimit || web.PerTurnLimit is < 1 or > 5)
+            throw new PdmRuleException("联网额度需为整数：每日1至10000次，每月1至100000次且不少于每日额度，每轮1至5次。");
+        var savedSettings = new AiSettings(input.Revision, rows.ToArray(), input.DefaultModel, web);
+        if (web.Enabled) AiWebPolicy.Provider(savedSettings);
+        await store.SaveSettingsAsync(access.Tenant.CompanyId, savedSettings, ct);
         log.LogInformation("AI settings updated company {Company} user {User} revision {Revision}", access.Tenant.CompanyId, access.Tenant.UserId, input.Revision + 1);
-        return View(await store.SettingsAsync(access.Tenant.CompanyId, ct));
+        return await ViewAsync(await store.SettingsAsync(access.Tenant.CompanyId, ct), ct);
     }
     public async Task<(AiSettings Settings, AiProvider Provider, AiModel Model)> ResolveAsync(string key, CancellationToken ct)
     {
@@ -68,7 +74,7 @@ public sealed class AiSettingsService(IAiStore store, AiAccess access, IDataProt
         var text = new System.Text.StringBuilder();
         try {
             await foreach (var update in client.GetStreamingResponseAsync([new(ChatRole.User, input.Tools ? "请先调用connection_check工具，再用中文简短回复验证结果。" : "请只回复：连接成功。")], options, timeout.Token)) text.Append(update.Text);
-            if (text.Length == 0 || input.Tools && !called) throw new PdmRuleException(input.Tools ? "模型没有完成工具调用，请关闭业务工具能力或检查模型配置。" : "模型未返回文字，请核对模型名称及兼容接口。");
+            if (text.Length == 0 || input.Tools && !called) throw new PdmRuleException(input.Tools ? "模型没有完成工具调用，请关闭工具调用或检查模型配置。" : "模型未返回文字，请核对模型名称及兼容接口。");
             return new { success = true, message = input.Tools ? "流式回复与工具调用验证通过。" : "认证与流式回复验证通过。", tools = called };
         } catch (Exception ex) when (ex is not PdmRuleException) {
             log.LogWarning("AI connection test failed provider {Provider} exception {Type}", providerId, ex.GetType().Name);

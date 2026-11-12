@@ -154,6 +154,10 @@ function openFormArchive(folderId: string, fileId: string) {
 async function openQualityIssue(projectId: string, issueId: string) {
   if (await openManagedProject(projectId, 'opl')) requestedOplIssueId.value = issueId
 }
+const qualityThemesOpen = ref(false)
+const qualityThemeRevision = ref(0)
+const canOpenCompanyReview = computed(() => workspace.hasPermission('quality.review.view'))
+function openCompanyReview() { if (canOpenCompanyReview.value) qualityThemesOpen.value = true }
 watch([activeView, projectTab, () => workspace.project.value.id], clearGlobalStatus, { flush: 'sync' })
 const mountedBomProjectId = ref('')
 const mountedInformationProjectId = ref('')
@@ -172,6 +176,9 @@ const requestedQualityAcceptance = ref(false)
 const requestedQualitySection = ref('quality')
 const requestedBomKind = ref<'Overview' | 'Source' | 'WearPart' | 'Release' | import('./types').BomKind>()
 const visitedViews = ref(new Set<ActiveView>())
+// 这些页面自行按当前账号读取数据，不依赖项目工作区的全局初始化。
+const independentViews = new Set<ActiveView>(['ai-assistant', 'purchase-analysis', 'quality-review', 'spare-parts', 'work-hours', 'standard-library', 'stocked-materials', 'program-templates', 'production-drawings'])
+const activePageReady = computed(() => workspace.ready.value || (workspace.authenticated.value && independentViews.has(activeView.value) && canNavigate(activeView.value)))
 watch(activeView, (view, previous) => {
   workspace.setProjectPageActive(view === 'workspace')
   if (view === 'workspace' && previous !== view && workspace.ready.value && !bomHasUnsavedChanges.value)
@@ -181,6 +188,7 @@ watch(() => workspace.project.value.id, (id, previous) => {
   if (id !== previous) { mountedBomProjectId.value = ''; mountedDocumentsProjectId.value = ''; mountedInformationProjectId.value = '' }
 }, { flush: 'sync' })
 const navigationContextKey = computed(() => JSON.stringify([workspace.currentUsername.value, workspace.activeCompanyId.value]))
+watch([navigationContextKey, canOpenCompanyReview], () => { qualityThemesOpen.value = false })
 watch([workspace.authenticated, workspace.ready, navigationContextKey], ([authenticated, ready, context], previous) => {
   if (!authenticated || previous?.[2] !== context) setMaterialStockContext(authenticated ? context : '')
   if (authenticated && ready) void refreshMaterialStockPlans(() => listMaterialStockPlans(workspace.getAccessToken()))
@@ -191,7 +199,7 @@ const stockPlanRefreshTimer = window.setInterval(() => {
 onBeforeUnmount(() => window.clearInterval(stockPlanRefreshTimer))
 provide(pagePreferenceScopeKey, navigationContextKey)
 watch([activeView, projectTab, workspace.ready, () => workspace.project.value?.id], () => {
-  if (workspace.authenticated.value && workspace.ready.value) void refreshTablePreferences()
+  if (workspace.authenticated.value && workspace.ready.value) void refreshTablePreferences(30_000)
 })
 watch([activeView, workspace.ready, workspace.authenticated, navigationContextKey], ([view, ready, authenticated, context], previous) => {
   if (!authenticated || previous && previous[3] !== context) {
@@ -201,7 +209,7 @@ watch([activeView, workspace.ready, workspace.authenticated, navigationContextKe
     lastProjectNavigation.value = 'project-reports'
     lastStandardNavigation.value = 'standard-library'
   }
-  if (authenticated && ready) {
+  if (authenticated && (ready || independentViews.has(view) && canNavigate(view))) {
     visitedViews.value.add(view)
     if (projectNavigationTabs.some(tab => tab.key === view)) lastProjectNavigation.value = view as NavKey
     if (standardNavigationTabs.value.some(tab => tab.key === view)) lastStandardNavigation.value = view as NavKey
@@ -992,7 +1000,11 @@ watch([workspace.authenticated, workspace.ready, navigationContextKey], ([authen
     projectTab.value = 'overview'
     return
   }
-  if (!ready) return
+  if (!ready) {
+    const remembered = readRememberedNavigation()
+    if (!initialPageRestored && !validReleaseLink && !pendingProjectNavigation && remembered && independentViews.has(remembered)) void handleNavigation(remembered)
+    return
+  }
   void (async () => {
     if (validReleaseLink && !releaseLinkOpened) {
       releaseLinkOpened = true
@@ -1332,12 +1344,12 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           />
         </el-drawer>
         <main :key="navigationContextKey" class="pdm-main" :class="{ 'is-project-workspace': activeView === 'workspace' }">
-        <section v-if="workspace.loading.value && !workspace.ready.value" class="pdm-panel pdm-workspace-state pdm-loading-page" aria-live="polite">
+        <section v-if="workspace.loading.value && !activePageReady" class="pdm-panel pdm-workspace-state pdm-loading-page" aria-live="polite">
           <SquareLoader label="正在加载权限内项目和待办任务" />
           <div class="pdm-loading-copy"><h1>正在读取PLM数据</h1>
           <p>正在加载权限内项目和待办任务…</p></div>
         </section>
-        <section v-else-if="workspace.loadError.value && !workspace.ready.value" class="pdm-panel pdm-workspace-state is-error" role="alert">
+        <section v-else-if="workspace.loadError.value && !activePageReady" class="pdm-panel pdm-workspace-state is-error" role="alert">
           <h1>数据加载失败</h1>
           <p>{{ workspace.loadError.value }}</p>
           <div class="pdm-state-actions">
@@ -1345,7 +1357,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             <button type="button" class="pdm-secondary-action" @click="workspace.logout">重新登录</button>
           </div>
         </section>
-        <template v-else-if="workspace.ready.value">
+        <template v-else-if="activePageReady">
         <section v-if="workspace.loadError.value" class="pdm-panel pdm-module-error" role="alert">
           <strong>部分数据刷新失败</strong><span>{{ workspace.loadError.value }}</span>
           <button type="button" @click="workspace.reload()">重试</button>
@@ -1408,6 +1420,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         </div>
         <div v-if="visitedViews.has('project-workbench')" v-show="activeView === 'project-workbench'" class="pdm-navigation-page" data-navigation-page="project-workbench">
         <ProjectWorkbench
+          :active="activeView === 'project-workbench'"
           :organization-units="workspace.organizationDirectory.value.units"
           :users="workspace.users.value"
           :token="workspace.getAccessToken()"
@@ -1423,13 +1436,13 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           <PurchaseAnalysis :key="navigationContextKey" :token="workspace.getAccessToken()" />
         </div>
         <div v-if="activeView === 'quality-review' && canNavigate('quality-review')" class="pdm-navigation-page" data-navigation-page="quality-review">
-          <QualityReviewWorkbench :key="navigationContextKey" :token="workspace.getAccessToken()" :company-id="workspace.activeCompanyId.value" @open-issue="openQualityIssue" @updated="workspace.refreshApprovalInbox()" />
+          <QualityReviewWorkbench :show-company-review-entry="canOpenCompanyReview" :company-review-revision="qualityThemeRevision" @open-company-review="openCompanyReview" :key="navigationContextKey" :token="workspace.getAccessToken()" :company-id="workspace.activeCompanyId.value" @open-issue="openQualityIssue" @updated="workspace.refreshApprovalInbox()" />
         </div>
         <div v-if="activeView === 'spare-parts' && canNavigate('spare-parts')" class="pdm-navigation-page" data-navigation-page="spare-parts">
           <SparePartWorkbench :key="navigationContextKey" :token="workspace.getAccessToken()" />
         </div>
         <div v-if="visitedViews.has('production-drawings')" v-show="activeView === 'production-drawings'" class="pdm-navigation-page" data-navigation-page="production-drawings">
-        <ProductionWorkbench :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :permissions="workspace.currentPermissions.value" />
+        <ProductionWorkbench :active="activeView === 'production-drawings'" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :permissions="workspace.currentPermissions.value" />
         </div>
         <div v-if="visitedViews.has('work-hours')" v-show="activeView === 'work-hours'" class="pdm-navigation-page" data-navigation-page="work-hours">
           <WorkHoursManager :token="workspace.getAccessToken()" :company-id="workspace.activeCompanyId.value" :active="activeView === 'work-hours'" @changed="workHoursReminder.refresh" />
@@ -1584,10 +1597,10 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             <ProjectFileLibrary :requested-archive="requestedFormArchive" @archive-located="requestedFormArchive = undefined" :form-permissions="workspace.project.value.effectiveProjectPermissions ?? []" v-if="projectTab === 'files' && !workspace.moduleErrors.value.some(error => error.tab === 'files' || error.module === '图档工作区')" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
             <ProjectBudgetManager v-else-if="projectTab === 'budget'" :project="workspace.project.value" :bonus-permissions="bonusProjectPermissions" :token="workspace.getAccessToken()" />
             <ProjectRetrospective v-else-if="projectTab === 'summary'" :key="workspace.project.value.id" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :token="workspace.getAccessToken()" @updated="workspace.refreshApprovalInbox()" />
-            <ProjectOplManager v-else-if="projectTab === 'opl'" :key="workspace.project.value.id" :project="workspace.project.value" :token="workspace.getAccessToken()" :requested-issue-id="requestedOplIssueId" @issue-request-handled="requestedOplIssueId = undefined" @saved="workspace.refreshApprovalInbox()" @open-release="openReleasePackage" />
+            <ProjectOplManager :show-company-review-entry="canOpenCompanyReview" :company-review-revision="qualityThemeRevision" @open-company-review="openCompanyReview" v-else-if="projectTab === 'opl'" :key="workspace.project.value.id" :project="workspace.project.value" :token="workspace.getAccessToken()" :requested-issue-id="requestedOplIssueId" @issue-request-handled="requestedOplIssueId = undefined" @saved="workspace.refreshApprovalInbox()" @open-release="openReleasePackage" />
             <ProjectInformation :customers="workspace.customers.value" :administrator="workspace.hasPermission('settings.storage.manage')" ref="informationPanel" v-if="mountedInformationProjectId === workspace.project.value.id" v-show="projectTab === 'information'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :users="workspace.users.value" :current-username="workspace.currentUsername.value" :directory="workspace.organizationDirectory.value" :on-update-main-staffing="workspace.updateMainProjectStaffing" :on-update-designers="workspace.updateChildProjectDesigners" :on-update-phase-owners="workspace.updateProjectPhaseOwners" :can-edit-application-order-date="workspace.hasPermission('project.application.approve') || workspace.hasPermission('project.edit')" :can-view-applications="workspace.hasPermission('project.application.submit') || workspace.hasPermission('project.application.approve')" @open-application="async id => { requestedApplicationId = id; await handleNavigation('project-applications') }" />
             <ProjectPlanManager :requested-task-id="requestedPlanTaskId" :single-plan="showSingleProjectPlan" @task-request-handled="requestedPlanTaskId = undefined" v-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
-            <QualityManager @open-issue="openQualityIssue" :form-permissions="workspace.project.value.effectiveProjectPermissions ?? []" @locate-archive="openFormArchive" v-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.project.value.effectiveProjectPermissions?.includes('validation-plan.edit') === true" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" :requested-quality-acceptance="requestedQualityAcceptance" :requested-section="requestedQualitySection" @request-handled="requestedValidationPlanProjectId = ''" />
+            <QualityManager :show-company-review-entry="canOpenCompanyReview" :company-review-revision="qualityThemeRevision" @open-company-review="openCompanyReview" @open-issue="openQualityIssue" :form-permissions="workspace.project.value.effectiveProjectPermissions ?? []" @locate-archive="openFormArchive" v-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.project.value.effectiveProjectPermissions?.includes('validation-plan.edit') === true" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" :requested-quality-acceptance="requestedQualityAcceptance" :requested-section="requestedQualitySection" @request-handled="requestedValidationPlanProjectId = ''" />
             <section v-if="mountedDocumentsProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.module === '图档工作区')" v-show="projectTab === 'documents'" class="pdm-document-workspace">
               <WorkspaceExplorerBar :project="workspace.project.value" :selected="workspace.selectedNode.value" :local-state="selectedWorkspaceLocalState" :desktop-available="desktopAvailable" @open-folder="openWorkspaceFolder" />
               <div class="pdm-workspace">
@@ -1697,6 +1710,9 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
       </table>
     </el-drawer>
 
+    <el-dialog v-if="workspace.authenticated.value && canOpenCompanyReview" v-model="qualityThemesOpen" title="公司共性问题目录" width="min(1100px, 94vw)" append-to-body :close-on-click-modal="false" destroy-on-close>
+      <QualityReviewWorkbench v-if="qualityThemesOpen" :token="workspace.getAccessToken()" :company-id="workspace.activeCompanyId.value" themes-only @updated="qualityThemeRevision++" />
+    </el-dialog>
     <U9SyncBlockerDrawer
       v-model="releaseBlockerDrawerOpen"
       :blockers="releaseBlockerDrawerBlockers"

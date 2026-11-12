@@ -5,6 +5,14 @@ namespace Upton.Pdm.Application;
 /// <summary>仅首次迁移使用旧角色规则，运行时不调用此处决定权限。</summary>
 public static class AuthorizationMigration
 {
+    // Only the new permission is seeded once. Existing prerequisites and later revocations are preserved.
+    public static AuthorizationSettings EnableAiWebDefaults(AuthorizationSettings settings) => settings.AiWebDefaultsApplied ? settings : settings with
+    {
+        AiWebDefaultsApplied = true,
+        Templates = settings.Templates.Select(role => role.RoleCode == nameof(UserRole.Administrator) && !role.Grants.Any(g => g.Permission == AiPermissions.Web)
+            ? role with { Grants = [..role.Grants, new(AiPermissions.Web, ["company"])] } : role).ToArray()
+    };
+
     public static AuthorizationSettings EnableDingTalkSelfBindingDefaults(AuthorizationSettings settings)
     {
         if (settings.DingTalkSelfBindingDefaultsApplied) return settings;

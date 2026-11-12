@@ -10,8 +10,8 @@ import { readQualityUploadAccess } from '../api'
 import { ElMessage } from '../statusMessage'
 import type { ProjectSummary } from '../types'
 
-const props = defineProps<{ projectId: string; projectCode: string; projectName: string; projects: ProjectSummary[]; token: string; currentUsername: string; currentDisplayName: string; canEdit: boolean; canManageCatalog: boolean; canDecideApproval?: boolean; requestedQualityAcceptance?: boolean; requestedProjectId?: string; requestedSection?: string; formPermissions?: readonly string[] }>()
-const emit = defineEmits<{ requestHandled: []; locateArchive: [folderId: string, fileId: string]; openIssue: [projectId: string, issueId: string] }>()
+const props = defineProps<{ projectId: string; projectCode: string; projectName: string; projects: ProjectSummary[]; token: string; currentUsername: string; currentDisplayName: string; canEdit: boolean; canManageCatalog: boolean; canDecideApproval?: boolean; requestedQualityAcceptance?: boolean; requestedProjectId?: string; requestedSection?: string; formPermissions?: readonly string[]; showCompanyReviewEntry?: boolean; companyReviewRevision?: number }>()
+const emit = defineEmits<{ requestHandled: []; locateArchive: [folderId: string, fileId: string]; openIssue: [projectId: string, issueId: string]; openCompanyReview: [] }>()
 const inspectionRevision = ref(0)
 const activeDetail = ref('')
 const activeTab = ref('quality')
@@ -58,7 +58,7 @@ function changeView(section: string, view: string) { activeDetail.value = view =
     <nav class="quality-manager__tabs pdm-project-subtabs pdm-segmented" aria-label="质量分类" role="tablist">
       <button v-for="tab in qualityTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" :aria-pressed="activeTab === tab.key" role="tab" :aria-selected="activeTab === tab.key" @click="selectTab(tab.key)">{{ tab.label }}</button>
     </nav>
-    <ProjectQualityIssues v-if="activeTab === 'issues' && formPermissions?.includes('project.quality.view')" :key="projectId" :project-id="projectId" :token="token" @open-issue="(id, issueId) => emit('openIssue', id, issueId)" />
+    <ProjectQualityIssues :show-company-review-entry="showCompanyReviewEntry" :company-review-revision="companyReviewRevision" @open-company-review="emit('openCompanyReview')" v-if="activeTab === 'issues' && formPermissions?.includes('project.quality.view')" :key="projectId" :project-id="projectId" :token="token" @open-issue="(id, issueId) => emit('openIssue', id, issueId)" />
     <div v-show="activeTab === 'quality'" class="quality-manager__sections">
       <ValidationPlanManager v-show="!activeDetail || activeDetail === 'validation'" v-bind="props" :can-edit="canEditValidation" :requested-project-id="requestedQualityAcceptance ? undefined : requestedProjectId" class="quality-manager__plan" @view-changed="changeView('validation', $event)" @request-handled="emit('requestHandled')" />
       <ValidationPlanManager v-show="!activeDetail || activeDetail === 'acceptance'" v-bind="props" :can-edit="canEditQuality" :requested-project-id="requestedQualityAcceptance ? requestedProjectId : undefined" quality-acceptance class="quality-manager__plan" @view-changed="changeView('acceptance', $event)" @request-handled="emit('requestHandled')" />

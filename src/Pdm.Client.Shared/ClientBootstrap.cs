@@ -474,17 +474,94 @@ internal static class ClientPackageUpdater
         catch (IOException) { return null; }
     }
 
+    public static bool IsPluginDownloadRunning() => TryGetRunningUpdater(GetPendingPath("solidworks-addin") + ".downloading");
+
+    // 下载进程独立于 SolidWorks 生命周期，退出时尚未完成的下载也能继续并自动安装。
+    public static bool StagePluginInBackground(ClientPackageConfiguration package, string targetDirectory, int processId, bool automaticInstall)
+    {
+        if (package == null || string.IsNullOrWhiteSpace(package.Version) || string.IsNullOrWhiteSpace(package.PackageUrl)
+            || string.IsNullOrWhiteSpace(package.Sha256)) return false;
+        var pendingPath = GetPendingPath("solidworks-addin");
+        var root = Path.Combine(Path.GetDirectoryName(pendingPath), "solidworks-addin");
+        Directory.CreateDirectory(root);
+        using var lease = TryAcquireStageLease(Path.Combine(root, "background-download.lock"));
+        if (lease == null || IsPluginDownloadRunning()) return true;
+        if (IsInstallerRunning("solidworks-addin")) return true;
+        var workerRoot = Path.Combine(root, "worker-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workerRoot);
+        var assemblyPath = Path.Combine(workerRoot, "UPLM.UpdateWorker.dll");
+        File.Copy(typeof(ClientPackageUpdater).Assembly.Location, assemblyPath);
+        var request = Serializer.Serialize(new { package.Version, package.PackageUrl, package.Sha256,
+            TargetDirectory = Path.GetFullPath(targetDirectory), ProcessId = processId, AutomaticInstall = automaticInstall });
+        var marker = pendingPath + ".downloading";
+        var command = "& {" + DownloadScript + "\n} -AssemblyPath " + PowerShellLiteral(assemblyPath)
+            + " -RequestJson " + PowerShellLiteral(request) + " -MarkerPath " + PowerShellLiteral(marker);
+        try
+        {
+            var worker = Process.Start(new ProcessStartInfo
+            {
+                FileName = "powershell.exe", Arguments = EncodePowerShellCommand(command),
+                UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden
+            });
+            if (worker == null) return false;
+            using (worker) WriteAllTextAtomically(marker, worker.Id.ToString());
+            return true;
+        }
+        catch
+        {
+            try { File.Delete(marker); } catch { }
+            throw;
+        }
+    }
+
+    private const string DownloadScript = @"param([string]$AssemblyPath,[string]$RequestJson,[string]$MarkerPath)
+$ErrorActionPreference = 'Stop'
+try {
+  $request = $RequestJson | ConvertFrom-Json
+  $assembly = [Reflection.Assembly]::LoadFile($AssemblyPath)
+  $updater = $assembly.GetType('Upton.Pdm.ClientShared.ClientPackageUpdater', $true)
+  $packageType = $assembly.GetType('Upton.Pdm.ClientShared.ClientPackageConfiguration', $true)
+  $package = [Activator]::CreateInstance($packageType, $true)
+  foreach ($name in @('Version','PackageUrl','Sha256')) { $packageType.GetProperty($name).SetValue($package, [string]$request.$name, $null) }
+  $stage = $updater.GetMethod('StageAsync', [Reflection.BindingFlags]'Public,Static')
+  for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    try {
+      $task = $stage.Invoke($null, [object[]]@('solidworks-addin', $package, [string]$request.TargetDirectory, [Threading.CancellationToken]::None, $null))
+      [void]$task.GetAwaiter().GetResult()
+      $schedule = $updater.GetMethod('SchedulePluginUpdate', [Reflection.BindingFlags]'Public,Static')
+      $scheduled = $schedule.Invoke($null, [object[]]@([int]$request.ProcessId, [bool]$request.AutomaticInstall))
+      $running = $updater.GetMethod('IsInstallerRunning').Invoke($null, [object[]]@('solidworks-addin'))
+      $installed = $updater.GetMethod('GetInstalledVersion').Invoke($null, [object[]]@([string]$request.TargetDirectory))
+      $needed = $updater.GetMethod('IsUpdateAvailable').Invoke($null, [object[]]@([string]$installed,[string]$request.Version))
+      if (-not $scheduled -and -not $running -and $needed) { throw '更新尚未就绪，后台将自动重试。' }
+      Remove-Item -LiteralPath ($MarkerPath + '.error.txt') -Force -ErrorAction SilentlyContinue
+      return
+    } catch {
+      ($_ | Out-String) | Set-Content -LiteralPath ($MarkerPath + '.error.txt') -Encoding UTF8
+      if ($attempt -eq 9) { throw }
+      Start-Sleep -Seconds 30
+    }
+  }
+} catch {
+  ($_ | Out-String) | Set-Content -LiteralPath ($MarkerPath + '.error.txt') -Encoding UTF8
+} finally {
+  Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
+}";
+
     public static bool IsInstallerRunning(string component) => TryGetRunningUpdater(GetPendingPath(component) + ".launched");
 
     public static bool SchedulePluginOnExit(int processId) =>
-        LaunchPendingUpdate("solidworks-addin", processId, string.Empty, false, true);
+        SchedulePluginUpdate(processId, true);
+
+    public static bool SchedulePluginUpdate(int processId, bool automaticInstall) =>
+        LaunchPendingUpdate("solidworks-addin", processId, string.Empty, false, true, automaticInstall);
 
     public static bool TryLaunchPendingUpdate(string component, int processId, string restartPath, bool visible = false)
         => LaunchPendingUpdate(component, processId, restartPath, visible, false);
 
-    private static bool LaunchPendingUpdate(string component, int processId, string restartPath, bool visible, bool pluginExit)
+    private static bool LaunchPendingUpdate(string component, int processId, string restartPath, bool visible, bool pluginExit, bool automaticInstall = false)
     {
-        // 插件安装必须由用户明确打开安装窗口，桌面客户端不得代为静默安装。
+        // 插件更新由插件自己的后台流程调度，桌面客户端不能代替插件启动更新。
         if (component == "solidworks-addin" && !visible && !pluginExit) return false;
         var pendingPath = GetPendingPath(component);
         lock (PendingUpdateSync)
@@ -533,6 +610,7 @@ internal static class ClientPackageUpdater
                 // 插件能够读取的文件不一定能被 PowerShell 读取（例如透明加密软件按进程授权）。
                 // 从插件内存传递脚本和已解析状态，不再让安装进程读取落盘的脚本及 JSON。
                 pending.InteractiveInstall = visible;
+                pending.AutomaticInstall = automaticInstall;
                 if ((visible || pluginExit) && (pending.FileHashes == null || pending.FileHashes.Count == 0))
                     throw new InvalidDataException("此更新包缺少逐文件校验信息，请重新下载更新包。");
                 var arguments = BuildUpdaterArguments(processId, pendingPath, launchMarker, restartPath, Serializer.Serialize(pending));
@@ -563,6 +641,11 @@ internal static class ClientPackageUpdater
         var command = string.Concat("& {", ApplyScript, "\n} -ProcessId ", processId.ToString(System.Globalization.CultureInfo.InvariantCulture),
             " -PendingPath ", PowerShellLiteral(pendingPath), " -LaunchMarker ", PowerShellLiteral(launchMarker),
             " -RestartPath ", PowerShellLiteral(restartPath), " -PendingJson ", PowerShellLiteral(pendingJson));
+        return EncodePowerShellCommand(command);
+    }
+
+    private static string EncodePowerShellCommand(string command)
+    {
         byte[] compressed;
         using (var stream = new MemoryStream())
         {
@@ -739,6 +822,31 @@ function Copy-DirectoryWithRetry([string]$Source,[string]$Destination) {
   }
   throw $lastError
 }
+function Expand-PluginInterface([string]$Directory,$Hashes) {
+  $zipPath = Join-Path $Directory 'uplm-ui.zip'
+  if (-not (Test-Path -LiteralPath $zipPath)) { return }
+  $ui = Join-Path $Directory 'ui'
+  $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+  try {
+    $prefix = [IO.Path]::GetFullPath($ui).TrimEnd('\') + '\'
+    foreach ($entry in $archive.Entries) {
+      if (-not $entry.Name) { continue }
+      $path = [IO.Path]::GetFullPath((Join-Path $ui $entry.FullName))
+      if (-not $path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw '插件界面资源路径无效。' }
+      [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
+      [IO.Compression.ZipFileExtensions]::ExtractToFile($entry,$path,$true)
+      $stream = $entry.Open()
+      $sha = [Security.Cryptography.SHA256]::Create()
+      try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','') }
+      finally { $stream.Dispose(); $sha.Dispose() }
+      $Hashes | Add-Member -MemberType NoteProperty -Name ('ui\' + $entry.FullName.Replace('/','\')) -Value $hash -Force
+    }
+  } finally { $archive.Dispose() }
+  foreach ($entry in @('index.html','review-overlay.html','server-settings.html','client-bootstrap.json')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $ui $entry) -PathType Leaf)) { throw ('插件界面资源缺失：' + $entry) }
+  }
+  Verify-PackageFiles $Directory $Hashes
+}
 function Expand-VerifiedPluginPackage([string]$ArchivePath,[string]$Destination,[string]$ExpectedHash) {
   Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
   $stream = [IO.File]::OpenRead($ArchivePath)
@@ -783,11 +891,31 @@ function Stop-LeftoverWebViewProcesses([string]$TargetDirectory) {
     }
   }
 }
-function Wait-ForSolidWorksExit([int]$TimeoutSeconds) {
+function Test-UsesPluginDirectory($Process,[string]$TargetDirectory) {
+  $localRoot = [IO.Path]::GetFullPath([Environment]::GetFolderPath('LocalApplicationData')).TrimEnd('\') + '\'
+  if (-not $TargetDirectory.StartsWith($localRoot, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+  # 用户独立安装只等待同一账号的实例，共享安装仍等待全部实例。
+  try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $instance = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $Process.Id) -ErrorAction Stop
+    $owner = Invoke-CimMethod -InputObject $instance -MethodName GetOwnerSid -ErrorAction Stop
+    if ($owner.ReturnValue -eq 0 -and $owner.Sid) {
+      if ($owner.Sid -eq $identity) { return $true }
+      # HKLM COM 注册可能让另一账号也加载此目录，须确认其未使用当前插件。
+      $prefix = $TargetDirectory.TrimEnd('\') + '\'
+      foreach ($module in $Process.Modules) {
+        if ($module.FileName.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { return $true }
+      }
+      return $false
+    }
+  } catch { }
+  return $true
+}
+function Wait-ForSolidWorksExit([int]$TimeoutSeconds,[string]$TargetDirectory) {
   for ($attempt = 1; $TimeoutSeconds -eq 0 -or $attempt -le $TimeoutSeconds; $attempt++) {
     $running = @(Get-Process -Name 'SLDWORKS' -ErrorAction SilentlyContinue)
     try {
-      if ($running.Count -eq 0) { return $true }
+      if (@($running | Where-Object { Test-UsesPluginDirectory $_ $TargetDirectory }).Count -eq 0) { return $true }
     } finally {
       foreach ($process in $running) { $process.Dispose() }
     }
@@ -819,9 +947,16 @@ try {
   }
   if ([string]$pending.Component -eq 'solidworks-addin') {
     # SolidWorks 还开着就先不动目录：保留待安装状态（不写 error.txt），等客户端轮询或插件下次检查时重试。
-    if (-not (Wait-ForSolidWorksExit 0)) {
+    if (-not (Wait-ForSolidWorksExit 0 $target)) {
       Remove-Item -LiteralPath $LaunchMarker -Force -ErrorAction SilentlyContinue
       throw '等待 SolidWorks 退出超时，未修改安装目录。请关闭 SolidWorks 后重新点击安装更新。'
+    }
+  }
+  if ($pending.AutomaticInstall) {
+    $settingsPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'UPLM/solidworks-addin-settings.json'
+    if (Test-Path -LiteralPath $settingsPath) {
+      $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($settings.AutomaticUpdatesEnabled -eq $false) { return }
     }
   }
   $backupRoot = Split-Path -Parent $PendingPath
@@ -842,6 +977,7 @@ try {
     Copy-DirectoryWithRetry $payload $candidate
   }
   Verify-PackageFiles $candidate $pending.FileHashes
+  if ($component -eq 'solidworks-addin') { Expand-PluginInterface $candidate $pending.FileHashes }
   # 服务器地址属于本机安装配置，不能被更新包的打包环境覆盖。
   $installedLocator = Join-Path $target 'uplm-bootstrap.json'
   if (Test-Path -LiteralPath $installedLocator) {
@@ -853,7 +989,7 @@ try {
   if (-not [string]::Equals($candidateVersion, [string]$pending.Version, [StringComparison]::OrdinalIgnoreCase)) {
     throw ('Update package version verification failed. Expected=' + [string]$pending.Version + ' Actual=' + $candidateVersion)
   }
-  if ($component -eq 'solidworks-addin') { [void](Wait-ForSolidWorksExit 0) }
+  if ($component -eq 'solidworks-addin') { [void](Wait-ForSolidWorksExit 0 $target) }
   $failureHint = '安装未完成，请关闭占用插件的程序，再检查更新。详细原因已写入更新日志。'
   if (Test-Path -LiteralPath $target) { Move-DirectoryWithRetry $target $backup }
   try {
@@ -887,6 +1023,7 @@ try {
 } catch {
   Write-Host $failureHint -ForegroundColor Red
   ($_ | Out-String) | Set-Content -LiteralPath ($PendingPath + '.error.txt') -Encoding UTF8
+} finally {
   Remove-Item -LiteralPath $LaunchMarker -Force -ErrorAction SilentlyContinue
 }";
 
@@ -899,6 +1036,7 @@ try {
         public string PackageSha256 { get; set; }
         public System.Collections.Generic.Dictionary<string, string> FileHashes { get; set; }
         public bool InteractiveInstall { get; set; }
+        public bool AutomaticInstall { get; set; }
     }
 }
 

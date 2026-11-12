@@ -42,7 +42,7 @@ public sealed partial class PdmAddin
         if (currentTree?.DocumentId.HasValue == true
             && (await apiClient.GetVersionsAsync(currentTree.DocumentId.Value, lifetime.Token, 1)).Count > 0)
             rootId = currentTree.DocumentId.Value;
-        if (Interlocked.CompareExchange(ref controlledOpenInProgress, 1, 0) != 0)
+        if (MarkCacheOperationBusy(ref controlledOpenInProgress) != 0)
             throw new InvalidOperationException("已有PLM图档正在准备，请等待当前操作结束。");
         var reused = false;
         bool opened;

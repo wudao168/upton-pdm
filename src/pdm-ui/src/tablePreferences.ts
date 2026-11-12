@@ -11,6 +11,7 @@ interface PreferenceSession {
   writes: Map<string, Promise<void>>
   changes: number
   refreshing?: Promise<void>
+  lastReadAt?: number
 }
 let session: PreferenceSession | undefined
 export const tablePreferenceVersion = ref(0)
@@ -51,7 +52,8 @@ export async function initializeTablePreferences(username: string, company: stri
   session = context
   try {
     const result = await readUserTablePreferences(token, company)
-    if (session !== context) return
+    if (session !== context || context.changes > 0) return
+    context.lastReadAt = Date.now()
     const remote = result.preferences ?? {}
     const migrating = Object.entries(context.values).filter(([key]) => !(key in remote))
     context.values = { ...context.values, ...remote }
@@ -65,9 +67,10 @@ export async function initializeTablePreferences(username: string, company: stri
   if (session === context) tablePreferenceVersion.value++
 }
 
-export async function refreshTablePreferences(): Promise<void> {
+export async function refreshTablePreferences(maxAgeMs = 0): Promise<void> {
   const context = session
   if (!context) return
+  if (maxAgeMs > 0 && context.lastReadAt !== undefined && Date.now() - context.lastReadAt < maxAgeMs) return
   if (context.writes.size) return
   if (context.refreshing) return context.refreshing
   const changes = context.changes
@@ -75,6 +78,7 @@ export async function refreshTablePreferences(): Promise<void> {
     try {
       const result = await readUserTablePreferences(context.token, context.company)
       if (session !== context || context.changes !== changes) return
+      context.lastReadAt = Date.now()
       if (!Object.entries(result.preferences ?? {}).some(([key, value]) => context.values[key] !== value)) return
       context.values = { ...context.values, ...result.preferences }
       persistCache(context)

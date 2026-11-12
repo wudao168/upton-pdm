@@ -18,7 +18,12 @@ public sealed class MySqlMigrationRunner(IOptions<PdmDatabaseOptions> options, I
 
         await using var connection = new MySqlConnection(settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        await connection.ExecuteAsync(new CommandDefinition(
+        // Even CREATE IF NOT EXISTS requests an exclusive metadata lock. Existing installations
+        // only need to read this table; avoid blocking startup behind an unrelated open reader.
+        var hasHistory = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='pdm_schema_migration'",
+            cancellationToken: cancellationToken)) != 0;
+        if (!hasHistory) await connection.ExecuteAsync(new CommandDefinition(
             """
             CREATE TABLE IF NOT EXISTS pdm_schema_migration (
                 version VARCHAR(64) NOT NULL PRIMARY KEY,

@@ -95,8 +95,8 @@ public sealed partial class MySqlPdmRepository
                 verifiedReferences.Add((file.DocumentId, preparedVersion.Revision.Display));
             if (commit.ReferenceSnapshot.Root.Kind == DocumentKind.Drawing)
             {
-                var models = commit.ReferenceSnapshot.Root.Children.Where(node => node.Kind is DocumentKind.Assembly or DocumentKind.Part)
-                    .Where(node => node.Status is not (ReferenceNodeStatus.Virtual or ReferenceNodeStatus.Missing) && node.DocumentId.HasValue).Select(node => node.DocumentId!.Value).Distinct().ToArray();
+                var models = DrawingModelRelations.KnownModels(commit.ReferenceSnapshot.Root)
+                    .Select(node => node.DocumentId!.Value).Distinct().ToArray();
                 // A partial read may add verified models, but cannot prove that an old relation was removed.
                 if (!commit.ReferenceSnapshot.Root.StructureIndexPending)
                     await connection.ExecuteAsync(new CommandDefinition("DELETE FROM document_model_drawing_relation WHERE drawing_document_id=@Id",

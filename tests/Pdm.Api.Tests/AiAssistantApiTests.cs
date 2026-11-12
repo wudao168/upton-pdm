@@ -14,7 +14,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Api.Tests;
 
-public sealed class AiAssistantApiTests
+public sealed partial class AiAssistantApiTests
 {
     [Theory]
     [InlineData("2026-11-11T15:59:00Z", "2026-11-11 23:59:00", "星期三")]
@@ -34,7 +34,7 @@ public sealed class AiAssistantApiTests
         Assert.Contains("event: done", await ordinary.Content.ReadAsStringAsync());
         var initial = upstream.Requests.Last(); Assert.False(initial.TryGetProperty("tools", out _));
         var prompt = initial.GetProperty("messages")[0].GetProperty("content").GetString()!;
-        Assert.Contains("本轮可信服务器时间", prompt); Assert.Contains("系统内置基础说明", prompt); Assert.Contains("未接入联网搜索", prompt);
+        Assert.Contains("本轮可信服务器时间", prompt); Assert.Contains("系统内置基础说明", prompt); Assert.Contains("本轮没有联网工具", prompt);
         Assert.Equal(HttpStatusCode.Forbidden, (await f.Client.PostAsJsonAsync(path, new AiSendInput(Guid.NewGuid(), "查询项目", f.Model, true))).StatusCode);
         var project = await f.Project("模式切换验收"); await f.ProjectGrant(project.Id, AiPermissions.Business, PermissionCodes.ProjectView);
         var enabled = await f.Client.PostAsJsonAsync(path, new AiSendInput(Guid.NewGuid(), "查询项目", f.Model, true)); Assert.DoesNotContain("event: error", await enabled.Content.ReadAsStringAsync());
@@ -99,8 +99,8 @@ public sealed class AiAssistantApiTests
         await f.Grant(PermissionCodes.RoleSettingsView);
         var catalogue = await f.Client.GetFromJsonAsync<JsonElement>("/api/role-permissions");
         var permissions = catalogue.GetProperty("permissions").EnumerateArray().Where(p => p.GetProperty("code").GetString()!.StartsWith("ai.")).ToArray();
-        Assert.Equal(4, permissions.Length);
-        Assert.DoesNotContain(before.Templates.SelectMany(t => t.Grants), g => g.Permission.StartsWith("ai."));
+        Assert.Equal(5, permissions.Length);
+        Assert.Equal(AiPermissions.Web, Assert.Single(before.Templates.SelectMany(t => t.Grants), g => g.Permission.StartsWith("ai.")).Permission);
         Assert.Equal(HttpStatusCode.Forbidden, (await f.Client.GetAsync("/api/ai/settings")).StatusCode);
         await f.Grant(AiPermissions.Settings, AiPermissions.Chat);
         var input = f.Configuration("http://127.0.0.1:1/v1", "验收密钥");
@@ -253,13 +253,15 @@ public sealed class AiAssistantApiTests
     private sealed class Fixture : IAsyncDisposable
     {
         public const string Actor = "ai-acceptance", Role = "ai-acceptance-role";
-        public PdmApiFactory Factory { get; } = new();
+        public Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program> Factory { get; private set; } = new PdmApiFactory();
         public HttpClient Client { get; private set; } = null!;
         public IPdmRepository Repo { get; private set; } = null!;
         public Guid Company, Other, UserId = Guid.NewGuid(), Provider = Guid.NewGuid();
         public string Model => Provider + ":test-model";
-        public static async Task<Fixture> Create() {
-            var f = new Fixture(); f.Client = f.Factory.CreateClient(); f.Repo = f.Factory.Services.GetRequiredService<IPdmRepository>();
+        public static async Task<Fixture> Create(IAiWebClient? web = null) {
+            var f = new Fixture();
+            if (web is not null) f.Factory = f.Factory.WithWebHostBuilder(builder => builder.ConfigureServices(services => services.AddSingleton(web)));
+            f.Client = f.Factory.CreateClient(); f.Repo = f.Factory.Services.GetRequiredService<IPdmRepository>();
             var directory = await f.Repo.GetOrganizationDirectoryAsync(default); f.Company = directory.Organizations[0].Id; f.Other = directory.Organizations[1].Id;
             await f.Repo.CreateUserAsync(new(f.UserId, Actor, "AI功能验收", "unused", UserRole.Engineer, true, RoleCode: Role, CompanyId: f.Company), default);
             await f.Repo.SetUserCompanyScopeAsync(Actor, f.Company, false, [], "admin", default); f.CompanyHeader(f.Company); f.Login(Actor); return f;
@@ -292,7 +294,7 @@ public sealed class AiAssistantApiTests
         public ConcurrentQueue<JsonElement> Requests { get; } = new();
         public TaskCompletionSource Received { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public static async Task<MockModel> Start(int status = 200, bool pause = false) {
+        public static async Task<MockModel> Start(int status = 200, bool pause = false, int toolRounds = 1, string? requestedTool = null, string? arguments = null) {
             var builder = WebApplication.CreateSlimBuilder(); builder.Configuration.Sources.Clear(); builder.Configuration.AddInMemoryCollection(); builder.WebHost.UseUrls("http://127.0.0.1:0"); builder.Logging.ClearProviders();
             var app = builder.Build(); var mock = new MockModel(app);
             app.MapPost("/v1/chat/completions", async (HttpContext context) => {
@@ -303,9 +305,10 @@ public sealed class AiAssistantApiTests
                 context.Response.ContentType = "text/event-stream";
                 var last = body.GetProperty("messages").EnumerateArray().Last();
                 async Task Chunk(object delta, string? reason = null) { await context.Response.WriteAsync("data: " + JsonSerializer.Serialize(new { id = "mock", @object = "chat.completion.chunk", created = 1, model = "test-model", choices = new[] { new { index = 0, delta, finish_reason = reason } } }) + "\n\n"); await context.Response.Body.FlushAsync(); }
-                if (last.GetProperty("role").GetString() != "tool" && body.TryGetProperty("tools", out var toolList) && toolList.GetArrayLength() > 0) {
-                    var name = toolList[0].GetProperty("function").GetProperty("name").GetString()!;
-                    await Chunk(new { role = "assistant", tool_calls = new[] { new { index = 0, id = "call-1", type = "function", function = new { name, arguments = name == "connection_check" ? "{}" : "{\"query\":\"\"}" } } } }, "tool_calls");
+                var toolCount = body.GetProperty("messages").EnumerateArray().Count(m => m.GetProperty("role").GetString() == "tool");
+                if (toolCount < toolRounds && body.TryGetProperty("tools", out var toolList) && toolList.GetArrayLength() > 0) {
+                    var name = requestedTool ?? toolList[0].GetProperty("function").GetProperty("name").GetString()!;
+                    await Chunk(new { role = "assistant", tool_calls = new[] { new { index = 0, id = "call-" + toolCount, type = "function", function = new { name, arguments = arguments ?? (name == "connection_check" ? "{}" : name == "SearchWeb" ? "{\"query\":\"DeepSeek 官方搜索文档\"}" : "{\"query\":\"\"}") } } } }, "tool_calls");
                 } else {
                     await Chunk(new { role = "assistant", content = "模拟回复：" }); await Chunk(new { content = "查询完成。" }, "stop");
                 }

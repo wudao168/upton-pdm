@@ -27,7 +27,7 @@ public sealed partial class PdmAddin
         && Volatile.Read(ref openOperationInProgress) == 0 && Volatile.Read(ref controlledOpenInProgress) == 0
         && Volatile.Read(ref workspaceOperationInProgress) == 0 && Volatile.Read(ref batchDialogInProgress) == 0
         && Volatile.Read(ref checkInOperationInProgress) == 0 && Volatile.Read(ref draftSnapshotInProgress) == 0
-        && Volatile.Read(ref refreshSuppressionDepth) == 0 && Volatile.Read(ref automaticDrawingOperationInProgress) == 0
+        && Volatile.Read(ref refreshSuppressionDepth) == 0
         && Volatile.Read(ref treeRefreshInProgress) == 0;
 
     private void ObserveNativeFileOpening(string fileName)

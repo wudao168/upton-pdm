@@ -126,7 +126,6 @@ public sealed partial class PdmAddin
     private bool CanMaintainEdits() => Volatile.Read(ref checkInOperationInProgress) == 0
         && Volatile.Read(ref workspaceOperationInProgress) == 0 && Volatile.Read(ref openOperationInProgress) == 0
         && Volatile.Read(ref controlledOpenInProgress) == 0 && Volatile.Read(ref refreshSuppressionDepth) == 0
-        && Volatile.Read(ref automaticDrawingOperationInProgress) == 0
         && Volatile.Read(ref batchDialogInProgress) == 0;
 
     private IReadOnlyList<LocalEditDraft> PrepareClosedEdits()

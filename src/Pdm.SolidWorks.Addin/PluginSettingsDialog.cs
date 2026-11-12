@@ -71,9 +71,15 @@ internal sealed class PluginSettingsDialog : Form
         ClientSize = new Size(540, 820);
         Font = new Font("Microsoft YaHei UI", 9F);
 
+        // Keep every settings row usable when the owning monitor constrains a
+        // scaled dialog. The content scrolls instead of collapsing the update row.
+        var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+        Controls.Add(scrollHost);
         var root = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
+            Height = ClientSize.Height,
+            MinimumSize = new Size(0, ClientSize.Height),
             Padding = new Padding(16),
             ColumnCount = 1,
             RowCount = 5
@@ -83,7 +89,7 @@ internal sealed class PluginSettingsDialog : Form
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-        Controls.Add(root);
+        scrollHost.Controls.Add(root);
 
         var connectionGroup = new GroupBox { Text = "服务器连接", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
         var connectionLayout = new TableLayoutPanel
@@ -94,7 +100,7 @@ internal sealed class PluginSettingsDialog : Form
             RowCount = 3,
             Margin = Padding.Empty
         };
-        connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84F));
+        connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6F));
         connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96F));
@@ -106,8 +112,9 @@ internal sealed class PluginSettingsDialog : Form
         connectionLayout.Controls.Add(new Label
         {
             Text = "服务器地址",
+            AutoSize = true,
             TextAlign = ContentAlignment.MiddleLeft,
-            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 0, 6, 0)
         }, 0, 0);
         serverAddress.Text = initialSettings.ServerAddress ?? string.Empty;
@@ -190,7 +197,7 @@ internal sealed class PluginSettingsDialog : Form
         updateLayout.Controls.Add(new Label { Text = "下载进度", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 4);
         updateLayout.Controls.Add(updateProgress, 1, 4);
         updateLayout.SetColumnSpan(updateProgress, 2);
-        automaticUpdates.Text = "自动下载更新，退出全部 SolidWorks 窗口后安装";
+        automaticUpdates.Text = "后台自动下载，退出全部 SolidWorks 后静默更新";
         automaticUpdates.Checked = initialSettings.AutomaticUpdatesEnabled;
         automaticUpdates.Dock = DockStyle.Fill;
         updateLayout.Controls.Add(automaticUpdates, 0, 5);

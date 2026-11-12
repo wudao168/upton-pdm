@@ -3,13 +3,19 @@ export { productionRequestId as aiRequestId } from './productionTracking'
 
 export interface AiModel { id: string; name: string; enabled: boolean; tools: boolean; contextTokens: number; outputTokens: number }
 export interface AiProvider { id: string; name: string; baseUrl: string; network: 'intranet' | 'cloud'; adapter: 'compatible' | 'deepseek'; enabled: boolean; models: AiModel[]; hasKey?: boolean; apiKey?: string; clearKey?: boolean }
-export interface AiSettings { revision: number; providers: AiProvider[]; defaultModel: string | null }
+export interface AiWebSettings { enabled: boolean; providerId: string | null; dailyLimit: number; monthlyLimit: number; perTurnLimit: number }
+export interface AiWebUsage { today: number; month: number }
+export const defaultAiWeb = (): AiWebSettings => ({ enabled: false, providerId: null, dailyLimit: 100, monthlyLimit: 1000, perTurnLimit: 3 })
+export interface AiSettings { revision: number; providers: AiProvider[]; defaultModel: string | null; web?: AiWebSettings; webUsage?: AiWebUsage }
 export interface AiChoice { key: string; provider: string; name: string; tools: boolean; network: string }
-export interface AiBootstrap { canChat: boolean; canManage: boolean; canBusiness: boolean; defaultModel: string | null; models: AiChoice[] }
-export interface AiSource { name: string; projectId: string | null; kind: string; permissions: string[] }
+export interface AiBootstrap { canChat: boolean; canManage: boolean; canBusiness: boolean; canWeb?: boolean; webEnabled?: boolean; web?: AiWebSettings; webUsage?: AiWebUsage; defaultModel: string | null; models: AiChoice[] }
+export interface AiSource { name: string; projectId: string | null; kind: string; permissions: string[]; url?: string; date?: string }
 export interface AiMessage { id: string; role: string; text: string; status: string; createdAt: string; sources?: AiSource[]; inputTokens?: number; outputTokens?: number }
-export interface AiConversation { id: string; title: string; model: string; business: boolean; revision: number; updatedAt: string; busyUntil?: string; messages: AiMessage[] }
-export interface AiEvent { text?: string; message?: string; clear?: boolean; omittedHistory?: boolean; business?: boolean; status?: string; sources?: AiSource[]; inputTokens?: number; outputTokens?: number }
+export interface AiConversation { id: string; title: string; model: string; business: boolean; web?: boolean; revision: number; updatedAt: string; busyUntil?: string; messages: AiMessage[] }
+export interface AiEvent { text?: string; message?: string; clear?: boolean; omittedHistory?: boolean; business?: boolean; web?: boolean; status?: string; sources?: AiSource[]; inputTokens?: number; outputTokens?: number }
+export function aiSourceUrl(source: AiSource): string | undefined {
+  try { const url = new URL(source.url ?? ''); return source.kind === 'web' && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : undefined } catch { return undefined }
+}
 export const aiJson = <T>(path: string, token: string, method = 'GET', data?: unknown) => requestJson<T>(`/api/ai/${path}`, { method, ...(data === undefined ? {} : { body: JSON.stringify(data) }) }, token)
 export const aiError = (error: unknown) => error instanceof Error && /[\u3400-\u9fff]/.test(error.message) ? error.message : 'AI服务暂时不可用，请检查连接后重试。'
 

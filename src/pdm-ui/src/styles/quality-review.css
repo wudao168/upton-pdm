@@ -48,4 +48,11 @@
 .quality-review fieldset { margin:0; border:0; padding:0; min-width:0; }
 .quality-review__tag { display:inline-block; border-radius:999px; padding:2px 9px; background:var(--pdm-surface-muted); white-space:nowrap; }
 .quality-review__history { margin:0; padding-left:20px; display:grid; gap:8px; }
+.quality-review__issue-form { display:grid; gap:12px; }
+.quality-review__section-title { margin:0; font-size:14px; font-weight:600; }
+.quality-review__company-classification { min-width:0; }
+.quality-review__company-classification > summary { cursor:pointer; color:var(--pdm-theme-accent); line-height:28px; }
+.quality-review__company-classification > summary:focus-visible { outline:2px solid var(--pdm-theme-accent); outline-offset:2px; }
+.quality-review__classification-summary { margin-left:12px; color:var(--pdm-muted); overflow-wrap:anywhere; }
+.quality-review__classification-body { display:grid; gap:12px; padding-top:8px; }
 @media(max-width:700px) { .quality-review__form, .quality-review__detail { grid-template-columns:minmax(0,1fr); } .quality-review__dialog { padding:8px; } .quality-review__dialog-body { max-height:calc(100dvh - 16px); padding:16px; } .quality-review__filters label { max-width:none; } }

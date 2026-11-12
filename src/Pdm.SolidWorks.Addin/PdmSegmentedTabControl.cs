@@ -14,25 +14,55 @@ internal sealed class PdmSegmentedTabControl : TabControl
     private string theme = "a";
     private Dictionary<string, Color> colors;
     private int hoveredIndex = -1;
+    private TableLayoutPanel alignedToolbar;
+
+    internal void AlignWith(TableLayoutPanel toolbar)
+    {
+        alignedToolbar = toolbar;
+        toolbar.Layout += (_, _) => Invalidate();
+    }
 
     public PdmSegmentedTabControl()
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         SizeMode = TabSizeMode.Fixed;
-        tabFont = new Font(Font, FontStyle.Bold);
+        tabFont = new Font(Font, FontStyle.Regular);
         ApplyTheme("a");
     }
 
-    internal int HeaderHeight => Math.Max(34, Font.Height + 12) + 10;
-    public override Rectangle DisplayRectangle => new Rectangle(0, HeaderHeight + 5, ClientSize.Width, Math.Max(0, ClientSize.Height - HeaderHeight - 5));
+    private float horizontalScale = 1F;
+    private float verticalScale = 1F;
+    internal int HeaderHeight => Math.Max(1, (int)Math.Round(30 * verticalScale));
+    internal int HeaderGap => Math.Max(1, (int)Math.Round(5 * verticalScale));
+    public override Rectangle DisplayRectangle => new Rectangle(0, HeaderHeight + HeaderGap, ClientSize.Width, Math.Max(0, ClientSize.Height - HeaderHeight - HeaderGap));
 
     internal Rectangle GetSegmentBounds(int index)
     {
         if (TabCount == 0) return Rectangle.Empty;
-        var step = Math.Max(0, ClientSize.Width - 8d) / TabCount;
-        var left = 5 + (int)Math.Round(index * step);
-        var right = 5 + (int)Math.Round((index + 1) * step) - 2;
-        return new Rectangle(left, 5, Math.Max(0, right - left), HeaderHeight - 10);
+        if (alignedToolbar != null && alignedToolbar.ColumnCount == TabCount * 2 - 1)
+        {
+            // 直接复用实际按钮的屏幕位置，涵盖高 DPI 下原生 TabPage 的边缘偏移。
+            var action = alignedToolbar.GetControlFromPosition(index * 2, 0);
+            if (action != null && alignedToolbar.IsHandleCreated && IsHandleCreated)
+            {
+                var leftEdge = PointToClient(action.PointToScreen(Point.Empty)).X;
+                return new Rectangle(leftEdge, 0, action.Width, HeaderHeight);
+            }
+
+        }
+        var gap = Math.Max(1, (int)Math.Round(6 * horizontalScale));
+        var available = Math.Max(0, ClientSize.Width - gap * (TabCount - 1));
+        // TableLayoutPanel 将整除余量交给最后一列，与下方四个操作按钮一致。
+        var width = available / TabCount;
+        var left = index * (width + gap);
+        return new Rectangle(left, 0, index == TabCount - 1 ? ClientSize.Width - left : width, HeaderHeight);
+    }
+
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified)
+    {
+        horizontalScale *= factor.Width;
+        verticalScale *= factor.Height;
+        base.ScaleControl(factor, specified);
     }
 
     internal void ApplyTheme(string value)
@@ -48,7 +78,7 @@ internal sealed class PdmSegmentedTabControl : TabControl
     {
         base.OnFontChanged(e);
         tabFont?.Dispose();
-        tabFont = new Font(Font, FontStyle.Bold);
+        tabFont = new Font(Font, FontStyle.Regular);
         PerformLayout();
         Invalidate();
     }
@@ -102,34 +132,28 @@ internal sealed class PdmSegmentedTabControl : TabControl
     {
         e.Graphics.Clear(Parent?.BackColor ?? SystemColors.Control);
         if (colors == null || Width < 2) return;
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var track = Rounded(new Rectangle(0, 0, Width - 1, HeaderHeight - 1), 7))
-        using (var surface = new SolidBrush(colors["--pdm-surface"]))
-        using (var border = new Pen(colors["--pdm-border"]))
-        {
-            e.Graphics.FillPath(surface, track);
-            e.Graphics.DrawPath(border, track);
-        }
         for (var index = 0; index < TabCount; index++)
         {
             var bounds = GetSegmentBounds(index);
-            if (index == SelectedIndex)
+            var enabled = TabPages[index].Enabled;
+            var background = !enabled ? Color.FromArgb(224, 228, 233)
+                : index == SelectedIndex ? Color.FromArgb(21, 126, 77) : Color.FromArgb(72, 84, 99);
+            if (enabled && index == hoveredIndex) background = ControlPaint.Light(background, 0.12F);
+            using (var brush = new SolidBrush(background)) e.Graphics.FillRectangle(brush, bounds);
+            var caption = TabPages[index].Text;
+            var fittedSize = tabFont.Size;
+            while (fittedSize > 6.5F)
             {
-                var shadowBounds = bounds;
-                shadowBounds.Offset(0, 1);
-                using (var shadow = Rounded(shadowBounds, 10))
-                using (var brush = new SolidBrush(Color.FromArgb(20, colors["--pdm-sidebar"]))) e.Graphics.FillPath(brush, shadow);
-                using (var selected = Rounded(bounds, 10))
-                using (var brush = new SolidBrush(colors["--pdm-theme-accent-soft-strong"])) e.Graphics.FillPath(brush, selected);
+                using (var candidate = new Font(tabFont.FontFamily, fittedSize, FontStyle.Regular))
+                    if (TextRenderer.MeasureText(e.Graphics, caption, candidate, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width <= bounds.Width - 2) break;
+                fittedSize -= 0.25F;
             }
-            var textColor = index == SelectedIndex ? colors["--pdm-theme-accent-hover"]
-                : index == hoveredIndex ? colors["--pdm-theme-accent"] : colors["--pdm-text-soft"];
-            TextRenderer.DrawText(e.Graphics, TabPages[index].Text, tabFont, Rectangle.Inflate(bounds, -3, 0),
-                TabPages[index].Enabled ? textColor : SystemColors.GrayText,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            using (var fittedFont = new Font(tabFont.FontFamily, fittedSize, FontStyle.Regular))
+                TextRenderer.DrawText(e.Graphics, caption, fittedFont, Rectangle.Inflate(bounds, -1, 0),
+                    enabled ? Color.White : Color.FromArgb(145, 151, 159),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             if (index == SelectedIndex && Focused && ShowFocusCues)
-                using (var focus = Rounded(Rectangle.Inflate(bounds, -1, -1), 9))
-                using (var pen = new Pen(colors["--pdm-theme-accent"])) e.Graphics.DrawPath(pen, focus);
+                ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(bounds, -3, -3), Color.White, background);
         }
     }
 

@@ -6,6 +6,45 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class PendingDrawingRelationTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task FileDependenciesNeverBecomePairedDrawings(bool pending, bool legacy)
+    {
+        var (repository, project, session) = await Setup();
+        var direct = await Model(repository, project, session, "DIRECT");
+        var otherDirect = await Model(repository, project, session, "SECOND_VIEW");
+        var dependency = await Model(repository, project, session, "DEPENDENCY");
+        var drawing = await Drawing(repository, project, session);
+        var tree = ArchiveBatchTests.Node(drawing) with { StructureIndexPending = pending,
+            Children = [ArchiveBatchTests.Node(direct), ArchiveBatchTests.Node(otherDirect),
+                ArchiveBatchTests.Node(dependency) with { Role = ReferenceRole.ExternalFileDependency }] };
+        if (legacy)
+            await repository.CheckInVersionAsync(drawing.Id, "admin", session, ArchiveBatchTests.Commit(project, drawing, tree, 'C'), default);
+        else await Archive(repository, project, session, drawing, tree, 'C');
+        var relations = await repository.ListDocumentRelationsAsync(project.Id, default);
+        Assert.Equal(new[] { direct.Id, otherDirect.Id }.Order(), relations.Select(row => row.ModelDocumentId).Order());
+        var stored = Assert.Single(await repository.ListDocumentVersionsAsync(drawing.Id, default));
+        Assert.Equal(3, stored.ReferenceSnapshot.Children.Count);
+        Assert.Contains(stored.ReferenceSnapshot.Children, node => node.DocumentId == dependency.Id && node.Role == ReferenceRole.ExternalFileDependency);
+        Assert.Equal(pending, stored.ReferenceSnapshot.StructureIndexPending);
+    }
+
+    [Fact]
+    public void RepairOnlyRemovesExplicitDependencyRelationsAndPreservesAmbiguousOrDirectModels()
+    {
+        DocumentReferenceNode Node(Guid id, ReferenceRole role) => new(Guid.NewGuid(), id, "model", "MODEL.SLDPRT", "模型",
+            DocumentKind.Part, "Default", 1, ReferenceNodeStatus.Normal, RevisionLabel.InitialWork(), null, []) { Role = role };
+        var direct = Guid.NewGuid(); var dependency = Guid.NewGuid(); var unknown = Guid.NewGuid();
+        var drawing = Node(Guid.NewGuid(), ReferenceRole.Component) with { Kind = DocumentKind.Drawing, StructureIndexPending = true,
+            Children = [Node(direct, ReferenceRole.Component), Node(direct, ReferenceRole.ExternalFileDependency),
+                Node(dependency, ReferenceRole.ExternalFileDependency), Node(unknown, ReferenceRole.Component) with { ReferenceTypeUnverified = true }] };
+        Assert.Equal(dependency, Assert.Single(DrawingModelRelations.DependencyOnlyModelIds(drawing)));
+        Assert.Equal(2, DrawingModelRelations.KnownModels(drawing).Count());
+        Assert.Empty(DrawingModelRelations.DependencyOnlyModelIds(drawing with { Kind = DocumentKind.Assembly }));
+    }
+
     [Fact]
     public async Task ExistingPendingVersionWithoutRelationRowsIsRecoveredReadOnlyForListAndOpen()
     {

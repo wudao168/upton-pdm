@@ -206,7 +206,7 @@ public sealed class QualityReviewTests
         public void Delete(string root, Guid project, Guid id) { }
     }
     [Fact]
-    public async Task RecurrenceCanLinkAuthorizedOtherProjectAndInheritsTheme()
+    public async Task SimplifiedEntryCreatesIndependentEventsAndDoesNotEnumerateOtherProjectIssues()
     {
         var f = await Fixture.Create(); f.Act();
         try
@@ -214,24 +214,73 @@ public sealed class QualityReviewTests
             await f.GrantAll(Fixture.Actor);
             var theme = Guid.NewGuid();
             var catalog = await f.Service.SaveThemeAsync(theme, new(0, "重复失效", "", true), Fixture.Actor, UserRole.Engineer, default);
-            var original = await f.Issue();
-            original = await f.Issues.SaveAsync(original with { Status = "已完成" }, original.RowVersion, default);
-            await f.Store.SaveAsync(catalog with { Profiles = [Profile(original.Id, theme, f.Today.AddDays(-3))] }, catalog.RowVersion, default);
-            catalog = await f.Store.ReadAsync(f.Company, default);
+            var issue = await f.Issue();
             var second = await f.NewProject();
-            var recurrence = await f.Issues.SaveAsync(original with { Id = Guid.NewGuid(), ProjectId = second.Id, Status = "处理中", RowVersion = 0 }, 0, default);
-            var panel = await f.Service.IssueAsync(second.Id, recurrence.Id, Fixture.Actor, UserRole.Engineer, default);
-            Assert.Contains(panel.RelatedIssues, r => r.Issue.Id == original.Id);
-            catalog = await f.Service.SaveIssueAsync(second.Id, recurrence.Id, new(catalog.RowVersion, "质量", "装配", "普通", f.Today,
-                null, null, original.Id, "", "", "", "未验证", "", []), Fixture.Actor, UserRole.Engineer, default);
-            Assert.Equal(theme, catalog.Profiles.Single(p => p.IssueId == recurrence.Id).ThemeId);
+            var other = await f.Issues.SaveAsync(issue with { Id = Guid.NewGuid(), ProjectId = second.Id, RowVersion = 0 }, 0, default);
+            var tracking = new CountingOplRepository(f.Issues);
+            var service = new QualityReviewService(f.Repository, tracking, f.Store, f.Clock);
+            var panel = await service.IssueAsync(f.Project.Id, issue.Id, Fixture.Actor, UserRole.Engineer, default);
+            Assert.Empty(panel.RelatedIssues);
+            Assert.All(tracking.ReadProjects, id => Assert.Equal(f.Project.Id, id));
+            catalog = await service.SaveIssueAsync(f.Project.Id, issue.Id, new(catalog.RowVersion, "质量", "不再接受的自由分类", "普通", f.Today,
+                theme, other.Id, Guid.NewGuid(), "", "", "", "未验证", "", []), Fixture.Actor, UserRole.Engineer, default);
+            var saved = Assert.Single(catalog.Profiles);
+            Assert.Equal(theme, saved.ThemeId);
+            Assert.Empty(saved.Category);
+            Assert.Null(saved.DuplicateOfIssueId);
+            Assert.Null(saved.RecurrenceOfIssueId);
+            Assert.All(tracking.ReadProjects, id => Assert.Equal(f.Project.Id, id));
             var settings = await f.Repository.GetAuthorizationSettingsAsync(default);
             await f.Repository.SaveAuthorizationSettingsAsync(settings with { Assignments = settings.Assignments.Select(a => a.Username == Fixture.Actor
-                ? a with { Scope = "project", TargetId = second.Id } : a).ToArray() }, settings.Revision, default);
-            panel = await f.Service.IssueAsync(second.Id, recurrence.Id, Fixture.Actor, UserRole.Engineer, default);
-            Assert.DoesNotContain(panel.RelatedIssues, r => r.Issue.Id == original.Id);
+                ? a with { Scope = "project", TargetId = f.Project.Id } : a).ToArray() }, settings.Revision, default);
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveIssueAsync(second.Id, other.Id,
+                new(catalog.RowVersion, "质量", "", "普通", f.Today, theme, null, null, "", "", "", "未验证", "", []), Fixture.Actor, UserRole.Engineer, default));
         }
         finally { TenantContext.Clear(); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SimplifiedSavePreservesLegacyClassificationRelationshipsAndFrequency(bool duplicate)
+    {
+        var f = await Fixture.Create(); f.Act();
+        try
+        {
+            await f.GrantAll(Fixture.Actor);
+            var theme = Guid.NewGuid();
+            var catalog = await f.Service.SaveThemeAsync(theme, new(0, "历史共性问题", "", true), Fixture.Actor, UserRole.Engineer, default);
+            var issue = await f.Issue();
+            // A historical target need not still be accessible. Editing today's remedies must not revalidate or erase that history.
+            var historicalTarget = Guid.NewGuid();
+            var historical = Profile(issue.Id, theme, f.Today) with { Category = "历史装配分类",
+                DuplicateOfIssueId = duplicate ? historicalTarget : null, RecurrenceOfIssueId = duplicate ? null : historicalTarget };
+            await f.Store.SaveAsync(catalog with { Profiles = [historical] }, catalog.RowVersion, default);
+            catalog = await f.Store.ReadAsync(f.Company, default);
+            var prior = Assert.Single(QualityReviewRules.Metrics(catalog, [new(issue, historical, f.Project.Id, f.Project.Code, f.Project.Name, "测试人员", "测试人员", true)], f.Today));
+            var input = new SaveQualityIssueProfile(catalog.RowVersion, "质量", "尝试覆盖历史分类", "普通", f.Today,
+                theme, Guid.NewGuid(), Guid.NewGuid(), "补充临时处置", "", "", "未验证", "", []);
+            catalog = await f.Service.SaveIssueAsync(f.Project.Id, issue.Id, input, Fixture.Actor, UserRole.Engineer, default);
+            // Missing legacy values from a simplified client must behave the same as forged values from an old client.
+            catalog = await f.Service.SaveIssueAsync(f.Project.Id, issue.Id, input with { ExpectedRowVersion = catalog.RowVersion,
+                Category = null!, DuplicateOfIssueId = null, RecurrenceOfIssueId = null, ImmediateAction = "补充后的临时处置" }, Fixture.Actor, UserRole.Engineer, default);
+            var saved = Assert.Single(catalog.Profiles);
+            Assert.Equal(historical.Category, saved.Category);
+            Assert.Equal(historical.DuplicateOfIssueId, saved.DuplicateOfIssueId);
+            Assert.Equal(historical.RecurrenceOfIssueId, saved.RecurrenceOfIssueId);
+            var after = Assert.Single(QualityReviewRules.Metrics(catalog, [new(issue, saved, f.Project.Id, f.Project.Code, f.Project.Name, "测试人员", "测试人员", true)], f.Today));
+            Assert.Equal(prior, after);
+        }
+        finally { TenantContext.Clear(); }
+    }
+
+    private sealed class CountingOplRepository(IProjectOplRepository inner) : IProjectOplRepository
+    {
+        public List<Guid> ReadProjects { get; } = [];
+        public Task<IReadOnlyList<OplIssue>> ListAsync(Guid projectId, CancellationToken ct)
+        { ReadProjects.Add(projectId); return inner.ListAsync(projectId, ct); }
+        public Task<IReadOnlyDictionary<Guid, int>> CountOpenAsync(IReadOnlyCollection<Guid> projectIds, CancellationToken ct) => inner.CountOpenAsync(projectIds, ct);
+        public Task<OplIssue> SaveAsync(OplIssue issue, long expectedVersion, CancellationToken ct, UserNotification? assignment = null) => inner.SaveAsync(issue, expectedVersion, ct, assignment);
     }
 
     [Fact]

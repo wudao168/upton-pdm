@@ -42,13 +42,13 @@ import type { ProductionSupplierChoices } from '../productionSuppliers'
 import { drawingsForProductionLine } from '../productionDrawingSelection'
 import { createProductionDrawingBomDownload } from '../productionDrawingBomDownload'
 
-const props = defineProps<{ token: string; username: string; permissions: string[] }>()
+const props = withDefaults(defineProps<{ token: string; username: string; permissions: string[]; active?: boolean }>(), { active: true })
 const workbenchRoot = ref<HTMLElement | null>(null)
 const scanPreviewKey = ref(0)
 const showAllocationEdit = ref(false)
 const tab = rememberedTab<string>('production.tab', 'tracking', ['tracking','external','schedule','capacity','execution','drawings','suppliers'])
 const projects = ref<ProductionProject[]>([])
-const listAttention = useProjectAttention(() => props.token, () => projects.value.map(item => item.id))
+const listAttention = useProjectAttention(() => props.token, () => projects.value.map(item => item.id), () => props.active)
 const record = ref<ProductionReleaseRecord | null>(null)
 const allCategories = ref(false), allRecords = ref<ProductionReleaseRecord[]>([])
 const trackingOnlyUnassigned = ref(false), trackingOnlyOpen = ref(true)

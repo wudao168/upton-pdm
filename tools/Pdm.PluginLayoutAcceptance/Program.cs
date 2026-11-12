@@ -30,14 +30,14 @@ internal static class Program
             Exception failure = null;
             host.Shown += (_, __) =>
             {
-                try { Console.WriteLine("Inspect pane"); InspectPane(host); Console.WriteLine("Inspect dialogs"); InspectDialogs(host); }
+                try { Console.WriteLine("Inspect pane"); InspectPane(host); InspectIntermediatePaneScale(host); Console.WriteLine("Inspect dialogs"); InspectDialogs(host); }
                 catch (Exception error) { failure = error; }
                 finally { host.Close(); }
             };
             Application.Run(host);
             File.WriteAllText(Path.Combine(output, "layout-measurements.json"), new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(measurements));
             if (failure != null) { Console.WriteLine("FAIL " + failure); return 1; }
-            Console.WriteLine("PASS pane widths 250/320/400/600, all five tabs, batch and settings dialogs; screenshots and geometry saved.");
+            Console.WriteLine("PASS pane widths 250/320/400/600, four tabs, login state colors, 100/125/150% settings, batch and settings dialogs; screenshots and geometry saved.");
             return 0;
         }
     }
@@ -47,14 +47,20 @@ internal static class Program
         using (var pane = (Control)New("PdmTaskPaneControl", "布局验证"))
         {
             host.Controls.Add(pane); pane.CreateControl();
+            var login = (Button)Field(pane, "loginButton");
+            Assert(login.BackColor.ToArgb() == Color.FromArgb(230, 126, 34).ToArgb(), "logged out user button must be orange");
             Call(pane, "SetAuthenticatedUser", "测试工程师", "tester");
+            Assert(login.BackColor.ToArgb() == Color.FromArgb(16, 185, 129).ToArgb(), "logged in user button must match web green");
+            Assert(login.ForeColor == Color.White, "user button text must be white");
             var root = Node("总装配体.SLDASM", 0); var part = Node("安装板.SLDPRT", 1); var drawing = Node("安装板.SLDDRW", 2);
             ((IList)Get(root, "Children")).Add(part); ((IList)Get(part, "Children")).Add(drawing);
             var project = New("ProjectDto"); Set(project, "Id", Guid.NewGuid()); Set(project, "Code", "P700015-1"); Set(project, "Name", "插件布局验证项目");
             var projects = Array.CreateInstance(T("ProjectDto"), 1); projects.SetValue(project, 0); Call(pane, "SetProjects", projects);
             Call(pane, "SetTree", root); Pump();
             var tabs = (TabControl)Field(pane, "tabs");
-            Assert(!tabs.TabPages.Cast<TabPage>().Any(tab => tab.Text == "待办"), "empty placeholder tab remains");
+            Assert(tabs.TabPages.Cast<TabPage>().Select(tab => tab.Text).SequenceEqual(new[] { "设计树", "工作区", "版本信息", "日志" }), "only four supported tabs must remain");
+            Assert(assembly.GetType("Upton.Pdm.SolidWorks.AutomaticDrawingControl") == null, "automatic drawing UI still shipped");
+            Assert(!Descendants(pane).Any(control => control.Text == "自动出图"), "automatic drawing entry remains");
             var primary = new[] { "checkoutButton", "checkinButton", "propertyEditButton", "settingsButton" }.Select(name => (Button)Field(pane, name)).ToArray();
             Assert(primary.All(button => button.Parent == primary[0].Parent) && primary[0].Parent.Controls.OfType<Button>().Count() == 4, "duplicate primary action remains");
             foreach (var width in new[] { 250, 320, 400, 600 })
@@ -67,6 +73,7 @@ internal static class Program
                     VerifyControls(pane, key, true, 30);
                     if (tab.Text == "设计树")
                     {
+                        VerifyToolbarAlignment(pane, tabs, primary, 1F);
                         Assert(primary.All(button => button.Height == 30), "primary button heights differ");
                         Assert(primary.Max(button => button.Width) - primary.Min(button => button.Width) <= 3, "primary button widths differ");
                         Assert(primary.Select(button => button.Top).Distinct().Count() == 1, "primary buttons are not aligned");
@@ -75,6 +82,15 @@ internal static class Program
                     }
                     Save(pane, key);
                 }
+            }
+            Call(pane, "SetAuthenticatedUser", "", "");
+            Assert(login.BackColor.ToArgb() == Color.FromArgb(230, 126, 34).ToArgb(), "logout must restore orange button");
+            Call(pane, "SetAuthenticatedUser", "测试工程师", "tester");
+            foreach (var theme in new[] { "a", "c", "p", "o", "g" })
+            {
+                Call(pane, "ApplyTheme", theme);
+                Call(pane, "ApplyStructureActionButtonAppearances");
+                Assert(login.BackColor.ToArgb() == Color.FromArgb(16, 185, 129).ToArgb(), "theme/action refresh changed user button color");
             }
             pane.Scale(new SizeF(1.5F, 1.5F));
             foreach (var width in new[] { 375, 480, 600, 900 })
@@ -85,8 +101,27 @@ internal static class Program
                     tabs.SelectedTab = tab; Pump();
                     var key = "scaled-pane-" + width + "-" + tabs.SelectedIndex;
                     VerifyControls(pane, key, true, 45);
+                    if (tab.Text == "设计树") VerifyToolbarAlignment(pane, tabs, primary, 1.5F);
                     Save(pane, key);
                 }
+            }
+        }
+    }
+
+    static void InspectIntermediatePaneScale(Form host)
+    {
+        using (var pane = (Control)New("PdmTaskPaneControl", "125%布局验证"))
+        {
+            host.Controls.Add(pane); pane.CreateControl();
+            pane.Scale(new SizeF(1.25F, 1.25F));
+            var tabs = (TabControl)Field(pane, "tabs");
+            var primary = new[] { "checkoutButton", "checkinButton", "propertyEditButton", "settingsButton" }.Select(name => (Button)Field(pane, name)).ToArray();
+            foreach (var width in new[] { 313, 400, 500, 750 })
+            {
+                host.ClientSize = new Size(width, 1050); Pump();
+                VerifyToolbarAlignment(pane, tabs, primary, 1.25F);
+                VerifyControls(pane, "pane-125-" + width, true, 38);
+                Save(pane, "pane-125-" + width);
             }
         }
     }
@@ -107,12 +142,53 @@ internal static class Program
         var constructor = T("PluginSettingsDialog").GetConstructors(Flags).Single();
         var arguments = constructor.GetParameters().Select(parameter => typeof(Delegate).IsAssignableFrom(parameter.ParameterType)
             ? Callback(parameter.ParameterType) : Activator.CreateInstance(parameter.ParameterType, true)).ToArray();
+        foreach (var scale in new[] { 1F, 1.25F, 1.5F })
         using (var dialog = (Form)constructor.Invoke(arguments))
         {
-            Console.WriteLine("Inspect settings layout");
             dialog.Opacity = 0; dialog.ShowInTaskbar = false; dialog.Show(host); Pump();
-            VerifyControls(dialog, "settings", true, 30); Save(dialog, "settings"); dialog.Close();
+            if (scale != 1F) { dialog.Scale(new SizeF(scale, scale)); Pump(); }
+            var address = (TextBox)Field(dialog, "serverAddress");
+            address.Text = "http://192.168.2.8:5173";
+            var label = Descendants(dialog).OfType<Label>().Single(control => control.Text == "服务器地址");
+            var desired = TextRenderer.MeasureText(label.Text, label.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            Save(dialog, "settings-before-check-" + (int)(scale * 100));
+            Assert(label.AutoSize && label.Width >= label.GetPreferredSize(Size.Empty).Width, "server label must fit one line scale=" + scale + " actual=" + label.Size + " preferred=" + label.PreferredSize + " measured=" + desired);
+            Assert(label.Height >= desired.Height && label.Height < desired.Height * 2, "server label must not wrap");
+            Assert(!address.Multiline && address.ClientSize.Width >= TextRenderer.MeasureText(address.Text, address.Font, Size.Empty, TextFormatFlags.SingleLine).Width, "server URL must be fully visible on one line");
+            Assert(label.Right <= address.Left, "server address label overlaps input");
+            var key = "settings-" + (int)(scale * 100);
+            VerifyControls(dialog, key, true, (int)Math.Round(30 * scale)); Save(dialog, key);
+            var save = (Button)Field(dialog, "saveButton");
+            var scroll = dialog.Controls.OfType<Panel>().Single(panel => panel.AutoScroll);
+            scroll.ScrollControlIntoView(save); Pump();
+            var visibleBounds = scroll.RectangleToClient(save.Parent.RectangleToScreen(save.Bounds));
+            Assert(scroll.ClientRectangle.Contains(visibleBounds), "save button must remain reachable after scrolling");
+            Save(dialog, key + "-scrolled");
+            save.PerformClick(); Pump();
+            Assert(dialog.DialogResult == DialogResult.OK, "save button must still invoke the mocked save callback");
+            dialog.Close();
         }
+    }
+
+    static void VerifyToolbarAlignment(Control pane, TabControl tabs, Button[] primary, float scale)
+    {
+        var project = (TextBox)Field(pane, "currentProject");
+        var login = (Button)Field(pane, "loginButton");
+        var first = primary[0].RectangleToScreen(primary[0].ClientRectangle);
+        var last = primary[3].RectangleToScreen(primary[3].ClientRectangle);
+        var segmentMethod = tabs.GetType().GetMethod("GetSegmentBounds", Flags);
+        for (var index = 0; index < 4; index++)
+        {
+            var segment = tabs.RectangleToScreen((Rectangle)segmentMethod.Invoke(tabs, new object[] { index }));
+            var button = primary[index].RectangleToScreen(primary[index].ClientRectangle);
+            Assert(Math.Abs(segment.Left - button.Left) <= 2 && Math.Abs(segment.Right - button.Right) <= 2, "tab and action columns differ " + index + " " + segment + " vs " + button + " tabs=" + tabs.Bounds + " page=" + tabs.TabPages[0].Bounds + " parent=" + primary[0].Parent.Bounds + " columns=" + string.Join(",", ((TableLayoutPanel)primary[0].Parent).GetColumnWidths()));
+            Assert(Math.Abs(segment.Height - button.Height) <= 1, "tab and action heights differ");
+            Assert(Math.Abs(button.Top - segment.Bottom - 5 * scale) <= 1, "tab/action vertical gap must be 5px " + segment + " " + button);
+        }
+        Assert(Math.Abs(first.Left - project.PointToScreen(Point.Empty).X) <= Math.Ceiling(2 * scale), "tabs/action left does not match project input");
+        Assert(Math.Abs(last.Right - login.PointToScreen(new Point(login.Width, 0)).X) <= Math.Ceiling(2 * scale), "tabs/action right does not match user button");
+        var search = (TextBox)Field(pane, "searchBox");
+        Assert(Math.Abs(search.Parent.PointToScreen(search.Location).Y - first.Bottom - 5 * scale) <= 1, "action/search vertical gap must be 5px actual=" + (search.Parent.PointToScreen(search.Location).Y - first.Bottom));
     }
 
     static object Callback(Type delegateType)

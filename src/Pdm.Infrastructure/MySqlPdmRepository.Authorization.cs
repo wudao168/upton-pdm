@@ -38,8 +38,8 @@ public sealed partial class MySqlPdmRepository
                     new { Value = JsonSerializer.Serialize(migrated, jsonOptions) }, cancellationToken: ct));
                 continue;
             }
-            if (stored.RolesUnified && stored.DingTalkSelfBindingDefaultsApplied) return stored;
-            var upgraded = AuthorizationMigration.EnableDingTalkSelfBindingDefaults(stored);
+            if (stored.RolesUnified && stored.DingTalkSelfBindingDefaultsApplied && stored.AiWebDefaultsApplied) return stored;
+            var upgraded = AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(stored));
             try { return await CommitAuthorizationSettingsAsync(upgraded, stored.Revision, !stored.RolesUnified, ct); }
             catch (PdmConflictException)
             {
@@ -66,7 +66,8 @@ public sealed partial class MySqlPdmRepository
         {
             Revision = expectedRevision + 1,
             RolesUnified = previous.RolesUnified || updateRoles,
-            DingTalkSelfBindingDefaultsApplied = previous.DingTalkSelfBindingDefaultsApplied || settings.DingTalkSelfBindingDefaultsApplied
+            DingTalkSelfBindingDefaultsApplied = previous.DingTalkSelfBindingDefaultsApplied || settings.DingTalkSelfBindingDefaultsApplied,
+            AiWebDefaultsApplied = previous.AiWebDefaultsApplied || settings.AiWebDefaultsApplied
         };
         if (updateRoles) await SyncAuthorizationRolesAsync(connection, transaction, previous, saved, ct);
         await connection.ExecuteAsync(new CommandDefinition(

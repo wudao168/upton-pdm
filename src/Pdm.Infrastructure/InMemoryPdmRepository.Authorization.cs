@@ -13,7 +13,7 @@ public sealed partial class InMemoryPdmRepository
         lock (gate)
         {
             if (authorizationSettings is not null) return authorizationSettings;
-            var unified = AuthorizationPolicy.BindRoles(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(migrated));
+            var unified = AuthorizationPolicy.BindRoles(AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(migrated)));
             SyncAuthorizationRoles(migrated, unified);
             return authorizationSettings = unified;
         }
@@ -27,7 +27,8 @@ public sealed partial class InMemoryPdmRepository
             {
                 Revision = expectedRevision + 1,
                 RolesUnified = authorizationSettings.RolesUnified || updateRoles,
-                DingTalkSelfBindingDefaultsApplied = authorizationSettings.DingTalkSelfBindingDefaultsApplied
+                DingTalkSelfBindingDefaultsApplied = authorizationSettings.DingTalkSelfBindingDefaultsApplied,
+                AiWebDefaultsApplied = authorizationSettings.AiWebDefaultsApplied
             };
             if (updateRoles) SyncAuthorizationRoles(authorizationSettings, next);
             authorizationSettings = next;

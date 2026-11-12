@@ -18,19 +18,20 @@ test('AI assistant DeepSeek settings chat history and narrow LAN layout', async 
   test.setTimeout(120_000)
   const errors: string[] = []
   page.on('pageerror', e => errors.push(e.message)); page.on('console', m => { if (m.type() === 'error') errors.push(m.text()) })
-  const permissions = ['ai.chat.use', 'ai.settings.manage', 'ai.business.read']
+  const permissions = ['ai.chat.use', 'ai.settings.manage', 'ai.business.read', 'ai.cloud.use', 'ai.web.search']
   await page.route('**/api/auth/login', route => route.fulfill({ json: { accessToken: 'ai-test', expiresAt: '2099-01-01T00:00:00Z', username: 'ai-qa', displayName: 'AI验收人员', role: 'Engineer', permissions,
     primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '验收公司', accessibleCompanies: [{ id: 'org-ks', name: '验收公司', code: '7' }] } }))
-  let settings: import('../../src/aiAssistant').AiSettings = { revision: 0, providers: [], defaultModel: null }
+  let settings: import('../../src/aiAssistant').AiSettings = { revision: 0, providers: [], defaultModel: null, web: { enabled: false, providerId: null, dailyLimit: 100, monthlyLimit: 1000, perTurnLimit: 3 }, webUsage: { today: 0, month: 0 } }
+  let canWeb = true
   const conversations: import('../../src/aiAssistant').AiConversation[] = []
   const sendRequests: unknown[] = []
   await page.route('**/api/ai/**', async route => {
     const path = new URL(route.request().url()).pathname, method = route.request().method()
     expect(route.request().headers()['x-company-id']).toBe('org-ks')
-    if (path.endsWith('/bootstrap')) return route.fulfill({ json: { canChat: true, canManage: true, canBusiness: true, defaultModel: settings.defaultModel,
+    if (path.endsWith('/bootstrap')) return route.fulfill({ json: { canChat: true, canManage: true, canBusiness: true, canWeb, webEnabled: settings.web?.enabled, web: settings.web, webUsage: settings.webUsage, defaultModel: settings.defaultModel,
       models: settings.providers.filter(p => p.enabled).flatMap(p => p.models.filter(m => m.enabled).map(m => ({ key: `${p.id}:${m.id}`, provider: p.name, name: m.name, tools: m.tools, network: p.network }))) } })
     if (path.endsWith('/settings')) {
-      if (method === 'PUT') { settings = route.request().postDataJSON(); settings.revision++; settings.providers.forEach(p => { p.hasKey = !!p.apiKey; delete p.apiKey }) }
+      if (method === 'PUT') { settings = route.request().postDataJSON(); settings.revision++; settings.providers.forEach(p => { p.hasKey = !!p.apiKey || p.hasKey; delete p.apiKey }) }
       return route.fulfill({ json: settings })
     }
     if (path.endsWith('/test')) return route.fulfill({ json: { success: true, message: '流式回复与工具调用验证通过。' } })
@@ -38,10 +39,12 @@ test('AI assistant DeepSeek settings chat history and narrow LAN layout', async 
       const input = route.request().postDataJSON(); sendRequests.push(input)
       expect(input.requestId).toMatch(/^[a-f0-9-]{36}$/)
       const c = conversations.find(c => path.includes(c.id))!
-      const answer = input.business ? '模拟验收完成：已查询BOM发布记录。' : '模拟验收完成：当前为普通对话。'
-      c.title = input.text; c.business = input.business; c.messages.push({ id: input.requestId, role: 'user', text: input.text, status: 'complete', createdAt: new Date().toISOString() },
-        { id: `answer-${sendRequests.length}`, role: 'assistant', text: answer, status: 'complete', createdAt: new Date().toISOString() })
-      return route.fulfill({ contentType: 'text/event-stream', body: `event: start\ndata: ${JSON.stringify({ business: input.business })}\n\nevent: delta\ndata: ${JSON.stringify({ text: answer })}\n\nevent: done\ndata: {"status":"complete","inputTokens":25,"outputTokens":12,"sources":[]}\n\n` })
+      const answer = input.web ? '模拟验收完成：已搜索公开网页。' : input.business ? '模拟验收完成：已查询BOM发布记录。' : '模拟验收完成：当前为普通对话。'
+      const sources = input.web ? [{ name: 'DeepSeek官方文档', kind: 'web', projectId: null, permissions: ['ai.web.search', 'ai.cloud.use'], url: 'https://api-docs.deepseek.com/zh-cn/guides/search/', date: '2026-11-12' }] : []
+      if (input.web) settings.webUsage = { today: 1, month: 1 }
+      c.title = input.text; c.business = input.business; c.web = input.web; c.messages.push({ id: input.requestId, role: 'user', text: input.text, status: 'complete', createdAt: new Date().toISOString() },
+        { id: `answer-${sendRequests.length}`, role: 'assistant', text: answer, status: 'complete', createdAt: new Date().toISOString(), sources })
+      return route.fulfill({ contentType: 'text/event-stream', body: `event: start\ndata: ${JSON.stringify({ business: input.business, web: input.web })}\n\nevent: delta\ndata: ${JSON.stringify({ text: answer })}\n\nevent: done\ndata: ${JSON.stringify({ status: 'complete', inputTokens: 25, outputTokens: 12, sources })}\n\n` })
     }
     if (path.endsWith('/conversations')) {
       if (method === 'POST') { const input = route.request().postDataJSON(); const c = { ...input, id: `conversation-${conversations.length}`, title: '新对话', revision: 1, updatedAt: new Date().toISOString(), messages: [] }; conversations.push(c); return route.fulfill({ json: c }) }
@@ -56,19 +59,26 @@ test('AI assistant DeepSeek settings chat history and narrow LAN layout', async 
   await page.locator('.pdm-sidebar').getByRole('button', { name: 'AI助手', exact: true }).click()
   const chat = page.getByRole('region', { name: 'AI助手', exact: true })
   await expect(chat.getByText('今天需要了解什么？')).toBeVisible(); await expect(chat.getByRole('button', { name: '发送', exact: true })).toBeDisabled()
-  await chat.getByRole('button', { name: '服务配置', exact: true }).click()
+  await expect(chat.getByRole('checkbox', { name: '联网查询', exact: true })).toBeDisabled()
+  await expect(chat.getByRole('button', { name: '服务配置', exact: true })).toHaveCount(0)
+  await page.locator('.pdm-sidebar').getByRole('button', { name: '系统设置', exact: true }).click()
+  await page.getByRole('navigation', { name: '系统管理功能' }).getByRole('button', { name: 'AI服务', exact: true }).click()
   const settingsPanel = page.getByRole('region', { name: 'AI服务配置', exact: true })
   await settingsPanel.getByRole('button', { name: 'DeepSeek', exact: true }).click()
   const form = page.getByRole('dialog', { name: '配置AI服务', exact: true }).locator('.ai-provider-form')
   await expect(form.getByLabel('API基础地址')).toHaveValue('https://api.deepseek.com'); await expect(form.getByLabel('模型ID', { exact: true })).toHaveValue('deepseek-flash')
-  await form.getByLabel('服务名称').fill('DeepSeek模拟验收'); await form.getByLabel('网络范围').selectOption('intranet')
-  await form.getByLabel('API基础地址').fill('http://127.0.0.1:19090/v1'); await form.getByLabel('API密钥').fill('mock-secret')
+  await form.getByLabel('服务名称').fill('DeepSeek模拟验收'); await form.getByLabel('网络范围').selectOption('cloud')
+  await form.getByLabel('API基础地址').fill('https://api.deepseek.com'); await form.getByLabel('API密钥').fill('mock-secret')
   await expect(form.getByLabel('API密钥')).toHaveAttribute('type', 'password'); await form.getByLabel('启用服务', { exact: true }).check()
   await form.getByRole('button', { name: '保存', exact: true }).click(); await expect(form).toHaveCount(0)
   await settingsPanel.getByRole('button', { name: '工具测试', exact: true }).click(); await expect(settingsPanel.getByRole('status')).toContainText('验证通过')
-  await settingsPanel.getByRole('button', { name: '配置', exact: true }).click(); await form.getByLabel('允许业务工具调用').check(); await form.getByRole('button', { name: '保存', exact: true }).click(); await expect(form).toHaveCount(0)
+  await settingsPanel.getByRole('button', { name: '配置', exact: true }).click(); await form.getByLabel('允许工具调用').check(); await form.getByRole('button', { name: '保存', exact: true }).click(); await expect(form).toHaveCount(0)
+  await settingsPanel.getByRole('combobox', { name: '联网服务', exact: true }).selectOption({ label: 'DeepSeek模拟验收' }); await settingsPanel.getByLabel('启用联网服务', { exact: true }).check()
+  await expect(settingsPanel.getByLabel('每日上限')).toHaveValue('100'); await expect(settingsPanel.getByLabel('每月上限')).toHaveValue('1000')
+  await settingsPanel.getByLabel('每轮上限').fill('2'); await settingsPanel.getByRole('button', { name: '保存', exact: true }).click()
   await page.screenshot({ path: join(tmpdir(), 'pdm-ai-settings-desktop.png'), animations: 'disabled' })
-  await page.getByRole('dialog', { name: 'AI服务配置', exact: true }).locator('.el-drawer__close-btn').click()
+  await page.locator('.pdm-sidebar').getByRole('button', { name: 'AI助手', exact: true }).click()
+  await chat.getByRole('button', { name: '刷新', exact: true }).click()
   await chat.getByRole('textbox', { name: '输入问题' }).fill('查询我有权限查看的项目，并列出计划交期。请说明当前对话模式。'); await chat.getByRole('button', { name: '发送', exact: true }).click()
   await expect(chat.getByText('模拟验收完成：当前为普通对话。')).toBeVisible(); expect(sendRequests).toHaveLength(1)
   await expect(chat.getByRole('button', { name: '发送', exact: true })).toHaveCSS('border-radius', '999px')
@@ -81,6 +91,10 @@ test('AI assistant DeepSeek settings chat history and narrow LAN layout', async 
       return left.right <= right.left && children.every(child => { const r = child.getBoundingClientRect(); return r.left >= left.left && r.right <= left.right })
     })).toBe(true)
     await expect(chat.getByRole('button', { name: '新建对话', exact: true })).toHaveCSS('width', '80px')
+    const refreshBox = await chat.getByRole('button', { name: '刷新', exact: true }).boundingBox(), newBox = await chat.getByRole('button', { name: '新建对话', exact: true }).boundingBox()
+    expect(refreshBox!.x + refreshBox!.width).toBeLessThanOrEqual(newBox!.x); expect(refreshBox!.y).toBeCloseTo(newBox!.y, 0)
+    const modelBox = await chat.getByRole('combobox', { name: '选择模型' }).boundingBox(), retryBox = await chat.getByRole('button', { name: '重新回答', exact: true }).boundingBox()
+    expect(modelBox!.x + modelBox!.width).toBeLessThanOrEqual(retryBox!.x); expect(modelBox!.y).toBeCloseTo(retryBox!.y, 0)
     await chat.getByRole('searchbox', { name: '搜索对话' }).fill('不存在的对话')
     await expect(chat.getByText('暂无对话', { exact: true })).toBeVisible()
     await chat.getByRole('searchbox', { name: '搜索对话' }).fill('')
@@ -93,11 +107,19 @@ test('AI assistant DeepSeek settings chat history and narrow LAN layout', async 
   await chat.getByRole('checkbox', { name: '只读业务查询' }).check()
   await chat.getByRole('textbox', { name: '输入问题' }).fill('700016项目发布BOM了吗？'); await chat.getByRole('button', { name: '发送', exact: true }).click()
   await expect(chat.getByText('模拟验收完成：已查询BOM发布记录。')).toBeVisible(); expect(sendRequests[1]).toMatchObject({ business: true })
-  await chat.getByText('可查询的内容与范围', { exact: true }).click(); await expect(chat.getByText(/暂未开放其他业务明细、联网搜索/)).toBeVisible()
+  await chat.getByText('可查询的内容与范围', { exact: true }).click(); await expect(chat.getByText(/联网查询：通过DeepSeek官方服务/)).toBeVisible()
   await chat.getByText('可查询的内容与范围', { exact: true }).click()
+  await chat.getByRole('checkbox', { name: '联网查询', exact: true }).check(); await expect(chat.getByRole('checkbox', { name: '只读业务查询' })).not.toBeChecked()
+  await expect(chat.getByText(/每轮最多 2 次/)).toBeVisible()
+  await chat.getByRole('textbox', { name: '输入问题' }).fill('搜索DeepSeek官方公开文档'); await chat.getByRole('button', { name: '发送', exact: true }).click()
+  await expect(chat.getByText('模拟验收完成：已搜索公开网页。')).toBeVisible(); expect(sendRequests[2]).toMatchObject({ web: true, business: false })
+  const source = chat.getByRole('link', { name: /DeepSeek官方文档/ }); await expect(source).toHaveAttribute('href', 'https://api-docs.deepseek.com/zh-cn/guides/search/'); await expect(source).toHaveAttribute('rel', 'noopener noreferrer')
+  await expect(chat.getByText(/今日 1\/100/)).toBeVisible(); await page.screenshot({ path: join(tmpdir(), 'pdm-ai-web-desktop.png'), animations: 'disabled' })
+  await chat.getByRole('button', { name: '新建对话', exact: true }).click(); await chat.getByRole('navigation', { name: '历史对话' }).getByRole('button').first().click(); await expect(chat.getByRole('checkbox', { name: '联网查询', exact: true })).toBeChecked(); await expect(source).toBeVisible()
   await page.setViewportSize({ width: 500, height: 900 }); await expect(chat.getByRole('textbox', { name: '输入问题' })).toBeVisible()
   expect(await chat.evaluate(el => el.scrollWidth <= el.clientWidth + 2)).toBe(true)
   await page.screenshot({ path: join(tmpdir(), 'pdm-ai-chat-narrow.png'), animations: 'disabled' })
+  await chat.getByRole('checkbox', { name: '联网查询', exact: true }).uncheck(); canWeb = false; await chat.getByRole('button', { name: '刷新', exact: true }).click(); await expect(chat.getByRole('checkbox', { name: '联网查询', exact: true })).toBeDisabled()
   page.once('dialog', dialog => dialog.accept()); await chat.getByRole('button', { name: '删除对话', exact: true }).click(); await expect(chat.getByText('今天需要了解什么？')).toBeVisible(); await expect(chat.getByRole('navigation', { name: '历史对话' }).getByRole('button')).toHaveCount(0)
   await expect(page.locator('vite-error-overlay')).toHaveCount(0); expectNoRuntimeErrors(errors)
 })

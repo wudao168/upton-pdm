@@ -82,6 +82,7 @@ public sealed record QualityIssueWorkspace(long RowVersion, QualityIssueRow Row,
     IReadOnlyList<QualityTheme> Themes, IReadOnlyList<QualityPerson> People,
     bool CanManageIssues, bool CanVerifyIssues, bool CanCloseIssues, bool CanReopenIssues, bool CanVoidIssues)
 {
+    // Kept for older readers. Daily issue entry no longer enumerates or edits historical issue relationships.
     public IReadOnlyList<QualityIssueRow> RelatedIssues { get; init; } = [];
 }
 public sealed record ProjectRetrospectiveWorkspace(Guid ProjectId, long RowVersion,
@@ -99,6 +100,8 @@ public sealed record ProjectRetrospectiveWorkspace(Guid ProjectId, long RowVersi
     public bool CanReopenIssues { get; init; }
     public bool CanVoidIssues { get; init; }
 }
+// Category and the two relationship identifiers are accepted only for wire compatibility.
+// Existing stored values remain unchanged; newly classified issues start without those legacy fields.
 public sealed record SaveQualityIssueProfile(long ExpectedRowVersion, string Domain, string Category,
     string Severity, DateOnly? OccurredOn, Guid? ThemeId, Guid? DuplicateOfIssueId, Guid? RecurrenceOfIssueId,
     string ImmediateAction, string RootCause, string CorrectiveAction, string VerificationResult,

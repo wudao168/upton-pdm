@@ -1346,7 +1346,8 @@ export function usePdmWorkspace() {
     window.localStorage.setItem(sessionKey, JSON.stringify(session))
     window.sessionStorage.removeItem(sessionKey)
     scheduleSessionRenewal(session)
-    await initializeTablePreferences(session.username, activeCompanyId.value, session.accessToken)
+    // 本机偏好同步初始化，远端列设置在后台更新，不阻塞登录或项目加载。
+    void initializeTablePreferences(session.username, activeCompanyId.value, session.accessToken)
     if (accessToken !== session.accessToken || persistentSession?.username !== session.username) return
     authenticated.value = true
   }
@@ -1413,6 +1414,7 @@ export function usePdmWorkspace() {
         const session = await apiResumeSession(persistentSession!.resumeToken, persistentSession!.desktopHandoff)
         const permissionsChanged = JSON.stringify(currentPermissions.value) !== JSON.stringify(session.permissions ?? [])
         await applySession(session)
+        authInitialized.value = true
         if (!wasAuthenticated || permissionsChanged) await reload()
         return true
       } catch (error) {

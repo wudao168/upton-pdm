@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 
 internal static partial class Program
 {
- static async Task ControlledCacheScenario(string output)
+ static async Task ControlledCacheScenario(string output,bool cleanupOnly=false)
  {
   output=Path.GetFullPath(output);Directory.CreateDirectory(output);
   var identity=Type("PdmDocumentIdentityStore");var bindings=identity.GetField("bindingDirectory",Flags);var resolver=identity.GetField("workspaceRootResolver",Flags);
@@ -35,6 +35,8 @@ internal static partial class Program
   object Metadata(string path){var args=new object[]{path,null};Check((bool)identity.GetMethod("TryReadLocalMetadata",Flags).Invoke(null,args),"副本保留路径对应的版本记录");return args[1];}
   try
   {
+   if(!cleanupOnly)
+   {
    var root=Path.Combine(output,"reuse");var manifest=Manifest("ROOT.SLDASM","ROOT.SLDASM","PART.SLDPRT","DRAWING.SLDDRW");var files=((IEnumerable)Get(manifest,"Files")).Cast<object>().ToArray();
    var handler=new CacheDownloadHandler();foreach(var file in files){var value="server bytes "+Get(file,"FileName");Content(file,value);handler.Bytes[(Guid)Get(file,"DocumentId")]=Encoding.UTF8.GetBytes(value);}
    using(var client=(IDisposable)New("PdmApiClient","http://cache.invalid/"))
@@ -104,6 +106,31 @@ internal static partial class Program
     Check((Guid)Get(Metadata(path),"NativeIsolationSnapshotId")== (Guid)Get(descriptor,"ReferenceSnapshotId"),"快照移动后保留独立原生副本代次，不退回源文件指纹");
     Check(await Prepare(manager,isolatedManifest,true)==path,"独立原生快照同样可重复复用");
    }
+   }
+   var protection=Type("CacheInstanceRegistry");var state=New("CacheInstanceState");var now=DateTime.UtcNow;
+   Set(state,"ProcessId",42);Set(state,"StartedUtcTicks",123L);Set(state,"RecordedUtc",now);
+   bool Matches(int pid,long started,DateTime instant)=>(bool)protection.GetMethod("Matches",Flags).Invoke(null,new object[]{state,pid,started,instant});
+   Check(Matches(42,123L,now),"跨实例只接受同一进程生命周期内的新鲜保护记录");
+   Check(!Matches(42,124L,now)&&!Matches(43,123L,now)&&!Matches(42,123L,now.AddSeconds(11)),"PID重用、错进程和过期状态均不能解除保护");
+   Set(state,"Busy",true);Check(!Matches(42,123L,now),"其他实例正在加载图档时保护缓存");
+   var gate=protection.GetMethod("WithGate",Flags).MakeGenericMethod(typeof(bool));
+   using(var entered=new ManualResetEventSlim())using(var release=new ManualResetEventSlim())using(var second=new ManualResetEventSlim())
+   {
+    var first=Task.Run(()=>gate.Invoke(null,new object[]{output,new Func<bool>(()=>{entered.Set();release.Wait();return true;})}));
+    Check(entered.Wait(5000),"清理取得跨实例互斥保护");
+    var next=Task.Run(()=>gate.Invoke(null,new object[]{output,new Func<bool>(()=>{second.Set();return true;})}));
+    try
+    {
+     Check(!second.Wait(100),"清理未结束时新加载保护更新不能越过互斥边界");
+     var publish=protection.GetMethod("TryPublish",Flags);
+     var heartbeat=Task.Run(()=>(bool)publish.Invoke(null,new object[]{output,true,new string[0],new Guid[0]}));
+     Check(heartbeat.Wait(1000)&&!heartbeat.Result,"清理期间闲置心跳立即跳过，即使它观察到忙碌状态也不等待互斥锁");
+     Check(!Directory.Exists(Path.Combine(output,".uplm","CacheSessions")),"跳过心跳不写入新的闲置声明");
+    }
+    finally{release.Set();}
+    await Task.WhenAll(first,next);Check(second.IsSet,"清理结束后等待的图档操作可继续");
+    Check((bool)protection.GetMethod("TryPublish",Flags).Invoke(null,new object[]{output,false,new string[0],new Guid[0]}),"清理结束后闲置心跳恢复发布");
+   }
    var cleaner=Type("ControlledCacheMaintenance");
    object Record(string rootFolder,string directory,object package,string kind){cleaner.GetMethod("Record",Flags).Invoke(null,new object[]{rootFolder,directory,package,kind});return package;}
    object Clean(string rootFolder,string[] paths,Guid[] ids,long limit,bool manual,Func<bool> busy=null)=>cleaner.GetMethod("Clean",Flags).Invoke(null,new object[]{rootFolder,paths,ids,limit,manual,busy??(()=>false)});
@@ -137,7 +164,7 @@ internal static partial class Program
    var junctionRoot=Path.Combine(output,"junctions");var external=Path.Combine(junctionRoot,"original");Directory.CreateDirectory(external);var sentinel=Path.Combine(external,"ROOT.SLDASM");File.WriteAllText(sentinel,"cache snapshot bytes",new UTF8Encoding(false));File.SetAttributes(sentinel,FileAttributes.ReadOnly);
    var junctionParent=Path.Combine(junctionRoot,"View","QA","装配工作区");Directory.CreateDirectory(junctionParent);var junction=Path.Combine(junctionParent,Guid.NewGuid().ToString("N"));
    var command="New-Item -ItemType Junction -Path '"+junction.Replace("'","''")+"' -Target '"+external.Replace("'","''")+"' | Out-Null";
-   using(var process=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(@"C:\Program Files\PowerShell\7\pwsh.exe","-NoProfile -EncodedCommand "+Convert.ToBase64String(Encoding.Unicode.GetBytes(command))){UseShellExecute=false,CreateNoWindow=true,WindowStyle=System.Diagnostics.ProcessWindowStyle.Hidden}))
+   using(var process=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),"-NoProfile -EncodedCommand "+Convert.ToBase64String(Encoding.Unicode.GetBytes(command))){UseShellExecute=false,CreateNoWindow=true,WindowStyle=System.Diagnostics.ProcessWindowStyle.Hidden}))
    {if(!process.WaitForExit(10000)||process.ExitCode!=0)throw new Exception("缓存目录链接回归准备失败");}
    Record(junctionRoot,junction,obsoletePackage,"working");Exception linkFailure=null;object linkResult=null;try{linkResult=Clean(junctionRoot,new string[0],new Guid[0],0,true);}catch(System.Reflection.TargetInvocationException error){linkFailure=error.InnerException;}
    Check((linkFailure is IOException||linkResult!=null&&(long)Get(linkResult,"FreedBytes")==0)

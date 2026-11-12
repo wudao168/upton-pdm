@@ -16,7 +16,7 @@ internal static partial class Program
   output=Path.GetFullPath(output);Directory.CreateDirectory(output);
   void Check(bool ok,string text){if(!ok)throw new Exception(text);Console.WriteLine("PASS: "+text);}
   var cleaner=Type("ArchiveTemporaryCopyCleaner");var rootField=cleaner.GetField("directory",Flags);var previous=rootField.GetValue(null);
-  object Clean(Func<bool> busy)=>cleaner.GetMethod("Clean",Flags).Invoke(null,new object[]{busy});
+  object Clean(Func<bool> busy)=>cleaner.GetMethod("Clean",Flags).Invoke(null,new object[]{busy,null});
   string Copy(string root,string name="PART.SLDPRT"){
    var path=Path.Combine(root,Guid.NewGuid().ToString("N"),Guid.NewGuid().ToString("N"),name);Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllBytes(path,new byte[8192]);return path;
   }
@@ -42,6 +42,21 @@ internal static partial class Program
     if(mode=="readonly"){Check((File.GetAttributes(copy)&FileAttributes.ReadOnly)!=0,"不改写只读文件属性");File.SetAttributes(copy,FileAttributes.Normal);}
     if(mode=="unknown")Check(File.ReadAllText(unknown)=="keep","非插件GUID结构中的文件保留");
    }
+   var leaseType=Type("ArchiveTemporaryCopyLease");
+   var leasedRoot=Path.Combine(output,"leased-"+Guid.NewGuid().ToString("N"));rootField.SetValue(null,leasedRoot);
+   var leased=Copy(leasedRoot);var leasedDirectory=Path.GetDirectoryName(leased);
+   leaseType.GetMethod("Start",Flags).Invoke(null,new object[]{leasedDirectory});
+   try
+   {
+    var active=Clean(()=>false);
+    Check(File.Exists(leased)&&(int)Get(active,"SkippedItems")==1,"另一个上传持有生命周期锁时保留整个副本");
+   }
+   finally{leaseType.GetMethod("Release",Flags).Invoke(null,new object[]{leasedDirectory});}
+   var legacy=Copy(leasedRoot);
+   var released=cleaner.GetMethod("Clean",Flags).Invoke(null,new object[]{new Func<bool>(()=>false),new Func<bool>(()=>true)});
+   Check(!File.Exists(leased)&&File.Exists(legacy)&&(int)Get(released,"DeletedFiles")==1&&(int)Get(released,"UnconfirmedCopies")==1,
+    "未知旧实例运行时仍清理已释放锁的新副本，并保留无法确认的旧副本");
+   Check(((string)Get(released,"Message")).Contains("1 个旧上传副本"),"返回待确认副本数量，避免误报全部清理成功");
    var missing=Path.Combine(output,"missing-"+Guid.NewGuid().ToString("N"));rootField.SetValue(null,missing);var empty=Clean(()=>false);
    Check((int)Get(empty,"DeletedFiles")==0&&!Directory.Exists(missing),"目录不存在时不创建或删除其他位置");
    var activeRoot=Path.Combine(output,"active-plugin-"+Guid.NewGuid().ToString("N"));rootField.SetValue(null,activeRoot);var activeCopy=Copy(activeRoot);
@@ -51,7 +66,7 @@ internal static partial class Program
    var linkRoot=Path.Combine(output,"links-"+Guid.NewGuid().ToString("N"));var external=Path.Combine(linkRoot,"outside");Directory.CreateDirectory(external);var sentinel=Path.Combine(external,"source.SLDPRT");File.WriteAllText(sentinel,"keep source");
    var rootPath=Path.Combine(linkRoot,"checkin");var document=Path.Combine(rootPath,Guid.NewGuid().ToString("N"));Directory.CreateDirectory(document);var link=Path.Combine(document,Guid.NewGuid().ToString("N"));
    var command="New-Item -ItemType Junction -Path '"+link.Replace("'","''")+"' -Target '"+external.Replace("'","''")+"' | Out-Null";
-   using(var process=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(@"C:\Program Files\PowerShell\7\pwsh.exe","-NoProfile -EncodedCommand "+Convert.ToBase64String(Encoding.Unicode.GetBytes(command))){UseShellExecute=false,CreateNoWindow=true,WindowStyle=System.Diagnostics.ProcessWindowStyle.Hidden}))
+   using(var process=System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),"-NoProfile -EncodedCommand "+Convert.ToBase64String(Encoding.Unicode.GetBytes(command))){UseShellExecute=false,CreateNoWindow=true,WindowStyle=System.Diagnostics.ProcessWindowStyle.Hidden}))
    {if(!process.WaitForExit(10000)||process.ExitCode!=0)throw new Exception("目录链接回归准备失败");}
    rootField.SetValue(null,rootPath);var linked=Clean(()=>false);
    Check(File.ReadAllText(sentinel)=="keep source"&&Directory.Exists(link)&&(int)Get(linked,"SkippedItems")>0,"不沿目录链接删除包外原图");
