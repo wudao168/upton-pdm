@@ -34,6 +34,7 @@ internal static partial class Program
             try { await fixture.Restore(); }
             catch (IOException) { blocked = true; }
             catch (HttpRequestException) { blocked = true; }
+            catch (InvalidOperationException error) when (mode == "download-failure" && error.InnerException is HttpRequestException) { blocked = true; }
             finally { held?.Dispose(); }
             var shouldBlock = mode == "download-failure" || mode == "subsequent-edit" || mode == "locked-retry" || mode == "same-title";
             if (blocked != shouldBlock) throw new Exception("Wrong recovery outcome: " + mode);
@@ -208,7 +209,7 @@ internal static partial class Program
             var file=New("ControlledOpenFileDto");Set(file,"DocumentId",id);Set(file,"VersionId",version);Set(file,"FileName","PART.SLDPRT");Set(file,"RelativePath","PART.SLDPRT");Set(file,"Revision","W1");Set(file,"Sha256",hash);Set(file,"FileLength",(long)System.Text.Encoding.UTF8.GetByteCount(Canonical));
             var files=(IList)Activator.CreateInstance(Property(Manifest,"Files").PropertyType);files.Add(file);Set(Manifest,"Files",files);
             Client=New("PdmApiClient","http://discard-physical.invalid/");((HttpClient)Field(Client,"httpClient")).Dispose();
-            var http=new HttpClient(Handler){BaseAddress=new Uri("http://discard-physical.invalid/")};http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(Client,"httpClient",http);SetField(Plugin,"apiClient",Client);
+            var http=new HttpClient(Handler){BaseAddress=new Uri("http://discard-physical.invalid/")};http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(Client,"httpClient",http);SetField(Client,"controlledOpenHttpClient",http);SetField(Plugin,"apiClient",Client);
             Journal=New("EditDraftJournal",Path.Combine(DirectoryPath,"journal"),"fixture");SetField(Plugin,"editJournal",Journal);SetField(Plugin,"editJournalScope",(string)Get(Client,"EditJournalScope")+"|tester");
             var old=New("LocalEditDraft");Set(old,"DocumentId",id);Set(old,"ProjectId",project);Set(old,"SessionId",separateHistoricalSession ? Guid.NewGuid() : Field(Plugin,"checkoutSessionId"));Set(old,"SourcePath",OldPath);Set(old,"BaseVersionId",version);Set(old,"BaseSha256",hash);Set(old,"RestoreOnOpen",true);
             DiscardCall(Journal,"Save",old);oldJournalPath=Directory.GetFiles(Path.Combine(DirectoryPath,"journal"),"*.xml",SearchOption.AllDirectories).Single();oldJournalText=File.ReadAllText(oldJournalPath);

@@ -22,6 +22,7 @@ public sealed partial class PdmAddin
     private string lastEditMaintenanceError;
     private int draftSnapshotInProgress;
     private Func<bool> draftIdleCheck = UserIdleForDraft;
+    private Func<bool> backgroundMaintenanceIdleCheck = () => UserIdleFor(750);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct LastDraftInputInfo { public uint Size; public uint Time; }
@@ -29,22 +30,56 @@ public sealed partial class PdmAddin
     [DllImport("user32.dll")]
     private static extern bool GetLastInputInfo(ref LastDraftInputInfo input);
 
-    private static bool UserIdleForDraft()
+    private static bool UserIdleForDraft() => UserIdleFor(5000);
+
+    private static bool UserIdleFor(uint milliseconds)
     {
         var input = new LastDraftInputInfo { Size = (uint)Marshal.SizeOf(typeof(LastDraftInputInfo)) };
-        return GetLastInputInfo(ref input) && unchecked((uint)System.Environment.TickCount - input.Time) >= 5000;
+        return GetLastInputInfo(ref input) && unchecked((uint)System.Environment.TickCount - input.Time) >= milliseconds;
+    }
+
+    private void RunPeriodicNativeMaintenance()
+    {
+        // OnIdle also fires between mouse-wheel/rotation messages. These periodic
+        // scans must yield to user input; lease heartbeats run independently.
+        // While deferred, cache protection expires conservatively: other processes
+        // refuse cleanup rather than assuming these loaded documents are unused.
+        if (!backgroundMaintenanceIdleCheck()) return;
+        var watch = Stopwatch.StartNew();
+        PublishCacheProtection();
+        var cacheMs = watch.ElapsedMilliseconds;
+        if (Volatile.Read(ref batchDialogInProgress) == 0 && Volatile.Read(ref checkInOperationInProgress) == 0)
+            PruneArchiveMemoryCopies();
+        var pruneMs = watch.ElapsedMilliseconds - cacheMs;
+        TryMaintainEdits();
+        if (watch.ElapsedMilliseconds >= 50)
+            PluginDiagnosticLog.Record("空闲维护耗时", "主线程总计=" + watch.ElapsedMilliseconds
+                + "毫秒；缓存保护=" + cacheMs + "；副本清理=" + pruneMs
+                + "；编辑维护=" + (watch.ElapsedMilliseconds - cacheMs - pruneMs));
     }
 
     private bool EnsureEditJournal()
     {
-        if (apiClient == null || !apiClient.IsAuthenticated || string.IsNullOrWhiteSpace(authenticatedUsername)) return false;
-        var scope = apiClient.EditJournalScope + "|" + authenticatedUsername.ToLowerInvariant();
+        var scope = CurrentEditJournalScope();
+        if (scope == null) return false;
         if (scope == editJournalScope) return true;
-        editJournalScope = scope;
-        editJournal = new EditDraftJournal(Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "UPTON PDM", "edit-drafts"), scope);
-        localEdits.Clear();
-        foreach (var entry in editJournal.ReadAll().Where(entry => entry.SessionId == checkoutSessionId && !entry.Closed)) localEdits[entry.DocumentId] = entry;
+        var journal = CreateEditJournal(scope);
+        RestoreEditJournal(journal, scope, journal.ReadAll());
         return true;
+    }
+
+    private string CurrentEditJournalScope() => apiClient?.IsAuthenticated == true && !string.IsNullOrWhiteSpace(authenticatedUsername)
+        ? apiClient.EditJournalScope + "|" + authenticatedUsername.ToLowerInvariant() : null;
+
+    private static EditDraftJournal CreateEditJournal(string scope) => new EditDraftJournal(Path.Combine(
+        System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "UPTON PDM", "edit-drafts"), scope);
+
+    private void RestoreEditJournal(EditDraftJournal journal, string scope, IReadOnlyList<LocalEditDraft> entries)
+    {
+        editJournalScope = scope;
+        editJournal = journal;
+        localEdits.Clear();
+        foreach (var entry in entries.Where(entry => entry.SessionId == checkoutSessionId && !entry.Closed)) localEdits[entry.DocumentId] = entry;
     }
 
     private void RememberLocalEdit(CadTreeNode node, DocumentDto document)
@@ -90,37 +125,78 @@ public sealed partial class PdmAddin
         }
     }
 
-    private async void TryMaintainEdits()
+    private void TryMaintainEdits()
     {
-        if (disconnecting || DateTime.UtcNow < nextEditMaintenanceUtc || !CanMaintainEdits()
+        if (disconnecting || DateTime.UtcNow < nextEditMaintenanceUtc || !CanMaintainEdits() || CurrentEditJournalScope() == null
             || Interlocked.Exchange(ref editMaintenanceInProgress, 1) != 0) return;
         nextEditMaintenanceUtc = DateTime.UtcNow.AddSeconds(10);
+        // Native idle events do not guarantee a managed synchronization context.
+        // Always return to our shared CAD-thread dispatcher after background I/O.
         try
         {
-            if (!EnsureEditJournal()) return;
-            if (ArchiveBatchJournal.Recoverable(apiClient.EditJournalScope, authenticatedUsername).Any())
+            GetTaskPaneSynchronizationContext().Post(async _ =>
+            {
+                try { await MaintainEditsAsync(); }
+                catch (Exception exception) { ReportEditMaintenanceError(exception); }
+                finally { Interlocked.Exchange(ref editMaintenanceInProgress, 0); }
+            }, null);
+        }
+        catch { Interlocked.Exchange(ref editMaintenanceInProgress, 0); throw; }
+    }
+
+    private async Task MaintainEditsAsync()
+    {
+        var scope = CurrentEditJournalScope();
+        if (scope == null || disconnecting || !CanMaintainEdits()) return;
+        var client = apiClient;
+        var actor = authenticatedUsername;
+        var previousJournal = editJournal;
+        var journal = editJournalScope == scope ? editJournal : CreateEditJournal(scope);
+        var sequence = journal.ChangeSequence;
+        var watch = Stopwatch.StartNew();
+        var snapshot = await Task.Run(() => new {
+            Entries = journal.ReadAll(),
+            RecoverableBatch = ArchiveBatchJournal.Recoverable(client.EditJournalScope, actor).Any()
+        });
+        if (disconnecting || !ReferenceEquals(client, apiClient) || scope != CurrentEditJournalScope()
+            || !ReferenceEquals(previousJournal, editJournal) || sequence != journal.ChangeSequence
+            || !CanMaintainEdits() || !backgroundMaintenanceIdleCheck()) return;
+        if (!ReferenceEquals(journal, editJournal)) RestoreEditJournal(journal, scope, snapshot.Entries);
+        PluginDiagnosticLog.Record("编辑维护读取", "后台读取=" + watch.ElapsedMilliseconds + "毫秒；记录=" + snapshot.Entries.Count);
+        watch.Restart();
+        try
+        {
+            if (snapshot.RecoverableBatch)
             {
                 if (DateTime.UtcNow < nextArchiveBatchRecoveryUtc) return;
                 nextArchiveBatchRecoveryUtc = DateTime.UtcNow.AddSeconds(30);
-                if (!await ReconcileArchiveBatchesAsync()) return;
+                await ReconcileArchiveBatchesAsync();
+                return; // Recovery can change the journal; consume a fresh snapshot next time.
             }
             // Archive reconciliation can yield to a foreground operation. Reserve
             // the same workspace gate while retrying acquisition rollback so a
             // new checkout cannot be mistaken for a failed in-flight acquisition.
             if (!CanMaintainEdits()) return;
-            if (editJournal.ReadAll().Any(entry => entry.AcquisitionRollbackPending && !entry.Closed))
+            if (snapshot.Entries.Any(entry => entry.AcquisitionRollbackPending && !entry.Closed))
             {
                 if (!TryBeginWorkspaceOperation("正在核对未完成的编辑权限")) return;
                 try { await RecoverRecordedAcquisitionsAsync(); }
                 finally { EndWorkspaceOperation(); }
+                return;
             }
             if (!CanMaintainEdits()) return;
-            var pending = PrepareClosedEdits();
+            // A recovery request above may have yielded while the user resumed
+            // rotating/zooming. Recheck input before entering native CAD again.
+            if (!backgroundMaintenanceIdleCheck()) return;
+            var pending = PrepareClosedEditsCore(snapshot.Entries);
             TryOfferIdleRelease();
             await ClosePreservedEditsAsync(pending, lifetime.Token);
         }
-        catch (Exception exception) { ReportEditMaintenanceError(exception); }
-        finally { Interlocked.Exchange(ref editMaintenanceInProgress, 0); }
+        finally
+        {
+            if (watch.ElapsedMilliseconds >= 50)
+                PluginDiagnosticLog.Record("编辑维护执行", "耗时=" + watch.ElapsedMilliseconds + "毫秒；活动记录=" + localEdits.Count);
+        }
     }
 
     private bool CanMaintainEdits() => Volatile.Read(ref checkInOperationInProgress) == 0
@@ -129,10 +205,16 @@ public sealed partial class PdmAddin
         && Volatile.Read(ref batchDialogInProgress) == 0;
 
     private IReadOnlyList<LocalEditDraft> PrepareClosedEdits()
+        => PrepareClosedEditsCore(editJournal?.ReadAll() ?? Array.Empty<LocalEditDraft>());
+
+    private IReadOnlyList<LocalEditDraft> PrepareClosedEditsCore(IReadOnlyList<LocalEditDraft> entries)
     {
         // A restarted client can have only retained records from a previous session.
         // They still need the guarded recovery pass below even without active edits.
         if (editJournal == null) return Array.Empty<LocalEditDraft>();
+        var retainedEdits = entries.Where(entry => entry.SessionId != checkoutSessionId && !entry.Closed
+            && DateTime.UtcNow >= entry.NextMaintenanceAttemptUtc).ToArray();
+        if (localEdits.Count == 0 && retainedEdits.Length == 0) return Array.Empty<LocalEditDraft>();
         if (IsSolidWorksCommandActive()) return Array.Empty<LocalEditDraft>();
         // Includes invisible component documents still used by an open assembly.
         var loaded = (application.GetDocuments() as Array)?.OfType<IModelDoc2>()
@@ -206,8 +288,7 @@ public sealed partial class PdmAddin
             }
             catch (Exception exception) { ReportEditMaintenanceError(exception, entry, closing); }
         }
-        foreach (var entry in editJournal.ReadAll().Where(entry => entry.SessionId != checkoutSessionId && !entry.Closed
-            && DateTime.UtcNow >= entry.NextMaintenanceAttemptUtc))
+        foreach (var entry in retainedEdits)
         {
             try
             {

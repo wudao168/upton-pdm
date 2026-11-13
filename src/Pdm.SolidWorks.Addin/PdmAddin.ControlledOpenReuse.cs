@@ -186,9 +186,16 @@ public sealed partial class PdmAddin
         {
             var isContext = contextIds.Contains(file.DocumentId);
             var source = context.Value.Files.FirstOrDefault(candidate => candidate.DocumentId == file.DocumentId);
+            // A manifest stores one file per document. Separate assembly occurrences
+            // can use different configurations from those same versioned bytes.
+            // Apply the same file identity rule to every open/checkout entry point;
+            // actual occurrence structures are verified separately below.
+            var sameReferenceFile = DocumentKindFromPath(file.FileName) == CadDocumentKind.Part
+                && file.DocumentId != requested.RootDocumentId && source != null
+                && source.VersionId == file.VersionId && WorkingReuseFileBytesMatch(source, file);
             if (source == null
                 || !string.Equals(source.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
-                || !isContext && !(loadedRoot != null && kind == CadDocumentKind.Part && file.DocumentId == requested.RootDocumentId)
+                || !isContext && !sameReferenceFile && !(loadedRoot != null && kind == CadDocumentKind.Part && file.DocumentId == requested.RootDocumentId)
                     && !string.Equals(source.Configuration ?? string.Empty, file.Configuration ?? string.Empty, StringComparison.OrdinalIgnoreCase))
                 throw WorkingModelContextMismatch(file.FileName);
             var path = ControlledReferenceMaterializer.LocalPath(context.Key, source);

@@ -1311,23 +1311,35 @@ internal sealed class PdmTaskPaneControl : UserControl
         DrawNodeImage(eventArgs.Graphics, eventArgs.Node, structureBounds, selected);
         structureBounds.X += 20;
         structureBounds.Width = Math.Max(0, structureBounds.Width - 20);
-        TextRenderer.DrawText(eventArgs.Graphics, eventArgs.Node.Text, font, structureBounds, structureColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping);
         eventArgs.Graphics.Restore(nameGraphicsState);
+        DrawStructureCellText(eventArgs.Graphics, eventArgs.Node.Text, font, structureBounds, structureColor, background);
         if (model != null)
         {
             var versions = VersionText(model);
             var status = WorkStateText(model);
             var statusColor = selected ? SystemColors.HighlightText : WorkStateColor(model);
             var versionBounds = new Rectangle(nameDividerX + 5, eventArgs.Bounds.Top, Math.Max(0, versionDividerX - nameDividerX - 9), eventArgs.Bounds.Height);
-            TextRenderer.DrawText(eventArgs.Graphics, versions, structureTree.Font, versionBounds, selected ? SystemColors.HighlightText : Color.FromArgb(64, 76, 89), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            DrawStructureCellText(eventArgs.Graphics, versions, structureTree.Font, versionBounds, selected ? SystemColors.HighlightText : Color.FromArgb(64, 76, 89), background);
             var statusBounds = new Rectangle(versionDividerX + 5, eventArgs.Bounds.Top, Math.Max(0, structureTree.ClientSize.Width - versionDividerX - 9), eventArgs.Bounds.Height);
-            TextRenderer.DrawText(eventArgs.Graphics, status, model.WorkState == CadWorkState.None ? structureTree.Font : emphasizedNodeFont, statusBounds, statusColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            DrawStructureCellText(eventArgs.Graphics, status, model.WorkState == CadWorkState.None ? structureTree.Font : emphasizedNodeFont, statusBounds, statusColor, background);
         }
 
         if ((eventArgs.State & TreeNodeStates.Focused) == TreeNodeStates.Focused)
         {
             ControlPaint.DrawFocusRectangle(eventArgs.Graphics, new Rectangle(0, eventArgs.Bounds.Top, structureTree.ClientSize.Width, eventArgs.Bounds.Height), structureColor, background);
         }
+    }
+
+    private static void DrawStructureCellText(Graphics graphics, string text, Font font, Rectangle bounds, Color foreground, Color background)
+    {
+        if (bounds.Width <= 0 || bounds.Height <= 0) return;
+        // Native selection/focus updates may invalidate only part of a row. GDI text
+        // must use the same clip and transform as the GDI+ background; otherwise it
+        // paints white selected text over cells whose background was never repainted.
+        TextRenderer.DrawText(graphics, text, font, bounds, foreground, background,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+            | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping
+            | TextFormatFlags.PreserveGraphicsTranslateTransform);
     }
 
     private Rectangle GetStructureExpanderBounds(TreeNode node)
@@ -1446,7 +1458,40 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private sealed class StructureTreeView : TreeView
     {
+        private TreeNode previousSelectedNode;
         public StructureTreeView() => TreeControlDiagnostics.Attach(this, "插件设计树");
+
+        protected override void OnBeforeSelect(TreeViewCancelEventArgs e)
+        {
+            previousSelectedNode = SelectedNode;
+            base.OnBeforeSelect(e);
+        }
+
+        protected override void OnAfterSelect(TreeViewEventArgs e)
+        {
+            InvalidateRow(previousSelectedNode);
+            InvalidateRow(e.Node);
+            base.OnAfterSelect(e);
+        }
+
+        protected override void OnGotFocus(EventArgs e)
+        {
+            InvalidateRow(SelectedNode);
+            base.OnGotFocus(e);
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            InvalidateRow(SelectedNode);
+            base.OnLostFocus(e);
+        }
+
+        private void InvalidateRow(TreeNode node)
+        {
+            if (node == null || node.TreeView != this) return;
+            var bounds = node.Bounds;
+            if (bounds.Height > 0) Invalidate(new Rectangle(0, bounds.Top, ClientSize.Width, bounds.Height));
+        }
 
         protected override CreateParams CreateParams
         {
@@ -3157,9 +3202,14 @@ internal sealed class PdmTaskPaneControl : UserControl
             return !string.IsNullOrWhiteSpace(node.OperationAccess?.Reason) ? node.OperationAccess.Reason
                 : node.OperationAccess == null ? "尚未取得当前图档的授权结果，请刷新设计树；仍未恢复时检查服务连接。"
                 : "权限中心未授权当前图档的获取操作，请联系授权人员核对项目及目录范围。";
-        if (!string.IsNullOrWhiteSpace(node.CheckedOutBy) && !IsEditingByCurrentUser(node)
-            && !(node.CheckoutSessionLost && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)))
+        if (!string.IsNullOrWhiteSpace(node.CheckedOutBy) && !IsEditingByCurrentUser(node))
+        {
+            if (string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
+                return node.CheckoutSessionLost ? "当前账号的编辑会话需要恢复，请刷新设计树后重新获取。"
+                    : "当前图档由你在另一编辑会话中获取" + (string.IsNullOrWhiteSpace(node.CheckoutMachine)
+                        ? "。" : "（电脑 " + node.CheckoutMachine + "）。") + "请在原会话完成编辑或释放权限。";
             return "当前图档由“" + DisplayUserName(node.CheckedOutBy) + "”编辑，请先完成或释放该编辑会话。";
+        }
         return "当前图档不能获取，请核对所选文件是否存在且为支持的图档类型。";
     }
 

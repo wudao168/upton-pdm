@@ -41,6 +41,8 @@
   <ItemGroup>
     <Compile Include="..\Pdm.LocalSettings\WorkspaceSettingsStore.cs" Link="WorkspaceSettingsStore.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientBootstrap.cs" Link="ClientBootstrap.cs" />
+    <Compile Include="..\Pdm.Client.Shared\ClientUpdateState.cs" Link="ClientUpdateState.cs" />
+    <Compile Include="..\Pdm.Client.Shared\ClientPackageUpdater.cs" Link="ClientPackageUpdater.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientDiagnostics.cs" Link="ClientDiagnostics.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientDeviceIdentity.cs" Link="ClientDeviceIdentity.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientLogRedaction.cs" Link="ClientLogRedaction.cs" />

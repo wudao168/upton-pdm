@@ -38,30 +38,26 @@ internal static partial class Program
             && (int)Field(plugin, "pendingTreeRefresh") == 1, "工程图保存回调仍触发原生修改，或丢失设计树刷新");
         Console.WriteLine("PASS: Drawing save retains ordinary tree refresh without opening, rewriting or saving a native document again");
 
-        var snapshot = New("PluginUpdateSnapshot");
         var constructor = Type("PluginSettingsDialog").GetConstructors(Flags).Single();
-        var arguments = new object[constructor.GetParameters().Length]; arguments[0] = settings; arguments[1] = snapshot;
+        var arguments = new object[constructor.GetParameters().Length];
+        arguments[0] = settings;
+        arguments[1] = "2026.11.13.120000";
         for (var index = 2; index < arguments.Length; index++)
         {
             var delegateType = constructor.GetParameters()[index].ParameterType;
             var invoke = delegateType.GetMethod("Invoke");
-            object value;
-            if (invoke.ReturnType == Type("PluginUpdateSnapshot")) value = snapshot;
-            else
-            {
-                var resultType = invoke.ReturnType.GetGenericArguments()[0];
-                var result = resultType == Type("PluginUpdateSnapshot") ? snapshot : New("PluginConnectionResult");
-                value = typeof(Task).GetMethod("FromResult").MakeGenericMethod(resultType).Invoke(null, new[] { result });
-            }
+            var resultType = invoke.ReturnType.GetGenericArguments()[0];
+            var value = typeof(Task).GetMethod("FromResult").MakeGenericMethod(resultType)
+                .Invoke(null, new[] { New("PluginConnectionResult") });
             arguments[index] = Expression.Lambda(delegateType, Expression.Constant(value, invoke.ReturnType),
                 invoke.GetParameters().Select(parameter => Expression.Parameter(parameter.ParameterType)).ToArray()).Compile();
         }
         using (var dialog = (Form)constructor.Invoke(arguments))
         {
             var controls = ArchiveControls(dialog).ToArray();
-            TreeCheck(!controls.Any(control => control.Text.Contains("二维码")) && !controls.OfType<NumericUpDown>().Any(), "设置页仍显示二维码选项");
+            TreeCheck(!controls.Any(control => control.Text.Contains("二维码")), "设置页仍显示二维码选项");
             TreeCheck(controls.OfType<GroupBox>().Select(control => control.Text).OrderBy(text => text).SequenceEqual(
-                new[] { "服务器连接", "任务计划显示", "版本与更新", "存档临时副本" }.OrderBy(text => text)), "设置页丢失其他功能或仍有空白二维码分组");
+                new[] { "服务器连接", "任务计划与存档选项", "插件版本", "本地副本与缓存" }.OrderBy(text => text)), "设置页丢失其他功能或仍有空白二维码分组");
             dialog.Show(); dialog.Update();
             using (var bitmap = new Bitmap(dialog.Width, dialog.Height))
             {

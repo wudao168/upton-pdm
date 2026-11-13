@@ -80,11 +80,12 @@ internal static partial class Program
      Check((int)TreeCall(plugin,"OnFileOpening",Path.Combine(original,"PART.SLDPRT"))==0,"嵌套受控读取按自身清单核对，不受旧活动树误拦截");
     Check((int)TreeCall(plugin,"OnFileOpening",Path.Combine(directory,"PART.SLDPRT"))==0,"嵌套范围结束后恢复外层边界");TreeCall(plugin,"OnFileOpened",Path.Combine(directory,"PART.SLDPRT"));
    }
-   foreach(var mode in new[]{"original-present","original-missing","original-open","different-project","stale-version","stale-config","actual-config","occurrence-config","unknown-edit","owned-edit","source-copy","acquire-inplace",
+   foreach(var mode in new[]{"original-present","original-missing","original-open","different-project","stale-version","stale-config","actual-config","occurrence-config","unknown-edit","owned-edit","source-copy","acquire-inplace","acquire-occurrence","latest-occurrence","acquire-dependency-version","acquire-dependency-bytes","acquire-dependency-denied",
     "release-promotion","release-acquire","release-denied","release-other-project","release-binding","release-owned","release-missing-draft","release-session-mismatch","release-draft-base",
     "release-rebind-during-versions","release-rebind-after-activation","release-config-during-versions","release-draft-after-activation",
     "context-environment","context-older-environment","context-ordinary-driver","context-unverified","context-wrong-name","context-duplicate-driver","context-nested-driver","context-virtual","context-tampered","context-root-race"})
    {
+    var acquiring = mode == "acquire-inplace" || mode.StartsWith("acquire-dependency-") || mode == "acquire-occurrence";
     var folder=Path.Combine(output,"View",mode);Directory.CreateDirectory(folder);var partPath=Path.Combine(folder,"PART.SLDPRT");File.WriteAllText(partPath,"saved model bytes");
     var oldPath=Path.Combine(output,"source-"+mode,"PART.SLDPRT");Directory.CreateDirectory(Path.GetDirectoryName(oldPath));if(mode!="original-missing")File.WriteAllText(oldPath,"other original geometry");
     var source=New("ControlledOpenFileDto");var project=Guid.NewGuid();Set(source,"DocumentId",Guid.NewGuid());Set(source,"VersionId",Guid.NewGuid());Set(source,"FileName","PART.SLDPRT");Set(source,"RelativePath","PART.SLDPRT");Set(source,"Configuration","Default");Set(source,"Sha256",WorkingReuseHash(partPath));Set(source,"FileLength",new FileInfo(partPath).Length);Set(source,"Revision","W2");
@@ -92,13 +93,23 @@ internal static partial class Program
     var owner=New("ControlledOpenManifestDto");Set(owner,"ProjectId",mode=="different-project"||mode=="release-other-project"?Guid.NewGuid():project);var ownerFiles=(IList)Activator.CreateInstance(Property(owner,"Files").PropertyType);ownerFiles.Add(source);Set(owner,"Files",ownerFiles);
     Set(owner,"RootDocumentId",Get(source,"DocumentId"));Set(owner,"RootVersionId",Get(source,"VersionId"));Set(owner,"RootRelativePath","PART.SLDPRT");
     var requested=New("ControlledOpenManifestDto");Set(requested,"ProjectId",project);Set(requested,"RootDocumentId",Get(source,"DocumentId"));Set(requested,"RootVersionId",Get(source,"VersionId"));Set(requested,"RootRelativePath","PART.SLDPRT");
-    Set(requested,"ForEdit",mode=="acquire-inplace");
+    Set(requested,"ForEdit",acquiring); if(acquiring)Set(owner,"ForEdit",true);
     var json=new JavaScriptSerializer();var requestedFile=json.Deserialize(json.Serialize(source),source.GetType());Set(requestedFile,"IsRoot",true);
     if(mode=="stale-version")Set(requestedFile,"VersionId",Guid.NewGuid());if(mode=="stale-config")Set(requestedFile,"Configuration","Other");if(mode=="source-copy"){Set(requestedFile,"Sha256",new string('A',64));Set(requestedFile,"FileLength",1000L);}
     if(mode.StartsWith("release-")){Set(requestedFile,"VersionId",Guid.NewGuid());Set(requestedFile,"Revision","A");Set(requested,"RootVersionId",Get(requestedFile,"VersionId"));}
     if(mode=="release-binding")identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)partPath,Get(source,"DocumentId"),project,Guid.NewGuid(),"W9",Get(source,"Sha256"),Get(source,"FileLength")});
     if(mode=="occurrence-config")Set(source,"Configuration","AssemblyOccurrence");
     var requestedFiles=(IList)Activator.CreateInstance(Property(requested,"Files").PropertyType);requestedFiles.Add(requestedFile);Set(requested,"Files",requestedFiles);
+    object occurrenceDependency = null;
+    if (acquiring && mode != "acquire-inplace" || mode == "latest-occurrence")
+    {
+     var depPath=Path.Combine(folder,"BC1-波纹管接头A.SLDPRT");File.WriteAllText(depPath,"one file, all occurrence configurations");File.SetAttributes(depPath,FileAttributes.ReadOnly);
+     occurrenceDependency=New("ControlledOpenFileDto");Set(occurrenceDependency,"DocumentId",Guid.NewGuid());Set(occurrenceDependency,"VersionId",Guid.NewGuid());Set(occurrenceDependency,"FileName",Path.GetFileName(depPath));Set(occurrenceDependency,"RelativePath",Path.GetFileName(depPath));Set(occurrenceDependency,"Configuration","PA-M32(AD34.5)");Set(occurrenceDependency,"Sha256",WorkingReuseHash(depPath));Set(occurrenceDependency,"FileLength",new FileInfo(depPath).Length);Set(occurrenceDependency,"Revision","W1");ownerFiles.Add(occurrenceDependency);
+     identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)depPath,Get(occurrenceDependency,"DocumentId"),project,Get(occurrenceDependency,"VersionId"),"W1",Get(occurrenceDependency,"Sha256"),Get(occurrenceDependency,"FileLength")});
+     var dep=json.Deserialize(json.Serialize(occurrenceDependency),occurrenceDependency.GetType());Set(dep,"Configuration","PA-M20(AD21.2)");requestedFiles.Add(dep);
+     if(mode=="acquire-dependency-version")Set(dep,"VersionId",Guid.NewGuid());
+     if(mode=="acquire-dependency-bytes"){File.SetAttributes(depPath,FileAttributes.Normal);File.AppendAllText(depPath," unverified changes");}
+    }
     object parent=null;object parentReference=null;string parentPath=null;
     if(mode.StartsWith("context-")||mode=="release-acquire")
     {
@@ -128,7 +139,7 @@ internal static partial class Program
     object Model(string path)
     {
      Func<System.Runtime.Remoting.Messaging.IMethodCallMessage,object> callback=call=>{
-      switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return Path.GetFileName(path);case "GetType":return path==parentPath?2:1;case "GetSaveFlag":return mode=="owned-edit";case "IsOpenedReadOnly":return path==parentPath||readOnly;case "SetReadOnlyState":if(mode!="acquire-inplace"&&mode!="release-acquire"||path!=partPath)throw new Exception("越界解锁");readOnly=(bool)call.Args[0];unlocks++;return true;case "get_ConfigurationManager":return configurationManager;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;case "GetComponents":return new[]{component};default:throw new Exception("模型窗口和几何不得修改："+call.MethodName);}
+      switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return Path.GetFileName(path);case "GetType":return path==parentPath?2:1;case "GetSaveFlag":return mode=="owned-edit";case "IsOpenedReadOnly":return path==parentPath||readOnly;case "SetReadOnlyState":if(!acquiring&&mode!="release-acquire"||path!=partPath)throw new Exception("越界解锁");readOnly=(bool)call.Args[0];unlocks++;return true;case "get_ConfigurationManager":return configurationManager;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;case "GetComponents":return new[]{component};default:throw new Exception("模型窗口和几何不得修改："+call.MethodName);}
      };
      return mode=="release-acquire"&&path==parentPath?new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),callback).GetTransparentProxy():new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),callback).GetTransparentProxy();
     }
@@ -171,11 +182,11 @@ internal static partial class Program
       if(mode=="context-nested-driver")refs.Add(new{documentId=Guid.NewGuid(),fileName="DRIVER.SLDPRT",kind=1,children=new[]{driver}});
       data=new[]{new{id=mode=="context-root-race"?Guid.NewGuid():Get(requestedFile,"VersionId"),sha256=Get(requestedFile,"Sha256"),fileLength=Get(requestedFile,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",(string)Get(source,"Sha256")}},referenceSnapshot=new{documentId=Get(source,"DocumentId"),fileName="PART.SLDPRT",configuration="Default",kind=1,children=refs.ToArray()}}};
      }
-     else if(request.RequestUri.AbsolutePath.EndsWith("/documents"))data=mode=="owned-edit"||mode=="acquire-inplace"||mode=="release-acquire"||editablePromotion?new[]{checkoutDocument}:new object[0];
+     else if(request.RequestUri.AbsolutePath.EndsWith("/documents"))data=mode=="owned-edit"||acquiring||mode=="release-acquire"||editablePromotion?new[]{checkoutDocument}:new object[0];
      else if(request.RequestUri.AbsolutePath.EndsWith("/document-operation-rules"))data=new{disabledRuleIds=new string[0]};
      else if(request.RequestUri.AbsolutePath.EndsWith("/document-relations"))data=new object[0];
-     else if(request.RequestUri.AbsolutePath.EndsWith("/open-manifest")){if(mode=="release-denied")return new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"message\":\"当前账号没有该项目的获取权限。\"}")};data=mode=="release-acquire"?owner:requested;}
-     else if(request.RequestUri.AbsolutePath.EndsWith("/checkout")&&(mode=="acquire-inplace"||mode=="release-acquire")){checkouts++;Set(checkoutDocument,"CheckedOutBy","tester");Set(checkoutDocument,"CheckoutSessionId",session);Set(checkoutDocument,"CheckedOutAt",new DateTime(2026,10,27,6,0,0,DateTimeKind.Utc));data=checkoutDocument;}
+     else if(request.RequestUri.AbsolutePath.EndsWith("/open-manifest")){if(mode=="release-denied")return new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"message\":\"当前账号没有该项目的获取权限。\"}")};data=mode=="release-acquire"||acquiring?owner:requested;}
+     else if(request.RequestUri.AbsolutePath.EndsWith("/checkout")&&(acquiring||mode=="release-acquire")){checkouts++;if(mode=="acquire-dependency-denied")return new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"message\":\"当前账号没有该项目的获取权限。\"}")};Set(checkoutDocument,"CheckedOutBy","tester");Set(checkoutDocument,"CheckoutSessionId",session);Set(checkoutDocument,"CheckedOutAt",new DateTime(2026,10,27,6,0,0,DateTimeKind.Utc));data=checkoutDocument;}
      else throw new Exception("复用不应下载或检入文件："+request.RequestUri.AbsolutePath);
      return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(json.Serialize(data))};
     }))
@@ -193,14 +204,16 @@ internal static partial class Program
      if(mode=="release-draft-base")Set(((IDictionary)Field(addin,"localEdits"))[Get(source,"DocumentId")],"BaseVersionId",Guid.NewGuid());
      if(mode=="owned-edit"||mode=="unknown-edit")File.AppendAllText(partPath,"|local geometry edit");
      var bytes=File.ReadAllBytes(partPath);var parentBytes=parent==null?null:File.ReadAllBytes(parentPath);var parentAttributes=parent==null?FileAttributes.Normal:File.GetAttributes(parentPath);Exception failure=null;bool reused=false;
-     try{var task=(Task)TreeCall(addin,"TryOpenModelInLoadedContextAsync",requested,mode=="acquire-inplace"||mode=="release-acquire"||mode=="release-denied");await task;reused=(bool)Get(task,"Result");}catch(InvalidOperationException error){failure=error;}
-     var shouldPass=new[]{"original-present","original-missing","occurrence-config","owned-edit","source-copy","acquire-inplace","context-environment","context-older-environment","release-promotion","release-acquire","release-owned"}.Contains(mode);
+     try{var task=(Task)TreeCall(addin,"TryOpenModelInLoadedContextAsync",requested,acquiring||mode=="release-acquire"||mode=="release-denied");await task;reused=(bool)Get(task,"Result");}catch(InvalidOperationException error){failure=error;}
+     var shouldPass=new[]{"original-present","original-missing","occurrence-config","owned-edit","source-copy","acquire-inplace","acquire-occurrence","latest-occurrence","context-environment","context-older-environment","release-promotion","release-acquire","release-owned"}.Contains(mode);
      if(shouldPass&&failure!=null)Console.WriteLine("DIAGNOSTIC: "+failure);
      Check(reused==shouldPass&&(failure==null)==shouldPass,"模型工作副本复用及真实冲突判定："+mode);
      Check(nativeMutations==0&&File.ReadAllBytes(partPath).SequenceEqual(bytes),"保留当前模型窗口和本地内容，不生成第二套副本："+mode);
      if(parent!=null)Check(File.ReadAllBytes(parentPath).SequenceEqual(parentBytes)&&File.GetAttributes(parentPath)==parentAttributes&&(string)Get(parent,"Configuration")=="Default", "装配上下文保持原字节、属性和原配置："+mode);
      Check(!File.Exists(oldPath)||File.ReadAllText(oldPath)=="other original geometry","原目录文件不被读取为模型或修改："+mode);
-     if(mode=="acquire-inplace")Check(checkouts==1&&unlocks==1&&!readOnly,"获取编辑权限复用同一窗口，仅解锁选中的模型，不重新打开或下载");
+     if(mode=="acquire-inplace"||mode=="acquire-occurrence")Check(checkouts==1&&unlocks==1&&!readOnly,"获取编辑权限复用同一窗口，仅解锁选中的模型，不重新打开或下载");
+     if(mode.StartsWith("acquire-dependency-"))Check(failure!=null&&unlocks==0&&checkouts==(mode=="acquire-dependency-denied"?1:0),"关联配置等价不放行真实版本、字节冲突或未授权："+mode);
+     if(occurrenceDependency!=null)Check((string)Get(occurrenceDependency,"Configuration")=="PA-M32(AD34.5)","获取不改写装配实例配置");
      if(mode=="release-acquire")Check(checkouts==1&&unlocks==1&&!readOnly&&Equals(Get(((IList)Get(owner,"Files"))[0],"VersionId"),Get(source,"VersionId"))&&Equals(Get(((IDictionary)Field(addin,"localEdits"))[Get(source,"DocumentId")],"BaseVersionId"),Get(source,"VersionId")),"LatestEdit发布等价在父装配原基线中获取成功，回调返回新会话供激活后复核，草稿仍保留原版本");
      if(mode=="release-promotion"||mode=="release-owned")Check(Equals(Get(source,"VersionId"),Get(owner,"RootVersionId")),"审批发布等价打开保留原工作基线，不将父清单改写为发布版本");
      if(editablePromotion)Check(mode=="release-owned"||failure!=null&&failure.Message.Contains("获取会话"),"发布等价模型即使尚未修改，也必须核对完整编辑基线及获取会话："+mode);

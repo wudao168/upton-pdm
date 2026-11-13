@@ -38,8 +38,6 @@ public sealed partial class PdmAddin : ISwAddin
     private SolidWorksReferenceTreeScanner scanner;
     private CancellationTokenSource lifetime;
     private CancellationTokenSource metadataRefreshCancellation;
-    private readonly SemaphoreSlim clientUpdateGate = new SemaphoreSlim(1, 1);
-    private readonly object clientUpdateStatusSync = new object();
     private readonly object metadataRefreshSync = new object();
     private readonly object metadataCacheSync = new object();
     private readonly object fileHashCacheSync = new object();
@@ -105,7 +103,6 @@ public sealed partial class PdmAddin : ISwAddin
     private string addinDirectory = string.Empty;
     private PluginSettings pluginSettings = new PluginSettings();
     private ClientBootstrapConfiguration currentBootstrap;
-    private PluginUpdateSnapshot clientUpdateSnapshot = new PluginUpdateSnapshot();
     private const int ActiveDocumentRefreshDebounceMilliseconds = 200;
     private const int StructuralRefreshDebounceMilliseconds = 800;
     private const int ActiveTreeCacheCapacity = 8;
@@ -152,17 +149,19 @@ public sealed partial class PdmAddin : ISwAddin
             WireSolidWorksEvents();
 
             taskPaneView = application.CreateTaskpaneView2(CreateTaskPaneIcon(), "UPLM");
-            taskPaneView.DisplayWindowFromHandlex64(taskPaneControl.Handle.ToInt64());
+            if (taskPaneView == null || !taskPaneView.DisplayWindowFromHandlex64(taskPaneControl.Handle.ToInt64()))
+                throw new InvalidOperationException("UPLM 插件任务窗格未能加载。");
             taskPaneSynchronizationContext = new TaskPaneSynchronizationContext(taskPaneControl);
             taskPaneControl.SetConnectionState(false, "等待SolidWorks启动完成");
             RefreshTree(false);
-            SetInitialUpdateSnapshot();
+            ClientPackageUpdater.ReportStartup(ClientUpdateState.Addin, addinDirectory, LoadedPluginVersion, true);
             PublishCacheProtection(true);
             LogOperation("ConnectToSW success elapsedMs=" + connectTimer.ElapsedMilliseconds + " serverSync=deferred pid=" + Process.GetCurrentProcess().Id);
             return true;
         }
         catch (Exception exception)
         {
+            ClientPackageUpdater.ReportStartup(ClientUpdateState.Addin, addinDirectory, LoadedPluginVersion, false);
             LogDiagnostic("ConnectToSW", exception);
             DisconnectFromSW();
             return false;
@@ -198,39 +197,6 @@ public sealed partial class PdmAddin : ISwAddin
         catch (Exception error) { LogDiagnostic("同步账号主题", error); }
     }
 
-    private async Task MonitorClientUpdatesAsync()
-    {
-        while (!disconnecting && lifetime != null && !lifetime.IsCancellationRequested)
-        {
-            try
-            {
-                pluginSettings = PluginSettingsStore.Load();
-                if (pluginSettings.AutomaticUpdatesEnabled)
-                {
-                    await CheckClientUpdateAsync(pluginSettings.ServerAddress, true, lifetime.Token).ConfigureAwait(false);
-                }
-                var pollSeconds = currentBootstrap?.PollSeconds ?? 30;
-                await Task.Delay(TimeSpan.FromSeconds(Math.Max(15, pollSeconds)), lifetime.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception exception)
-            {
-                LogDiagnostic("MonitorClientUpdates", exception);
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(15, currentBootstrap?.PollSeconds ?? 30)), lifetime.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
-            }
-        }
-    }
-
     public bool DisconnectFromSW()
     {
         if (archiveReaderAddin) { archiveReaderAddin = false; return true; }
@@ -245,8 +211,6 @@ public sealed partial class PdmAddin : ISwAddin
             lifetime?.Cancel();
             propertyWindow?.Dispose();
             propertyWindow = null;
-            if (pluginSettings?.AutomaticUpdatesEnabled == true)
-                ClientPackageUpdater.SchedulePluginOnExit(Process.GetCurrentProcess().Id);
             ArchiveSession.Current?.CloseForShutdown();
             controlledOpenListener?.Dispose();
             UnwireSolidWorksEvents();
@@ -425,7 +389,8 @@ public sealed partial class PdmAddin : ISwAddin
         if (applicationEvents != null)
         {
             applicationEvents.ActiveDocChangeNotify += OnActiveDocumentChanged;
-            applicationEvents.ActiveModelDocChangeNotify += OnActiveDocumentChanged;
+            applicationEvents.ActiveModelDocChangeNotify += OnActiveModelDocumentChanged;
+            applicationEvents.DocumentLoadNotify2 += OnNativeDocumentLoaded;
             applicationEvents.FileOpenPreNotify += OnFileOpening;
             applicationEvents.FileOpenPostNotify += OnFileOpened;
             applicationEvents.FileNewNotify2 += OnFileCreated;
@@ -451,7 +416,8 @@ public sealed partial class PdmAddin : ISwAddin
         try
         {
             applicationEvents.ActiveDocChangeNotify -= OnActiveDocumentChanged;
-            applicationEvents.ActiveModelDocChangeNotify -= OnActiveDocumentChanged;
+            applicationEvents.ActiveModelDocChangeNotify -= OnActiveModelDocumentChanged;
+            applicationEvents.DocumentLoadNotify2 -= OnNativeDocumentLoaded;
             applicationEvents.FileOpenPreNotify -= OnFileOpening;
             applicationEvents.FileOpenPostNotify -= OnFileOpened;
             applicationEvents.FileNewNotify2 -= OnFileCreated;
@@ -896,14 +862,12 @@ public sealed partial class PdmAddin : ISwAddin
         // SolidWorks can send idle notifications while an Insert Component/Mate command is open.
         // Scanning (which may resolve components), saving, or activating documents can interrupt it.
         if (IsSolidWorksCommandActive()) return 0;
-        PublishCacheProtection();
-        if (Volatile.Read(ref batchDialogInProgress) == 0 && Volatile.Read(ref checkInOperationInProgress) == 0) PruneArchiveMemoryCopies();
         if (ShowBlockedControlledOpen()) return 0;
         if (TryStartAssemblyPermissionPrompt()) return 0;
         TryInitializeServerAfterStartup();
         TryStartQueuedControlledOpen();
         TryStartControlledOpenRequest();
-        TryMaintainEdits();
+        RunPeriodicNativeMaintenance();
         SynchronizeActiveDocumentContextOnIdle();
         TryRefreshPendingTree("IdleRefresh");
         return 0;
@@ -1241,16 +1205,12 @@ public sealed partial class PdmAddin : ISwAddin
             new PluginSettings
             {
                 ServerAddress = serverAddress,
-                AutomaticUpdatesEnabled = pluginSettings?.AutomaticUpdatesEnabled != false,
                 PlannedTaskScrollIntervalSeconds = pluginSettings?.PlannedTaskScrollIntervalSeconds ?? 30,
                 CacheLimitGigabytes = pluginSettings?.CacheLimitGigabytes ?? 20,
                 BlockArchiveOnMissingReferences = pluginSettings?.BlockArchiveOnMissingReferences == true,
             },
-            GetClientUpdateSnapshot(),
-            GetClientUpdateSnapshot,
+            LoadedPluginVersion,
             TestPluginConnectionAsync,
-            address => CheckClientUpdateAsync(address, false, lifetime.Token),
-            address => CheckClientUpdateAsync(address, true, lifetime.Token, true),
             SavePluginSettingsAsync) { CleanTemporaryCopies = CleanArchiveTemporaryCopiesAsync,
                 ReadCacheUsage = ReadControlledCacheUsageAsync, CleanControlledCache = CleanControlledCacheAsync })
         {
@@ -2116,217 +2076,7 @@ public sealed partial class PdmAddin : ISwAddin
         return ClientBootstrapLoader.LoadAsync(cancellationToken);
     }
 
-    private void SetInitialUpdateSnapshot()
-    {
-        var installedVersion = LoadedPluginVersion;
-        var snapshot = new PluginUpdateSnapshot
-        {
-            InstalledVersion = installedVersion,
-            Status = pluginSettings.AutomaticUpdatesEnabled ? "等待自动检查更新" : "自动更新已关闭"
-        };
-        if (ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out var pendingVersion, out var pendingError))
-        {
-            snapshot.AvailableVersion = pendingVersion;
-            snapshot.Status = string.IsNullOrWhiteSpace(pendingError)
-                ? PendingPluginStatus()
-                : pluginSettings.AutomaticUpdatesEnabled ? "上次更新未完成，后台将自动重试" : "上次安装未完成，请检查更新后重试";
-            snapshot.UpdateAvailable = true;
-            snapshot.ReadyToInstall = ClientPackageUpdater.PendingUpdateHasFileHashes("solidworks-addin");
-        }
-        SetClientUpdateSnapshot(snapshot);
-    }
-
-    private PluginUpdateSnapshot GetClientUpdateSnapshot()
-    {
-        lock (clientUpdateStatusSync)
-        {
-            var snapshot = clientUpdateSnapshot.Clone();
-            snapshot.LoadedVersion = LoadedPluginVersion;
-            snapshot.DiskVersion = ClientPackageUpdater.GetInstalledVersion(addinDirectory);
-            return snapshot;
-        }
-    }
-
-    private void SetClientUpdateSnapshot(PluginUpdateSnapshot snapshot)
-    {
-        lock (clientUpdateStatusSync) clientUpdateSnapshot = snapshot?.Clone() ?? new PluginUpdateSnapshot();
-    }
-
-    private void ChangeClientUpdateSnapshot(Action<PluginUpdateSnapshot> change)
-    {
-        lock (clientUpdateStatusSync)
-        {
-            var snapshot = clientUpdateSnapshot.Clone();
-            change(snapshot);
-            clientUpdateSnapshot = snapshot;
-        }
-    }
-
-    private async Task<PluginUpdateSnapshot> CheckClientUpdateAsync(
-        string serverAddress,
-        bool install,
-        CancellationToken cancellationToken,
-        bool launchInstaller = false)
-    {
-        await clientUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            if (ClientPackageUpdater.IsPluginDownloadRunning())
-            {
-                ChangeClientUpdateSnapshot(snapshot =>
-                {
-                    snapshot.Busy = true;
-                    snapshot.ProgressPercentage = null;
-                    snapshot.Status = "正在后台下载并校验更新，退出 SolidWorks 后将继续完成静默更新";
-                });
-                return GetClientUpdateSnapshot();
-            }
-            ChangeClientUpdateSnapshot(snapshot =>
-            {
-                snapshot.Busy = true;
-                snapshot.ProgressPercentage = null;
-                snapshot.Status = "正在检查更新…";
-            });
-
-            var installedVersion = LoadedPluginVersion;
-            var checkedAt = DateTimeOffset.Now;
-
-            var hasPending = ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out var pendingVersion, out var pendingError);
-            var ready = hasPending && string.IsNullOrWhiteSpace(pendingError)
-                && ClientPackageUpdater.PendingUpdateHasFileHashes("solidworks-addin");
-            var repairFailedUpdate = hasPending && !ready;
-            ClientBootstrapConfiguration bootstrap = null;
-            try
-            {
-                bootstrap = string.IsNullOrWhiteSpace(serverAddress)
-                    ? await ClientBootstrapLoader.LoadAsync(cancellationToken, false).ConfigureAwait(false)
-                    : await ClientBootstrapLoader.LoadAsync(PluginSettingsStore.BuildBootstrapUrl(serverAddress),
-                        cancellationToken, false).ConfigureAwait(false);
-            }
-            catch (Exception error) when (ready && !(error is OperationCanceledException))
-            { LogDiagnostic("更新服务器暂不可用，保留已校验的插件更新", error); }
-            var availableVersion = bootstrap?.SolidWorksAddin?.Version?.Trim() ?? string.Empty;
-            if (ready && (!ClientPackageUpdater.IsUpdateAvailable(pendingVersion, availableVersion)
-                || ClientPackageUpdater.IsInstallerRunning("solidworks-addin")))
-            {
-                if (launchInstaller || pluginSettings.AutomaticUpdatesEnabled) ScheduleSilentPluginInstaller(!launchInstaller);
-                var pendingSnapshot = new PluginUpdateSnapshot
-                {
-                    InstalledVersion = installedVersion, AvailableVersion = pendingVersion, LastCheckedAt = checkedAt,
-                    Status = PendingPluginStatus(launchInstaller),
-                    ReadyToInstall = true, UpdateAvailable = !launchInstaller, ProgressPercentage = 100
-                };
-                SetClientUpdateSnapshot(pendingSnapshot);
-                return pendingSnapshot.Clone();
-            }
-
-            var updateAvailable = repairFailedUpdate
-                || ClientPackageUpdater.IsUpdateAvailable(installedVersion, availableVersion);
-            if (!updateAvailable)
-            {
-                var serverVersionIsOlder = ClientPackageUpdater.IsUpdateAvailable(availableVersion, installedVersion);
-                var currentSnapshot = new PluginUpdateSnapshot
-                {
-                    InstalledVersion = installedVersion,
-                    AvailableVersion = availableVersion,
-                    LastCheckedAt = checkedAt,
-                    Status = string.IsNullOrWhiteSpace(availableVersion)
-                        ? "服务器未发布插件版本"
-                        : serverVersionIsOlder
-                            ? "服务器发布版本低于当前版本，已阻止降级"
-                            : "已是最新版本"
-                };
-                SetClientUpdateSnapshot(currentSnapshot);
-                return currentSnapshot.Clone();
-            }
-
-            if (!install)
-            {
-                var availableSnapshot = new PluginUpdateSnapshot
-                {
-                    InstalledVersion = installedVersion,
-                    AvailableVersion = availableVersion,
-                    LastCheckedAt = checkedAt,
-                    Status = repairFailedUpdate ? "检测到更新安装不完整，可立即修复" : "发现新版本",
-                    UpdateAvailable = true
-                };
-                SetClientUpdateSnapshot(availableSnapshot);
-                return availableSnapshot.Clone();
-            }
-
-            ChangeClientUpdateSnapshot(snapshot =>
-            {
-                snapshot.InstalledVersion = installedVersion;
-                snapshot.AvailableVersion = availableVersion;
-                snapshot.LastCheckedAt = checkedAt;
-                snapshot.UpdateAvailable = true;
-                snapshot.Busy = true;
-                snapshot.Status = "正在下载并校验更新包…";
-            });
-            if (!ClientPackageUpdater.StagePluginInBackground(bootstrap.SolidWorksAddin, addinDirectory,
-                Process.GetCurrentProcess().Id, !launchInstaller))
-                throw new InvalidOperationException("未能启动后台更新，请稍后重新检查。");
-            var stagedSnapshot = new PluginUpdateSnapshot
-            {
-                InstalledVersion = installedVersion,
-                AvailableVersion = availableVersion,
-                LastCheckedAt = checkedAt,
-                Status = "正在后台下载并校验更新，退出 SolidWorks 后将继续完成静默更新",
-                Busy = true
-            };
-            SetClientUpdateSnapshot(stagedSnapshot);
-            return stagedSnapshot.Clone();
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            const string message = "连接更新服务器超时，请检查服务器地址和网络连接后重试。";
-            ChangeClientUpdateSnapshot(snapshot =>
-            {
-                snapshot.Busy = false;
-                snapshot.Status = message;
-                snapshot.LastCheckedAt = DateTimeOffset.Now;
-            });
-            throw new TimeoutException(message);
-        }
-        catch (OperationCanceledException)
-        {
-            ChangeClientUpdateSnapshot(snapshot =>
-            {
-                snapshot.Busy = false;
-                snapshot.Status = "更新检查已取消";
-            });
-            throw;
-        }
-        catch (Exception exception)
-        {
-            LogDiagnostic("插件更新检查失败", exception);
-            ChangeClientUpdateSnapshot(snapshot =>
-            {
-                snapshot.Busy = false;
-                snapshot.Status = "更新检查失败，请核对服务器地址、网络连接及本机目录权限后重试。";
-                snapshot.LastCheckedAt = DateTimeOffset.Now;
-            });
-            throw;
-        }
-        finally
-        {
-            clientUpdateGate.Release();
-        }
-    }
-
-    private string PendingPluginStatus(bool explicitlyScheduled = false) => explicitlyScheduled || pluginSettings.AutomaticUpdatesEnabled
-        ? "更新已就绪，退出全部 SolidWorks 后自动静默安装，无需确认" : "更新已就绪，请点击安装更新";
-
-    private static string LoadedPluginVersion => typeof(PdmAddin).Assembly
-        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
-        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().First().InformationalVersion.Split('+')[0];
-
-    private void ScheduleSilentPluginInstaller(bool automaticInstall)
-    {
-        if (!ClientPackageUpdater.IsInstallerRunning("solidworks-addin")
-            && !ClientPackageUpdater.SchedulePluginUpdate(Process.GetCurrentProcess().Id, automaticInstall))
-            throw new InvalidOperationException("未能安排静默更新，请稍后重新检查。");
-    }
+    private static string LoadedPluginVersion => ClientPackageUpdater.GetLoadedVersion(typeof(PdmAddin).Assembly);
 
     private async Task<PluginConnectionResult> TestPluginConnectionAsync(string serverAddress)
     {
@@ -2359,8 +2109,6 @@ public sealed partial class PdmAddin : ISwAddin
     private async Task<PluginConnectionResult> SavePluginSettingsAsync(PluginSettings requestedSettings)
     {
         if (requestedSettings == null) throw new ArgumentNullException(nameof(requestedSettings));
-        if (GetClientUpdateSnapshot().Busy)
-            throw new InvalidOperationException("插件更新正在进行，请等待完成后再切换服务器。");
         if (Volatile.Read(ref openOperationInProgress) != 0
             || Volatile.Read(ref checkInOperationInProgress) != 0
             || Volatile.Read(ref workspaceOperationInProgress) != 0)
@@ -2400,7 +2148,6 @@ public sealed partial class PdmAddin : ISwAddin
         var settings = new PluginSettings
         {
             ServerAddress = normalizedAddress,
-            AutomaticUpdatesEnabled = requestedSettings.AutomaticUpdatesEnabled,
             PlannedTaskScrollIntervalSeconds = requestedSettings.PlannedTaskScrollIntervalSeconds,
             CacheLimitGigabytes = requestedSettings.CacheLimitGigabytes,
             BlockArchiveOnMissingReferences = requestedSettings.BlockArchiveOnMissingReferences,
@@ -2442,13 +2189,6 @@ public sealed partial class PdmAddin : ISwAddin
             connection.Message = "设置已保存并应用";
         }
 
-        if (!settings.AutomaticUpdatesEnabled)
-        {
-            ChangeClientUpdateSnapshot(snapshot =>
-            {
-                if (!snapshot.Busy) snapshot.Status = "自动更新已关闭，可手动检查更新";
-            });
-        }
         return connection;
     }
 
@@ -3666,6 +3406,8 @@ public sealed partial class PdmAddin : ISwAddin
 
     private static string OpenDocumentErrorMessage(Exception exception)
     {
+        if (exception is TimeoutException && exception.Message.Any(character => character >= '\u4e00' && character <= '\u9fff'))
+            return exception.Message;
         if (exception is InvalidDataException)
             return exception.Message.Any(character => character >= '\u4e00' && character <= '\u9fff') ? exception.Message
                 : "图档或工作区完整性校验未通过，已保留本地文件；请查看诊断日志核对具体原因。";
@@ -11366,7 +11108,7 @@ public sealed partial class PdmAddin : ISwAddin
             LatestRevision = document?.Revision?.Display ?? source.Revision?.Display ?? string.Empty,
             DrawingVersion = document?.DrawingVersion ?? "待核对",
             PublishedVersion = document?.PublishedVersion ?? "未发布",
-            CheckedOutBy = source.CheckedOutBy ?? document?.CheckedOutBy,
+            CheckedOutBy = document?.CheckedOutBy,
             CheckedOutAt = document?.CheckedOutAt,
             CheckoutSessionId = document?.CheckoutSessionId,
             CheckoutMachine = document?.CheckoutMachine ?? string.Empty,

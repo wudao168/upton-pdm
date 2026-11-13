@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'SystemReleaseHistory.ps1')
+. (Join-Path $PSScriptRoot 'ClientUpdateSigning.ps1')
 $runtimeRoot = Join-Path $projectRoot '.runtime'
 $localRoot = Join-Path $projectRoot '.local'
 $downloadRoot = Join-Path $runtimeRoot 'downloads'
@@ -41,6 +42,14 @@ $ReleaseNote = Get-UplmReleaseNote -Version $ReleaseVersion -ReleaseNote $Releas
 $releasedAt = Get-UplmReleasedAt -Version $ReleaseVersion
 $lanBase = $LanBaseUrl.TrimEnd('/')
 $releaseHistoryBaseline = Join-Path $PSScriptRoot 'system-release-history.json'
+$updateBuildProperties = @()
+if (-not $ServerOnly) {
+    $updateCertificate = Get-UplmUpdateSigningCertificate
+    $updatePublicKey = Join-Path $localRoot 'update-public.xml'
+    New-Item -ItemType Directory -Path $localRoot -Force | Out-Null
+    Export-UplmUpdatePublicKey $updateCertificate $updatePublicKey
+    $updateBuildProperties = @("-p:UplmUpdatePublicKeyFile=$updatePublicKey", "-p:InformationalVersion=$ReleaseVersion")
+}
 if ($isUpgrade) {
     $apiOutput = Join-Path $localRoot 'api-next'
     if (-not $ServerOnly) {
@@ -302,7 +311,7 @@ try {
         throw 'Solution restore failed.'
     }
     if (-not $ServerOnly) {
-        & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo --disable-build-servers -m:1 -p:NuGetAudit=false
+        & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo --disable-build-servers -m:1 -p:NuGetAudit=false @updateBuildProperties
         if ($LASTEXITCODE -ne 0) {
             throw 'Release build failed.'
         }
@@ -403,6 +412,8 @@ $desktopArchive = Join-Path $updatesRoot "uplm-desktop-$ReleaseVersion.zip"
 $addinArchive = Join-Path $updatesRoot "uplm-solidworks-addin-$ReleaseVersion.zip"
 Compress-Archive -Path (Join-Path $clientOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force
 Compress-Archive -Path (Join-Path $addinOutput '*') -DestinationPath $addinArchive -CompressionLevel Optimal -Force
+$desktopHash = Get-Sha256 $desktopArchive
+$addinHash = Get-Sha256 $addinArchive
 $releaseHistory = Get-UplmReleaseHistory `
     -CurrentVersion $ReleaseVersion `
     -CurrentReleaseNote $ReleaseNote `
@@ -422,12 +433,14 @@ $bootstrap = [ordered]@{
     Desktop = [ordered]@{
         Version = $ReleaseVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($desktopArchive))"
-        Sha256 = Get-Sha256 $desktopArchive
+        Sha256 = $desktopHash
+        Signature = Get-UplmUpdateSignature $updateCertificate 'desktop' $ReleaseVersion $desktopHash
     }
     SolidWorksAddin = [ordered]@{
         Version = $ReleaseVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($addinArchive))"
-        Sha256 = Get-Sha256 $addinArchive
+        Sha256 = $addinHash
+        Signature = Get-UplmUpdateSignature $updateCertificate 'solidworks-addin' $ReleaseVersion $addinHash
     }
 }
 Write-Utf8File (Join-Path $webRoot 'client-bootstrap.json') @(($bootstrap | ConvertTo-Json -Depth 8))

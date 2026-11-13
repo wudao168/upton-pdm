@@ -103,8 +103,8 @@ public sealed partial class PdmAddin
             token.ThrowIfCancellationRequested();
             if (!ReferenceEquals(tree, currentTree) || DeferBackgroundTreeRefresh()) return;
             var byId = documents.Where(item => item.ProjectId == projectId).ToDictionary(item => item.Id);
-            ApplyPassiveDocumentAccess(tree, byId);
             ReconcilePassiveDrawings(tree, byId, await relationsTask);
+            ApplyPassiveDocumentAccess(tree, byId);
             taskPaneControl.SetTree(tree);
             if (tree.LocalStructureDeferred && !tree.Children.Any(child => child.Kind != CadDocumentKind.Drawing
                     && CadDesignTreeDisplay.IsStructureNode(child)) && taskPaneControl.IsStructureTabVisible)
@@ -131,6 +131,16 @@ public sealed partial class PdmAddin
             {
                 ApplyCheckoutDocument(node, document);
                 node.LatestRevision = document.Revision?.Display ?? string.Empty;
+            }
+            else
+            {
+                node.CheckedOutBy = null;
+                node.CheckedOutAt = null;
+                node.CheckoutSessionId = null;
+                node.CheckoutMachine = string.Empty;
+                node.CheckoutLastHeartbeatAt = null;
+                node.HasCurrentEditSession = false;
+                node.CheckoutSessionLost = false;
             }
         }
         PluginDiagnosticLog.Record("设计树获取权限", "图档=" + tree.FileName + "；已绑定=" + tree.DocumentId.HasValue
@@ -210,6 +220,7 @@ public sealed partial class PdmAddin
             tree.CurrentRevision = version.Revision?.Display ?? tree.CurrentRevision;
             tree.DisplayStructurePending = false;
             ReconcilePassiveDrawings(tree, documents, relations);
+            ApplyPassiveDocumentAccess(tree, documents);
             taskPaneControl.SetTree(currentTree);
             taskPaneControl.SetTreeNotice("已显示PLM结构索引；存档时核对本地实际结构。");
         }

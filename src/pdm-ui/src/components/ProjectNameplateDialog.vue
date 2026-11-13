@@ -103,9 +103,9 @@ async function confirm() {
         <p v-if="view.nameplate.releasePackageId">发布包：{{ view.nameplate.releasePackageNumber }} · 硬件确认：<PersonName :name="displayName(view.nameplate.confirmedBy || '')" /></p>
       </div>
       <NameplatePreview :name="view.name" :model="view.model" :serial-numbers="view.serialNumbers" :power-supply="view.nameplate.powerSupply" :rated-power="ratedPower" :dimensions="view.nameplate.dimensions" :air-pressure="view.nameplate.airPressure" :weight="view.nameplate.weight" :factory-date="view.nameplate.factoryDate">
-        <template v-if="editing" #powerSupply><div class="nameplate-numbers nameplate-power-inputs"><label><input :value="draft.voltage" @input="draft.voltage = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电压" :disabled="hardwareDisabled"><span>V</span></label><label><input :value="draft.frequency" @input="draft.frequency = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="频率" :disabled="hardwareDisabled"><span>Hz</span></label><b>/</b><label><input :value="draft.current" @input="draft.current = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电流" :disabled="hardwareDisabled"><span>A</span></label></div></template>
+        <template v-if="editing" #powerSupply><div class="nameplate-numbers nameplate-power-inputs"><label><input :value="draft.voltage" @input="draft.voltage = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电压" :disabled="hardwareDisabled"><span>V</span></label><label><input :value="draft.frequency" @input="draft.frequency = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="频率" :disabled="hardwareDisabled"><span>Hz</span></label><label><input :value="draft.current" @input="draft.current = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电流" :disabled="hardwareDisabled"><span>A</span></label></div></template>
         <template v-if="editing" #airPressure><div class="nameplate-numbers"><label><el-input v-model="draft.airPressure" aria-label="气压" maxlength="96" :disabled="executionDisabled" /><span>MPa</span></label></div></template>
-        <template v-if="editing" #dimensions><div class="nameplate-numbers nameplate-dimensions"><template v-for="(field, index) in dimensionFields" :key="field.key"><b v-if="index">x</b><label><input :value="draft[field.key]" @input="draft[field.key] = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" :aria-label="field.label" :disabled="executionDisabled"><span>mm</span></label></template></div></template>
+        <template v-if="editing" #dimensions><div class="nameplate-numbers nameplate-dimensions"><template v-for="field in dimensionFields" :key="field.key"><label><input :value="draft[field.key]" @input="draft[field.key] = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" :aria-label="field.label" :disabled="executionDisabled"><span>{{ field.label }} mm</span></label></template></div></template>
         <template v-if="editing" #weight><div class="nameplate-numbers"><label><input :value="draft.weight" @input="draft.weight = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="重量" :disabled="executionDisabled"><span>kg</span></label></div></template>
         <template v-if="editing" #factoryDate><el-date-picker v-model="view.nameplate.factoryDate" type="month" format="YYYY-MM" value-format="YYYY-MM-01" aria-label="出厂日期" :disabled="executionDisabled" :clearable="false" /></template>
       </NameplatePreview>
@@ -122,13 +122,21 @@ async function confirm() {
 .nameplate-numbers{display:flex;align-items:center;gap:4px;min-width:0}
 .nameplate-numbers label{display:flex;align-items:center;flex:1;min-width:0;gap:3px;font-size:12px}
 .nameplate-numbers label>span{flex-shrink:0;white-space:nowrap}
-.nameplate-numbers input{box-sizing:border-box;width:100%;min-width:0;height:30px;border:1px solid var(--pdm-border);border-radius:4px;padding:2px 4px;font:inherit;font-size:14px;appearance:textfield;-moz-appearance:textfield}
+.nameplate-numbers input{box-sizing:border-box;width:100%;min-width:0;height:30px;border:1px solid var(--pdm-border);border-radius:4px;padding:2px 4px;font:inherit;font-size:16px;font-weight:600;appearance:textfield;-moz-appearance:textfield}
 .nameplate-numbers input::-webkit-inner-spin-button,.nameplate-numbers input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
 .nameplate-numbers input:disabled{background:var(--el-disabled-bg-color);color:var(--el-disabled-text-color)}
 .nameplate-numbers input:focus{outline:1px solid var(--pdm-blue)}
 .nameplate-power-inputs input,.nameplate-dimensions input{text-align:center}
-.nameplate-dimensions{gap:2px}
-.nameplate-dimensions input{min-width:52px;padding:2px;font-size:11px}
-.nameplate-dimensions label{gap:1px;font-size:10px}
+.nameplate-power-inputs,.nameplate-dimensions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px}
+.nameplate-power-inputs input,.nameplate-dimensions input{padding:2px}
+.nameplate-power-inputs label,.nameplate-dimensions label{flex-direction:column;align-items:stretch;gap:1px;text-align:center;font-size:10px}
+@container (max-width:540px){
+  .nameplate-power-inputs,.nameplate-dimensions{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@container (max-width:440px){
+  .nameplate-power-inputs,.nameplate-dimensions{grid-template-columns:1fr}
+  .nameplate-power-inputs label,.nameplate-dimensions label{flex-direction:row;align-items:center;text-align:left;gap:4px}
+  .nameplate-power-inputs label>span,.nameplate-dimensions label>span{min-width:20px}
+}
 .nameplate-hint{font-size:12px;color:var(--pdm-muted);line-height:1.6}
 </style>

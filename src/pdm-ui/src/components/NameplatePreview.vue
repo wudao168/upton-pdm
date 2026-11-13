@@ -30,5 +30,28 @@ defineProps<{
 </template>
 
 <style scoped>
-.nameplate-preview-size{width:560px;max-width:100%;margin-inline:auto}.nameplate-preview{zoom:calc(2 / 3);user-select:text;border:2px solid #333;border-radius:22px;padding:18px;background:#fff;color:#222;overflow-x:auto}.nameplate-value{display:block;text-align:center}.nameplate-brand{position:relative;display:flex;align-items:center;min-height:128px;margin-bottom:14px;min-width:620px}.nameplate-brand>div{position:absolute;left:50%;transform:translateX(-50%);text-align:center;white-space:nowrap}.nameplate-brand img{width:160px;height:102.4px;flex:0 0 160px;object-fit:contain;filter:brightness(0)}.nameplate-brand h2{margin:0;font-size:22px;letter-spacing:1px}.nameplate-brand p{margin:4px 0 0;font-size:16px;letter-spacing:1px}.nameplate-table{width:100%;min-width:620px;border-collapse:collapse;table-layout:fixed;border:2px solid #333;font-size:16px}.nameplate-label{width:18%}.nameplate-table th,.nameplate-table td{border:2px solid #333;padding:8px;font-weight:500;overflow-wrap:anywhere}.nameplate-table th{text-align:center;font-weight:600;font-size:17px}.nameplate-table td[colspan="3"]{text-align:center}.nameplate-table th span{display:block;font-size:12px;letter-spacing:.5px;margin-top:3px}.nameplate-table :deep(.el-input__wrapper){padding:1px 5px}.nameplate-table :deep(.el-date-editor){width:100%;min-width:0}.nameplate-power{text-align:center;font-size:22px}.nameplate-preview footer{text-align:right;min-width:620px;margin-top:14px;font-size:18px;letter-spacing:1px}
+.nameplate-preview-size{width:560px;max-width:100%;margin-inline:auto;container-type:inline-size}
+.nameplate-preview{user-select:text;border:1px solid #333;border-radius:16px;padding:12px;background:#fff;color:#222}
+.nameplate-brand{display:flex;align-items:center;gap:12px;min-height:76px;margin-bottom:10px}
+.nameplate-brand>div{flex:1;min-width:0;text-align:center}
+.nameplate-brand img{width:20%;max-width:108px;height:auto;object-fit:contain;filter:brightness(0)}
+.nameplate-brand h2{margin:0;font-size:16px;line-height:1.4}
+.nameplate-brand p{margin:4px 0 0;font-size:11px}
+.nameplate-table{width:100%;border-collapse:collapse;table-layout:fixed;border:1px solid #333;font-size:16px;line-height:1.4}
+.nameplate-label{width:16%}
+.nameplate-table th,.nameplate-table td{border:1px solid #333;padding:5px;font-weight:600;overflow-wrap:anywhere}
+.nameplate-table td{text-align:center}
+.nameplate-table th{font-size:12px}
+.nameplate-table th span{display:block;font-size:10px;line-height:1.2;margin-top:3px}
+.nameplate-table :deep(.el-input__wrapper){padding:1px 6px}
+.nameplate-table :deep(.el-input__inner){font-size:16px;font-weight:600;color:#222}
+.nameplate-table :deep(input:disabled){-webkit-text-fill-color:#555}
+.nameplate-table :deep(.el-date-editor){width:100%;min-width:0}
+.nameplate-power{font-size:18px}
+.nameplate-preview footer{text-align:right;margin-top:10px;font-size:12px;letter-spacing:.6px}
+@container (max-width:400px){
+  .nameplate-preview{padding:7px}
+  .nameplate-table th,.nameplate-table td{padding:3px}
+  .nameplate-label{width:19%}
+}
 </style>

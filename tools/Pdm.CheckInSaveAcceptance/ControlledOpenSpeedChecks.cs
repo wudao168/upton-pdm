@@ -148,8 +148,8 @@ internal static partial class Program
    using(var http=new HttpClient(handler){BaseAddress=new Uri("http://speed.invalid/")})
    using(var client=(IDisposable)New("PdmApiClient","http://speed.invalid/"))
    {
-    SetField(client,"httpClient",http);var workspace=New("ControlledWorkspaceManager",client,folder);string result=null;var failed=false;
-    try{var task=(Task)Type("ControlledWorkspaceManager").GetMethod("PrepareReadOnlyAsync",Flags).Invoke(workspace,new object[]{manifest,false,cancellation.Token});await task;result=(string)Get(task,"Result");}catch(HttpRequestException){failed=true;}catch(OperationCanceledException){failed=true;}
+    SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);var workspace=New("ControlledWorkspaceManager",client,folder);string result=null;var failed=false;
+    try{var task=(Task)Type("ControlledWorkspaceManager").GetMethod("PrepareReadOnlyAsync",Flags).Invoke(workspace,new object[]{manifest,false,cancellation.Token});await task;result=(string)Get(task,"Result");}catch(InvalidOperationException error) when(error.Message.Contains("受控版本读取失败")){failed=true;}catch(OperationCanceledException){failed=true;}
     if(failed!=(mode!="success")||handler.Active!=0||handler.Maximum>4||handler.Maximum<2)throw new Exception("Unbounded, sequential or unfinished download batch: "+mode);
     if(mode=="success")
     {
@@ -173,7 +173,7 @@ internal static partial class Program
    if(request.Method!=HttpMethod.Get||!request.RequestUri.AbsolutePath.EndsWith("/file"))throw new Exception("Unexpected business request");
    var active=Interlocked.Increment(ref Active);int prior;do{prior=Maximum;if(prior>=active)break;}while(Interlocked.CompareExchange(ref Maximum,active,prior)!=prior);
    var count=Interlocked.Increment(ref Starts);
-   try{if(mode=="cancel"&&count==6)cancellation.Cancel();await Task.Delay(15,token);if(mode=="failure"&&count==6)throw new HttpRequestException("模拟传输失败");return new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(bytes)};}
+   try{if(mode=="cancel"&&count==6)cancellation.Cancel();await Task.Delay(15,token);if(mode=="failure"&&count==6)return new HttpResponseMessage(HttpStatusCode.Forbidden);return new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(bytes)};}
    finally{Interlocked.Decrement(ref Active);}
   }
  }

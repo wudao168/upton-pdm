@@ -16,13 +16,13 @@ public sealed class ProjectFileFormService(IPdmRepository repository, IProjectFi
             ? (await repository.ReadCompanyBusinessDetailsAsync(id, "receiving", ct)).Receiving : null;
         return new(access.Folder.Id, project.Code, project.Name, project.OrganizationName ?? access.Context.Root.OrganizationName ?? "UPTON 阿普顿",
             project.CustomerName ?? access.Context.Root.CustomerName ?? "", access.CanEdit, access.CanArchive,
-            await forms.ListAsync(projectId, kind, ct), receiving, access.CanExport);
+            await forms.ListAsync(project.Id, kind, ct), receiving, access.CanExport);
     }
 
     public async Task<ProjectFileForm> ReadAsync(Guid projectId, string kind, Guid id, string actor, UserRole role, CancellationToken ct)
     {
-        await RequireAsync(projectId, kind, "view", actor, role, ct);
-        return ForView(await FindAsync(projectId, kind, id, ct));
+        var access = await RequireAsync(projectId, kind, "view", actor, role, ct);
+        return ForView(await FindAsync(access.Context.Project.Id, kind, id, ct));
     }
 
     public async Task<ProjectFileForm> SaveAsync(Guid projectId, string kind, Guid id, SaveProjectFileForm input,
@@ -30,7 +30,7 @@ public sealed class ProjectFileFormService(IPdmRepository repository, IProjectFi
     {
         var access = await RequireAsync(projectId, kind, "edit", actor, role, ct);
         if (id == Guid.Empty || input.ExpectedRowVersion < 0 || input.Data is null) throw new PdmRuleException("单据资料无效，请刷新后重试。");
-        var previous = await forms.FindAsync(projectId, kind, id, ct);
+        var previous = await forms.FindAsync(access.Context.Project.Id, kind, id, ct);
         var data = Normalize(kind, input.Data, previous?.Data);
         return ForView(await forms.SaveAsync(access.Context.Project, kind, id, input.ExpectedRowVersion, data, actor, ct));
     }
@@ -40,7 +40,7 @@ public sealed class ProjectFileFormService(IPdmRepository repository, IProjectFi
         if (!ProjectFileFormPermissions.IsAcceptance(kind)) throw new PdmNotFoundException("验收单类型不存在。");
         var access = await RequireAsync(projectId, kind, "view", actor, role, ct);
         if (!access.CanExport) throw new UnauthorizedAccessException("当前项目未授权导出验收单。");
-        var form = await FindAsync(projectId, kind, id, ct);
+        var form = await FindAsync(access.Context.Project.Id, kind, id, ct);
         ValidateComplete(kind, form.Data);
         var draft = form with { Summary = form.Summary with { FileVersion = 0 } };
         var content = workbook.Build(kind, draft, access.Context.Project, access.Context.Root, access.Context.Directory, actor, clock.GetUtcNow(), null);
@@ -55,7 +55,7 @@ public sealed class ProjectFileFormService(IPdmRepository repository, IProjectFi
         if (ProjectFileFormPermissions.IsAcceptance(kind))
             throw new PdmRuleException("请在质量页签的预/终验收中上传记录，原文件会自动归入验收资料。");
         var access = await RequireAsync(projectId, kind, "archive", actor, role, ct);
-        var form = await FindAsync(projectId, kind, id, ct);
+        var form = await FindAsync(access.Context.Project.Id, kind, id, ct);
         if (form.Summary.RowVersion != revision) throw new PdmConflictException("单据已更新，请重新打开后生成存档。");
         var currentFile = await RequireActiveFileAsync(form.Summary.FileId, access.Folder, ct);
         var layoutVersion = ProjectFileFormIdentity.LayoutVersion(kind);
@@ -72,13 +72,13 @@ public sealed class ProjectFileFormService(IPdmRepository repository, IProjectFi
         // The shared file repository increments the version from the locked current file.
         var export = form with { Summary = form.Summary with { FileVersion = (currentFile?.CurrentVersion?.VersionNumber ?? 0) + 1 } };
         var content = workbook.Build(kind, export, access.Context.Project, access.Context.Root, access.Context.Directory, actor, clock.GetUtcNow(), evidenceName);
-        var output = await fileService.PrepareGeneratedFileAsync(projectId, access.Folder.Id, name, content, actor, role, ct);
+        var output = await fileService.PrepareGeneratedFileAsync(access.Context.Project.Id, access.Folder.Id, name, content, actor, role, ct);
         StoredProjectFileUpload? evidence = null;
         var attemptedCommit = false;
         try
         {
             if (evidenceName is not null)
-                evidence = await fileService.PrepareGeneratedFileAsync(projectId, access.Folder.Id, evidenceName,
+                evidence = await fileService.PrepareGeneratedFileAsync(access.Context.Project.Id, access.Folder.Id, evidenceName,
                     EvidenceZip(form.Data.Evidence ?? []), actor, role, ct);
             attemptedCommit = true;
             var result = await forms.ArchiveAsync(access.Context.Project, kind, id, revision, export.Summary.FileVersion, layoutVersion, output, evidence, actor, ct);
@@ -116,6 +116,12 @@ public sealed class ProjectFileFormService(IPdmRepository repository, IProjectFi
         if (!ProjectFileFormPermissions.Kinds.Contains(kind)) throw new PdmNotFoundException("单据类型不存在。");
         var context = await AuthorizationPolicy.CreateContextAsync(repository, projectId, actor, ct)
             ?? throw new UnauthorizedAccessException("无权访问该项目的单据。");
+        if (context.Project.Id != context.Root.Id)
+        {
+            projectId = context.Root.Id;
+            context = await AuthorizationPolicy.CreateContextAsync(repository, projectId, actor, ct)
+                ?? throw new UnauthorizedAccessException("无权访问主项目的单据。");
+        }
         var decisions = AuthorizationPolicy.Decisions(await repository.GetAuthorizationSettingsAsync(ct), context);
         bool Allows(string operation) => decisions.Any(d => d.Permission == ProjectFileFormPermissions.Code(kind, operation) && d.Allowed);
         if (!Allows(action) || !await repository.HasProjectContentReadAccessAsync(projectId, actor, role, ct))

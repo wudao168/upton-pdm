@@ -83,7 +83,7 @@ const tabs = [
   { key: 'budget', label: '预算' },
   { key: 'validation-plan', label: '质量' },
   { key: 'opl', label: 'OPL' },
-  { key: 'summary', label: '总结' },
+  { key: 'summary', label: '经验' },
   { key: 'documents', label: '图档' },
   { key: 'bom', label: 'BOM' },
   { key: 'release', label: '发布' },

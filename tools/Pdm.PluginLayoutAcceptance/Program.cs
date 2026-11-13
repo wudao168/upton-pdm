@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-internal static class Program
+internal static partial class Program
 {
     const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
     static Assembly assembly;
@@ -30,14 +30,21 @@ internal static class Program
             Exception failure = null;
             host.Shown += (_, __) =>
             {
-                try { Console.WriteLine("Inspect pane"); InspectPane(host); InspectIntermediatePaneScale(host); Console.WriteLine("Inspect dialogs"); InspectDialogs(host); }
+                try
+                {
+                    InspectTreePainting(host);
+                    if (!args.Contains("--tree-paint-only"))
+                    {
+                        Console.WriteLine("Inspect pane"); InspectPane(host); InspectIntermediatePaneScale(host); Console.WriteLine("Inspect dialogs"); InspectDialogs(host);
+                    }
+                }
                 catch (Exception error) { failure = error; }
                 finally { host.Close(); }
             };
             Application.Run(host);
             File.WriteAllText(Path.Combine(output, "layout-measurements.json"), new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(measurements));
             if (failure != null) { Console.WriteLine("FAIL " + failure); return 1; }
-            Console.WriteLine("PASS pane widths 250/320/400/600, four tabs, login state colors, 100/125/150% settings, batch and settings dialogs; screenshots and geometry saved.");
+            Console.WriteLine(args.Contains("--tree-paint-only") ? "PASS tree painting" : "PASS pane widths 250/320/400/600, four tabs, login state colors, 100/125/150% settings, batch and settings dialogs; screenshots and geometry saved.");
             return 0;
         }
     }
@@ -242,7 +249,7 @@ internal static class Program
         Console.WriteLine("Inspect settings constructor");
         var constructor = T("PluginSettingsDialog").GetConstructors(Flags).Single();
         var arguments = constructor.GetParameters().Select(parameter => typeof(Delegate).IsAssignableFrom(parameter.ParameterType)
-            ? Callback(parameter.ParameterType) : Activator.CreateInstance(parameter.ParameterType, true)).ToArray();
+            ? Callback(parameter.ParameterType) : parameter.ParameterType == typeof(string) ? "2026.11.13.120000" : Activator.CreateInstance(parameter.ParameterType, true)).ToArray();
         foreach (var scale in new[] { 1F, 1.25F, 1.5F })
         using (var dialog = (Form)constructor.Invoke(arguments))
         {

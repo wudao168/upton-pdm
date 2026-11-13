@@ -15,7 +15,6 @@ import FolderTemplateSettings from './FolderTemplateSettings.vue'
 import UserSettings from './UserSettings.vue'
 import PermissionCenter from './PermissionCenter.vue'
 import ProductionScanSettings from './ProductionScanSettings.vue'
-import ArchiveWarningSettings from './ArchiveWarningSettings.vue'
 import type { AuditEntry, CreateRoleInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, EquipmentTypeDefinition, OrganizationDirectory, OrganizationUnit, PdmCustomer, PdmSystemSettings, PdmUser, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, UpdateCrmIntegrationInput } from '../types'
 
 const props = defineProps<{
@@ -69,8 +68,6 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
       <button v-if="availableTabs.includes('ai')" type="button" :class="{ 'is-active': activeTab === 'ai' }" @click="activeTab='ai'">AI服务</button>
       <button v-if="availableTabs.includes('users')" type="button" :class="{ 'is-active': activeTab === 'users' }" @click="activeTab='users'">用户设置</button>
       <button v-if="availableTabs.includes('settings')" type="button" :class="{ 'is-active': activeTab === 'settings' }" @click="activeTab='settings'">编号与存储</button>
-      <button v-if="availableTabs.includes('archive-warnings')" type="button" :class="{ 'is-active': activeTab === 'archive-warnings' }" @click="activeTab='archive-warnings'">存档警告策略</button>
-      <button v-if="availableTabs.includes('stocked-materials')" type="button" :class="{ 'is-active': activeTab === 'stocked-materials' }" @click="activeTab='stocked-materials'">常备件设置</button>
       <button v-if="availableTabs.includes('approval')" type="button" :class="{ 'is-active': activeTab === 'approval' }" @click="activeTab='approval'">审批流程</button>
       <button v-if="availableTabs.includes('production-scan')" type="button" :class="{ 'is-active': activeTab === 'production-scan' }" @click="activeTab='production-scan'">生产扫码设置</button>
       <button v-if="availableTabs.includes('audit')" type="button" :class="{ 'is-active': activeTab === 'audit' }" @click="activeTab='audit'">全局审计</button>
@@ -85,12 +82,15 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
       :customers="customers"
       :customer-settings="crmIntegrationSettings"
       :pending="pending"
-      :can-manage-base="hasPermission('settings.storage.manage')"
+      :can-view-u9="hasPermission('settings.storage.manage') || hasPermission('settings.customer.manage')" :can-manage-base="hasPermission('settings.storage.manage')"
       :can-manage-customers="hasPermission('settings.customer.manage')"
       :on-save-customer-settings="onSaveCrmIntegrationSettings"
       :on-test-customer-connection="onTestCrmIntegration"
       :on-sync-customers="onSyncCrmCustomers"
     >
+      <template v-if="hasPermission('stock.settings.manage')" #stocked-materials>
+        <StockedMaterialSettings :key="activeOrganizationId" :token="token" :can-synchronize="hasPermission('stock.synchronize')" />
+      </template>
       <template #dingtalk>
         <DingTalkSettings :key="activeOrganizationId" :token="token" />
       </template>
@@ -107,8 +107,6 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
         <FolderTemplateSettings :nodes="folderTemplate" :users="organizationDirectory.users" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveFolderTemplate" />
       </template>
     </StorageSettings>
-    <ArchiveWarningSettings v-else-if="activeTab === 'archive-warnings'" :key="activeOrganizationId" :token="token" :can-edit="hasPermission('settings.storage.manage')" />
-    <StockedMaterialSettings v-else-if="activeTab === 'stocked-materials'" :key="activeOrganizationId" :token="token" :can-synchronize="hasPermission('stock.synchronize')" />
     <ClientLogManagement v-else-if="activeTab === 'client-logs'" :key="activeOrganizationId" :token="token" />
     <LoginSecuritySettings v-else-if="activeTab === 'login-security'" :key="activeOrganizationId" :token="token" />
     <ApprovalWorkflowSettings v-else-if="activeTab === 'approval'" :token="token" :company-id="activeOrganizationId" :settings="settings" :directory="organizationDirectory" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveSettings" />

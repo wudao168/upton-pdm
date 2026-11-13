@@ -12,15 +12,8 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Button testConnectionButton = new Button();
     private readonly Label connectionStatus = new Label();
     private readonly Label installedVersion = new Label();
-    private readonly Label availableVersion = new Label();
-    private readonly Label updateStatus = new Label();
-    private readonly Label lastCheckedAt = new Label();
-    private readonly ProgressBar updateProgress = new ProgressBar();
-    private readonly CheckBox automaticUpdates = new CheckBox();
     private readonly CheckBox blockMissingReferences = new CheckBox();
     private readonly ComboBox plannedTaskScrollInterval = new ComboBox();
-    private readonly Button checkUpdateButton = new Button();
-    private readonly Button installUpdateButton = new Button();
     private readonly Button saveButton = new Button();
     private readonly Button cancelButton = new Button();
     private readonly Button cleanupCopiesButton = new Button();
@@ -31,11 +24,7 @@ internal sealed class PluginSettingsDialog : Form
     public Func<Task<ControlledCacheUsage>> ReadCacheUsage { get; set; }
     public Func<Task<ControlledCacheUsage>> CleanControlledCache { get; set; }
     private Func<Task<ArchiveTemporaryCopyCleanupResult>> cleanTemporaryCopies;
-    private readonly Timer refreshTimer = new Timer();
-    private readonly Func<PluginUpdateSnapshot> readSnapshot;
     private readonly Func<string, Task<PluginConnectionResult>> testConnection;
-    private readonly Func<string, Task<PluginUpdateSnapshot>> checkUpdate;
-    private readonly Func<string, Task<PluginUpdateSnapshot>> installUpdate;
     private readonly Func<PluginSettings, Task<PluginConnectionResult>> saveSettings;
     private bool actionRunning;
 
@@ -47,18 +36,12 @@ internal sealed class PluginSettingsDialog : Form
 
     public PluginSettingsDialog(
         PluginSettings initialSettings,
-        PluginUpdateSnapshot initialSnapshot,
-        Func<PluginUpdateSnapshot> readSnapshot,
+        string loadedVersion,
         Func<string, Task<PluginConnectionResult>> testConnection,
-        Func<string, Task<PluginUpdateSnapshot>> checkUpdate,
-        Func<string, Task<PluginUpdateSnapshot>> installUpdate,
         Func<PluginSettings, Task<PluginConnectionResult>> saveSettings)
     {
         initialSettings ??= new PluginSettings();
-        this.readSnapshot = readSnapshot ?? throw new ArgumentNullException(nameof(readSnapshot));
         this.testConnection = testConnection ?? throw new ArgumentNullException(nameof(testConnection));
-        this.checkUpdate = checkUpdate ?? throw new ArgumentNullException(nameof(checkUpdate));
-        this.installUpdate = installUpdate ?? throw new ArgumentNullException(nameof(installUpdate));
         this.saveSettings = saveSettings ?? throw new ArgumentNullException(nameof(saveSettings));
 
         Text = "插件设置";
@@ -68,18 +51,18 @@ internal sealed class PluginSettingsDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(540, 820);
+        ClientSize = new Size(540, 590);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         // Keep every settings row usable when the owning monitor constrains a
-        // scaled dialog. The content scrolls instead of collapsing the update row.
+        // scaled dialog. The content scrolls to keep all settings accessible.
         var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
         Controls.Add(scrollHost);
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = ClientSize.Height,
-            MinimumSize = new Size(0, ClientSize.Height),
+            Height = ClientSize.Height - 2,
+            MinimumSize = new Size(0, ClientSize.Height - 2),
             Padding = new Padding(16),
             ColumnCount = 1,
             RowCount = 5
@@ -89,6 +72,12 @@ internal sealed class PluginSettingsDialog : Form
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
+        // The version section can shrink independently of the window. Keep the
+        // scroll content at the sum of its rows so the footer remains reachable.
+        var contentHeight = root.Padding.Vertical;
+        foreach (RowStyle row in root.RowStyles) contentHeight += (int)Math.Ceiling(row.Height);
+        root.Height = contentHeight;
+        root.MinimumSize = new Size(0, contentHeight);
         scrollHost.Controls.Add(root);
 
         var connectionGroup = new GroupBox { Text = "服务器连接", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
@@ -172,56 +161,13 @@ internal sealed class PluginSettingsDialog : Form
         taskGroup.Controls.Add(taskLayout);
         root.Controls.Add(taskGroup, 0, 1);
 
-        var updateGroup = new GroupBox { Text = "版本与更新", Dock = DockStyle.Fill, Margin = Padding.Empty };
-        var updateLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(10, 8, 10, 8),
-            ColumnCount = 3,
-            RowCount = 7
-        };
-        updateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88F));
-        updateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        updateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96F));
-        for (var row = 0; row < 6; row++) updateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
-        updateLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        updateGroup.Controls.Add(updateLayout);
-
-        AddValueRow(updateLayout, 0, "当前版本", installedVersion);
-        AddValueRow(updateLayout, 1, "最新版本", availableVersion);
-        AddValueRow(updateLayout, 2, "更新状态", updateStatus);
-        AddValueRow(updateLayout, 3, "最后检查", lastCheckedAt);
-        updateProgress.Dock = DockStyle.Fill;
-        updateProgress.Minimum = 0;
-        updateProgress.Maximum = 100;
-        updateLayout.Controls.Add(new Label { Text = "下载进度", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 4);
-        updateLayout.Controls.Add(updateProgress, 1, 4);
-        updateLayout.SetColumnSpan(updateProgress, 2);
-        automaticUpdates.Text = "后台自动下载，退出全部 SolidWorks 后静默更新";
-        automaticUpdates.Checked = initialSettings.AutomaticUpdatesEnabled;
-        automaticUpdates.Dock = DockStyle.Fill;
-        updateLayout.Controls.Add(automaticUpdates, 0, 5);
-        updateLayout.SetColumnSpan(automaticUpdates, 3);
-
-        var updateActions = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
-            Margin = new Padding(0, 6, 0, 0)
-        };
-        checkUpdateButton.Text = "检查更新";
-        ConfigureDialogButton(checkUpdateButton);
-        checkUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(false);
-        installUpdateButton.Text = "安装更新";
-        ConfigureDialogButton(installUpdateButton);
-        installUpdateButton.Margin = Padding.Empty;
-        installUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(true);
-        updateActions.Controls.Add(installUpdateButton);
-        updateActions.Controls.Add(checkUpdateButton);
-        updateLayout.Controls.Add(updateActions, 0, 6);
-        updateLayout.SetColumnSpan(updateActions, 3);
-        root.Controls.Add(updateGroup, 0, 2);
+        var versionGroup = new GroupBox { Text = "插件版本", Dock = DockStyle.Fill, Margin = Padding.Empty };
+        installedVersion.Text = "当前版本  " + DisplayVersion(loadedVersion);
+        installedVersion.Dock = DockStyle.Fill;
+        installedVersion.TextAlign = ContentAlignment.MiddleLeft;
+        installedVersion.Padding = new Padding(10, 0, 0, 0);
+        versionGroup.Controls.Add(installedVersion);
+        root.Controls.Add(versionGroup, 0, 2);
 
         var cleanupGroup = new GroupBox { Text = "本地副本与缓存", Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
         var cleanupLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 6), ColumnCount = 2, RowCount = 6 };
@@ -293,29 +239,6 @@ internal sealed class PluginSettingsDialog : Form
 
         AcceptButton = saveButton;
         CancelButton = cancelButton;
-        ApplySnapshot(initialSnapshot ?? new PluginUpdateSnapshot());
-        refreshTimer.Interval = 500;
-        refreshTimer.Tick += (_, _) =>
-        {
-            if (!actionRunning) ApplySnapshot(this.readSnapshot());
-        };
-        refreshTimer.Start();
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) refreshTimer.Dispose();
-        base.Dispose(disposing);
-    }
-
-    private static void AddValueRow(TableLayoutPanel layout, int row, string caption, Label value)
-    {
-        layout.Controls.Add(new Label { Text = caption, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, row);
-        value.Dock = DockStyle.Fill;
-        value.TextAlign = ContentAlignment.MiddleLeft;
-        value.AutoEllipsis = true;
-        layout.Controls.Add(value, 1, row);
-        layout.SetColumnSpan(value, 2);
     }
 
     private async Task RunConnectionTestAsync()
@@ -387,30 +310,6 @@ internal sealed class PluginSettingsDialog : Form
         finally { if (!IsDisposed) { if (clean) SetActionRunning(false); else cleanupCacheButton.Enabled = !actionRunning && CleanControlledCache != null; } }
     }
 
-    private async Task RunUpdateActionAsync(bool install)
-    {
-        if (actionRunning) return;
-        SetActionRunning(true);
-        try
-        {
-            var snapshot = install
-                ? await installUpdate(serverAddress.Text)
-                : await checkUpdate(serverAddress.Text);
-            ApplySnapshot(snapshot);
-        }
-        catch (Exception exception)
-        {
-            var snapshot = readSnapshot();
-            snapshot.Status = exception.Message;
-            snapshot.Busy = false;
-            ApplySnapshot(snapshot);
-        }
-        finally
-        {
-            SetActionRunning(false);
-        }
-    }
-
     private async Task SaveAsync()
     {
         if (actionRunning) return;
@@ -424,7 +323,6 @@ internal sealed class PluginSettingsDialog : Form
                 PlannedTaskScrollIntervalSeconds = plannedTaskScrollInterval.SelectedIndex == 0 ? 15
                     : plannedTaskScrollInterval.SelectedIndex == 2 ? 60 : 30,
                 ServerAddress = serverAddress.Text,
-                AutomaticUpdatesEnabled = automaticUpdates.Checked,
                 CacheLimitGigabytes = (int)cacheLimit.Value,
                 BlockArchiveOnMissingReferences = blockMissingReferences.Checked,
             });
@@ -448,40 +346,13 @@ internal sealed class PluginSettingsDialog : Form
     {
         actionRunning = running;
         serverAddress.Enabled = !running;
-        automaticUpdates.Enabled = !running;
         plannedTaskScrollInterval.Enabled = !running;
         cacheLimit.Enabled = !running;
         cleanupCacheButton.Enabled = !running && CleanControlledCache != null;
         testConnectionButton.Enabled = !running;
-        checkUpdateButton.Enabled = !running;
         saveButton.Enabled = !running;
         cancelButton.Enabled = !running;
         cleanupCopiesButton.Enabled = !running && cleanTemporaryCopies != null;
-        var snapshot = readSnapshot();
-        installUpdateButton.Text = snapshot.ReadyToInstall ? "安装更新" : "下载并安装";
-        installUpdateButton.Enabled = !running && snapshot.UpdateAvailable && !snapshot.Busy;
-    }
-
-    private void ApplySnapshot(PluginUpdateSnapshot snapshot)
-    {
-        snapshot = snapshot ?? new PluginUpdateSnapshot();
-        installUpdateButton.Text = snapshot.ReadyToInstall ? "安装更新" : "下载并安装";
-        installedVersion.Text = DisplayVersion(string.IsNullOrWhiteSpace(snapshot.LoadedVersion) ? snapshot.InstalledVersion : snapshot.LoadedVersion)
-            + (!string.IsNullOrWhiteSpace(snapshot.DiskVersion) && snapshot.DiskVersion != snapshot.LoadedVersion
-                ? "（磁盘 " + snapshot.DiskVersion + "，重启SolidWorks后生效）" : "");
-        availableVersion.Text = DisplayVersion(snapshot.AvailableVersion);
-        updateStatus.Text = snapshot.Status ?? string.Empty;
-        lastCheckedAt.Text = snapshot.LastCheckedAt.HasValue
-            ? snapshot.LastCheckedAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
-            : "尚未检查";
-        updateProgress.Style = snapshot.ProgressPercentage.HasValue
-            ? ProgressBarStyle.Continuous
-            : snapshot.Busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Blocks;
-        updateProgress.Value = snapshot.ProgressPercentage.HasValue
-            ? Math.Max(0, Math.Min(100, snapshot.ProgressPercentage.Value))
-            : 0;
-        installUpdateButton.Enabled = !actionRunning && snapshot.UpdateAvailable && !snapshot.Busy;
-        checkUpdateButton.Enabled = !actionRunning && !snapshot.Busy;
     }
 
     private static string DisplayVersion(string version)

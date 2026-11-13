@@ -58,7 +58,7 @@
   :root body .work-hours .wh-day-records + .wh-day-status { margin-top: 0 !important; }
   :root body .work-hours .wh-day-editor { border-radius: 16px !important; }
   @media (min-width: 1101px) {
-    :root body .work-hours .wh-calendar-layout { grid-template-columns: 400px minmax(0, 1fr) !important; }
+    :root body .work-hours .wh-calendar-layout { grid-template-columns: 300px minmax(0, 1fr) !important; }
     :root body .work-hours .wh-day-editor { min-height: 0 !important; align-self: stretch !important; contain: size; overflow: auto !important; }
   }
   @media (max-width: 760px) {

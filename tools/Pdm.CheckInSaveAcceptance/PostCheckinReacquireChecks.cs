@@ -21,7 +21,7 @@ internal static partial class Program
   void Check(bool ok,string message){if(!ok)throw new Exception(message);Console.WriteLine("PASS: "+message);}
   try
   {
-   foreach(var mode in new[]{"selected","no-session-receipt","unselected-no-receipt","new-head","new-dependency","configuration","path","binding","permission-denied","head-binding-race","dependency-binding-race","checkout-race","drawing-memory-edit","frozen-child-old","frozen-child-race"})
+   foreach(var mode in new[]{"selected","unrelated-assembly-mismatch","unrelated-binding","dependency-bad-binding","selected-config-mismatch","selected-config-race","no-session-receipt","unselected-no-receipt","new-head","new-dependency","configuration","path","binding","permission-denied","head-binding-race","dependency-binding-race","checkout-race","drawing-memory-edit","frozen-child-old","frozen-child-race"})
    {
     var folder=Path.Combine(output,"View",mode);Directory.CreateDirectory(folder);
     var plugin=New("PdmAddin");SetField(plugin,"authenticatedUsername","tester");var project=Guid.NewGuid();var session=(Guid)Field(plugin,"checkoutSessionId");
@@ -44,7 +44,7 @@ internal static partial class Program
      files[1]=Clone(frozen[1]);Bind(files[1]);File.SetAttributes(partPath,FileAttributes.ReadOnly);
     }
     var events=new List<string>();var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
-    var partNative=new Model(interop.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),partPath,false,events);var partModel=partNative.GetTransparentProxy();
+    var partNative=new Model(interop.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),partPath,false,events);var partModel=partNative.GetTransparentProxy();if(mode=="selected-config-mismatch")partNative.ActiveConfiguration="Other";
     var drawingNative=new Model(interop.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),drawingPath,true,events,false);var drawingModel=drawingNative.GetTransparentProxy();
     using(var memory=(IDisposable)New("PdmAddin+ArchiveMemoryCopy",drawingModel,drawingPath))
     {
@@ -63,8 +63,8 @@ internal static partial class Program
      var independentFiles=(IList)Activator.CreateInstance(Property(independent,"Files").PropertyType);independentFiles.Add(partHead);independentFiles.Add(Clone(frozen[2]));Set(independent,"Files",independentFiles);
      object Snapshot(object file,int kind,object[] children)=>new{documentId=Get(file,"DocumentId"),fileName=Get(file,"FileName"),configuration=Get(file,"Configuration"),kind,role=0,quantity=1,status=0,includesDesignDependencies=true,usesNativeFileInventory=true,children};
      object Version(object file,object snapshot)=>json.Deserialize(json.Serialize(new{id=Get(file,"VersionId"),documentId=Get(file,"DocumentId"),sha256=Get(file,"Sha256"),fileLength=Get(file,"FileLength"),revision=new{display=Get(file,"Revision")},referenceSnapshot=snapshot}),Type("DocumentVersionDto"));
-     var partDependencies=mode=="dependency-binding-race"?new[]{Snapshot(files[3],1,new object[0])}:new object[0];
-     if(mode=="dependency-binding-race")independentFiles.Add(Clone(files[3]));
+     var partDependencies=mode.StartsWith("dependency-")?new[]{Snapshot(files[3],1,new object[0])}:new object[0];
+     if(mode.StartsWith("dependency-"))independentFiles.Add(Clone(files[3]));
      var oldVersion=Version(frozen[1],Snapshot(frozen[1],1,partDependencies));var headVersion=Version(partHead,Snapshot(partHead,1,partDependencies));
      Set(headVersion,"DrawingVersion","V2");
      var rootChildren=files.Cast<object>().Where(file=>((string)Get(file,"FileName")).EndsWith("SLDPRT")).Select(file=>Snapshot(file,1,new object[0])).ToArray();var rootVersion=Version(files[0],Snapshot(files[0],0,rootChildren));
@@ -72,7 +72,7 @@ internal static partial class Program
      var manager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),call=>call.MethodName=="get_ActiveConfiguration"?configuration:throw new Exception(call.MethodName)).GetTransparentProxy();
      var mutations=0;var rootReadOnly=true;var rootUnlocks=0;
      var components=files.Cast<object>().Where(file=>((string)Get(file,"FileName")).EndsWith("SLDPRT")).Select(file=>new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{switch(call.MethodName){case "GetPathName":return Path.Combine(folder,(string)Get(file,"FileName"));case "get_ReferencedConfiguration":return "Default";case "get_IsVirtual":return false;case "GetModelDoc2":return ReferenceEquals(file,files[1])?partModel:null;case "GetSuppression":return 2;case "GetChildren":return new object[0];default:throw new Exception(call.MethodName);}}).GetTransparentProxy()).ToArray();
-     var rootModel=new DiscardAssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{switch(call.MethodName){case "GetPathName":return rootPath;case "GetTitle":return "OWNER.SLDASM";case "GetType":return 2;case "GetSaveFlag":return false;case "IsOpenedReadOnly":return rootReadOnly;case "get_ConfigurationManager":return manager;case "GetComponents":return components;case "SetReadOnlyState":rootReadOnly=(bool)call.Args[0];rootUnlocks++;return true;default:mutations++;throw new Exception("不得改变父装配："+call.MethodName);}}).GetTransparentProxy();
+     var rootModel=new DiscardAssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{switch(call.MethodName){case "GetPathName":return rootPath;case "GetTitle":return "OWNER.SLDASM";case "GetType":return 2;case "GetSaveFlag":return false;case "IsOpenedReadOnly":return rootReadOnly;case "get_ConfigurationManager":return manager;case "GetComponents":if(mode=="unrelated-assembly-mismatch")throw new Exception("单件获取不应遍历无关总装结构");return components;case "SetReadOnlyState":rootReadOnly=(bool)call.Args[0];rootUnlocks++;return true;default:mutations++;throw new Exception("不得改变父装配："+call.MethodName);}}).GetTransparentProxy();
      SetField(plugin,"application",new Proxy(appType,call=>{switch(call.MethodName){case "GetDocuments":return new[]{rootModel,partModel,drawingModel};case "get_ActiveDoc":return partModel;default:mutations++;throw new Exception("不得保存、关闭或重新打开："+call.MethodName);}}).GetTransparentProxy());
      ((IDictionary)Field(plugin,"controlledOpenManifests")).Add(folder,owner);
      object Node(object file,string kind){var node=New("CadTreeNode");Set(node,"DocumentId",Get(file,"DocumentId"));Set(node,"FullPath",Path.Combine(folder,(string)Get(file,"FileName")));Set(node,"FileName",Get(file,"FileName"));Set(node,"Configuration","Default");Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),kind));Set(node,"OpenedVersionId",Get(file,"VersionId"));return node;}
@@ -92,9 +92,9 @@ internal static partial class Program
       {
        if(path.Contains(Get(files[1],"DocumentId").ToString()))
        {
-        headReads++;if(mode=="head-binding-race"&&headReads==1)identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)partPath,Get(files[1],"DocumentId"),project,Guid.NewGuid(),"W9",Get(files[1],"Sha256"),Get(files[1],"FileLength")});
+        if(!mode.StartsWith("frozen-child-")||request.RequestUri.Query.Contains("take=1"))headReads++;if(mode=="head-binding-race"&&headReads==1)identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)partPath,Get(files[1],"DocumentId"),project,Guid.NewGuid(),"W9",Get(files[1],"Sha256"),Get(files[1],"FileLength")});
         if(mode=="dependency-binding-race"&&headReads==3){dependencyRaceTriggered=true;identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)Path.Combine(folder,(string)Get(files[3],"FileName")),Get(files[3],"DocumentId"),project,Guid.NewGuid(),"W9",Get(files[3],"Sha256"),Get(files[3],"FileLength")});}
-        data=mode=="frozen-child-race"&&headReads==1?new[]{oldVersion}
+        data=mode=="frozen-child-race"&&headReads==1&&request.RequestUri.Query.Contains("take=1")?new[]{oldVersion}
             :request.RequestUri.Query.Contains("take=1")?new[]{headVersion}:new[]{headVersion,oldVersion};
        }
        else data=path.Contains(Get(files[0],"DocumentId").ToString())?new[]{rootVersion}:new[]{drawingVersion};
@@ -104,7 +104,7 @@ internal static partial class Program
        var id=Guid.Parse(path.Split('/').Reverse().Skip(1).First());checkoutRequests.Add(id);
        if(mode=="permission-denied")return new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"message\":\"当前账号没有该项目图档的获取权限。\"}")};
        var doc=id.Equals(Get(files[1],"DocumentId"))?partDoc:id.Equals(Get(files[2],"DocumentId"))?drawingDoc:rootDoc;
-       granted.Add(id);Set(doc,"CheckedOutBy","tester");Set(doc,"CheckoutSessionId",session);Set(doc,"CheckedOutAt",new DateTime(2026,11,12,5,50,0,DateTimeKind.Utc));data=doc;
+       if(mode=="selected-config-race")partNative.ActiveConfiguration="Other";granted.Add(id);Set(doc,"CheckedOutBy","tester");Set(doc,"CheckoutSessionId",session);Set(doc,"CheckedOutAt",new DateTime(2026,11,12,5,50,0,DateTimeKind.Utc));data=doc;
        if(mode=="checkout-race"){var changed=Guid.NewGuid();Set(headVersion,"Id",changed);Set(partHead,"VersionId",changed);Set(independent,"RootVersionId",changed);}
       }
       else {unexpected.Add(path);throw new Exception("不得下载、提交或扩大权限："+path);}
@@ -123,12 +123,17 @@ internal static partial class Program
       if(mode=="configuration"){Set(partHead,"Configuration","Other");Set(Get(headVersion,"ReferenceSnapshot"),"Configuration","Other");}
       if(mode=="path"){Set(partHead,"RelativePath","different/PART.SLDPRT");Set(independent,"RootRelativePath","different/PART.SLDPRT");}
       if(mode=="binding")identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)partPath,Get(files[1],"DocumentId"),project,Guid.NewGuid(),"W9",Get(files[1],"Sha256"),Get(files[1],"FileLength")});
+      if(mode=="unrelated-binding"||mode=="dependency-bad-binding")
+      {
+       var file=files[mode=="unrelated-binding"?42:3];
+       identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)Path.Combine(folder,(string)Get(file,"FileName")),Get(file,"DocumentId"),project,Guid.NewGuid(),"W9",Get(file,"Sha256"),Get(file,"FileLength")});
+      }
       if(mode=="drawing-memory-edit")drawingNative.Modify(false);
       var hashes=files.Cast<object>().ToDictionary(file=>(string)Get(file,"FileName"),file=>WorkingReuseHash(Path.Combine(folder,(string)Get(file,"FileName"))));var attributes=files.Cast<object>().ToDictionary(file=>(string)Get(file,"FileName"),file=>File.GetAttributes(Path.Combine(folder,(string)Get(file,"FileName"))));var parentVersion=Get(parent,"RootVersionId");var parentFacts=frozen.ToDictionary(file=>(Guid)Get(file,"DocumentId"),file=>new{Version=Get(file,"VersionId"),Hash=Get(file,"Sha256"),Length=Get(file,"FileLength"),Configuration=Get(file,"Configuration"),Path=Get(file,"RelativePath")});var sourceVersion=Get(files[1],"VersionId");var drawingSourceVersion=Get(files[2],"VersionId");
       Exception failure=null;var success=false;try{var task=(Task)TreeCall(plugin,"TryAcquireReusableWorkingCopyAsync",selected,project,Get(files[0],"DocumentId"));await task;success=(bool)Get(task,"Result");}catch(InvalidOperationException error){failure=error;}
-      var expected=mode=="selected"||mode=="no-session-receipt";if(expected&&failure!=null)Console.WriteLine("DIAGNOSTIC: "+failure);
+      var expected=mode=="selected"||mode=="unrelated-assembly-mismatch"||mode=="unrelated-binding"||mode=="no-session-receipt";if(expected&&failure!=null)Console.WriteLine("DIAGNOSTIC: "+failure);
       Check(success==expected,mode+"：父装配冻结旧引用时，按所选子件独立最新基准核对再次获取");
-      Check(granted.All(id=>id.Equals(Get(files[1],"DocumentId"))||id.Equals(Get(files[2],"DocumentId")))&&granted.Count==(expected?2:mode=="checkout-race"||mode=="frozen-child-race"?1:0),mode+"：仅选中零件及关联工程图获授权，父装配与其它零件不获取");
+      Check(granted.All(id=>id.Equals(Get(files[1],"DocumentId"))||id.Equals(Get(files[2],"DocumentId")))&&granted.Count==(expected?2:mode=="checkout-race"||mode=="frozen-child-race"||mode=="selected-config-race"?1:0),mode+"：仅选中零件及关联工程图获授权，父装配与其它零件不获取");
       if(mode.StartsWith("frozen-child-"))Check(failure?.Message.Contains("V2")==true&&!failure.Message.Contains("W1")
           &&checkoutRequests.Count==(mode=="frozen-child-old"?0:1),"按子件当前图纸版本拒绝旧基准解锁并使用 V 编号："+mode);
       Check(rootReadOnly&&rootUnlocks==0&&mutations==0&&unexpected.Count==0&&events.Count==0&&files.Cast<object>().All(file=>WorkingReuseHash(Path.Combine(folder,(string)Get(file,"FileName")))==hashes[(string)Get(file,"FileName")]),mode+"：43份CAD原字节与父装配只读状态保留，无保存、关闭、重开或下载");

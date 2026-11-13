@@ -5,6 +5,7 @@
     <Project Path="src/Pdm.Infrastructure/Pdm.Infrastructure.csproj" />
     <Project Path="src/Pdm.Api/Pdm.Api.csproj" />
     <Project Path="src/Pdm.Desktop/Pdm.Desktop.csproj" />
+    <Project Path="src/Pdm.Updater/Pdm.Updater.csproj" />
     <Project Path="src/Pdm.SolidWorks.Addin/Pdm.SolidWorks.Addin.csproj" />
     <Project Path="src/Pdm.SolidWorks.PreviewWorker/Pdm.SolidWorks.PreviewWorker.csproj" />
     <Project Path="src/Pdm.PreviewAgent/Pdm.PreviewAgent.csproj" />

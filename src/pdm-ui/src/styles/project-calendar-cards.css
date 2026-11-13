@@ -20,7 +20,7 @@
   :root body .project-calendar .pc-date.today { background:var(--pdm-theme-accent) !important; color:#fff !important; }
   :root body .project-calendar .pc-event.pc-event { background:var(--pc-event) !important; border:0 !important; border-radius:7px !important; padding:0 5px !important; font-size:12px !important; line-height:16px !important; color:var(--pdm-text) !important; width:100% !important; box-sizing:border-box !important; }
   :root body .project-calendar .pc-event b { font-size:inherit !important; }
-  :root body .project-calendar .pc-event.warning { background:var(--pc-warning) !important; }
+
   :root body .project-calendar .pc-event.danger { background:var(--pc-danger) !important; }
   :root body .project-calendar .pc-event.done { background:var(--pc-done) !important; }
   :root body .project-calendar .pc-more { margin-top:0 !important; background:transparent !important; color:var(--pdm-muted) !important; font-size:11px !important; }
@@ -38,8 +38,8 @@
     :root body .project-calendar .pc-event.pc-event { padding:0 3px !important; font-size:12px !important; }
   }
 }
-.project-calendar { --pc-board:#f7f7f7 !important; --pc-day:#fff !important; --pc-outside:#ebebeb !important; --pc-event:#eee5fa !important; --pc-warning:#fdf0cd !important; --pc-danger:#fce5ef !important; --pc-done:#d1fae5 !important; }
-:root[data-pdm-color-scheme="dark"] .project-calendar { --pc-board:#202020 !important; --pc-day:#292929 !important; --pc-outside:#242424 !important; --pc-event:#392d48 !important; --pc-warning:#44391e !important; --pc-danger:#472c38 !important; --pc-done:#213e33 !important; }
+.project-calendar { --pc-board:#f7f7f7 !important; --pc-day:#fff !important; --pc-outside:#ebebeb !important; --pc-event:#fdf0bf !important; --pc-danger:#ffc56d !important; --pc-done:#d1fae5 !important; --pc-pending-text:#805900; --pc-overdue-text:#934606; --pc-done-text:#187047; }
+:root[data-pdm-color-scheme="dark"] .project-calendar { --pc-board:#202020 !important; --pc-day:#292929 !important; --pc-outside:#242424 !important; --pc-event:#44391e !important; --pc-danger:#684018 !important; --pc-done:#213e33 !important; --pc-pending-text:#fce08d; --pc-overdue-text:#ffc27a; --pc-done-text:#8de4b6; }
 @layer pdm-button-sizing {
  :root body .project-calendar .pc-event.pc-event { min-width:0 !important; height:16px !important; min-height:16px !important; max-height:16px !important; display:block !important; text-align:left !important; box-shadow:none !important; outline:0 !important; }
  :root body .project-calendar .pc-event::before,:root body .project-calendar .pc-event::after { display:none !important; }
@@ -56,6 +56,11 @@
 .pc-event-card dl>div { display:grid; gap:6px; }
 .pc-event-card dd { margin:0; line-height:1.5; overflow-wrap:anywhere; }
 .pc-event-card > button { justify-self:end; }
+@layer pdm-button-sizing {
+  :root body .pc-event-card > button.pc-event-action.done {
+    background:#16804e !important; border-color:#16804e !important; color:#fff !important;
+  }
+}
 :root body .project-calendar .pc-day { transition:box-shadow .18s ease,background-color .18s ease; }
 :root body .pc-event-popover.pc-card-enter-active,:root body .pc-event-popover.pc-card-leave-active { transition:opacity .15s cubic-bezier(0,0,.2,1),transform .15s cubic-bezier(0,0,.2,1),filter .15s cubic-bezier(0,0,.2,1); }
 :root body .pc-event-popover.pc-card-enter-from,:root body .pc-event-popover.pc-card-leave-to { opacity:0; transform:scale(.9); filter:blur(4px); }

@@ -59,6 +59,7 @@ internal static class PluginSettingsStore
     {
         if (settings == null) throw new ArgumentNullException(nameof(settings));
         settings.Normalize();
+        settings.AutomaticUpdatesEnabled = LoadSavedSettings().AutomaticUpdatesEnabled;
         ClientServerSettingsStore.Save(settings.ServerAddress);
         var path = GetPath();
         Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -92,22 +93,6 @@ internal static class PluginSettingsStore
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "UPLM",
         "solidworks-addin-settings.json");
-}
-
-internal sealed class PluginUpdateSnapshot
-{
-    public string InstalledVersion { get; set; } = string.Empty;
-    public string LoadedVersion { get; set; } = string.Empty;
-    public string DiskVersion { get; set; } = string.Empty;
-    public string AvailableVersion { get; set; } = string.Empty;
-    public string Status { get; set; } = "尚未检查更新";
-    public DateTimeOffset? LastCheckedAt { get; set; }
-    public int? ProgressPercentage { get; set; }
-    public bool UpdateAvailable { get; set; }
-    public bool ReadyToInstall { get; set; }
-    public bool Busy { get; set; }
-
-    public PluginUpdateSnapshot Clone() => (PluginUpdateSnapshot)MemberwiseClone();
 }
 
 internal sealed class PluginConnectionResult

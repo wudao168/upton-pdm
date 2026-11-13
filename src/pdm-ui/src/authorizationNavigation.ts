@@ -58,11 +58,10 @@ const sections: Record<string, readonly [label: string, modules: string[], codes
     ['经验与落实', [], ['quality.experience.']],
   ],
   admin: [
-    ['系统接口', [], ['settings.customer.manage']],
+    ['系统接口', ['常备件设置'], ['settings.customer.manage', 'stock.settings.manage']],
     ['AI服务', [], ['ai.settings.manage']],
     ['用户设置', ['权限中心'], ['settings.organization.manage', 'system.project-permission.view', 'system.platform.manage']],
     ['编号与存储', ['系统设置'], ['settings.storage.manage', 'settings.folder.manage']],
-    ['常备件设置', [], ['stock.settings.manage']],
     ['生产扫码设置', [], ['production.scan.manage']],
     ['全局审计', ['系统审计']],
     ['客户端日志', [], ['system.client-logs.view']],

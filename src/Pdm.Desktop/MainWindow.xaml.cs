@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private const int WindowMessageSystemCommand = 0x0112;
     private const int MenuExit = 0x1FE0;
     private const int MenuServerSettings = 0x1FD0;
+    private const int MenuClientUpdates = 0x1FC0;
     private const uint MenuString = 0x0000;
     private const uint MenuSeparator = 0x0800;
     private readonly string[] startupArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
@@ -130,6 +131,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
+            ReportDesktopStartup(false);
             LoadingPanel.Visibility = Visibility.Collapsed;
             if (hideAfterStartupNavigation)
             {
@@ -153,7 +155,20 @@ public partial class MainWindow : Window
             throw new FileNotFoundException("未找到客户端页面，请先执行 pnpm --dir src/pdm-ui build。", indexFile);
         }
 
-        await WorkspaceView.EnsureCoreWebView2Async();
+        var profile = Path.Combine(ClientUpdateState.StateRoot(ClientUpdateState.Desktop, DesktopTarget), "webview2");
+        var legacyProfile = Path.Combine(DesktopTarget, "Upton.Pdm.Desktop.exe.WebView2");
+        if (!Directory.Exists(profile) && Directory.Exists(legacyProfile))
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(profile)!);
+                Directory.Move(legacyProfile, profile);
+            }
+            catch (IOException) { profile = legacyProfile; }
+            catch (UnauthorizedAccessException) { profile = legacyProfile; }
+        }
+        var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: profile);
+        await WorkspaceView.EnsureCoreWebView2Async(environment);
         ConfigureLocalUiRequests(WorkspaceView.CoreWebView2, uiFolder);
         WorkspaceView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         WorkspaceView.NavigationCompleted += async (_, args) =>
@@ -171,6 +186,7 @@ public partial class MainWindow : Window
                 }
 
                 LoadingPanel.Visibility = Visibility.Collapsed;
+                ReportDesktopStartup(false);
                 hideAfterStartupNavigation = false;
                 RestoreFromNotificationArea();
                 WpfMessageBox.Show(this, $"页面加载失败：{args.WebErrorStatus}", "UPLM");
@@ -179,6 +195,7 @@ public partial class MainWindow : Window
             {
                 LoadingPanel.Visibility = Visibility.Collapsed;
                 workspaceNavigationReady = true;
+                if (!showingServerSettings) ReportDesktopStartup(true);
                 if (usingServerUi)
                 {
                     AppendClientDiagnostic($"服务器界面加载完成：url={WorkspaceView.Source} configuration={bootstrapConfiguration.ConfigurationVersion}");
@@ -188,7 +205,8 @@ public partial class MainWindow : Window
                     hideAfterStartupNavigation = false;
                     HideToNotificationArea();
                 }
-                var requestArgs = pendingExternalRequestArgs ?? startupArgs;
+                var externalArgs = DesktopExternalRequestStore.ReadAndDelete();
+                var requestArgs = pendingExternalRequestArgs ?? (externalArgs.Length > 0 ? externalArgs : startupArgs);
                 pendingExternalRequestArgs = null;
                 await DispatchLaunchRequestAsync(requestArgs);
             }
@@ -240,14 +258,8 @@ public partial class MainWindow : Window
 
                 try
                 {
-                    // 运行中只下载新版本，不在这里替换自身目录：本进程仍占用客户端目录会让替换失败，用户看到的就是刚打开就关闭。
-                    // 已下载的版本会在下次启动时安装。
-                    await ClientPackageUpdater.StageAsync(
-                        "desktop",
-                        latest.Desktop,
-                        AppDomain.CurrentDomain.BaseDirectory,
-                        bootstrapLifetime.Token);
-                    await MaintainSolidWorksAddinUpdateAsync(latest, bootstrapLifetime.Token);
+                    // 后台下载，等客户端正常退出后由独立更新器安装。
+                    await Task.Run(() => QueueClientUpdates(latest, true), bootstrapLifetime.Token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -306,28 +318,6 @@ public partial class MainWindow : Window
         {
             // Diagnostics must never prevent client startup or the UI refresh.
         }
-    }
-
-    private static async Task MaintainSolidWorksAddinUpdateAsync(
-        ClientBootstrapConfiguration configuration,
-        CancellationToken cancellationToken)
-    {
-        // 插件目录未必在 %LOCALAPPDATA%（开发机用 RegAsm /codebase 指向仓库目录），
-        // 已下载的插件包由插件设置页手动打开安装窗口，桌面客户端只负责下载。
-        if (ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out _, out _))
-        {
-            return;
-        }
-
-        var addinDirectory = ResolveSolidWorksAddinDirectory();
-        if (!Directory.Exists(addinDirectory)) return;
-
-        await ClientPackageUpdater.StageAsync(
-            "solidworks-addin",
-            configuration.SolidWorksAddin,
-            addinDirectory,
-            cancellationToken);
-
     }
 
     private void ConfigureLocalUiRequests(CoreWebView2 webView, string uiFolder)
@@ -452,6 +442,14 @@ public partial class MainWindow : Window
     {
         try
         {
+            using var registration = Registry.ClassesRoot.OpenSubKey(@"CLSID\" + ClientUpdateState.AddinGuid + @"\InprocServer32");
+            if (Uri.TryCreate(registration?.GetValue("CodeBase") as string, UriKind.Absolute, out var codeBase)
+                && codeBase.IsFile
+                && string.Equals(Path.GetFileName(codeBase.LocalPath), ClientUpdateState.ProgramName(ClientUpdateState.Addin), StringComparison.OrdinalIgnoreCase))
+            {
+                var registered = Path.GetDirectoryName(codeBase.LocalPath);
+                if (!string.IsNullOrWhiteSpace(registered)) return registered;
+            }
             using (var uninstallKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UPLMClient"))
             {
                 var installRoot = uninstallKey?.GetValue("InstallLocation") as string;
@@ -1162,7 +1160,7 @@ public partial class MainWindow : Window
     private async Task PublishClientVersionAsync()
     {
         if (WorkspaceView.CoreWebView2 == null) return;
-        var version = ClientPackageUpdater.GetInstalledVersion(AppDomain.CurrentDomain.BaseDirectory);
+        var version = LoadedDesktopVersion;
         var detail = new { version };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-client-version', {{ detail: {Serialize(detail)} }}));";
         try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
@@ -1262,6 +1260,7 @@ public partial class MainWindow : Window
         {
             AppendMenu(systemMenu, MenuSeparator, UIntPtr.Zero, string.Empty);
             AppendMenu(systemMenu, MenuString, new UIntPtr(MenuServerSettings), "服务器设置");
+            AppendMenu(systemMenu, MenuString, new UIntPtr(MenuClientUpdates), "客户端与插件更新");
             AppendMenu(systemMenu, MenuString, new UIntPtr(MenuExit), "退出 UPLM");
         }
 
@@ -1286,6 +1285,11 @@ public partial class MainWindow : Window
         if (command == MenuServerSettings)
         {
             ShowServerSettings();
+            handled = true;
+        }
+        if (command == MenuClientUpdates)
+        {
+            ShowClientUpdates();
             handled = true;
         }
         if (command == MenuExit)
@@ -1362,11 +1366,14 @@ public partial class MainWindow : Window
         var openItem = new WinForms.ToolStripMenuItem("打开 UPLM");
         var exitItem = new WinForms.ToolStripMenuItem("退出 UPLM");
         var serverItem = new WinForms.ToolStripMenuItem("服务器设置");
+        var updateItem = new WinForms.ToolStripMenuItem("客户端与插件更新");
         serverItem.Click += (_, _) => ShowServerSettings();
+        updateItem.Click += (_, _) => ShowClientUpdates();
         openItem.Click += (_, _) => RestoreFromNotificationArea();
         exitItem.Click += (_, _) => ExitApplication();
         menu.Items.Add(openItem);
         menu.Items.Add(serverItem);
+        menu.Items.Add(updateItem);
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add(exitItem);
 
@@ -1463,8 +1470,9 @@ public partial class MainWindow : Window
         _ = DispatchLaunchRequestAsync(arguments);
     }
 
-    private void ExitApplication()
+    private void ExitApplication(bool scheduleUpdate = true)
     {
+        if (scheduleUpdate) ClientPackageUpdater.ScheduleDesktopUpdateOnExit(DesktopTarget);
         allowClose = true;
         Close();
     }

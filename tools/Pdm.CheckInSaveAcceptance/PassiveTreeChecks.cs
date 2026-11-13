@@ -204,6 +204,15 @@ internal static partial class Program
         }
         var granted = New("DocumentOperationAccessDto"); Set(granted, "CanCheckout", true); Set(granted, "CanArchive", true);
         Set(model, "OperationAccess", granted);
+        var login = (string)Field(pane, "authenticatedUsername");
+        Set(source, "CheckedOutBy", login);
+        var snapshotWithOldCheckout = TreeCall(plugin, "MapProjectTree", source, docs, true);
+        TreeCheck(string.IsNullOrEmpty((string)Get(snapshotWithOldCheckout, "CheckedOutBy")), "已解除的历史编辑状态不能覆盖当前服务端的未获取状态");
+        Set(model, "CheckedOutBy", login); Set(model, "CheckoutSessionId", Guid.NewGuid()); Set(model, "CheckoutMachine", "OTHER-WS");
+        var currentCheckout = TreeCall(plugin, "MapProjectTree", source, docs, true);
+        var currentHint = (string)TreeCall(pane, "CheckoutUnavailableReason", currentCheckout);
+        TreeCheck(currentHint.Contains("另一编辑会话") && currentHint.Contains("OTHER-WS"), "当前登录账号的跨会话锁应明确说明原编辑会话和电脑");
+        Set(model, "CheckedOutBy", null); Set(model, "CheckoutSessionId", null); Set(model, "CheckoutMachine", null);
         Set(model, "DrawingVersion", "V2"); Set(model, "PublishedVersion", "A"); Set(branch, "LoadedDrawingVersion", "V1");
         TreeCall(plugin, "ApplyPassiveDocumentAccess", root, docs);
         var paneType = Type("PdmTaskPaneControl");

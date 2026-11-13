@@ -97,24 +97,13 @@ $addinPayload = Join-Path $clientRoot 'payload\solidworks-addin'
 $locator = [ordered]@{ BootstrapUrl = "$LanBaseUrl/client-bootstrap.json" } | ConvertTo-Json
 $utf8 = New-Object Text.UTF8Encoding($false)
 foreach ($payload in @($desktopPayload, $addinPayload)) { [IO.File]::WriteAllText((Join-Path $payload 'uplm-bootstrap.json'), $locator, $utf8) }
-$updatesRoot = Join-Path $appTarget 'wwwroot\updates'
-if (Test-Path -LiteralPath $updatesRoot) { Remove-Item -LiteralPath $updatesRoot -Recurse -Force }
-New-Item -ItemType Directory -Path $updatesRoot -Force | Out-Null
-$desktopUpdate = Join-Path $updatesRoot "uplm-desktop-$($manifest.desktopVersion).zip"
-$addinUpdate = Join-Path $updatesRoot "uplm-solidworks-addin-$($manifest.solidWorksAddinVersion).zip"
-Compress-Archive -Path (Join-Path $desktopPayload '*') -DestinationPath $desktopUpdate -CompressionLevel Optimal
-Compress-Archive -Path (Join-Path $addinPayload '*') -DestinationPath $addinUpdate -CompressionLevel Optimal
 $bootstrapPath = Join-Path $appTarget 'wwwroot\client-bootstrap.json'
 $bootstrap = Get-Content -LiteralPath $bootstrapPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $bootstrap.ConfigurationVersion = $manifest.version
 $bootstrap.ApiBaseUrl = "$LanBaseUrl/"
 $bootstrap.UiBaseUrl = "$LanBaseUrl/"
-$bootstrap.Desktop.Version = $manifest.desktopVersion
-$bootstrap.Desktop.PackageUrl = "/updates/$([IO.Path]::GetFileName($desktopUpdate))"
-$bootstrap.Desktop.Sha256 = (Get-FileHash -LiteralPath $desktopUpdate -Algorithm SHA256).Hash
-$bootstrap.SolidWorksAddin.Version = $manifest.solidWorksAddinVersion
-$bootstrap.SolidWorksAddin.PackageUrl = "/updates/$([IO.Path]::GetFileName($addinUpdate))"
-$bootstrap.SolidWorksAddin.Sha256 = (Get-FileHash -LiteralPath $addinUpdate -Algorithm SHA256).Hash
+# Keep the signed ZIP bytes. Updates preserve the installed locator and resolve
+# relative download URLs against the gateway chosen at installation.
 [IO.File]::WriteAllText($bootstrapPath, ($bootstrap | ConvertTo-Json -Depth 8), $utf8)
 
 $apiBin = '"{0}"' -f (Join-Path $appTarget 'Pdm.Api.exe')

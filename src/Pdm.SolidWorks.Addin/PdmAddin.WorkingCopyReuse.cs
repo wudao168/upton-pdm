@@ -63,11 +63,24 @@ public sealed partial class PdmAddin
         var committedChildren = new Dictionary<Guid, ControlledOpenFileDto>();
         var loadedDocuments = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
             .Select(document => new { Document = document, Path = document.GetPathName() }).ToArray();
+        // Use the server's dependency closure for a separately opened part. The
+        // assembly workspace is its physical location, not its checkout scope.
+        HashSet<Guid> selectedProofIds = null;
+        if (!requestedIds.Contains(rootId) && selected.All(item => item.Node.Kind == CadDocumentKind.Part
+            && loadedDocuments.Any(loaded => PathsEqual(loaded.Path, item.Node.FullPath))))
+            selectedProofIds = await ReadSelectedPartAcquisitionScopeAsync(requestedIds, requiredDrawings, projectId, workingManifest, latest);
+        ControlledOpenManifestDto AcquisitionScope(ControlledOpenManifestDto manifest)
+        {
+            var scope = WorkingAcquisitionScope(manifest, requiredDrawings);
+            return selectedProofIds == null ? scope : WithWorkingFiles(scope,
+                scope.Files.Where(file => selectedProofIds.Contains(file.DocumentId)).ToArray());
+        }
         var localChanges = false;
         var hasUnsavedLoadedDocument = loadedDocuments.Any(item => IsPathWithinDirectory(item.Path, context.Key) && item.Document.GetSaveFlag());
         var editableAssemblyIds = new HashSet<Guid>();
         foreach (var file in workingManifest.Files)
         {
+            if (selectedProofIds != null && !selectedProofIds.Contains(file.DocumentId)) continue;
             if (DocumentKindFromPath(file.FileName) == CadDocumentKind.Drawing && !requiredDrawings.Contains(file.DocumentId)) continue;
             var path = ControlledReferenceMaterializer.LocalPath(context.Key, file);
             if (committedRoot != null && file.DocumentId == rootId)
@@ -118,9 +131,9 @@ public sealed partial class PdmAddin
                 throw new InvalidOperationException("当前图档有未保存或未提交的修改，且" + reason + "。已保留当前窗口和修改，请核对后再获取权限。");
             return false;
         }
-        var workingScope = WorkingAcquisitionScope(workingManifest, requiredDrawings);
-        var latestScope = WorkingAcquisitionScope(latest, requiredDrawings);
-        var comparisonLatestScope = WorkingAcquisitionScope(comparisonLatest, requiredDrawings);
+        var workingScope = AcquisitionScope(workingManifest);
+        var latestScope = AcquisitionScope(latest);
+        var comparisonLatestScope = AcquisitionScope(comparisonLatest);
         // This projection is only for comparing the already-committed in-session
         // content. Disk bindings and the physical working manifest stay unchanged.
         var comparisonScope = WithWorkingFiles(workingScope, workingScope.Files.Select(file =>
@@ -150,6 +163,37 @@ public sealed partial class PdmAddin
             return CannotReuse("当前版本缺少可核对的引用快照");
         var missingComponents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var exactSnapshots = new Dictionary<Guid, DocumentReferenceNodeDto> { [rootId] = rootVersion.ReferenceSnapshot };
+        // A separately opened part owns its edit lease. Its containing assembly is
+        // a physical workspace, not an implicit request to edit every sibling.
+        // Keep all byte/binding checks above; validate the selected native models
+        // and their external sources instead of unrelated assembly occurrences.
+        var selectedPartModels = selected.Where(item => item.Node.Kind == CadDocumentKind.Part)
+            .GroupBy(item => item.Node.DocumentId.Value).Select(group => group.First())
+            .Select(item => new { Item = item, Model = loadedDocuments.FirstOrDefault(loaded => PathsEqual(loaded.Path, item.Node.FullPath))?.Document }).ToArray();
+        var selectedPartScope = !requestedIds.Contains(rootId) && selectedPartModels.Length == requestedIds.Count
+            && selectedPartModels.All(item => item.Model != null);
+        if (selectedPartScope)
+            foreach (var item in selectedPartModels)
+            {
+                var file = workingManifest.Files.Single(candidate => candidate.DocumentId == item.Item.Node.DocumentId);
+                var exact = (await apiClient.GetVersionsAsync(file.DocumentId, lifetime.Token)).FirstOrDefault(version => version.Id == file.VersionId);
+                if (!WorkingReuseSnapshotVersionMatches(file, exact))
+                    return CannotReuse("所选零件的精确版本快照无法核对：" + file.FileName);
+                exactSnapshots[file.DocumentId] = exact.ReferenceSnapshot;
+            }
+        bool SelectedPartSourcesMatch()
+        {
+            foreach (var item in selectedPartModels)
+            {
+                var file = workingManifest.Files.Single(candidate => candidate.DocumentId == item.Item.Node.DocumentId);
+                if (!ReferenceEquals(item.Model, FindLoadedDocument(item.Item.Node.FullPath))
+                    || !WorkingReuseLoadedContextForEditMatches(item.Model, context.Key, workingManifest,
+                        exactSnapshots[file.DocumentId], exactSnapshots, null, null, missingComponents: missingComponents,
+                        standalonePart: true)) return false;
+                ValidateControlledLoadedSources(item.Model, item.Item.Node.FullPath, workingManifest, application, missingComponents);
+            }
+            return true;
+        }
         try
         {
             while (true)
@@ -157,8 +201,9 @@ public sealed partial class PdmAddin
                 var missing = new HashSet<Guid>();
                 string nativeConflict = null;
                 missingComponents.Clear();
-                if (WorkingReuseLoadedContextForEditMatches(rootModel, context.Key, workingManifest, rootVersion.ReferenceSnapshot, exactSnapshots, missing, editableAssemblyIds,
-                    conflict => nativeConflict = conflict, missingComponents, committedRoot?.DocumentId)) break;
+                if (selectedPartScope ? SelectedPartSourcesMatch()
+                    : WorkingReuseLoadedContextForEditMatches(rootModel, context.Key, workingManifest, rootVersion.ReferenceSnapshot, exactSnapshots, missing, editableAssemblyIds,
+                        conflict => nativeConflict = conflict, missingComponents, committedRoot?.DocumentId)) break;
                 if (missing.Count == 0) return CannotReuse("实际加载的引用或配置与当前基准不一致：" + nativeConflict);
                 foreach (var id in missing)
                 {
@@ -227,7 +272,7 @@ public sealed partial class PdmAddin
         // a version published during the first manifest request is never unlocked stale.
         var acquired = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token, allowMissingComponents: true,
             useLatestModelReferences: context.Value.UsesLatestModelReferences);
-        if (!WorkingReuseManifestsMatch(latestScope, WorkingAcquisitionScope(acquired, requiredDrawings)))
+        if (!WorkingReuseManifestsMatch(latestScope, AcquisitionScope(acquired)))
             throw new InvalidOperationException("获取权限期间服务器版本发生变化：" + WorkingReuseManifestDifferences(latest, acquired)
                 + "。已保留当前窗口、文件和已获取权限，请核对后继续。");
         foreach (var added in inserted)
@@ -236,6 +281,8 @@ public sealed partial class PdmAddin
         await VerifyCompletedWorkingHeadsAsync(context.Key, workingManifest, committedHeads);
         await VerifySelectedWorkingVersionsAsync(selectedChildren, selectedVersions);
         VerifyCommittedChildren();
+        if (selectedPartScope && !SelectedPartSourcesMatch())
+            throw new InvalidOperationException("获取权限期间所选零件的实际配置或引用发生变化，已保留窗口和权限记录，尚未解锁。请核对后重试。");
         if (synchronizedRoot != null && (!synchronizedRoot.MatchesNativeState()
             || !ReferenceEquals(synchronizedRoot.Model, FindLoadedDocument(rootPath))
             || !WorkingHeadDiskMatches(context.Key, projectId, committedRoot)))
@@ -254,6 +301,26 @@ public sealed partial class PdmAddin
             + " files=" + latest.Files.Count + " reopened=0 replaced=0");
         verifiedDocuments?.Invoke(documents);
         return true;
+    }
+
+    private async Task<HashSet<Guid>> ReadSelectedPartAcquisitionScopeAsync(ISet<Guid> selected, ISet<Guid> drawings,
+        Guid projectId, ControlledOpenManifestDto working, ControlledOpenManifestDto latest)
+    {
+        var ids = new HashSet<Guid>(drawings);
+        foreach (var id in selected)
+        {
+            var part = await apiClient.CreateControlledOpenManifestAsync(id, null, false, true, lifetime.Token,
+                allowMissingComponents: true, useLatestModelReferences: latest.UsesLatestModelReferences);
+            if (part == null || part.ProjectId != projectId || part.RootDocumentId != id || part.Files == null
+                || !part.Files.Any(file => file.DocumentId == id && file.IsRoot)) return null;
+            foreach (var file in part.Files) ids.Add(file.DocumentId);
+        }
+        // Missing/new dependencies need the existing complete reconciliation path.
+        if (!ids.IsSubsetOf(new HashSet<Guid>(working.Files.Select(file => file.DocumentId)))
+            || !ids.IsSubsetOf(new HashSet<Guid>(latest.Files.Select(file => file.DocumentId)))) return null;
+        LogOperation("单件获取校验范围 selected=" + selected.Count + " dependencyFiles=" + ids.Count
+            + " workspaceFiles=" + working.Files.Count);
+        return ids;
     }
 
     private async Task<IReadOnlyDictionary<Guid, Guid>> VerifySelectedWorkingVersionsAsync(
@@ -378,7 +445,8 @@ public sealed partial class PdmAddin
     private static bool WorkingReuseLoadedContextForEditMatches(IModelDoc2 root, string directory,
         ControlledOpenManifestDto manifest, DocumentReferenceNodeDto snapshot,
         IReadOnlyDictionary<Guid, DocumentReferenceNodeDto> exactSnapshots, ISet<Guid> missingSnapshots, ISet<Guid> editableAssemblyIds,
-        Action<string> reportConflict = null, ISet<string> missingComponents = null, Guid? committedAssemblyRootId = null)
+        Action<string> reportConflict = null, ISet<string> missingComponents = null, Guid? committedAssemblyRootId = null,
+        bool standalonePart = false)
     {
         var files = manifest.Files.ToDictionary(file => file.FileName, StringComparer.OrdinalIgnoreCase);
         var snapshots = WorkingReuseSnapshotNodes(snapshot).ToLookup(node => node.FileName ?? string.Empty, StringComparer.OrdinalIgnoreCase);
@@ -521,7 +589,10 @@ public sealed partial class PdmAddin
         if (!PathsEqual(rootPath, expectedRootPath)) return Reject("loaded-path", rootPath, "expected=" + expectedRootPath);
         var rootConfiguration = root.ConfigurationManager?.ActiveConfiguration?.Name;
         if (string.IsNullOrWhiteSpace(rootConfiguration)) return Reject("missing-active-configuration", rootPath, "root=True");
-        if (!string.IsNullOrWhiteSpace(rootFile.Configuration) && !string.Equals(rootFile.Configuration, rootConfiguration, StringComparison.OrdinalIgnoreCase))
+        // An independently opened part uses its own exact snapshot configuration;
+        // the containing assembly's file inventory records an occurrence instead.
+        if (!(standalonePart && root.GetType() == 1) && !string.IsNullOrWhiteSpace(rootFile.Configuration)
+            && !string.Equals(rootFile.Configuration, rootConfiguration, StringComparison.OrdinalIgnoreCase))
             return Reject("root-manifest-configuration", rootPath, "actual=" + rootConfiguration + " expected=" + rootFile.Configuration);
         if (!string.IsNullOrWhiteSpace(snapshot.Configuration) && !string.Equals(snapshot.Configuration, rootConfiguration, StringComparison.OrdinalIgnoreCase))
             return Reject("snapshot-configuration", rootPath, "actual=" + rootConfiguration + " expected=" + snapshot.Configuration);

@@ -212,13 +212,18 @@ function copyCalendarDay(date: string, mode: DaySnapshot['mode']) {
   ElMessage.success(mode === 'cut' ? '已标记剪切，请选择目标日期粘贴；确认前源记录仍保留。' : '已复制当日工时，请选择其他日期后粘贴。')
 }
 function copyDay() { copyCalendarDay(selected.value, 'copy') }
-async function prepareDayPaste(source: DaySnapshot, date: string) {
+async function prepareDayPaste(source: DaySnapshot, date: string, saveImmediately = false) {
   if (!mayLeave() || loading.value || !own.value || source.context !== operationContext()) return
   if (date > today.value) return ElMessage.warning('实际工时不能填写未来日期。')
   if (date === source.date) return ElMessage.warning('请选择其他日期粘贴工时。')
   if (selected.value !== date) await selectDay(date)
-  if (source.context !== operationContext() || selected.value !== date || !own.value || loading.value) return
-  copyEntries.value = source.entries.map(entry => ({ ...entry, date }))
+  if (source.context !== operationContext() || selected.value !== date || !own.value || loading.value || error.value || !mayLeave()) return
+  const values = source.entries.map(entry => ({ ...entry, date }))
+  if (saveImmediately) {
+    await persist(date, date, appendWorkHoursDay(daily.value, values, date))
+    return
+  }
+  copyEntries.value = values
   for (const project of source.projects) if (!own.value.projects.some(item => item.id === project.id)) own.value.projects.push({ ...project })
   copyDate.value = source.date; copyTarget.value = date; copyMode.value = source.mode; transferSource.value = source; copyOpen.value = true
 }
@@ -250,7 +255,7 @@ function leaveDay(event: DragEvent, date: string) {
 }
 function dropDay(event: DragEvent, date: string) {
   event.preventDefault(); const source = dragSource.value, allowed = canDropDate(date); clearDrag()
-  if (source && allowed) void prepareDayPaste(source, date)
+  if (source && allowed) void prepareDayPaste(source, date, true)
 }
 async function showCalendarMenu(event: MouseEvent, date: string) {
   event.preventDefault(); if (!mayLeave() || loading.value || !own.value || copyOpen.value) return

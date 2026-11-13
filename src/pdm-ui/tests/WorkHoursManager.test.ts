@@ -99,14 +99,14 @@ describe('工时填报与汇总', () => {
   }
   const transfer = () => ({ setData: vi.fn(), effectAllowed: '', dropEffect: '' })
 
-  it('拖拽整日工时先核对再复制，源日期保留', async()=>{
+  it('拖拽整日工时直接保存，源日期保留', async()=>{
     const w=mountManager();await flushPromises();const data=transfer()
     await w.get('[data-work-hours-date="2026-10-19"]').trigger('dragstart',{dataTransfer:data})
     expect(data.setData).toHaveBeenCalledWith('application/x-uplm-work-hours','copy')
     await w.get('[data-work-hours-date="2026-10-20"]').trigger('dragover',{dataTransfer:data})
     await w.get('[data-work-hours-date="2026-10-20"]').trigger('drop',{dataTransfer:data});await flushPromises()
-    expect(w.get('.wh-copy-row').text()).toContain('P700012-1');expect(api.saveWorkHours).not.toHaveBeenCalled()
-    await button(w,'保存复制工时').trigger('click');await flushPromises()
+    expect(w.find('.wh-copy-row').exists()).toBe(false)
+    expect(api.saveWorkHours).toHaveBeenCalledTimes(1)
     expect(api.saveWorkHours).toHaveBeenCalledWith(expect.objectContaining({from:'2026-10-20',to:'2026-10-20',entries:[{date:'2026-10-20',projectId:'child',location:'厂内',hours:8}]}),'token')
     expect(w.get('[data-work-hours-date="2026-10-19"]').text()).toContain('8 小时');w.unmount()
   })

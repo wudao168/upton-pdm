@@ -23,6 +23,7 @@ const props = defineProps<{
   customers: PdmCustomer[]
   customerSettings: CrmIntegrationSettings
   pending: boolean
+  canViewU9?: boolean
   canManageBase: boolean
   canManageCustomers: boolean
   onSaveCustomerSettings: (input: UpdateCrmIntegrationInput) => Promise<CrmIntegrationSettings>
@@ -32,7 +33,7 @@ const props = defineProps<{
 
 type U9Tab = 'base' | 'interfaces' | 'customers' | 'material-sync' | 'dingtalk'
 
-const activeTab = ref<U9Tab>('base')
+const activeTab = ref<U9Tab | 'stocked-materials'>(props.canViewU9 === false ? 'stocked-materials' : 'base')
 const loading = ref(false)
 const savingBase = ref(false)
 const savingInterfaces = ref(false)
@@ -399,7 +400,7 @@ onMounted(() => {
   <section class="pdm-project-manager u9-integration-page pdm-loading-host" aria-label="系统接口">
     <SquareLoader v-if="loading" overlay label="正在加载U9C接口设置" />
     <el-tabs v-model="activeTab" class="u9-interface-tabs">
-      <el-tab-pane label="基础设置" name="base">
+      <el-tab-pane v-if="canViewU9 !== false" label="基础设置" name="base">
         <section class="pdm-panel u9-settings-card" aria-label="U9C基础设置">
           <header class="u9-card-heading">
             <div><h2>基础设置</h2><p>所有U9C接口共用服务地址和OAuth2参数；应用密钥只加密保存，页面不会回显。</p></div>
@@ -571,6 +572,9 @@ onMounted(() => {
 
       <el-tab-pane v-if="canManageBase && $slots.dingtalk" label="钉钉应用" name="dingtalk" lazy>
         <slot name="dingtalk" />
+      </el-tab-pane>
+      <el-tab-pane v-if="$slots['stocked-materials']" label="常备件设置" name="stocked-materials" lazy>
+        <slot name="stocked-materials" />
       </el-tab-pane>
     </el-tabs>
   </section>

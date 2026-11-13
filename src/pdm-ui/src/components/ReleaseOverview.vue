@@ -23,7 +23,6 @@ const { write: projectWritable } = useProjectCenterAccess()
 const previewItems = ref<ReleasePreviewItemResult[]>([])
 const previewLoading = ref(false)
 const previewPackageFilter = ref('')
-const previewLatestBomFilter = ref('')
 const retryRequestedId = ref('')
 let previewRequestId = 0
 onBeforeUnmount(() => { previewRequestId++ })
@@ -59,37 +58,6 @@ const previewPackages = computed(() => props.releasePackages
   .filter(item => item.state === '已发布' && requiresReleasePreview(item) && item.previewState && item.previewState !== 'None')
   .sort((left, right) => (right.publishedAt ?? right.createdAt ?? '').localeCompare(left.publishedAt ?? left.createdAt ?? '')))
 const previewAttentionCount = computed(() => props.releasePackages.filter(release => release.state === '已发布' && releasePreviewNeedsAttention(release)).length)
-const latestReleasedBomVersions = computed(() => (['Standard', 'NonStandard', 'Electrical'] as const)
-  .map(kind => props.versions
-    .filter(version => version.kind === kind && version.state === 'Released')
-    .sort((left, right) => right.versionNumber - left.versionNumber)[0])
-  .filter((version): version is BomVersion => Boolean(version)))
-const latestBomFilterOptions = computed(() => latestReleasedBomVersions.value.map(version => ({
-  ...version,
-  kindLabel: version.kind === 'Standard' ? '标准件BOM' : version.kind === 'NonStandard' ? '非标件BOM' : '电气件BOM',
-})))
-const selectedLatestBomVersion = computed(() => latestBomFilterOptions.value.find(version => version.id === previewLatestBomFilter.value))
-function releaseBomVersionId(release: ReleasePackageSummary, kind: BomVersion['kind']) {
-  if (kind === 'Standard') return release.standardBomVersionId
-  if (kind === 'NonStandard') return release.nonStandardBomVersionId
-  return release.electricalBomVersionId
-}
-const selectedLatestBomRelease = computed(() => {
-  const bomVersion = selectedLatestBomVersion.value
-  if (!bomVersion) return undefined
-
-  const normalizedVersionId = bomVersion.id.toLocaleLowerCase()
-  const linkedRelease = previewPackages.value.find(release => releaseBomVersionId(release, bomVersion.kind)?.toLocaleLowerCase() === normalizedVersionId)
-  if (linkedRelease) return linkedRelease
-
-  // Some older packages lack their BOM-version link; use the newest package from that BOM stream.
-  const scopes: ReleaseScope[] = bomVersion.kind === 'Standard'
-    ? ['StandardLongLead', 'StandardFormal', 'StandardSupplement']
-    : bomVersion.kind === 'NonStandard'
-      ? ['NonStandardWithDrawing', 'NonStandardLongLead', 'NonStandardSupplement']
-      : ['ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement']
-  return previewPackages.value.find(release => scopes.includes(release.scope))
-})
 const previewRows = computed(() => {
   const itemsByPackage = new Map<string, ReleasePreviewItemResult[]>()
   for (const item of previewItems.value) {
@@ -100,7 +68,6 @@ const previewRows = computed(() => {
 
   return previewPackages.value
     .filter(release => !previewPackageFilter.value || release.id === previewPackageFilter.value)
-    .filter(release => !selectedLatestBomVersion.value || release.id === selectedLatestBomRelease.value?.id)
     .map(release => {
       const items = itemsByPackage.get(release.id) ?? []
       const counts = { '成功': 0, '失败': 0, '转换中': 0, '排队中': 0 }
@@ -135,11 +102,14 @@ const previewRows = computed(() => {
       return { release, total, succeeded, failed, status, detail, problem, canRetry, percent: total ? Math.floor(succeeded * 100 / total) : null }
     })
 })
-const previewSummary = computed(() => previewRows.value.reduce((summary, row) => ({
-  total: summary.total + row.total,
-  succeeded: summary.succeeded + row.succeeded,
-  failed: summary.failed + row.failed,
-}), { total: 0, succeeded: 0, failed: 0 }))
+const previewSummary = computed(() => {
+  const counts = previewRows.value.reduce((summary, row) => ({
+    total: summary.total + row.total,
+    succeeded: summary.succeeded + row.succeeded,
+    failed: summary.failed + row.failed,
+  }), { total: 0, succeeded: 0, failed: 0 })
+  return `${previewRows.value.length} 个发布包 · 共 ${counts.total} 项 · 成功 ${counts.succeeded} · 失败 ${counts.failed}`
+})
 
 function hasReleasedDrawing(item: ReleasePreviewItemResult) {
   return !item.error?.includes('没有随本次发布转为正式版本')
@@ -183,7 +153,6 @@ watch([() => props.projectId, () => props.token, () => props.releasePackages.map
     if (projectId !== previousProjectId || token !== previousToken) {
       previewItems.value = []
       previewPackageFilter.value = ''
-      previewLatestBomFilter.value = ''
     }
     void loadPreviewItems()
   }, { immediate: true })
@@ -208,7 +177,7 @@ function visibleChangeNumber(release: ReleasePackageSummary) {
     <p v-if="previewAttentionCount" class="pdm-release-preview-attention" role="alert">有 {{ previewAttentionCount }} 个非标件发布包的图纸转换未完成，请在对应发布包旁处理或重试。</p>
     <div class="pdm-release-overview-grid">
       <article v-for="streamRef in streams" :key="streamRef.value.kind" class="pdm-panel pdm-release-stream-card">
-        <header><div><h3>{{ streamRef.value.label }}</h3><small>当前正式版 {{ streamRef.value.version?.label || '—' }}</small></div><span :class="streamRef.value.active.length ? 'is-active' : 'is-clear'">{{ streamRef.value.active.length ? `在途 ${streamRef.value.active.length}` : '无在途' }}</span></header>
+        <header class="pdm-release-overview-heading"><div class="pdm-release-heading-text"><h3>{{ streamRef.value.label }}</h3><small>当前正式版 {{ streamRef.value.version?.label || '—' }}</small></div><span :class="streamRef.value.active.length ? 'is-active' : 'is-clear'">{{ streamRef.value.active.length ? `在途 ${streamRef.value.active.length}` : '无在途' }}</span></header>
         <div v-if="streamRef.value.active.length" class="pdm-release-overview-active">
           <strong>待处理</strong>
           <div v-for="release in streamRef.value.active" :key="release.id">
@@ -237,22 +206,16 @@ function visibleChangeNumber(release: ReleasePackageSummary) {
         </div>
       </article>
       <section class="pdm-panel pdm-release-preview-list" aria-label="图纸转出">
-        <header>
-          <div>
+        <header class="pdm-release-overview-heading">
+          <div class="pdm-release-heading-text">
             <h3>图纸转出</h3>
-            <small>{{ previewRows.length }} 个发布包 · 共 {{ previewSummary.total }} 项 · 成功 {{ previewSummary.succeeded }} · 失败 {{ previewSummary.failed }}</small>
+            <small :title="previewSummary">{{ previewSummary }}</small>
           </div>
           <div class="pdm-release-preview-actions">
             <label class="pdm-release-preview-filter">发布包
               <select v-model="previewPackageFilter" aria-label="按发布包筛选">
                 <option value="">全部（{{ previewPackages.length }}）</option>
                 <option v-for="release in previewPackages" :key="release.id" :value="release.id">{{ release.number }}</option>
-              </select>
-            </label>
-            <label class="pdm-release-preview-filter">最新BOM
-              <select v-model="previewLatestBomFilter" aria-label="按最新BOM筛选">
-                <option value="">全部</option>
-                <option v-for="version in latestBomFilterOptions" :key="version.id" :value="version.id">{{ version.kindLabel }} · {{ version.label }}</option>
               </select>
             </label>
             <button type="button" class="pdm-secondary-action" :disabled="previewLoading" @click="loadPreviewItems">刷新</button>
@@ -297,7 +260,7 @@ function visibleChangeNumber(release: ReleasePackageSummary) {
             </tbody>
           </table>
         </div>
-        <p v-else class="pdm-release-preview-empty">{{ selectedLatestBomVersion ? '当前最新BOM版本没有关联的图纸转出记录。' : '暂无图纸转出记录。' }}</p>
+        <p v-else class="pdm-release-preview-empty">暂无图纸转出记录。</p>
       </section>
     </div>
   </section>
@@ -311,7 +274,7 @@ function visibleChangeNumber(release: ReleasePackageSummary) {
 .pdm-release-overview-active>div>button{width:100%}.pdm-release-overview-active button.pdm-release-retry-conversion{width:auto;margin-top:6px;border:1px solid var(--pdm-blue); color:var(--pdm-text)}.pdm-release-active-description{display:grid;gap:5px;min-width:0;overflow-wrap:anywhere}.pdm-release-publishing-reason{white-space:normal;font-size:12px;color:var(--pdm-text-soft)}.pdm-release-failure-reason{color:var(--pdm-danger);white-space:pre-wrap;font-size:12px}.pdm-release-overview-active em{flex-shrink:0}.pdm-release-overview-active em.is-error{color:var(--pdm-danger)}.pdm-release-published-state{padding:1px 6px;border-radius:999px;background:var(--pdm-green-soft);color:var(--pdm-green);font-size:11px}
 .pdm-release-overview{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;gap:var(--pdm-container-gap);overflow:hidden}
 .pdm-release-overview-grid{flex:1 1 0;min-height:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));gap:var(--pdm-container-gap)}
-.pdm-release-stream-card{padding:0;min-height:0;overflow:auto}.pdm-release-stream-card>header{position:sticky;top:0;z-index:2;background:var(--pdm-surface);display:flex;align-items:center;justify-content:space-between;padding:12px;border-bottom:1px solid var(--pdm-border)}.pdm-release-stream-card h3{margin:0}.pdm-release-stream-card header small{color:var(--pdm-muted)}.pdm-release-stream-card header>span{padding:4px 8px;border-radius:999px}.pdm-release-stream-card .is-active{background:var(--pdm-theme-accent-soft); color:var(--pdm-text)}.pdm-release-stream-card .is-clear{background:var(--pdm-green-soft);color:var(--pdm-green)}.pdm-release-overview-active,.pdm-release-overview-history{display:grid;gap:6px;padding:10px 12px}.pdm-release-overview-active{background:var(--pdm-theme-accent-soft);border-bottom:1px solid var(--pdm-border)}.pdm-release-overview-active button,.pdm-release-overview-history button{padding:7px;border:0;border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);text-align:left}.pdm-release-overview-active button{display:flex;justify-content:space-between;gap:8px}.pdm-release-overview-history button{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}.pdm-release-overview-history button>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-overview-active em{font-style:normal; color:var(--pdm-text)}.pdm-release-overview-history small,.pdm-release-overview-history p{color:var(--pdm-muted)}
+.pdm-release-stream-card{padding:0;min-height:0;overflow:auto}.pdm-release-stream-card>header{position:sticky;top:0;z-index:2}.pdm-release-stream-card header>span{padding:4px 8px;border-radius:999px}.pdm-release-stream-card .is-active{background:var(--pdm-theme-accent-soft); color:var(--pdm-text)}.pdm-release-stream-card .is-clear{background:var(--pdm-green-soft);color:var(--pdm-green)}.pdm-release-overview-active,.pdm-release-overview-history{display:grid;gap:6px;padding:10px 12px}.pdm-release-overview-active{background:var(--pdm-theme-accent-soft);border-bottom:1px solid var(--pdm-border)}.pdm-release-overview-active button,.pdm-release-overview-history button{padding:7px;border:0;border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);text-align:left}.pdm-release-overview-active button{display:flex;justify-content:space-between;gap:8px}.pdm-release-overview-history button{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}.pdm-release-overview-history button>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-overview-active em{font-style:normal; color:var(--pdm-text)}.pdm-release-overview-history small,.pdm-release-overview-history p{color:var(--pdm-muted)}
 .pdm-release-overview-history .pdm-release-row-tail{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail small{white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em{font-style:normal;padding:1px 6px;border-radius:999px;background:var(--pdm-surface-soft);color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em.is-error{background:var(--pdm-danger-soft);color:var(--pdm-danger)}
 .pdm-release-stream-card .pdm-release-package-row{box-sizing:border-box;display:grid;grid-template-columns:minmax(0,6fr) minmax(0,1fr);align-items:center;gap:5px;width:100%;min-width:0;min-height:46px;padding:5px;border:0;border-radius:0;background:transparent;box-shadow:none;text-align:left;font-size:12px;line-height:18px;cursor:pointer}
 .pdm-release-package-row .pdm-release-package-description{display:grid;grid-template-rows:18px 18px;min-width:0;gap:0}
@@ -326,20 +289,33 @@ function visibleChangeNumber(release: ReleasePackageSummary) {
   .pdm-release-overview { overflow:auto; }
   .pdm-release-overview-grid { flex:1 0 auto; grid-template-columns:minmax(0,1fr); grid-template-rows:none; grid-auto-rows:280px; }
 }
-.pdm-release-preview-list{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
-.pdm-release-preview-list>header{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px;padding:8px 12px}
-.pdm-release-preview-list h3{margin:0}
-.pdm-release-preview-list small{color:var(--pdm-muted)}
-.pdm-release-preview-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
-.pdm-release-preview-actions button{box-sizing:border-box;width:auto;min-width:80px;height:var(--pdm-button-compact);padding:2px 3px;overflow:hidden;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}
+.pdm-release-preview-list{display:flex;flex-direction:column;min-width:0;min-height:0;padding:0;overflow:hidden}
+.pdm-release-overview-heading {
+  box-sizing: border-box;
+  height: 60px;
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--pdm-control-gap, 8px);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--pdm-border);
+  background: var(--pdm-surface);
+}
+.pdm-release-heading-text { min-width: 0; }
+.pdm-release-heading-text h3 { margin: 0; }
+.pdm-release-heading-text small { display: block; color: var(--pdm-muted); }
+.pdm-release-heading-text :is(h3, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdm-release-preview-actions { display: grid; grid-auto-flow: column; align-items: center; gap: 6px; }
+.pdm-release-preview-actions button{box-sizing:border-box;width:auto;min-width:80px;height:var(--pdm-button-default);padding:2px 3px;overflow:hidden;border:1px solid var(--pdm-border);border-radius:999px;background:var(--pdm-surface);color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}
 .pdm-release-preview-actions button:disabled{opacity:.55}
-.pdm-release-preview-filter{display:inline-flex;align-items:center;gap:6px;color:var(--pdm-muted);font-size:12px}
-.pdm-release-preview-filter select{box-sizing:border-box;width:140px;min-width:0;height:26px;padding:3px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}.pdm-release-preview-filter select:focus{border-color:var(--pdm-blue);outline:2px solid var(--pdm-theme-accent-focus)}
-.pdm-release-preview-table-wrap{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid var(--pdm-border)}.pdm-release-baseline-table-wrap{flex:1 1 auto;min-height:0;overflow:auto}.pdm-release-baseline-table-wrap .pdm-edit-table th,.pdm-release-baseline-table-wrap .pdm-edit-table td{white-space:nowrap}
+.pdm-release-preview-filter{display:inline-flex;align-items:center;gap:6px;color:var(--pdm-muted);font-size:12px;white-space:nowrap}
+.pdm-release-preview-filter select{box-sizing:border-box;width:clamp(84px,8.3vw,140px);min-width:0;height:28px;padding:3px 6px;border:1px solid var(--pdm-border);border-radius:999px;background:var(--pdm-surface);color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}.pdm-release-preview-filter select:focus{border-color:var(--pdm-blue);outline:2px solid var(--pdm-theme-accent-focus)}
+.pdm-release-preview-table-wrap{flex:1 1 auto;min-height:0;overflow:auto}.pdm-release-baseline-table-wrap{flex:1 1 auto;min-height:0;overflow:auto}.pdm-release-baseline-table-wrap .pdm-edit-table th,.pdm-release-baseline-table-wrap .pdm-edit-table td{white-space:nowrap}
 .pdm-release-preview-table th,.pdm-release-preview-table td{padding:6px 8px;font-size:12px;white-space:nowrap}
 .pdm-release-preview-ok{padding:1px 6px;border-radius:999px;background:var(--pdm-green-soft);color:var(--pdm-green)}
 .pdm-release-preview-pending{ color:var(--pdm-text)}.pdm-release-preview-failed{padding:1px 6px;border-radius:999px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}
-.pdm-release-preview-empty{margin:0;padding:16px 12px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:12px}
+.pdm-release-preview-empty{margin:0;padding:16px 12px;color:var(--pdm-muted);font-size:12px}
 
 .pdm-release-preview-table { width: 100%; min-width: 480px; table-layout: fixed; }
 .pdm-release-preview-table :is(th, td) { padding-inline: 4px; }

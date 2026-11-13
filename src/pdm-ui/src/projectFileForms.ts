@@ -91,7 +91,7 @@ export interface ProjectFileFormIndex {
 
 export const fileFormKinds: { kind: ProjectFileFormKind; button: string; title: string }[] = [
   { kind: 'sample-demand', button: '样件需求', title: '样件需求计划' },
-  { kind: 'customer-change', button: '客户需求变更单', title: '客户需求变更单' },
+  { kind: 'customer-change', button: '需求变更单', title: '客户需求变更单' },
   { kind: 'pre-acceptance', button: '预验收单', title: '预验收单' },
   { kind: 'final-acceptance', button: '终验收单', title: '终验收单' },
 ]

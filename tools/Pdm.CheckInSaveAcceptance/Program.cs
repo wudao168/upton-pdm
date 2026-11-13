@@ -28,6 +28,12 @@ internal static partial class Program
   if(args.Length>0&&args[0]=="--archive-status-proxy-host") { RunArchiveStatusProxyHost(args); return; }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--maintenance-flow-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{ReferenceActivationScenario(args[2]);await MaintenanceJournalScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--idle-maintenance-regression")
+  {try{IdleMaintenanceScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--controlled-download-retry-regression")
+  {try{ControlledDownloadRetryScenario(args[2]).GetAwaiter().GetResult();ControlledDownloadConcurrencyScenario().GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if (args.Length > 1 && args[1] == "--property-window-regression")
   {
    using (var host = new Form { Opacity = 0, ShowInTaskbar = false })
@@ -2231,7 +2237,7 @@ internal static partial class Program
   public string Path;public bool Dirty;public Action OnSave,OnConfigurationNames,OnPropertyRead;bool readOnly=true;readonly List<string> events;
   public bool ReadOnly=>readOnly;
   readonly System.Type nativeType;readonly List<Delegate> modifyHandlers=new List<Delegate>();readonly List<Delegate> destroyHandlers=new List<Delegate>();readonly List<Delegate> reloadHandlers=new List<Delegate>();
-  public int UpdateStamp=1,CopyError,SelectionCount=2;int heldSelection;public string MemoryPayload="current memory";
+  public int UpdateStamp=1,CopyError,SelectionCount=2;int heldSelection;public string MemoryPayload="current memory"; public string ActiveConfiguration="Default";
   public readonly Dictionary<string,string> MemoryProperties=new Dictionary<string,string>{{"物料名称","当前内存属性"}};
   public string TypeName{get=>nativeType.FullName;set{}}
   public bool CanCastTo(System.Type type,object obj)=>type.IsAssignableFrom(nativeType)||type.Name=="IModelDoc2"||type.Name=="ModelDoc2"
@@ -2271,7 +2277,7 @@ internal static partial class Program
    {
     case "GetPathName":value=Path;break;
     case "GetTitle":value=System.IO.Path.GetFileName(Path);break;
-    case "get_ConfigurationManager":value=new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),m=>m.MethodName=="get_ActiveConfiguration"?new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.Configuration",true),c=>c.MethodName=="get_Name"?"Default":throw new Exception(c.MethodName)).GetTransparentProxy():throw new Exception(m.MethodName)).GetTransparentProxy();break;
+    case "get_ConfigurationManager":value=new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),m=>m.MethodName=="get_ActiveConfiguration"?new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.Configuration",true),c=>c.MethodName=="get_Name"?ActiveConfiguration:throw new Exception(c.MethodName)).GetTransparentProxy():throw new Exception(m.MethodName)).GetTransparentProxy();break;
     case "GetType":value=call.MethodBase is MethodInfo info&&info.ReturnType==typeof(System.Type)?(object)nativeType:Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?2:Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?3:1;break;
     case "GetSaveFlag":value=Dirty;break;
     case "GetUpdateStamp":value=UpdateStamp;break;

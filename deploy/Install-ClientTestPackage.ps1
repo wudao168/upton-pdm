@@ -41,6 +41,7 @@ function Get-WebView2RuntimeVersion {
     return ''
 }
 Assert-Hash (Join-Path $desktopSource 'Upton.Pdm.Desktop.exe') $manifest.desktopExeSha256
+Assert-Hash (Join-Path $desktopSource 'UPLM.Updater.exe') $manifest.updaterExeSha256
 Assert-Hash (Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll') $manifest.addinDllSha256
 Assert-Hash $webViewInstaller $manifest.webView2Sha256
 Assert-Hash $net48Installer $manifest.netFramework48Sha256

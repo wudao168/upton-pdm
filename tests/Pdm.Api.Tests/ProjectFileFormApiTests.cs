@@ -101,13 +101,15 @@ public sealed class ProjectFileFormApiTests
         settings = await repository.SaveAuthorizationSettingsAsync(settings with { Templates = [template with { Grants = grants }] }, settings.Revision, default);
         var sampleIndex = await Read<ProjectFileFormIndex>(await client.GetAsync(samplePath));
         Assert.True(sampleIndex.CanArchive);
+        var sharedIndex = await Read<ProjectFileFormIndex>(await client.GetAsync($"/api/projects/{child.Id}/files/sample-demand"));
+        Assert.Equal(sampleIndex.ProjectCode, sharedIndex.ProjectCode);
+        Assert.Equal(sampleIndex.FolderId, sharedIndex.FolderId);
         Assert.Equal(receiving, sampleIndex.Receiving);
         Assert.Null((await Read<ProjectFileFormIndex>(await client.GetAsync(changePath))).Receiving);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/projects/{other.Id}/files/sample-demand")).StatusCode);
         Login(client, "form-other");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(samplePath)).StatusCode);
-        var childIndex = await Read<ProjectFileFormIndex>(await client.GetAsync($"/api/projects/{child.Id}/files/sample-demand"));
-        Assert.True(childIndex.CanEdit);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/projects/{child.Id}/files/sample-demand")).StatusCode);
 
         Login(client, "form-lead");
         var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWwAAAABJRU5ErkJggg==");

@@ -920,22 +920,44 @@ internal sealed partial class PdmApiClient : IDisposable
         if (File.Exists(partialPath)) File.Delete(partialPath);
         try
         {
-            using (var response = await httpClient.GetAsync(
-                string.Concat("api/documents/", file.DocumentId, "/versions/", file.VersionId, "/file?download=false",
-                    file.NativeIsolation == null ? "" : "&nativeIsolationSnapshotId=" + file.NativeIsolation.ReferenceSnapshotId),
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken).ConfigureAwait(false))
+            for (var attempt = 1; ; attempt++)
             {
-                if (!response.IsSuccessStatusCode)
+                cancellationToken.ThrowIfCancellationRequested();
+                using var headersDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                headersDeadline.CancelAfter(TimeSpan.FromSeconds(60));
+                try
                 {
-                    ThrowAuthenticationExpiredIfNeeded(response);
-                    throw new InvalidOperationException(string.Concat(file.FileName, "的受控版本读取失败。"));
-                }
+                    using var response = await controlledOpenHttpClient.GetAsync(
+                        string.Concat("api/documents/", file.DocumentId, "/versions/", file.VersionId, "/file?download=false",
+                            file.NativeIsolation == null ? "" : "&nativeIsolationSnapshotId=" + file.NativeIsolation.ReferenceSnapshotId),
+                        HttpCompletionOption.ResponseHeadersRead, headersDeadline.Token).ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        ThrowAuthenticationExpiredIfNeeded(response);
+                        ThrowServiceUnavailableIfNeeded(response);
+                        if ((int)response.StatusCode == 408) throw new TimeoutException();
+                        throw new InvalidOperationException(string.Concat(file.FileName, "的受控版本读取失败。"));
+                    }
 
-                using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                using (var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 256 * 1024, true))
+                    using var transferDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    transferDeadline.CancelAfter(TimeSpan.FromMinutes(10));
+                    using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+                    using var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 256 * 1024, true);
+                    await input.CopyToAsync(output, 256 * 1024, transferDeadline.Token).ConfigureAwait(false);
+                    transferDeadline.Token.ThrowIfCancellationRequested();
+                    break;
+                }
+                catch (Exception error) when (!cancellationToken.IsCancellationRequested && (error is OperationCanceledException
+                    || error is TimeoutException || error is HttpRequestException || error is ServiceUnavailableException))
                 {
-                    await input.CopyToAsync(output).ConfigureAwait(false);
+                    var reason = error is OperationCanceledException || error is TimeoutException ? "服务器响应超时"
+                        : error is ServiceUnavailableException ? "PLM服务暂不可用" : "PLM连接中断";
+                    if (attempt == 3)
+                        throw new InvalidOperationException("准备工作区时，图档“" + file.FileName + "”下载失败。"
+                            + reason + "，已重试两次。请检查PLM服务及网络后重新打开。", error);
+                    if (File.Exists(partialPath)) File.Delete(partialPath);
+                    PluginDiagnosticLog.Record("工作区下载重试", file.FileName + "；" + reason + "；第" + attempt + "次重试");
+                    await Task.Delay(TimeSpan.FromSeconds(attempt), cancellationToken).ConfigureAwait(false);
                 }
             }
 
@@ -946,6 +968,7 @@ internal sealed partial class PdmApiClient : IDisposable
                 throw new InvalidDataException(string.Concat(file.FileName, "的长度或SHA-256校验失败。"));
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             File.Move(partialPath, path);
             if ((file.NativeIsolation != null || file.IsNativeIsolated) && (!PdmDocumentIdentityStore.TryWriteControlledVersion(path, file.DocumentId,
                     null, file.VersionId, file.Revision, file.Sha256, file.FileLength)

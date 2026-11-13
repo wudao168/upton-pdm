@@ -18,7 +18,7 @@ internal static partial class Program
   SetField(notifications,"blockedControlledOpenMessage","后续独立拦截");
   Check((string)Field(notifications,"blockedControlledOpenMessage")=="后续独立拦截","后续真正的新拦截仍然保留");
   foreach(var mode in new[]{"part","assembly","dirty-owner","stale-version","stale-config","tampered-child","tampered-dependency","owner-binding","different-project","no-loaded-owner","missing-inactive-owner","missing-loaded-owner","ambiguous","original-open",
-      "reference-loaded","reference-unloaded","reference-other-path","reference-denied","reference-race","explicit-latest-conflict"})
+      "reference-loaded","reference-unloaded","reference-occurrence-config","reference-different-dependency-version","reference-other-path","reference-denied","reference-race","explicit-latest-conflict"})
   {
    var folder=Path.Combine(output,"View","unloaded-"+mode);Directory.CreateDirectory(folder);
    var project=Guid.NewGuid();var plugin=New("PdmAddin");var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
@@ -37,6 +37,8 @@ internal static partial class Program
    var requested=New("ControlledOpenManifestDto");Set(requested,"ProjectId",project);Set(requested,"RootDocumentId",Get(target,"DocumentId"));Set(requested,"RootVersionId",Get(target,"VersionId"));Set(requested,"RootRelativePath",Get(target,"FileName"));
    var requestedFiles=(IList)Activator.CreateInstance(Property(requested,"Files").PropertyType);Set(requested,"Files",requestedFiles);
    var root=json.Deserialize(json.Serialize(target),target.GetType());Set(root,"IsRoot",true);requestedFiles.Add(root);requestedFiles.Add(json.Deserialize(json.Serialize(dependency),dependency.GetType()));
+   if(mode=="reference-occurrence-config"||mode=="reference-different-dependency-version")Set(requestedFiles[1],"Configuration","Another occurrence");
+   if(mode=="reference-different-dependency-version")Set(requestedFiles[1],"VersionId",Guid.NewGuid());
    if(mode=="stale-version")Set(root,"VersionId",Guid.NewGuid());
    if(mode=="stale-config")Set(root,"Configuration","Other");
    if(mode=="tampered-child"||mode=="tampered-dependency")
@@ -116,9 +118,9 @@ internal static partial class Program
           Enum.Parse(Type("ControlledOpenMode"),latest?"LatestReadOnly":"CurrentReference"),latest?null:selection[2],null,null,false,
           latest?null:mode=="reference-other-path"?Path.Combine(folder,"other",(string)Get(target,"FileName")):targetPath);
       await task;
-      var succeeds=mode=="reference-loaded"||mode=="reference-unloaded";
+      var succeeds=mode=="reference-loaded"||mode=="reference-unloaded"||mode=="reference-occurrence-config";
       Check((bool)Get(task,"Result")==succeeds&&ReferenceEquals(active,succeeds?childModel:parentModel)
-          &&opens==(mode=="reference-unloaded"?1:0),"单开装配引用仅激活或只读打开原文件，版本、路径、权限冲突受阻："+mode+" "+Field(plugin,"controlledOpenFailureMessage"));
+          &&opens==(mode=="reference-unloaded"||mode=="reference-occurrence-config"?1:0),"单开装配引用仅激活或只读打开原文件，版本、路径、权限冲突受阻："+mode+" "+Field(plugin,"controlledOpenFailureMessage"));
       if(succeeds)
       {
        SetField(plugin,"currentTree",selection[0]);

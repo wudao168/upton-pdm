@@ -98,6 +98,7 @@ internal static partial class Program
         var constructor = Type("PluginSettingsDialog").GetConstructors(Flags).Single();
         var arguments = constructor.GetParameters().Select(parameter =>
         {
+            if (parameter.ParameterType == typeof(string)) return "2026.11.13.120000";
             if (!typeof(Delegate).IsAssignableFrom(parameter.ParameterType)) return Activator.CreateInstance(parameter.ParameterType, true);
             var invoke = parameter.ParameterType.GetMethod("Invoke");
             if (parameter.Name == "saveSettings")

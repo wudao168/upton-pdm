@@ -6851,6 +6851,19 @@ test('release overview displays failure details and published status', async ({ 
   await expect(overview.locator('.pdm-release-publishing-reason')).toContainText('当前环节：等待图纸转换')
   await expect(overview.locator('.pdm-release-publishing-reason')).toContainText('转图服务器无法启动 SolidWorks（错误码 80080005）')
   await expect(overview.getByRole('progressbar', { name: 'RP-SUCCESS 转出进度' })).toHaveAttribute('value', '1')
+  await expect(overview.getByRole('combobox', { name: '按最新BOM筛选' })).toHaveCount(0)
+  const conversionHeader = overview.getByRole('region', { name: '图纸转出' }).locator('header')
+  const electricalHeader = overview.locator('.pdm-release-stream-card > header').filter({ hasText: '电气件BOM' })
+  for (const width of [1703, 1200, 994]) {
+    await page.setViewportSize({ width, height: 963 })
+    const electrical = (await electricalHeader.boundingBox())!
+    const conversion = (await conversionHeader.boundingBox())!
+    const actions = (await conversionHeader.locator('.pdm-release-preview-actions').boundingBox())!
+    expect(conversion.height).toBe(electrical.height)
+    if (width > 1000) expect(conversion.y).toBe(electrical.y)
+    expect(actions.x + actions.width).toBeLessThanOrEqual(conversion.x + conversion.width)
+  }
+  await page.setViewportSize({ width: 994, height: 855 })
   await expect(overview.locator('.pdm-release-publishing-reason')).toBeVisible()
   await expect(overview.getByRole('button', { name: '重试转图', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('release-status-overview.png'), fullPage: false })

@@ -65,7 +65,6 @@ public sealed partial class PdmAddin
         {
             if (IsCurrentConnection())
             {
-                _ = MonitorClientUpdatesAsync();
                 _ = MonitorEditHeartbeatAsync();
                 _ = MonitorThemeAsync();
             }

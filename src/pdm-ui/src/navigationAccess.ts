@@ -5,11 +5,9 @@ const productionOperations = ['production.assign', 'production.schedule', 'produ
 
 const systemTabs = {
   ai: ['ai.settings.manage'],
-  u9: ['settings.customer.manage', 'settings.storage.manage'],
+  u9: ['settings.customer.manage', 'settings.storage.manage', 'stock.settings.manage'],
   users: ['settings.organization.manage', 'system.role.view'],
   settings: ['settings.storage.manage', 'settings.folder.manage'],
-  'archive-warnings': ['settings.storage.manage'],
-  'stocked-materials': ['stock.settings.manage'],
   approval: ['settings.storage.manage'],
   'production-scan': ['production.scan.manage'],
   audit: ['audit.view'],

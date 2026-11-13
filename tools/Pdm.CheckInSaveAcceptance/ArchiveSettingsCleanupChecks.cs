@@ -77,7 +77,7 @@ internal static partial class Program
   finally{rootField.SetValue(null,previous);}
   var constructor=Type("PluginSettingsDialog").GetConstructors(Flags).Single();
   var arguments=constructor.GetParameters().Select(parameter=>{
-   if(!typeof(Delegate).IsAssignableFrom(parameter.ParameterType))return Activator.CreateInstance(parameter.ParameterType,true);
+   if(parameter.ParameterType==typeof(string))return "2026.11.13.120000"; if(!typeof(Delegate).IsAssignableFrom(parameter.ParameterType))return Activator.CreateInstance(parameter.ParameterType,true);
    var invoke=parameter.ParameterType.GetMethod("Invoke");object value;
    if(invoke.ReturnType.IsGenericType&&invoke.ReturnType.GetGenericTypeDefinition()==typeof(Task<>)){
     var resultType=invoke.ReturnType.GetGenericArguments()[0];value=typeof(Task).GetMethod("FromResult").MakeGenericMethod(resultType).Invoke(null,new[]{Activator.CreateInstance(resultType,true)});

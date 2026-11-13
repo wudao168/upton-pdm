@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Xml.Serialization;
 
 namespace Upton.Pdm.SolidWorks;
@@ -47,6 +48,8 @@ internal sealed class EditDraftJournal
 {
     private readonly string directory;
     private static readonly XmlSerializer Serializer = new XmlSerializer(typeof(LocalEditDraft));
+    private int changeSequence;
+    internal int ChangeSequence => Volatile.Read(ref changeSequence);
 
     public EditDraftJournal(string root, string scope)
     {
@@ -96,6 +99,7 @@ internal sealed class EditDraftJournal
             }
             if (File.Exists(target)) File.Replace(temporary, target, null);
             else File.Move(temporary, target);
+            Interlocked.Increment(ref changeSequence);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

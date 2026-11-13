@@ -11,6 +11,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'SystemReleaseHistory.ps1')
+. (Join-Path $PSScriptRoot 'ClientUpdateSigning.ps1')
+$signingCertificate = Get-UplmUpdateSigningCertificate
 $ReleaseNote = Get-UplmReleaseNote -Version $Version -ReleaseNote $ReleaseNote -Fallback '本次发布未填写版本说明。'
 if ([string]::IsNullOrWhiteSpace($DesktopVersion) -or [string]::IsNullOrWhiteSpace($SolidWorksAddinVersion)) {
     throw '必须分别指定 DesktopVersion 和 SolidWorksAddinVersion；未变化的组件请填写服务器当前组件版本。'
@@ -43,6 +45,8 @@ foreach ($required in @($dotnet, $webViewInstaller, $net48Installer)) {
 }
 if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Recurse -Force }
 New-Item -ItemType Directory -Path $desktopOutput,$addinOutput,$updates,$prerequisites -Force | Out-Null
+$updatePublicKey = Join-Path $output 'update-public.xml'
+Export-UplmUpdatePublicKey $signingCertificate $updatePublicKey
 
 Push-Location $root
 try {
@@ -58,9 +62,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'SolidWorks 插件依赖还原失败。' }
     & $dotnet restore 'src\Pdm.CadArchiveWorker\Pdm.CadArchiveWorker.csproj' --nologo -p:NuGetAudit=false
     if ($LASTEXITCODE -ne 0) { throw '独立归档组件依赖还原失败。' }
-    & $dotnet build 'src\Pdm.Desktop\Pdm.Desktop.csproj' --configuration Release --no-restore --nologo
+    & $dotnet build 'src\Pdm.Desktop\Pdm.Desktop.csproj' --configuration Release --no-restore --nologo "-p:InformationalVersion=$DesktopVersion" "-p:UplmUpdatePublicKeyFile=$updatePublicKey"
     if ($LASTEXITCODE -ne 0) { throw '桌面客户端构建失败。' }
-    & $dotnet build 'src\Pdm.SolidWorks.Addin\Pdm.SolidWorks.Addin.csproj' --configuration Release --no-restore --nologo
+    & $dotnet build 'src\Pdm.SolidWorks.Addin\Pdm.SolidWorks.Addin.csproj' --configuration Release --no-restore --nologo "-p:InformationalVersion=$SolidWorksAddinVersion"
     if ($LASTEXITCODE -ne 0) { throw 'SolidWorks 插件构建失败。' }
     & $dotnet build 'src\Pdm.CadArchiveWorker\Pdm.CadArchiveWorker.csproj' --configuration Release --no-restore --nologo
     if ($LASTEXITCODE -ne 0) { throw '独立归档组件构建失败。' }
@@ -134,6 +138,8 @@ $desktopArchive = Join-Path $updates "uplm-desktop-$DesktopVersion.zip"
 $addinArchive = Join-Path $updates "uplm-solidworks-addin-$SolidWorksAddinVersion.zip"
 Compress-Archive -Path (Join-Path $desktopOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force
 Compress-Archive -Path (Join-Path $addinOutput '*') -DestinationPath $addinArchive -CompressionLevel Optimal -Force
+$desktopHash = (Get-FileHash -LiteralPath $desktopArchive -Algorithm SHA256).Hash
+$addinHash = (Get-FileHash -LiteralPath $addinArchive -Algorithm SHA256).Hash
 $bootstrap = [ordered]@{
     SchemaVersion = 2
     ConfigurationVersion = $Version
@@ -146,17 +152,21 @@ $bootstrap = [ordered]@{
     Desktop = [ordered]@{
         Version = $DesktopVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($desktopArchive))"
-        Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $desktopArchive).Hash
+        Sha256 = $desktopHash
+        Signature = Get-UplmUpdateSignature $signingCertificate 'desktop' $DesktopVersion $desktopHash
     }
     SolidWorksAddin = [ordered]@{
         Version = $SolidWorksAddinVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($addinArchive))"
-        Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $addinArchive).Hash
+        Sha256 = $addinHash
+        Signature = Get-UplmUpdateSignature $signingCertificate 'solidworks-addin' $SolidWorksAddinVersion $addinHash
     }
 }
-if ($null -ne $existingBootstrap -and
-    [string]::Equals([string]$existingBootstrap.SolidWorksAddin.Version, $SolidWorksAddinVersion, [StringComparison]::OrdinalIgnoreCase)) {
-    $bootstrap['SolidWorksAddin'] = $existingBootstrap.SolidWorksAddin
+foreach ($component in @('Desktop', 'SolidWorksAddin')) {
+    $previous = if ($null -ne $existingBootstrap) { $existingBootstrap.$component }
+    if ($previous -and $previous.Signature -and $previous.Version -eq $bootstrap[$component].Version) {
+        $bootstrap[$component] = $previous
+    }
 }
 [IO.File]::WriteAllText((Join-Path $serverPublish 'client-bootstrap.json'), ($bootstrap | ConvertTo-Json -Depth 8), $encoding)
 
@@ -177,6 +187,7 @@ $manifest = [ordered]@{
     createdAt = [DateTimeOffset]::Now.ToString('O')
     serverBaseUrl = $serverBase
     desktopExeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $desktopOutput 'Upton.Pdm.Desktop.exe')).Hash
+    updaterExeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $desktopOutput 'UPLM.Updater.exe')).Hash
     addinDllSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $addinOutput 'Upton.Pdm.SolidWorks.Addin.dll')).Hash
     webView2Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $prerequisites 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe')).Hash
     netFramework48Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $prerequisites 'NDP48-x86-x64-AllOS-ENU.exe')).Hash
