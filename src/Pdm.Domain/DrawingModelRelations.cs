@@ -23,4 +23,9 @@ public static class DrawingModelRelations
                 && node.Kind is DocumentKind.Part or DocumentKind.Assembly && node.DocumentId.HasValue)
             .Select(node => node.DocumentId!.Value).Where(id => !direct.Contains(id)).ToHashSet();
     }
+
+    public static bool HasCompleteModelIndex(DocumentReferenceNode drawing) => drawing.Kind == DocumentKind.Drawing
+        && !drawing.StructureIndexPending && !drawing.ReferenceTypeUnverified
+        && !drawing.Children.Any(node => node.ReferenceTypeUnverified || IsDirectModel(node)
+            && (!node.DocumentId.HasValue || node.Status is ReferenceNodeStatus.Missing or ReferenceNodeStatus.Virtual));
 }

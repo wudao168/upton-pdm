@@ -101,7 +101,9 @@ public static class FunctionPermissionCatalog
         Add("document.view", "查看图档及版本", "项目图档", PermissionCodes.ProjectContentView, true, Route("GET", "/projects/{projectId}/documents"), Route("GET", "/documents/{documentId}/versions"), Route("POST", "/documents/version-verifications"));
         foreach (var item in new[] { ("create", "创建发布包", "POST", "/release-packages"), ("edit", "编辑发布包草稿", "PUT", "/release-packages/{releasePackageId}/draft"), ("delete", "删除发布包草稿", "DELETE", "/release-packages/{releasePackageId}/draft"), ("submit", "提交发布包", "POST", "/release-packages/{releasePackageId}/submit"), ("withdraw", "撤回发布包", "POST", "/release-packages/{releasePackageId}/withdraw") })
             Add("release." + item.Item1, item.Item2, "审批发布", PermissionCodes.ReleaseManage, false, Route(item.Item3, item.Item4));
-        Add("release.view", "查看发布记录", "审批发布", PermissionCodes.ProjectContentView, true, Route("GET", "/projects/{projectId}/release-packages"));
+        Add("release.view", "查看发布记录", "审批发布", PermissionCodes.ProjectContentView, true, Route("GET", "/projects/{projectId}/release-packages"),
+            Route("GET", "/release-packages/{releasePackageId}/drawing-review/{documentId}/preview"),
+            Route("POST", "/release-packages/{releasePackageId}/drawing-review/{documentId}/preview"));
         foreach (var category in new[] { ("mechanical", "标准件／非标件BOM", PermissionCodes.BomMechanicalEdit), ("electrical", "电气件BOM", PermissionCodes.BomElectricalEdit) })
         {
             foreach (var action in new[] { ("create", "新增明细"), ("update", "编辑明细"), ("delete", "删除明细"), ("restore", "恢复明细"), ("import", "导入明细") })
@@ -116,6 +118,19 @@ public static class FunctionPermissionCatalog
         {
             var view = result.FirstOrDefault(item => item.Module == operation.Module && item.Code.EndsWith(".view"));
             if (view is not null) result[result.IndexOf(operation)] = operation with { Dependencies = operation.Dependencies.Append(view.Code).Distinct().ToArray() };
+        }
+        // 给通用审批权限声明联合审核入口，不改变其他业务审批原有的权限依赖。
+        foreach (var entry in new[] { (PermissionCodes.ApprovalDecide, "drawing-review"), (PermissionCodes.ApprovalEmergencySubstitute, "drawing-review/emergency") })
+        {
+            var index = result.FindIndex(p => p.Code == entry.Item1);
+            result[index] = result[index] with { Routes = result[index].Routes.Append(Route("POST", "/release-packages/{releasePackageId}/" + entry.Item2)).ToArray() };
+        }
+        var releaseViewIndex = result.FindIndex(p=>p.Code=="release.view");
+        result[releaseViewIndex] = result[releaseViewIndex] with { Routes=result[releaseViewIndex].Routes.Append(Route("GET","/projects/{projectId}/release-drawing-reviews")).ToArray() };
+        foreach (var entry in new[] { (PermissionCodes.ApprovalDecide, "drawing-review/node"), (PermissionCodes.ApprovalEmergencySubstitute, "drawing-review/node/emergency") })
+        {
+            var index = result.FindIndex(p=>p.Code==entry.Item1);
+            result[index] = result[index] with { Routes=result[index].Routes.Append(Route("POST","/release-packages/{releasePackageId}/"+entry.Item2)).ToArray() };
         }
         result.AddRange(ProjectFileFormPermissions.Definitions());
         result.AddRange(SparePartPermissions.Definitions());

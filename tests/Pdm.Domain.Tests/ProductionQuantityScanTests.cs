@@ -93,6 +93,28 @@ public sealed class ProductionQuantityScanTests
     }
 
     [Fact]
+    public async Task LongLeadBatchQrUsesTheFrozenWorkVersionAndOnlyItsOwnBatch()
+    {
+        var f = await Create("Self");
+        var work = f.Version with { Id = Guid.NewGuid(), Revision = RevisionLabel.InitialWork(), Status = DocumentVersionStatus.Work, ReleasePackageId = null };
+        var versions = (ConcurrentDictionary<Guid, DocumentVersion>)typeof(InMemoryPdmRepository)
+            .GetField("versions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(f.Repository)!;
+        versions[work.Id] = work;
+        var package = f.Original with
+        {
+            Id = Guid.NewGuid(), Number = "SCAN-LONG-LEAD", Scope = ReleaseScope.NonStandardLongLead, LocksDocuments = false,
+            VersionBindings = [new(f.Drawing.Id, work.Id, work.Revision.Display, work.Sha256, false, DrawingModelDocumentId: f.Item.SourceDocumentId)],
+            DrawingReview = new(1, [new(f.Drawing.Id, work.Id, work.Sha256, f.Drawing.FileName, "token", [f.Item.Id], true, "Confirmed", [])]),
+            PdfDeliveryArtifacts = new Dictionary<Guid, DocumentPreviewArtifact> { [f.Drawing.Id] = new(DocumentPreviewFormat.Pdf, "delivery.pdf", 1, "pdf", work.Sha256) }
+        };
+        await f.Repository.CreateReleasePackageAsync(package, default);
+        var qr = PdfReleaseIdentity.Display("MODEL-QTY", work.Revision.Display, package.Id);
+        var found = await f.Service.ResolveScanAsync(qr, "admin", UserRole.Administrator, default);
+        Assert.Equal(package.Id, Assert.Single(found).ReleasePackageId);
+        Assert.Empty(await f.Service.ResolveScanAsync(PdfReleaseIdentity.Display("MODEL-QTY", "Z", package.Id), "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
     public async Task PartialPackagingRetryAndReprintKeepQuantityAndObsoleteDrawingBlocksCachedOperations()
     {
         var company = Guid.NewGuid();

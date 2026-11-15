@@ -73,8 +73,8 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
       <button v-if="availableTabs.includes('audit')" type="button" :class="{ 'is-active': activeTab === 'audit' }" @click="activeTab='audit'">全局审计</button>
       <button v-if="availableTabs.includes('client-logs')" type="button" :class="{ 'is-active': activeTab === 'client-logs' }" @click="activeTab='client-logs'">客户端日志</button>
       <button v-if="availableTabs.includes('login-security')" type="button" :class="{ 'is-active': activeTab === 'login-security' }" @click="activeTab='login-security'">登录安全</button>
+      <button v-if="availableTabs.includes('system-info')" type="button" :class="{ 'is-active': activeTab === 'system-info' }" @click="activeTab='system-info'">系统信息</button>
     </nav>
-      <slot name="version" />
     </header>
     <U9IntegrationManagement
       v-if="activeTab === 'u9'"
@@ -111,6 +111,7 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
     <LoginSecuritySettings v-else-if="activeTab === 'login-security'" :key="activeOrganizationId" :token="token" />
     <ApprovalWorkflowSettings v-else-if="activeTab === 'approval'" :token="token" :company-id="activeOrganizationId" :settings="settings" :directory="organizationDirectory" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveSettings" />
     <section v-else-if="activeTab === 'audit'" class="pdm-project-manager"><AuditLog :entries="auditEntries" title="全局操作记录" description="查看所有项目的存档、审批、发布和系统管理操作。" @refresh="$emit('refreshAudit')" /></section>
+    <slot v-else-if="activeTab === 'system-info' && availableTabs.includes('system-info')" name="version" />
   </section>
 </template>
 

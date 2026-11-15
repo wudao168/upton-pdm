@@ -13,6 +13,7 @@ import { useUserDisplayName } from '../userDisplay'
 const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
+  panelTitle?: string
   packageId: string
   packages: DrawingReviewPackage[]
   candidates?: DrawingReviewCandidate[]
@@ -238,8 +239,8 @@ function toggleCollapsed() {
   emit('update:collapsed', collapsed.value)
 }
 
-function canInitiate(candidate: DrawingReviewCandidate) {
-  return props.canSubmit && candidate.state === 'Ready' && candidate.selectable && !!candidate.modelDocumentId
+function canInitiate(_candidate: DrawingReviewCandidate) {
+  return false // 新图纸通过非标件发布包统一审批；此面板只处理历史在途单据。
 }
 
 function selectAllReadyCandidates() {
@@ -393,13 +394,17 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
       <button v-if="collapsed" type="button" class="drawing-review-collapse" aria-label="展开图纸审核栏" title="展开图纸审核栏" @click="toggleCollapsed"><ChevronLeft :size="16" /></button>
       <template v-else>
         <button v-if="scopeOpen" type="button" class="drawing-review-back" aria-label="返回图纸审核" @click="scopeOpen = false"><ArrowLeft :size="16" /></button>
-        <div class="drawing-review-panel__title"><h2>{{ scopeOpen ? '选择审核范围' : '2D图纸审核' }}</h2></div>
+        <div class="drawing-review-panel__title"><h2>{{ panelTitle || '历史2D图纸审核' }}</h2></div>
         <button v-if="scopeOpen" type="button" class="is-primary drawing-review-submit" title="发起图纸审核" :disabled="pending || !selectedCandidateCount || !assignedReviewers.length" @click="submitScope"><Send :size="14" />发起审核</button>
         <button type="button" class="drawing-review-collapse" aria-label="折叠图纸审核栏" title="折叠图纸审核栏" @click="toggleCollapsed"><ChevronRight :size="16" /></button>
       </template>
     </header>
 
-    <template v-if="!collapsed">
+    <template v-if="!collapsed || panelTitle">
+    <div v-show="!collapsed" class="drawing-review-panel__body">
+    <slot name="scope" />
+  <slot name="content">
+    <p class="drawing-review-merge-hint">新图纸请在非标件BOM中发起发布，BOM与图纸在同一流程审核、批准后同步发布。此处保留历史审核记录与在途处理。</p>
     <template v-if="scopeOpen">
       <section class="drawing-review-scope">
         <label class="drawing-review-scope__search"><SearchField><input v-model="scopeSearch" aria-label="搜索审核图档" placeholder="搜索图号或名称" /></SearchField></label>
@@ -444,7 +449,6 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
     <div class="drawing-review-panel__toolbar">
       <label><select v-model="overviewState" aria-label="筛选图纸审核状态"><option v-for="option in overviewStateOptions" :key="option.value" :value="option.value">{{ option.label }}（{{ option.count }}）</option></select></label>
       <button type="button" class="drawing-review-toolbar__refresh" title="刷新审核状态" :disabled="pending" @click="emit('refresh')"><RefreshCw :size="14" />刷新</button>
-      <button v-if="canSubmit" type="button" class="drawing-review-toolbar__create" title="发起图纸审核" :disabled="pending" @click="openScopeSelection"><Send :size="14" />发起审核</button>
     </div>
 
     <section class="drawing-review-overview" aria-label="图纸审核状态表">
@@ -478,9 +482,8 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
       <div v-if="overviewSelectableIds.length" class="drawing-review-overview__batch">
         <span>已选 {{ selectedOverviewCandidates.length }} 张</span>
         <button
-          type="button"
+          v-if="batchPrimaryMode && batchPrimaryMode !== 'submit'" type="button"
           :class="batchPrimaryMode === 'approve' ? 'is-approve' : 'is-submit'"
-          :title="batchPrimaryMode === 'submit' ? '选择审核人后发起审核' : undefined"
           :disabled="batchPrimaryDisabled"
           @click="runBatchPrimary()"
         >{{ batchPrimaryLabel }}</button>
@@ -495,9 +498,8 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 
     <section v-if="!activePackage" class="drawing-review-panel__empty">
       <MessageSquareText :size="34" />
-      <strong>尚未提交图纸审核</strong>
-      <p>发起前可全选或手工勾选；系统只冻结非标 BOM 中唯一关联的2D工程图。</p>
-      <button v-if="canSubmit" type="button" class="is-primary" :disabled="pending" @click="openScopeSelection"><Send :size="15" />选择范围并发起审核</button>
+      <strong>暂无历史审核单</strong>
+      <p>请在非标件BOM中创建发布包并提交统一审批。</p>
     </section>
 
     <template v-else>
@@ -521,12 +523,19 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 
     </template>
     </template>
+    </slot>
+    </div>
     </template>
   </aside>
 </template>
 
 <style scoped>
 .drawing-review-panel{font-size:12px;position:absolute;z-index:20;inset:0 0 0 auto;box-sizing:border-box;width:300px;min-width:0;min-height:0;height:100%;display:flex;flex-direction:column;overflow-x:hidden;overflow-y:auto;background:var(--pdm-surface);border-color:var(--pdm-border);box-shadow:-10px 0 28px var(--pdm-shadow)}
+.drawing-review-panel{padding:0;scrollbar-gutter:auto}
+.drawing-review-panel__body{box-sizing:border-box;width:100%;min-width:0;margin:0;padding:0}
+/* 已启用悬浮滚动条时不再保留原生滚动条宽度，兼容桌面WebView。 */
+.drawing-review-panel[data-overlayscrollbars-viewport]{scrollbar-width:none!important}
+.drawing-review-panel[data-overlayscrollbars-viewport]::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}
 .drawing-review-panel.is-overlay-hosted{position:relative;inset:auto;width:100%;height:100%;border-radius:0;backdrop-filter:none;-webkit-backdrop-filter:none}
 .drawing-review-panel__header{display:flex;align-items:center;gap:8px;padding:12px 13px 9px;border-bottom:1px solid var(--pdm-border-soft)}
 .drawing-review-panel__title{flex:0 1 auto;min-width:0}.drawing-review-panel__title span{ color:var(--pdm-text);font-size:12px;font-weight:600;letter-spacing:.12em}.drawing-review-panel__header h2{margin:2px 0 0;overflow:hidden;font-size:14px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}

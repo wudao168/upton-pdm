@@ -148,6 +148,8 @@ const visibleTabs = computed(() => tabs
 const switchConfirmationPending = ref(false)
 const projectSettingsOpen = ref(false)
 const projectBrowserOpen = ref(false)
+const projectBrowserContentReady = ref(false)
+let projectBrowserGeneration = 0
 const quickProjectQuery = ref('')
 const projectSearchQuery = ref('')
 const projectTypeFilter = ref<string[]>([])
@@ -206,7 +208,7 @@ const pagedRootProjects = computed(() => {
 })
 
 watch([projectSearchQuery, projectTypeFilter, projectCustomerFilter, projectExecutionUnitFilter, projectPersonFilter, projectPageSize], () => { projectPage.value = 1 })
-watch(projectPageCount, pageCount => { if (projectPage.value > pageCount) projectPage.value = pageCount })
+watch(() => projectBrowserContentReady.value ? projectPageCount.value : 1, pageCount => { if (projectPage.value > pageCount) projectPage.value = pageCount })
 watch(() => props.project.id, () => { projectSettingsOpen.value = false })
 watch(() => rootProject.value.id, () => { quickProjectQuery.value = '' })
 
@@ -228,12 +230,18 @@ function openProjectBrowser() {
   projectSearchQuery.value = quickProjectQuery.value.trim()
   projectTypeFilter.value = projectSearchQuery.value ? [] : [...defaultProjectTypes.value]
   quickProjectQuery.value = ''
+  const generation = ++projectBrowserGeneration
   projectBrowserOpen.value = true
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (generation === projectBrowserGeneration && projectBrowserOpen.value) projectBrowserContentReady.value = true
+  }))
 }
 
 function closeProjectBrowser() {
   if (switchConfirmationPending.value) return
   projectBrowserOpen.value = false
+  projectBrowserContentReady.value = false
+  projectBrowserGeneration++
   projectSearchQuery.value = ''
   projectTypeFilter.value = []
   projectCustomerFilter.value = ''
@@ -358,6 +366,8 @@ function drawingDocumentCount(project: ProjectSummary) {
           <div><h3 id="pdm-project-browser-title">浏览项目</h3><p>{{ defaultProjectTypes.length ? '默认显示标准项目 P，' : '' }}可多选项目分类，清空分类则显示全部。</p></div>
 
         </div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭项目浏览" :disabled="switchConfirmationPending" @click="closeProjectBrowser">×</button></header></template>
+        <p v-if="!projectBrowserContentReady" role="status">正在准备项目列表…</p>
+        <template v-else>
         <div class="pdm-project-browser-search">
           <SearchField><input v-model="projectSearchQuery" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户、型号或序列号" autofocus></SearchField>
           <span>找到 {{ filteredRootProjects.length }} 个项目</span>
@@ -399,6 +409,7 @@ function drawingDocumentCount(project: ProjectSummary) {
           <button type="button" class="pdm-secondary-action" aria-label="下一页" :disabled="projectPage >= projectPageCount" @click="projectPage++">下一页</button>
         </div>
         <PanelActions><footer><button type="button" class="pdm-secondary-action" :disabled="switchConfirmationPending" @click="closeProjectBrowser">取消</button></footer></PanelActions>
+        </template>
       </RawDrawerPanel>
     </div></Transition>
 

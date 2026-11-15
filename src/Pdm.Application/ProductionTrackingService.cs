@@ -142,6 +142,7 @@ public sealed record ProductionTrackingSummary(Guid ReleasePackageId, Guid Proje
 {
     public DateTimeOffset? ReceivedAt { get; init; }
     public bool HasReleaseAttention { get; init; }
+    public bool HasUnscheduledProduction { get; init; }
 }
 
 public sealed record AssignProductionLot(Guid LineId, string Route, decimal Quantity, string? Supplier,
@@ -244,6 +245,13 @@ public static class ProductionTrackingRules
         return state.Lots.All(lot => lot.Route == "External") ? "外协待交货" : "已排产待执行";
     }
 
+    public static bool HasUnassignedDemand(ProductionTrackingState state) =>
+        state.Lines.Any(line => Unassigned(state, line) > 0 && Issued(state, line.Id) < EffectiveDemand(state, line));
+
+    public static bool HasUnscheduledProduction(ProductionTrackingState state) =>
+        HasUnassignedDemand(state) || state.Lots.Any(lot => lot.Route == "Self" && lot.Schedule.Count == 0
+            && ProductionQuantityFlow.Outstanding(state, lot) > 0);
+
     public static ProductionTrackingSummary Summary(ProductionTrackingState state)
     {
         var remaining = state.Lines.Where(line => Issued(state, line.Id) < EffectiveDemand(state, line)).ToArray();
@@ -264,7 +272,11 @@ public static class ProductionTrackingRules
             remaining.Count(line => line.Priority == "Urgent"),
             remaining.Count(line => line.Priority == "Priority"),
             remaining.Where(line => line.RequiredOn.HasValue).Select(line => line.RequiredOn).Min(),
-            forecast, atRisk, unplanned, state.Lines.Sum(line => line.RequiredQuantity)) { ReceivedAt = state.ReceivedAt };
+            forecast, atRisk, unplanned, state.Lines.Sum(line => line.RequiredQuantity))
+        {
+            ReceivedAt = state.ReceivedAt,
+            HasUnscheduledProduction = HasUnscheduledProduction(state)
+        };
     }
 }
 
@@ -343,15 +355,24 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 var releases = await repository.ListReleasePackagesAsync(project.Id, ct);
                 var releasesById = releases.ToDictionary(item => item.Id);
                 var packages = await EnsureProjectAsync(project, ct, releases);
-                var states = packages.Select(item => item.State);
-                if (selfOnly) states = states.Select(ProductionTrackingRules.SelfProduction).OfType<ProductionTrackingState>();
-                if (externalOnly) states = states.Select(ProductionTrackingRules.ExternalProduction).OfType<ProductionTrackingState>();
-                var summaries = states.Select(state => ProductionTrackingRules.Summary(state) with {
-                    HasReleaseAttention = releasesById.TryGetValue(state.ReleasePackageId, out var release)
-                        && ReleasePreviewPolicy.RequiresConversion(release)
-                        && (release.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Running or ReleasePreviewState.Failed)
-                }).ToArray();
-                return summaries.Length == 0 ? null : new ProductionTrackingProject(project.Id,
+                var summaries = new List<ProductionTrackingSummary>();
+                foreach (var record in packages)
+                {
+                    var state = record.State;
+                    var projection = selfOnly ? ProductionTrackingRules.SelfProduction(state)
+                        : externalOnly ? ProductionTrackingRules.ExternalProduction(state) : state;
+                    if (projection is null && selfOnly && ProductionTrackingRules.HasUnassignedDemand(state))
+                        projection = state;
+                    if (projection is null) continue;
+                    summaries.Add(ProductionTrackingRules.Summary(projection) with
+                    {
+                        HasUnscheduledProduction = ProductionTrackingRules.HasUnscheduledProduction(state),
+                        HasReleaseAttention = releasesById.TryGetValue(state.ReleasePackageId, out var release)
+                            && ReleasePreviewPolicy.RequiresConversion(release)
+                            && (release.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Running or ReleasePreviewState.Failed)
+                    });
+                }
+                return summaries.Count == 0 ? null : new ProductionTrackingProject(project.Id,
                     project.Code, project.Name,
                     summaries);
             }));
@@ -1207,8 +1228,13 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
     {
         code = code.Trim();
         if (PdfReleaseIdentity.TryDecodeBatch(code, out var batchModel, out var batchRevision, out var batchId))
+        {
+            var batch = await repository.FindReleasePackageAsync(batchId, ct);
+            if (batch is not null && ReleasePreviewPolicy.DeliversFrozenDrawings(batch))
+                return await ResolveFrozenDeliveryScanAsync(batch, batchModel, batchRevision, actor, role, ct);
             return (await ResolveDisplayScanAsync(batchModel, batchRevision, actor, role, ct, batchId))
                 .Where(item => item.ReleasePackageId == batchId).ToArray();
+        }
         if (PdfReleaseIdentity.TryDecodeDisplay(code, out var model, out var revision))
             return await ResolveDisplayScanAsync(model, revision, actor, role, ct);
         if (code.Trim().StartsWith("UPLM-PDF|", StringComparison.Ordinal))
@@ -1323,6 +1349,31 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             results.AddRange(await ResolvePdfScanAsync(PdfReleaseIdentity.Encode(package.Id, binding.VersionId), actor, role, ct));
         }
         return results.DistinctBy(item => (item.ReleasePackageId, item.LineId, item.LotId)).ToArray();
+    }
+
+    private async Task<IReadOnlyList<ProductionScanResult>> ResolveFrozenDeliveryScanAsync(ReleasePackage package,
+        string model, string revision, string actor, UserRole role, CancellationToken ct)
+    {
+        if (package.State != ReleasePackageState.Published) return [];
+        await RequireProjectAsync(package.ProjectId, actor, role, ct);
+        var results = new List<ProductionScanResult>();
+        foreach (var item in package.DrawingReview?.Items ?? [])
+        {
+            if (!package.PdfDeliveryArtifacts.TryGetValue(item.DocumentId, out var preview)
+                || preview.Format != DocumentPreviewFormat.Pdf || !string.Equals(preview.SourceSha256, item.Sha256, StringComparison.OrdinalIgnoreCase))
+                continue;
+            var drawing = await repository.FindDocumentAsync(item.DocumentId, ct);
+            if (drawing?.ProjectId != package.ProjectId || drawing.Kind != DocumentKind.Drawing || drawing.State == DocumentLifecycleState.Obsolete)
+                continue;
+            var version = await repository.FindDocumentVersionAsync(item.DocumentId, item.VersionId, ct);
+            if (version is null || version.Sha256 != item.Sha256 || version.Revision.Display != revision) continue;
+            var modelIds = ReleaseBoundSourceReader.ModelDocumentIds(package, item.DocumentId, version.ReferenceSnapshot);
+            if (!string.Equals(ReleaseBoundSourceReader.DrawingModel(package, version, modelIds, drawing.DrawingNumber), model,
+                StringComparison.OrdinalIgnoreCase)) continue;
+            results.AddRange((await ResolvePdfScanAsync(PdfReleaseIdentity.Encode(package.Id, item.VersionId), actor, role, ct))
+                .Where(result => result.ReleasePackageId == package.Id));
+        }
+        return results.DistinctBy(result => result.LineId).ToArray();
     }
 
     private async Task<IReadOnlyList<ProductionScanResult>> ResolvePdfScanAsync(string code, string actor, UserRole role, CancellationToken ct)

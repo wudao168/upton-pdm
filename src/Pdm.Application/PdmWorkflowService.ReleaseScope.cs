@@ -42,7 +42,7 @@ public sealed partial class PdmWorkflowService
         var publishIds = drawingBomRelease ? drawings : models.Concat(drawings).ToHashSet();
         var bindings = new Dictionary<Guid, ReleaseVersionBinding>();
         var drawingIds = new HashSet<Guid>();
-        var reviewedItems = drawingBomRelease
+        var reviewedItems = drawingBomRelease && !ReleaseDrawingReview.Supports(package.Scope)
             ? (await repository.ListDrawingReviewPackagesAsync(package.ProjectId, ct)).Where(review => IsDrawingReviewApproved(review.State))
                 .SelectMany(review => review.Items).Where(item => IsDrawingReviewed(item.DrawingState)).ToArray() : [];
         var reference = package.ReferenceSnapshotId.HasValue ? await repository.FindReferenceSnapshotAsync(package.ReferenceSnapshotId.Value, ct) : null;
@@ -84,7 +84,8 @@ public sealed partial class PdmWorkflowService
                 var targetRevision = version.Status == DocumentVersionStatus.Work ? version.Revision.Release().Display : version.Revision.Display;
                 BomDrawingRevision.ValidateDrawingProperties(version, targetRevision, document.FileName);
             }
-            if (selectedForPublication && document.Kind == DocumentKind.Drawing) drawingIds.Add(id);
+            if ((selectedForPublication || package.Scope == ReleaseScope.NonStandardLongLead && publishIds.Contains(id))
+                && document.Kind == DocumentKind.Drawing) drawingIds.Add(id);
             var storedName = ReleaseBoundSourceReader.FileName(version.ReferenceSnapshot.DocumentId == id ? version.ReferenceSnapshot.FileName : document.FileName);
             bindings[id] = new(id, version.Id, version.Revision.Display, version.Sha256, selectedForPublication, storedName,
                 selectedForPublication && version.Status == DocumentVersionStatus.Work,
@@ -124,13 +125,16 @@ public sealed partial class PdmWorkflowService
         await RequireCompletePackageReleaseIndexAsync(package, package.ReferenceSnapshotId.HasValue
             ? await repository.FindReferenceSnapshotAsync(package.ReferenceSnapshotId.Value, ct) : null, ct);
         if (package.VersionBindings is null) return; // Existing in-flight packages keep their original rules.
-        foreach (var binding in package.VersionBindings.Where(item => item.Publish))
+        foreach (var binding in package.VersionBindings.Where(item => item.Publish || package.DrawingReview?.Items.Any(d => d.DocumentId == item.DocumentId) == true))
         {
             var history = await repository.ListDocumentVersionsAsync(binding.DocumentId, ct);
             var bound = history.FirstOrDefault(version => version.Id == binding.VersionId);
             if (!IsDrawingBomRelease(package.Scope) && bound?.ReferenceSnapshot.HasPendingStructureIndex == true)
                 throw new PdmRuleException("本次发布图档的结构或图模关联仍待补全，原生文件已保留，请补全后再发布。");
             var latest = history.FirstOrDefault();
+            if (package.DrawingReview is not null && (bound is null || bound.Sha256 != binding.Sha256
+                || latest is null || latest.Id != binding.VersionId && !MatchesReviewedVersion(bound, latest.Id, history)))
+                throw new PdmConflictException("本次审核绑定的图纸版本已变化，请核对图档及发布包冻结版本。");
             if (IsDrawingBomRelease(package.Scope) && binding.DrawingModelDocumentId.HasValue && !binding.RequiresPromotion
                 && (bound is null || latest is null || latest.Id != bound.Id && !MatchesReviewedVersion(bound, latest.Id, history)))
                 throw new PdmConflictException("本次发布绑定的2D图纸版本已变化，请刷新草稿后核对当前图纸的审核记录。");

@@ -17,6 +17,37 @@ internal static partial class Program
 {
     static async Task DiscardWorkingPathScenario()
     {
+        foreach(var mode in new[]{"missing-reference","unknown-existing-reference","deleted-working-file"})
+        using(var fixture=new DiscardPathFixture())
+        {
+            File.WriteAllText(fixture.CurrentPath,"selected edit before discard");
+            DiscardCall(fixture.Plugin,"MarkDiscardedLocalEdit",fixture.Node);
+            var before=fixture.Records().Single(entry=>(string)Get(entry,"SourcePath")==fixture.CurrentPath);
+            if(mode=="deleted-working-file") { File.Delete(fixture.CurrentPath);fixture.Loaded=false; }
+            else
+            {
+                fixture.ReferenceTargetPath=Path.Combine(Path.GetDirectoryName(fixture.CurrentPath),"MISSING.SLDPRT");
+                if(mode=="unknown-existing-reference")
+                {
+                    var foreign=Path.Combine(fixture.DirectoryPath,"Snapshots","MISSING.SLDPRT");
+                    Directory.CreateDirectory(Path.GetDirectoryName(foreign));File.WriteAllText(foreign,"foreign reference must not be substituted");
+                }
+            }
+            var blocked=false;try{await fixture.Restore();}catch(IOException){blocked=true;}
+            if(blocked!=(mode=="unknown-existing-reference"))throw new Exception("Missing-reference recovery boundary: "+mode);
+            var after=fixture.Records().Single(entry=>(string)Get(entry,"SourcePath")==fixture.CurrentPath);
+            if((bool)Get(after,"DiscardPending")!=blocked||!Equals(Get(before,"DraftPath"),Get(after,"DraftPath")))throw new Exception("Discard intent/draft retention: "+mode);
+            if(mode=="deleted-working-file")
+            {
+                if(File.Exists(fixture.CurrentPath)||fixture.Handler.Downloads!=0||fixture.Closes!=0)throw new Exception("Deleted workspace was unexpectedly rewritten");
+                File.WriteAllText(fixture.CurrentPath,"fixture cleanup placeholder");
+            }
+            else if(!blocked&&(File.ReadAllText(fixture.CurrentPath)!=DiscardPathFixture.Canonical
+                ||File.Exists(fixture.ReferenceTargetPath)||((IList)Get(fixture.Manifest,"ReferenceIssues")).Count!=1))
+                throw new Exception("Missing reference was replaced, dropped or not reported");
+            if(blocked&&(fixture.Closes!=0||File.ReadAllText(fixture.CurrentPath)!="selected edit before discard"))throw new Exception("Unknown existing reference altered the editor");
+            fixture.AssertOldUntouched();Console.WriteLine("PASS: discard recovery "+mode+" preserves drafts and unrelated files");
+        }
         foreach (var mode in new[] { "clean", "saved-edit", "download-failure", "subsequent-edit", "locked-retry", "same-title" })
         using (var fixture = new DiscardPathFixture())
         {
@@ -332,6 +363,6 @@ internal static partial class Program
         public DiscardAssemblyProxy(System.Type modelType,Func<IMethodCallMessage,object> callback):base(modelType){this.modelType=modelType;this.callback=callback;}
         public string TypeName{get;set;}
         public bool CanCastTo(System.Type type,object value)=>type==typeof(object)||type.Namespace=="SolidWorks.Interop.sldworks"&&new[]{"ModelDoc2","IModelDoc2","AssemblyDoc","IAssemblyDoc"}.Contains(type.Name);
-        public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var value=call.MethodName=="GetType"&&(call.MethodBase as MethodInfo)?.ReturnType==typeof(System.Type)?modelType:callback(call);return new ReturnMessage(value,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception error){return new ReturnMessage(error,call);}}
+        public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var value=call.MethodName=="GetType"&&(call.MethodBase as MethodInfo)?.ReturnType==typeof(System.Type)?modelType:callback(call);return value as IMessage ?? new ReturnMessage(value,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception error){return new ReturnMessage(error,call);}}
     }
 }

@@ -24,7 +24,7 @@ describe('AI对话传输与入口', () => {
   })
   it('对话和服务管理独立授权，撤权隐藏入口', () => {
     const can = (permission: string) => permission === 'ai.settings.manage'
-    expect(systemManagementTabs(can)).toEqual(['ai']); expect(canViewNavigation('ai-assistant', can)).toBe(false)
+    expect(systemManagementTabs(can)).toEqual(['ai', 'system-info']); expect(canViewNavigation('ai-assistant', can)).toBe(false)
     expect(canViewNavigation('ai-assistant', p => p === 'ai.chat.use')).toBe(true)
     expect(canViewNavigation('ai-assistant', () => false)).toBe(false)
   })

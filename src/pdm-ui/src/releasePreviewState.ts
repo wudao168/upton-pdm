@@ -12,7 +12,8 @@ export function projectReleaseAttention(project: Pick<ProjectSummary, 'hasReleas
 }
 
 export function requiresReleasePreview(release: Pick<ReleasePackageSummary, 'locksDocuments' | 'scope'>) {
-  return release.locksDocuments !== false && ['NonStandardWithDrawing', 'NonStandardSupplement', 'LegacyCombined'].includes(release.scope)
+  return ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'].includes(release.scope)
+    || release.scope === 'LegacyCombined' && release.locksDocuments !== false
 }
 
 export function releasePreviewUnfinished(release: ReleasePackageSummary) {
@@ -40,7 +41,7 @@ export function releasePreviewStateLabel(releasePackage: ReleasePackageSummary) 
   } as Record<string, string>)[releasePackage.previewState ?? 'None'] ?? String(releasePackage.previewState)
 }
 
-/** 列表里的转图状态短标签；没有转图事项（长交期等）时返回空串。 */
+/** 列表里的转图状态短标签；不需要转图时返回空串。 */
 export function releasePreviewStateTag(releasePackage: ReleasePackageSummary) {
   if (!requiresReleasePreview(releasePackage)) return ''
   if (releasePreviewNeedsAttention(releasePackage)) return '转图失败'

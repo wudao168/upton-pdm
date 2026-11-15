@@ -83,6 +83,29 @@ describe('发布跟踪快捷筛选与发布包切换', () => {
     }
     wrapper.unmount()
   })
+  it('默认跨项目按发布时间排序，支持按项目号分组并保留选中包', async () => {
+    const base = (await api.listProductionTrackingProjects('token'))[0]!
+    records.two.state.projectId = 'other'
+    records.two.state.projectCode = 'P10'
+    vi.mocked(api.listProductionTrackingProjects).mockResolvedValue([
+      { ...base, code: 'P2', packages: [{ ...base.packages[0]!, projectCode: 'P2', publishedAt: '2026-10-18T00:00:00Z', status: '待接收', hasUnscheduledProduction: true }] },
+      { id: 'other', code: 'P10', name: '其他项目', packages: [{ ...base.packages[1]!, projectId: 'other', projectCode: 'P10', publishedAt: '2026-10-20T00:00:00Z', status: '已排产待执行' }] },
+    ])
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
+    await flushPromises()
+    const packages = wrapper.findAll('.production-workbench__package')
+    expect(packages.map(item => item.get('.production-workbench__package-number').text())).toEqual(['P10 · RP-two', 'P2 · RP-one'])
+    expect(packages[0]!.classes()).not.toContain('is-unscheduled')
+    expect(packages[1]!.classes()).toContain('is-unscheduled')
+    expect(packages[1]!.text()).toContain('未排产')
+    expect(packages[0]!.classes()).toContain('selected')
+    const reads = vi.mocked(api.readProductionTrackingRelease).mock.calls.length
+    await wrapper.get('[aria-label="发布包排序"]').setValue('project')
+    expect(wrapper.findAll('.production-workbench__project strong').map(item => item.text())).toEqual(['P2', 'P10'])
+    expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-two')
+    expect(api.readProductionTrackingRelease).toHaveBeenCalledTimes(reads)
+    wrapper.unmount()
+  })
   it('阶段筛选合并具体状态，保留状态文字与父子选中联动', async () => {
     const base = (await api.listProductionTrackingProjects('token'))[0]!
     vi.mocked(api.listProductionTrackingProjects).mockResolvedValue([{ ...base, packages: [
@@ -90,6 +113,7 @@ describe('发布跟踪快捷筛选与发布包切换', () => {
     ] }])
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['production.schedule'] } })
     await flushPromises()
+    await wrapper.get('[aria-label="发布包排序"]').setValue('project')
     const filter = wrapper.get('[aria-label="筛选生产状态"]')
     expect(filter.findAll('option')).toHaveLength(9)
     expect(wrapper.find('.production-workbench__project-chevron').exists()).toBe(false)
@@ -108,6 +132,7 @@ describe('发布跟踪快捷筛选与发布包切换', () => {
   it('展开折叠总控只调整项目列表，保留当前发布包', async () => {
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
+    await wrapper.get('[aria-label="发布包排序"]').setValue('project')
     expect(wrapper.find('.production-workbench__all-categories').exists()).toBe(false)
     const selected = wrapper.get('.production-workbench__package.selected').text()
     const button = wrapper.get('.production-workbench__toggle-projects')
@@ -129,6 +154,7 @@ describe('发布跟踪快捷筛选与发布包切换', () => {
     })
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['production.assign'] } })
     await flushPromises()
+    await wrapper.get('[aria-label="发布包排序"]').setValue('project')
     const packages = () => wrapper.findAll('.production-workbench__package')
     expect(wrapper.get('.production-workbench__project').attributes('data-release-attention')).toBe('new')
     expect(packages()[0]!.attributes('data-release-attention')).toBe('new')
@@ -147,6 +173,7 @@ describe('发布跟踪快捷筛选与发布包切换', () => {
     previewAttention.add('one')
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
+    await wrapper.get('[aria-label="发布包排序"]').setValue('project')
     expect(wrapper.get('.production-workbench__project').attributes('data-release-attention')).toBe('error')
     const packages = wrapper.findAll('.production-workbench__package')
     expect(packages[0]!.attributes('data-release-attention')).toBe('error')
@@ -182,6 +209,7 @@ describe('发布跟踪快捷筛选与发布包切换', () => {
     ])
     const wrapper = mount(ProductionWorkbench, { attachTo: document.body, props: { token: 'token', username: 'admin', permissions: ['production.schedule'] } })
     await flushPromises()
+    await wrapper.get('[aria-label="发布包排序"]').setValue('project')
     await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === tabName)!.trigger('click')
     await flushPromises()
     const headers = () => wrapper.findAll('.production-workbench__project')
@@ -701,6 +729,18 @@ describe('三栏自制排程', () => {
     expect(wrapper.get('[aria-label="发布包物料明细"]').text()).toContain('外协板')
     wrapper.unmount()
   })
+  it('自制追溯可打开尚未分配批次的发布包', async () => {
+    const base = (await api.listProductionTrackingProjects('token'))[0]!
+    records.one.state.lots = []
+    records.one.state.movements = []
+    vi.mocked(api.listProductionTrackingProjects).mockResolvedValue([{ ...base, packages: [
+      { ...base.packages[0]!, status: '待分配', hasUnscheduledProduction: true },
+    ] }])
+    const wrapper = await openSchedule()
+    expect(wrapper.get('.production-workbench__package.selected.is-unscheduled').text()).toContain('RP-one')
+    expect(wrapper.get('[aria-label="自制批次明细"]').text()).toContain('当前发布包暂无自制批次')
+    wrapper.unmount()
+  })
   it('排程只显示自制发布包和批次，混合物料不混入外协数量、状态与交期，刷新后清除外协选择', async () => {
     const self = records.one.state.lots[1]
     self.promisedOn = '2026-11-04'
@@ -727,7 +767,7 @@ describe('三栏自制排程', () => {
     await wrapper.findAll('button').find(button => button.text() === '刷新')!.trigger('click')
     await flushPromises()
     expect(wrapper.findAll('.production-workbench__package')).toHaveLength(0)
-    expect(wrapper.text()).toContain('暂无已分配自制批次的发布包')
+    expect(wrapper.text()).toContain('暂无自制或待分配的发布包')
     expect(wrapper.find('.production-workbench__schedule-form').exists()).toBe(false)
     expect(wrapper.get('[aria-label="排程安排"]').text()).not.toContain('支架')
     await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '发布跟踪')!.trigger('click')

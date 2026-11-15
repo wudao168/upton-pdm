@@ -16,6 +16,7 @@ export function isFoldButton(button: HTMLButtonElement) {
 // 导航、树节点、日历格和图片入口属于业务内容，不作为操作按钮装饰。
 export const buttonNavigationSelector = 'nav, .pdm-sidebar, .pdm-tabs, [role="tablist"], .el-tree, [role="tree"], .el-pagination, .el-picker-panel, .el-dropdown-menu, .pdm-tree-context-menu'
 export const buttonContentSelector = [
+  '.review-drawing-list button',
   '.bonus-phase', '.bonus-role-option',
   '.pdm-stat-card', '.report-page .report-heat-cell', '.report-segment button',
   '.pdm-search-field__action > button', '.pdm-search-submit',

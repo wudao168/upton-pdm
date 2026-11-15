@@ -15,6 +15,8 @@
   }
   :root body .production-workbench .production-workbench__tree button.production-workbench__project.selected { background:#e5e7eb !important; }
   :root body .production-workbench .production-workbench__tree button.production-workbench__package.selected { background:#f9fafb !important; }
+  :root[data-pdm-color-scheme] body .production-workbench .production-workbench__tree button.production-workbench__package.is-unscheduled { background:var(--pdm-orange-soft) !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-unscheduled { flex:none; color:var(--pdm-danger); font-size:11px !important; }
   :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package).selected::before {
     content:''; position:absolute; left:0; top:8px; bottom:8px; width:4px;
     border-radius:999px; background:var(--pdm-theme-accent); pointer-events:none;

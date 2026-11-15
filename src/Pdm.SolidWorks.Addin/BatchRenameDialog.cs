@@ -233,6 +233,7 @@ internal sealed class BatchRenameControl : UserControl
 
     internal event EventHandler BackRequested;
     internal event EventHandler Completed;
+    internal event EventHandler DrawingSyncRequested;
 
     public BatchRenameControl(
         IReadOnlyList<BatchPropertyEditItem> items,
@@ -492,6 +493,10 @@ internal sealed class BatchRenameControl : UserControl
         row.Controls.Add(caseSensitive, 7, 0);
         row.Controls.Add(preview, 8, 0);
         row.Controls.Add(propertyApply, 9, 0);
+        row.ColumnStyles[10] = new ColumnStyle(SizeType.Absolute, SharedControlWidth + SharedControlGap);
+        row.ColumnCount = 12;
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.Controls.Add(CreateSharedButton("工程图同步", () => DrawingSyncRequested?.Invoke(this, EventArgs.Empty)), 10, 0);
         return row;
     }
 

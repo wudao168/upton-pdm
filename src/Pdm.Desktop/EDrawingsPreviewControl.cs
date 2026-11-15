@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Configuration;
+using System.Globalization;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -89,7 +91,12 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             if (documentReady && !documentTransitioning)
                 ComponentSelectionChanged?.Invoke(currentDocumentPath, name, configuration);
         };
-        documentLoadTimer.Interval = 30000;
+        var configuredSeconds = ConfigurationManager.AppSettings["EDrawingsLoadTimeoutSeconds"];
+        var timeoutSeconds = int.TryParse(configuredSeconds, NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds)
+            && seconds >= 1 && seconds <= int.MaxValue / 1000
+            ? seconds
+            : 180;
+        documentLoadTimer.Interval = timeoutSeconds * 1000;
         documentLoadTimer.Tick += (_, _) => OnDocumentFailed(currentDocumentPath, -1, "加载超时");
 
         ConfigureToolbar();

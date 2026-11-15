@@ -14,10 +14,11 @@ const systemTabs = {
   'client-logs': ['system.client-logs.view'],
   'login-security': ['system.login-policy.manage', 'system.client-logs.view'],
 }
-export type SystemTab = keyof typeof systemTabs
+export type SystemTab = keyof typeof systemTabs | 'system-info'
 
 export function systemManagementTabs(can: PermissionCheck): SystemTab[] {
-  return (Object.keys(systemTabs) as SystemTab[]).filter(tab => systemTabs[tab].some(can))
+  const tabs = (Object.keys(systemTabs) as Array<keyof typeof systemTabs>).filter(tab => systemTabs[tab].some(can))
+  return tabs.length ? [...tabs, 'system-info'] : tabs
 }
 
 export function canViewProductionTab(tab: string, can: PermissionCheck) {

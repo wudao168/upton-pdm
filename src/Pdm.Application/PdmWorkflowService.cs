@@ -163,9 +163,14 @@ public sealed partial class PdmWorkflowService(
         if (input.BrowserCadArchiveEnabled != current.BrowserCadArchiveEnabled && !BrowserCadArchivePolicy.CanConfigure(role))
             throw new UnauthorizedAccessException("只有管理员可以启用或关闭网页存档入口。");
         var pdfFields = PdfTitleBlockSnapshotBuilder.Normalize(input.PdfTitleBlockFill.EnabledFields);
-        if (!pdfFields.SequenceEqual(PdfTitleBlockSnapshotBuilder.Normalize(current.PdfTitleBlockFill.EnabledFields))
-            && !BrowserCadArchivePolicy.CanConfigure(role))
-            throw new UnauthorizedAccessException("只有管理员可以修改PDF属性自动填写设置。");
+        var currentPdfLabels = PdfTitleBlockSnapshotBuilder.NormalizeDrawingLabels(current.PdfTitleBlockFill.DrawingLabels);
+        var pdfLabels = input.PdfTitleBlockFill.DrawingLabels is null
+            ? currentPdfLabels : PdfTitleBlockSnapshotBuilder.NormalizeDrawingLabels(input.PdfTitleBlockFill.DrawingLabels);
+        if (pdfFields.Select(key => pdfLabels.GetValueOrDefault(key, PdfTitleBlockFields.DefaultLabel(key)))
+            .GroupBy(PdfTitleBlockFields.NormalizeLabel, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+            throw new PdmRuleException("已勾选的字段不能使用相同的图框标签。");
+        var pdfSettingsChanged = !pdfFields.SequenceEqual(PdfTitleBlockSnapshotBuilder.Normalize(current.PdfTitleBlockFill.EnabledFields))
+            || !pdfLabels.SequenceEqual(currentPdfLabels);
         var vaultRoot = StorageLocationPolicy.Normalize(input.VaultRoot);
         var releaseRoot = StorageLocationPolicy.Normalize(input.ReleaseRoot);
         var materialAttachmentRoot = StorageLocationPolicy.Normalize(input.MaterialAttachmentRoot);
@@ -185,7 +190,7 @@ public sealed partial class PdmWorkflowService(
             ReleaseChangeReasonTypes = NormalizeReleaseChangeReasonTypes(input.ReleaseChangeReasonTypes),
             ReleaseChangeReasonLabels = NormalizeReleaseChangeReasonLabels(input.ReleaseChangeReasonLabels, NormalizeReleaseChangeReasonTypes(input.ReleaseChangeReasonTypes)),
             FormalSupplementPolicies = NormalizeFormalSupplementPolicies(input.FormalSupplementPolicies),
-            PdfTitleBlockFill = new() { EnabledFields = pdfFields },
+            PdfTitleBlockFill = new() { EnabledFields = pdfFields, DrawingLabels = pdfLabels },
             DrawingQrPolicy = DrawingQrPolicy.Default,
             PreviewConversion = NormalizePreviewConversion(input.PreviewConversion)
         });
@@ -201,9 +206,9 @@ public sealed partial class PdmWorkflowService(
         await AuditAsync(actor, "system.material-code-approval.update", nameof(PdmSystemSettings), "material-code-approval", string.Join('、', settings.MaterialCodeApproval.ApproverRoleCodes), cancellationToken);
         await AuditAsync(actor, "system.release-change-reasons.update", nameof(PdmSystemSettings), "release-change-reasons", string.Join('、', settings.ReleaseChangeReasonTypes), cancellationToken);
         await AuditAsync(actor, "system.formal-supplement-policies.update", nameof(PdmSystemSettings), "formal-supplement-policies", $"标准件：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Standard)}；电气：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Electrical)}", cancellationToken);
-        if (!pdfFields.SequenceEqual(PdfTitleBlockSnapshotBuilder.Normalize(current.PdfTitleBlockFill.EnabledFields)))
+        if (pdfSettingsChanged)
             await AuditAsync(actor, "system.pdf-title-block.update", nameof(PdmSystemSettings), "pdf-title-block",
-                "PDF自动填写：" + string.Join("、", pdfFields.Select(key => PdfTitleBlockFields.Get(key).Name)), cancellationToken);
+                                $"PDF自动填写：{string.Join("、", pdfFields.Select(key => PdfTitleBlockFields.Get(key).Name))}；图框映射：{string.Join("、", pdfLabels.Select(pair => $"{PdfTitleBlockFields.Get(pair.Key).Name} → {pair.Value}"))}", cancellationToken);
         await AuditAsync(actor, "system.preview-conversion.update", nameof(PdmSystemSettings), "preview-conversion", $"{PreviewConversionSummary(settings.PreviewConversion)}", cancellationToken);
         return settings;
     }
@@ -5289,7 +5294,16 @@ public sealed partial class PdmWorkflowService(
                 throw new PdmConflictException($"{BomName(targetKind)}在发布包创建后已变化，请撤销该草稿并重新创建。");
             versionsForReview.Add(targetVersion);
         }
-        if (package.Scope == ReleaseScope.LegacyCombined || IsNonStandardScope(package.Scope))
+        if (ReleaseDrawingReview.Supports(package.Scope))
+        {
+            if (await CurrentNonStandardReleaseItemsAsync(package, cancellationToken) is {} currentNonStandard
+                && !BomSnapshotsEqual(package.NonStandardBomSnapshot, currentNonStandard))
+                throw new PdmConflictException("非标件BOM在发布草稿创建后已变化，请更新草稿并重新提交。");
+            var review = await ReleaseDrawingReviewService.CaptureAsync(repository, package, cancellationToken);
+            package = await repository.SaveReleaseDrawingReviewAsync(package.Id, review,
+                package.DrawingReview?.Revision ?? 0, null, cancellationToken);
+        }
+        else if (package.Scope == ReleaseScope.LegacyCombined)
             await EnsureNonStandardDrawingReviewReadyAsync(
                 package.ProjectId,
                 package.NonStandardBomSnapshot,
@@ -5428,12 +5442,14 @@ public sealed partial class PdmWorkflowService(
             && await ApprovalEmergencyPolicy.CanAsync(repository, package.ProjectId, package.EmergencyRoleCodes, actor, role, cancellationToken, businessInbox);
     }
 
-    public async Task<ReleasePackage> EmergencyDecideAsync(Guid taskId, string actor, UserRole role, ApprovalDecision decision, string reason, CancellationToken cancellationToken, bool publishImmediately = true)
+    public async Task<ReleasePackage> EmergencyDecideAsync(Guid taskId, string actor, UserRole role, ApprovalDecision decision, string? reason, CancellationToken cancellationToken, bool publishImmediately = true)
     {
         var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken) ?? throw new PdmNotFoundException("审批任务不存在。");
         if (!await ApprovalEmergencyPolicy.CanAsync(repository, package.ProjectId, package.EmergencyRoleCodes, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户不属于该审批流配置的紧急代批角色，或无项目访问权限。");
-        reason = RequiredComment(reason, "紧急代批原因");
+        reason = decision == ApprovalDecision.Approved && package.DrawingReview is not null && string.IsNullOrWhiteSpace(reason)
+            ? null
+            : RequiredComment(reason, "紧急代批原因");
         return await CompleteApprovalDecisionAsync(taskId, actor, decision, reason, true, reason, publishImmediately, cancellationToken);
     }
 
@@ -5454,7 +5470,8 @@ public sealed partial class PdmWorkflowService(
         var pendingPackage = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("审批任务不存在。");
         var activeNode = pendingPackage.ApprovalTasks.First(task => task.Id == taskId);
-        if (decision == ApprovalDecision.Approved && activeNode.Participants?.Policy?.RequireOpinion == true && string.IsNullOrWhiteSpace(originalComment))
+        if (decision == ApprovalDecision.Approved && pendingPackage.DrawingReview is null
+            && activeNode.Participants?.Policy?.RequireOpinion == true && string.IsNullOrWhiteSpace(originalComment))
             throw new PdmRuleException("该审批节点要求填写同意意见。");
         if (decision == ApprovalDecision.Approved)
         {
@@ -5478,7 +5495,15 @@ public sealed partial class PdmWorkflowService(
             await EnsureReleaseMaterialRelationsAsync(pendingPackage, cancellationToken);
             await ValidateReleaseVersionsAsync(pendingPackage, cancellationToken);
         }
-        if (decision == ApprovalDecision.Approved
+        if (decision == ApprovalDecision.Approved)
+        {
+            ReleaseDrawingReviewService.RequireComplete(pendingPackage, activeNode, actor);
+            if (pendingPackage.DrawingReview is not null
+                && await CurrentNonStandardReleaseItemsAsync(pendingPackage, cancellationToken) is {} currentNonStandard
+                && !BomSnapshotsEqual(pendingPackage.NonStandardBomSnapshot, currentNonStandard))
+                throw new PdmConflictException("非标件BOM与本次冻结审核内容不一致，请退回修改后重新提交。");
+        }
+        if (decision == ApprovalDecision.Approved && pendingPackage.DrawingReview is null
             && (pendingPackage.Scope == ReleaseScope.LegacyCombined
                 || IsNonStandardScope(pendingPackage.Scope)))
             await EnsureNonStandardDrawingReviewReadyAsync(
@@ -5489,7 +5514,7 @@ public sealed partial class PdmWorkflowService(
                 pendingPackage.Scope == ReleaseScope.NonStandardSupplement ? pendingPackage.SelectedBomItemIds : null,
                 pendingPackage.VersionBindings, IsDrawingBomRelease(pendingPackage.Scope));
         var package = await repository.DecideApprovalAsync(taskId, actor, decision, comment, emergencySubstitute, emergencyReason, cancellationToken, businessNote);
-        await AuditAsync(actor, emergencySubstitute ? "approval.emergency-substitute" : "approval.decide", nameof(ApprovalTask), taskId.ToString(), emergencySubstitute ? $"{decision}；原因：{emergencyReason}" : decision.ToString(), cancellationToken);
+        await AuditAsync(actor, emergencySubstitute ? "approval.emergency-substitute" : "approval.decide", nameof(ApprovalTask), taskId.ToString(), emergencySubstitute && !string.IsNullOrWhiteSpace(emergencyReason) ? $"{decision}；原因：{emergencyReason}" : decision.ToString(), cancellationToken);
 
         var completed = package.ApprovalTasks.First(task => task.Id == taskId);
         if (completed.Decision == ApprovalDecision.Approved)
@@ -5565,11 +5590,19 @@ public sealed partial class PdmWorkflowService(
             previewSources = ReleasePreviewPolicy.RequiresConversion(package)
                 ? await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken)
                 : [];
+            ReleasePreviewService.RequireFrozenDrawings(package, previewSources);
+            if (ReleasePreviewPolicy.DeliversFrozenDrawings(package) && !previewSources.Any(source => source.Kind == DocumentKind.Drawing))
+                throw new PdmRuleException("非标件长交期发布缺少可以核实的冻结图纸。");
             ReleasePublishingProgress.Set(package.Id, "读取转图来源已完成，开始生成发布资料");
             if (previewSources.Any(source => source.Kind == DocumentKind.Drawing))
                 await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running,
                     null, package.PreviewAttempts, timeProvider.GetUtcNow(), cancellationToken);
             publication = await publisher.PublishAsync(package, project, previewSources, cancellationToken);
+        }
+        catch (ReleaseConversionPendingException exception) when (exception.InnerException is PreviewServerUnavailableException)
+        {
+            return await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.WaitingForServer,
+                exception.InnerException.Message, package.PreviewAttempts, timeProvider.GetUtcNow(), cancellationToken);
         }
         catch (ReleaseConversionPendingException exception)
         {
@@ -5604,7 +5637,8 @@ public sealed partial class PdmWorkflowService(
             await AuditAsync(actor, "release-package.publish-failed", nameof(ReleasePackage), package.Id.ToString(), exception.Message, cancellationToken);
             throw;
         }
-        if (package.PdfTitleBlockSnapshot is { Enabled: true } && publication.Previews.Count > 0)
+        if (publication.Previews.Count > 0 && (package.PdfTitleBlockSnapshot is { Enabled: true }
+            || ReleasePreviewPolicy.DeliversFrozenDrawings(package)))
             await repository.AttachReleasePreviewArtifactsAsync(package.Id, publication.Previews, cancellationToken);
         foreach (var version in releasedVersions)
         {
@@ -6701,6 +6735,8 @@ public sealed partial class PdmWorkflowService(
         if (package.State != ReleasePackageState.Published && package.State != ReleasePackageState.Publishing)
             throw new PdmRuleException("只有审批完成等待转图或已发布的发布包可以重试转图。");
         if (!ReleasePreviewPolicy.RequiresConversion(package)) throw new PdmRuleException("该发布类型不支持转图。");
+        if (ReleasePreviewPolicy.DeliversFrozenDrawings(package) && package.DrawingReview?.Items.Count is not > 0)
+            throw new PdmRuleException("该历史长交期发布包缺少冻结审核图纸，无法补转。");
         var saved = await repository.MarkReleasePreviewStateAsync(releasePackageId, ReleasePreviewState.Pending, null, 0, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "release-package.preview.retry", nameof(ReleasePackage), releasePackageId.ToString(),
             $"{package.Number}；重新排队转图", cancellationToken);

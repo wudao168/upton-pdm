@@ -10,6 +10,60 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed partial class ReleaseRecoveryTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LongLeadConvertsAllFrozenDrawingsWithoutPromotingWorkVersions(bool historical)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var originals = fixture.Versions.Values.Where(version => version.ReleasePackageId == fixture.Package.Id)
+            .Select(version => version with
+            {
+                Id = Guid.NewGuid(), Revision = RevisionLabel.InitialWork(), Status = DocumentVersionStatus.Work,
+                ReleasePackageId = null, Preview = null
+            }).ToArray();
+        Assert.NotEmpty(originals);
+        foreach (var version in originals) fixture.Versions[version.Id] = version;
+        var package = fixture.Package with
+        {
+            Id = Guid.NewGuid(), Number = "RP-LONG-LEAD-PDF", Scope = ReleaseScope.NonStandardLongLead, LocksDocuments = false,
+            State = historical ? ReleasePackageState.Published : ReleasePackageState.Publishing,
+            PreviewState = ReleasePreviewState.None,
+            PublishedPath = historical ? Path.Combine(fixture.Project.ReleaseLocation, "RP-LONG-LEAD-PDF") : null,
+            VersionBindings = originals.Select(version => new ReleaseVersionBinding(version.DocumentId, version.Id,
+                version.Revision.Display, version.Sha256, false, RequiresPromotion: false)).ToArray(),
+            DrawingReview = new(1, originals.Select(version => new ReleaseDrawingReviewItem(version.DocumentId, version.Id,
+                version.Sha256, Path.GetFileName(version.StorageRelativePath), "token", [], true, "Confirmed", [])).ToArray()),
+            PdfTitleBlockSnapshot = historical ? new(["designer", "revision"], new Dictionary<Guid, PdfDrawingTitleBlockSnapshot>(), true) : null
+        };
+        await fixture.Repository.CreateReleasePackageAsync(package, default);
+        if (historical)
+        {
+            Directory.CreateDirectory(package.PublishedPath!);
+            Assert.Contains(await fixture.Repository.ListReleasePackagesAwaitingPreviewAsync(5, 100, default), value => value.Id == package.Id);
+            Assert.True(await fixture.Service.ProcessAsync(package, default));
+            var saved = (await fixture.Repository.FindReleasePackageAsync(package.Id, default))!;
+            Assert.Equal(ReleasePreviewState.Succeeded, saved.PreviewState);
+            Assert.Equal(originals.Length, saved.PdfTitleBlockSnapshot!.Drawings.Count);
+            Assert.Equal(originals.Length, saved.PdfDeliveryArtifacts.Count);
+            Assert.All(await fixture.Service.ListItemsAsync(package.Id, default), item => Assert.True(item.Succeeded));
+        }
+        else
+        {
+            var publisher = new AtomicReleasePackagePublisher(TimeProvider.System, fixture.Converter, fixture.Repository);
+            await publisher.PrepareAsync(package, fixture.Project, default);
+            var sources = await fixture.Repository.ListReleasePreviewSourcesAsync(package.Id, default);
+            fixture.Converter.Failure = new PreviewServerUnavailableException("等待服务器");
+            await Assert.ThrowsAsync<ReleaseConversionPendingException>(() => publisher.PublishAsync(package, fixture.Project, sources, default));
+            fixture.Converter.Failure = null;
+            var result = await publisher.PublishAsync(package, fixture.Project, sources, default);
+            Assert.Equal(originals.Length, result.Previews.Count);
+            Assert.Empty(result.FormalDrawings!);
+        }
+        Assert.DoesNotContain(fixture.Versions.Values, version => version.ReleasePackageId == package.Id);
+        Assert.All(originals, version => Assert.Null(fixture.Versions[version.Id].Preview));
+    }
+
     [Fact]
     public async Task UnfinishedConversionNotifiesSubmitterAndDivisionAssistantsOnceThenReportsRecovery()
     {

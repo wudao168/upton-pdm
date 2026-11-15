@@ -22,7 +22,7 @@ public sealed partial class MySqlPdmRepository
         var planned = ordered.Select(file => file.DocumentId).ToHashSet();
         var projectId = ordered[0].Commit.ReferenceSnapshot.ProjectId;
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT IGNORE INTO archive_batch_receipt(batch_id,project_id,actor,request_hash) VALUES(@BatchId,@ProjectId,@Actor,@Hash)",
             new { BatchId = batchId, ProjectId = projectId, Actor = actor, Hash = requestHash }, transaction, cancellationToken: cancellationToken));
@@ -124,7 +124,10 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE reference_snapshot SET root_json=@RootJson,sha256=@Sha256 WHERE id=@Id AND root_document_id=@DocumentId",
                 new { RootJson = rootJson, snapshot.Sha256, Id = snapshot.SnapshotId, DocumentId = version.DocumentId }, transaction, cancellationToken: cancellationToken));
-            results[file.DocumentId] = result with { Version = version };
+            var document = result.Document;
+            if (document.Kind == DocumentKind.Drawing)
+                document = await AdoptArchivedReviewDrawingAsync(connection, transaction, document, version, cancellationToken);
+            results[file.DocumentId] = result with { Version = version, Document = document };
         }
         await RefreshWorkingReferenceRootsAsync(connection, transaction, projectId, actor, timeProvider.GetUtcNow(), cancellationToken);
         var receipt = new ArchiveBatchReceipt(batchId, projectId, actor, requestHash, ordered.Select(file => results[file.DocumentId]).ToArray()) { FollowupPending = true };

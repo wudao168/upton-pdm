@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Text.RegularExpressions;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf.IO;
 using Upton.Pdm.Domain;
@@ -11,8 +10,10 @@ internal static partial class PdfReleasePageEditor
 {
     private sealed record FillCell(int Page, double PageHeight, string Name, string Value, Box Bounds);
 
-    internal static void FillTitleBlock(string input, string output, IReadOnlyDictionary<string, string> values)
+    internal static IReadOnlyList<string> FillTitleBlock(string input, string output, IReadOnlyDictionary<string, string> values, IReadOnlyDictionary<string, string>? drawingLabels = null)
     {
+        var protectedLabels = PdfTitleBlockFields.All.SelectMany(field => field.Labels)
+            .Concat(drawingLabels?.Values ?? []).Select(PdfTitleBlockFields.NormalizeLabel).ToHashSet(StringComparer.OrdinalIgnoreCase);
         Init();
         // 保留SolidWorks跨内容流共享的字体、线型与绘图状态。
         using var joined = new MemoryStream();
@@ -32,6 +33,7 @@ internal static partial class PdfReleasePageEditor
         var document = Native.FPDF_LoadMemDocument64(pin.AddrOfPinnedObject(), (nuint)bytes.Length, null);
         if (document == 0) { pin.Free(); throw new PdmRuleException("PDF标题栏无法读取，请重新转换后重试。"); }
         var cells = new List<FillCell>();
+        var missing = new List<string>();
         try
         {
             for (var index = 0; index < Native.FPDF_GetPageCount(document); index++)
@@ -51,10 +53,17 @@ internal static partial class PdfReleasePageEditor
                     foreach (var (key, value) in values)
                     {
                         var field = PdfTitleBlockFields.Get(key);
+                        var fieldLabels = drawingLabels?.TryGetValue(key, out var mappedLabel) == true ? new[] { mappedLabel } : field.Labels;
+                        var expected = fieldLabels.Select(PdfTitleBlockFields.NormalizeLabel).ToHashSet(StringComparer.OrdinalIgnoreCase);
                         var matches = labels.Where(text => text.Bounds.Top <= logo[0].Bounds.Top + 45
                             && text.Bounds.Left >= Native.FPDF_GetPageWidthF(page) * .45
-                            && field.Labels.Any(label => CleanLabel(text.Value).Equals(CleanLabel(label), StringComparison.OrdinalIgnoreCase))).ToArray();
-                        if (matches.Length != 1) throw new PdmRuleException($"PDF第{index + 1}页未唯一找到“{field.Name}”图框格（标签：{string.Join("／", field.Labels)}），请补齐对应标签后重新转图。");
+                            && expected.Contains(PdfTitleBlockFields.NormalizeLabel(text.Value))).ToArray();
+                        if (matches.Length == 0)
+                        {
+                            missing.Add($"第{index + 1}页 {field.Name}（{string.Join("／", fieldLabels)}）");
+                            continue;
+                        }
+                        if (matches.Length != 1) throw new PdmRuleException($"PDF第{index + 1}页未唯一找到“{field.Name}”图框格（标签：{string.Join("／", fieldLabels)}），请核对图框标签及格线后重试。");
                         Box cell;
                         try
                         {
@@ -74,7 +83,7 @@ internal static partial class PdfReleasePageEditor
                         foreach (var item in items.Where(item => item.Type is 1 or 3 && item.Bounds.Overlaps(cell)))
                         {
                             if (item.Type != 1 || !Inside(item.Bounds, cell) || labels.Any(text => text.Bounds == item.Bounds
-                                && PdfTitleBlockFields.All.Any(f => f.Labels.Any(l => CleanLabel(text.Value) == CleanLabel(l)))))
+                                && protectedLabels.Contains(PdfTitleBlockFields.NormalizeLabel(text.Value))))
                                 throw new PdmRuleException($"PDF第{index + 1}页“{field.Name}”区域包含其他图文，已停止填写，请检查图框。");
                             remove.Add(item.Handle);
                         }
@@ -110,6 +119,7 @@ internal static partial class PdfReleasePageEditor
             foreach (var cell in pageCells) DrawCell(graphics, cell);
         }
         pdf.Save(output);
+        return missing;
     }
 
     private static void DrawCell(XGraphics graphics, FillCell cell)
@@ -138,7 +148,7 @@ internal static partial class PdfReleasePageEditor
         throw new PdmRuleException($"PDF第{cell.Page + 1}页“{cell.Name}”内容超出图框格，请扩大对应格后重试；系统不会截断内容。");
     }
 
-    private static string CleanLabel(string value) => Regex.Replace(value, @"[\s：:]", "");
+
     private static bool Inside(Box inner, Box outer) => inner.Left >= outer.Left - .6 && inner.Right <= outer.Right + .6
         && inner.Bottom >= outer.Bottom - .6 && inner.Top <= outer.Top + .6;
 

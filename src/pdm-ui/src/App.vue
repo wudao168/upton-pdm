@@ -9,12 +9,15 @@ import AppHeader from './components/AppHeader.vue'
 import AuditLog from './components/AuditLog.vue'
 import DocumentTree from './components/DocumentTree.vue'
 import DrawingReviewPanel from './components/DrawingReviewPanel.vue'
+import ReleaseDrawingWorkspace from './components/ReleaseDrawingWorkspace.vue'
+import PreviewMarkupTools from './components/PreviewMarkupTools.vue'
+import ReleaseDrawingReviewPanel from './components/ReleaseDrawingReviewPanel.vue'
 import DrawingReviewAnnotationCard from './components/DrawingReviewAnnotationCard.vue'
 import LoginView from './components/LoginView.vue'
 import { pagePreferenceScopeKey, readPagePreference, writePagePreference } from './pagePreference'
 import { refreshTablePreferences } from './tablePreferences'
 import { refreshMaterialStockPlans, setMaterialStockContext } from './materialStockPlans'
-import { listMaterialStockPlans } from './api'
+import { listMaterialStockPlans, listReleaseDrawingReviews } from './api'
 import ProjectWorkspaceHeader from './components/ProjectWorkspaceHeader.vue'
 import type { ProjectTab } from './components/ProjectWorkspaceHeader.vue'
 import SideNav from './components/SideNav.vue'
@@ -178,7 +181,7 @@ const mountedDocumentsProjectId = ref('')
 const materialRequestedTab = ref('materials')
 const requestedProgramTemplateId = ref('')
 // 默认展开审核栏，与网页端/客户端保持一致；用户手动折叠后按用户选择。
-const drawingReviewPanelCollapsed = ref(true)
+const drawingReviewPanelCollapsed = ref(false)
 const drawingReviewPackageId = ref('')
 const requestedReleasePackageId = ref('')
 const requestedValidationPlanProjectId = ref('')
@@ -254,6 +257,7 @@ const productReleasedAt = ref('')
 const productReleaseNote = ref('')
 const productReleaseHistory = ref<SystemReleaseHistoryEntry[]>([])
 const desktopClientVersion = ref('')
+const publishedDesktopVersion = ref('')
 const solidWorksAddinVersion = ref('')
 const messageDrawerOpen = ref(false)
 const savedTheme = window.localStorage.getItem('pdm_theme')
@@ -325,18 +329,21 @@ async function loadServerVersion() {
       ReleasedAt?: string
       ReleaseNote?: string
       ReleaseHistory?: SystemReleaseHistoryEntry[]
+      Desktop?: { Version?: string }
       SolidWorksAddin?: { Version?: string }
     }
     productVersion.value = configuration.ConfigurationVersion?.trim() ?? ''
     productReleasedAt.value = configuration.ReleasedAt?.trim() ?? ''
     productReleaseNote.value = configuration.ReleaseNote?.trim() ?? ''
     productReleaseHistory.value = Array.isArray(configuration.ReleaseHistory) ? configuration.ReleaseHistory : []
+    publishedDesktopVersion.value = configuration.Desktop?.Version?.trim() ?? ''
     solidWorksAddinVersion.value = configuration.SolidWorksAddin?.Version?.trim() ?? ''
   } catch {
     productVersion.value = ''
     productReleasedAt.value = ''
     productReleaseNote.value = ''
     productReleaseHistory.value = []
+    publishedDesktopVersion.value = ''
     solidWorksAddinVersion.value = ''
   }
 }
@@ -458,8 +465,14 @@ const canDecideDrawingReview = computed(() => {
     : workspace.projects.value.find(project => project.id === reviewProjectId)
   return reviewProject?.effectiveProjectPermissions?.includes('drawing-review.decide') === true
 })
+const releaseDocumentReviewInline = ref(false)
+const releaseDocumentReviewActive = ref(false), requestedDocumentReleaseId = ref('')
+watch(releaseDocumentReviewActive, active => { if(active)drawingReviewPanelCollapsed.value=false })
+watch(() => workspace.project.value.id, () => { releaseDocumentReviewActive.value = false; requestedDocumentReleaseId.value = '' })
+async function openDocumentReleaseReview(id: string) { requestedDocumentReleaseId.value = id; await openProjectTab('documents') }
 const drawingReviewOverlayState = computed(() => ({
-  visible: desktopAvailable && activeView.value === 'workspace' && projectTab.value === 'documents',
+  // 图档统一使用页面内的发布包审核栏，原生预览区域为右栏让出空间。
+  visible: false,
   collapsed: drawingReviewPanelCollapsed.value,
   packageId: drawingReviewPackageId.value,
   packages: workspace.drawingReviews.value,
@@ -778,9 +791,14 @@ async function openManagedProject(projectId: string, requestedTab?: ProjectTab, 
 
 async function openReleasePackage(projectId: string, releasePackageId: string) {
   requestedReleasePackageId.value = ''
-  if (await openManagedProject(projectId, 'bom')) {
-    requestedReleasePackageId.value = releasePackageId
-  }
+  try {
+    const review = (await listReleaseDrawingReviews(projectId, workspace.getAccessToken())).find(item => item.id === releasePackageId)
+    if (review && ['审批中','工艺审核','待批准'].includes(review.state)) {
+      if (await openManagedProject(projectId, 'documents')) requestedDocumentReleaseId.value = releasePackageId
+      return
+    }
+  } catch { /* 图档不可访问或原流程单据，沿用原发布入口及权限校验 */ }
+  if (await openManagedProject(projectId, 'bom')) requestedReleasePackageId.value = releasePackageId
 }
 
 const releaseLinkParams = new URLSearchParams(window.location.search)
@@ -1062,7 +1080,6 @@ onMounted(() => {
   window.addEventListener('pdm-solidworks-status', handleWorkspaceSolidWorksStatus)
   window.addEventListener('pdm-client-version', handleClientVersion)
   window.chrome?.webview?.addEventListener('message', handleReviewOverlayAction)
-  void loadServerVersion()
   if (desktopAvailable) postDesktopMessage('client-version-request')
   requestWorkspaceLocalState()
 })
@@ -1553,7 +1570,9 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               :release-note="productReleaseNote"
               :release-history="productReleaseHistory"
               :desktop-version="desktopClientVersion"
+              :published-desktop-version="publishedDesktopVersion"
               :solid-works-addin-version="solidWorksAddinVersion"
+              @refresh="loadServerVersion"
             />
           </template>
         </SystemManagement>
@@ -1570,7 +1589,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             </section>
             <div v-if="canViewTab(projectTab)" class="pdm-project-tab-content">
             <SquareLoader v-if="projectTabPending" overlay show-label label="正在读取页面资料…" />
-            <BomManager :can-add-spare-parts="workspace.hasPermission('spare-parts.maintain')" :active="activeView === 'workspace' && (projectTab === 'bom' || projectTab === 'release')" @release-preview-attention="(projectId, hasIssue) => { releasePreviewIssues[projectId] = hasIssue }" @release-confirmation="workspace.confirmBomRelease" :drawing-reviews="workspace.drawingReviews.value" :drawing-review-candidates="workspace.drawingReviewCandidates.value" :requested-bom-kind="requestedBomKind" @open-bom="openHierarchyBom" @kind-change="handleBomKindChange" @bom-request-handled="requestedBomKind = undefined" v-if="mountedBomProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.tab === 'bom' || ((projectTab === 'release' || projectTab === 'bom') && error.tab === 'release'))" v-show="projectTab === 'bom' || projectTab === 'release'" :source-data="workspace.bomSourceData.value" :source-data-loaded="workspace.bomSourceDataLoaded.value" :standard="workspace.standardBom.value" :non-standard="workspace.nonStandardBom.value" :unclassified="workspace.unclassifiedBom.value" :electrical="workspace.electricalBom.value" :reference-root="workspace.root.value" :documents="workspace.managedDocuments.value" :document-relations="workspace.documentRelations.value" :validation-rules="workspace.systemSettings.value.validationRules" :release-change-reason-types="workspace.systemSettings.value.releaseChangeReasonTypes" :change-reason-labels="workspace.systemSettings.value.releaseChangeReasonLabels" :formal-supplement-policies="workspace.systemSettings.value.formalSupplementPolicies" :declarations="workspace.bomEmptyDeclarations.value" :versions="workspace.bomVersions.value" :baselines="workspace.bomBaselines.value" :release-packages="workspace.releasePackages.value" :username="workspace.currentUsername.value" :upload-progress="workspace.uploadProgress.value" :operation-error="workspace.operationError.value" :can-manage-release="workspace.project.value.effectiveProjectPermissions?.includes('release.manage') === true" :can-manage-mechanical-release="workspace.project.value.effectiveProjectPermissions?.includes('release.manage') === true && workspace.project.value.effectiveProjectPermissions?.includes('release.mechanical') === true" :can-decide-approval="workspace.hasPermission('approval.decide')" :can-emergency-decide="workspace.hasPermission('approval.emergency-substitute')" :requested-release-package-id="requestedReleasePackageId" :pending="workspace.operationPending.value" :editable="bomEditable" :token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :project="workspace.project.value" :projects="workspace.projects.value" :preview-reconciliation="workspace.previewBomFromDrawings" @dirty-change="bomHasUnsavedChanges = $event" @save-multiplier="(kind, multiplier, expected) => runOperation(() => workspace.updateBomMultiplier(kind, multiplier, expected), 'BOM整套倍率已保存；发布将使用该倍率')" @save="(kind, items) => runOperation(() => workspace.saveBomItems(kind, items), 'BOM已保存；CAD来源物料的变更已进入SolidWorks待写回队列')" @import="(kind, file) => runOperation(() => workspace.importBomFile(kind, file), 'BOM已导入并保存')" @export="(kind, mode) => runOperation(() => workspace.exportBomFile(kind, mode), 'BOM已导出')" @export-wear-parts="mode => runOperation(() => workspace.exportWearPartBomFile(mode), '易损件BOM已导出')" @resolve="(itemId, action, targetKind) => runOperation(() => workspace.resolveBomItem(itemId, action, targetKind), '待处理项已更新，保存BOM后再写回SolidWorks')" @batch-retain="itemIds => runOperation(() => workspace.retainBomItems(itemIds), '所选待处理BOM项已确认保留')" @batch-update="(input) => runOperation(() => workspace.batchUpdateBomItems(input), 'BOM属性已更新，保存BOM后再写回SolidWorks')" @batch-delete="(itemIds, reason) => runOperation(() => workspace.batchDeleteBomItems(itemIds, reason), '所选BOM物料已移入回收站')" @batch-restore="(itemIds, mode) => runOperation(() => workspace.batchRestoreBomItems(itemIds, mode), mode === 'AsManual' ? '所选物料已转为人工物料并恢复' : '所选BOM物料已恢复')" @batch-permanently-delete-manual="itemIds => runOperation(() => workspace.permanentlyDeleteManualBomItems(itemIds), '所选人工来源BOM物料已彻底删除')" @release-exclusion="(itemIds, excluded, reason) => runOperation(() => workspace.setBomReleaseExclusion(itemIds, excluded, reason), excluded ? '所选物料已设为不发布' : '所选物料已恢复发布')" @restore-source="(itemIds) => runOperation(() => workspace.restoreBomItemsFromSource(itemIds), '所选BOM属性已恢复为最新图档源数据；分类与排序保持不变')" @release-create="(input) => runOperation(() => workspace.createPackage(input), '发布草稿已创建，范围与审批模板已固化')" @release-update-draft="(releasePackageId, input) => runOperation(() => workspace.updatePackageDraft(releasePackageId, input), '发布草稿已更新')" @release-delete-draft="releasePackageId => runOperation(() => workspace.deletePackageDraft(releasePackageId), '发布草稿已删除')" @release-upload="(releasePackageId, file) => runOperation(() => workspace.uploadPackageFile(releasePackageId, file), '发包文件已上传并通过SHA-256校验')" @release-submit="releasePackageId => submitReleasePackage(releasePackageId)" @release-withdraw="withdrawCurrentPackage" @release-retry-u9="releasePackageId => runOperation(() => workspace.retryLongLeadU9(releasePackageId), 'BOM料号申请已补建，正式料号齐全后将自动续传U9C')" @release-retry-preview="releasePackageId => runOperation(() => workspace.retryReleasePreview(releasePackageId), '转图已重新排队，完成后会在站内消息里反馈结果')" @release-decide="(taskId, decision, comment, note) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment, note), decision === 'Approved' ? '审批已流转' : '发布包已退回')" @release-transfer="(taskId, targetUsername, comment) => runOperation(() => workspace.transferApprovalTask(taskId, targetUsername, comment), '审批已转交')" @release-emergency-decide="(taskId, decision, reason) => runOperation(() => workspace.emergencyDecideApprovalTask(taskId, decision, reason), decision === 'Approved' ? '当前节点已紧急代批并继续流转' : '当前节点已紧急代退回')" @release-request-handled="requestedReleasePackageId = ''" @material-code-changed="workspace.reload(workspace.project.value.id)" />
+            <BomManager @release-review-documents="openDocumentReleaseReview" :can-add-spare-parts="workspace.hasPermission('spare-parts.maintain')" :active="activeView === 'workspace' && (projectTab === 'bom' || projectTab === 'release')" @release-preview-attention="(projectId, hasIssue) => { releasePreviewIssues[projectId] = hasIssue }" @release-confirmation="workspace.confirmBomRelease" :drawing-reviews="workspace.drawingReviews.value" :drawing-review-candidates="workspace.drawingReviewCandidates.value" :requested-bom-kind="requestedBomKind" @open-bom="openHierarchyBom" @kind-change="handleBomKindChange" @bom-request-handled="requestedBomKind = undefined" v-if="mountedBomProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.tab === 'bom' || ((projectTab === 'release' || projectTab === 'bom') && error.tab === 'release'))" v-show="projectTab === 'bom' || projectTab === 'release'" :source-data="workspace.bomSourceData.value" :source-data-loaded="workspace.bomSourceDataLoaded.value" :standard="workspace.standardBom.value" :non-standard="workspace.nonStandardBom.value" :unclassified="workspace.unclassifiedBom.value" :electrical="workspace.electricalBom.value" :reference-root="workspace.root.value" :documents="workspace.managedDocuments.value" :document-relations="workspace.documentRelations.value" :validation-rules="workspace.systemSettings.value.validationRules" :release-change-reason-types="workspace.systemSettings.value.releaseChangeReasonTypes" :change-reason-labels="workspace.systemSettings.value.releaseChangeReasonLabels" :formal-supplement-policies="workspace.systemSettings.value.formalSupplementPolicies" :declarations="workspace.bomEmptyDeclarations.value" :versions="workspace.bomVersions.value" :baselines="workspace.bomBaselines.value" :release-packages="workspace.releasePackages.value" :username="workspace.currentUsername.value" :upload-progress="workspace.uploadProgress.value" :operation-error="workspace.operationError.value" :can-manage-release="workspace.project.value.effectiveProjectPermissions?.includes('release.manage') === true" :can-manage-mechanical-release="workspace.project.value.effectiveProjectPermissions?.includes('release.manage') === true && workspace.project.value.effectiveProjectPermissions?.includes('release.mechanical') === true" :can-decide-approval="workspace.hasPermission('approval.decide')" :can-emergency-decide="workspace.hasPermission('approval.emergency-substitute')" :requested-release-package-id="requestedReleasePackageId" :pending="workspace.operationPending.value" :editable="bomEditable" :token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :project="workspace.project.value" :projects="workspace.projects.value" :preview-reconciliation="workspace.previewBomFromDrawings" @dirty-change="bomHasUnsavedChanges = $event" @save-multiplier="(kind, multiplier, expected) => runOperation(() => workspace.updateBomMultiplier(kind, multiplier, expected), 'BOM整套倍率已保存；发布将使用该倍率')" @save="(kind, items) => runOperation(() => workspace.saveBomItems(kind, items), 'BOM已保存；CAD来源物料的变更已进入SolidWorks待写回队列')" @import="(kind, file) => runOperation(() => workspace.importBomFile(kind, file), 'BOM已导入并保存')" @export="(kind, mode) => runOperation(() => workspace.exportBomFile(kind, mode), 'BOM已导出')" @export-wear-parts="mode => runOperation(() => workspace.exportWearPartBomFile(mode), '易损件BOM已导出')" @resolve="(itemId, action, targetKind) => runOperation(() => workspace.resolveBomItem(itemId, action, targetKind), '待处理项已更新，保存BOM后再写回SolidWorks')" @batch-retain="itemIds => runOperation(() => workspace.retainBomItems(itemIds), '所选待处理BOM项已确认保留')" @batch-update="(input) => runOperation(() => workspace.batchUpdateBomItems(input), 'BOM属性已更新，保存BOM后再写回SolidWorks')" @batch-delete="(itemIds, reason) => runOperation(() => workspace.batchDeleteBomItems(itemIds, reason), '所选BOM物料已移入回收站')" @batch-restore="(itemIds, mode) => runOperation(() => workspace.batchRestoreBomItems(itemIds, mode), mode === 'AsManual' ? '所选物料已转为人工物料并恢复' : '所选BOM物料已恢复')" @batch-permanently-delete-manual="itemIds => runOperation(() => workspace.permanentlyDeleteManualBomItems(itemIds), '所选人工来源BOM物料已彻底删除')" @release-exclusion="(itemIds, excluded, reason) => runOperation(() => workspace.setBomReleaseExclusion(itemIds, excluded, reason), excluded ? '所选物料已设为不发布' : '所选物料已恢复发布')" @restore-source="(itemIds) => runOperation(() => workspace.restoreBomItemsFromSource(itemIds), '所选BOM属性已恢复为最新图档源数据；分类与排序保持不变')" @release-create="(input) => runOperation(() => workspace.createPackage(input), '发布草稿已创建，范围与审批模板已固化')" @release-update-draft="(releasePackageId, input) => runOperation(() => workspace.updatePackageDraft(releasePackageId, input), '发布草稿已更新')" @release-delete-draft="releasePackageId => runOperation(() => workspace.deletePackageDraft(releasePackageId), '发布草稿已删除')" @release-upload="(releasePackageId, file) => runOperation(() => workspace.uploadPackageFile(releasePackageId, file), '发包文件已上传并通过SHA-256校验')" @release-submit="releasePackageId => submitReleasePackage(releasePackageId)" @release-withdraw="withdrawCurrentPackage" @release-retry-u9="releasePackageId => runOperation(() => workspace.retryLongLeadU9(releasePackageId), 'BOM料号申请已补建，正式料号齐全后将自动续传U9C')" @release-retry-preview="releasePackageId => runOperation(() => workspace.retryReleasePreview(releasePackageId), '转图已重新排队，完成后会在站内消息里反馈结果')" @release-decide="(taskId, decision, comment, note) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment, note), decision === 'Approved' ? '审批已流转' : '发布包已退回')" @release-transfer="(taskId, targetUsername, comment) => runOperation(() => workspace.transferApprovalTask(taskId, targetUsername, comment), '审批已转交')" @release-emergency-decide="(taskId, decision, reason) => runOperation(() => workspace.emergencyDecideApprovalTask(taskId, decision, reason), decision === 'Approved' ? '当前节点已紧急代批并继续流转' : '当前节点已紧急代退回')" @release-request-handled="requestedReleasePackageId = ''" @material-code-changed="workspace.reload(workspace.project.value.id)" />
             <WorkbenchHome
               :active="activeView === 'workspace' && projectTab === 'overview'"
               v-if="projectTab === 'overview'"
@@ -1614,65 +1633,43 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             <ProjectPlanManager :requested-task-id="requestedPlanTaskId" :single-plan="showSingleProjectPlan" @task-request-handled="requestedPlanTaskId = undefined" v-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
             <QualityManager :show-company-review-entry="canOpenCompanyReview" :company-review-revision="qualityThemeRevision" @open-company-review="openCompanyReview" @open-issue="openQualityIssue" :form-permissions="bonusProjectPermissions ?? []" @locate-archive="openFormArchive" v-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.project.value.effectiveProjectPermissions?.includes('validation-plan.edit') === true" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" :requested-quality-acceptance="requestedQualityAcceptance" :requested-section="requestedQualitySection" @request-handled="requestedValidationPlanProjectId = ''" />
             <section v-if="mountedDocumentsProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.module === '图档工作区')" v-show="projectTab === 'documents'" class="pdm-document-workspace">
-              <WorkspaceExplorerBar :project="workspace.project.value" :selected="workspace.selectedNode.value" :local-state="selectedWorkspaceLocalState" :desktop-available="desktopAvailable" @open-folder="openWorkspaceFolder" />
-              <div class="pdm-workspace">
-                <DocumentTree v-model:query="workspace.searchQuery.value" :filter="workspace.documentFilter.value" :root="workspace.hasDocuments.value ? workspace.filteredTree.value : undefined" :drawings="workspace.filteredDrawings.value" :selected-id="workspace.selectedNode.value.id" :all-count="workspace.documentFilterCounts.value.all" :model-count="workspace.documentFilterCounts.value.model" :drawing-count="workspace.documentFilterCounts.value.drawing" :warning-count="workspace.warningCount.value" :can-edit="workspace.hasPermission('document.edit')" :review-states="drawingReviewStates" :local-states="workspaceLocalStates" :refreshing="workspace.loading.value || workspaceLocalRefreshing" @update:filter="workspace.setDocumentFilter" @select="workspace.selectNode" @refresh="refreshDocumentTree" @open="workspace.openDocument" @open-folder="openWorkspaceFolder" @versions="node => node.documentId && openVersionDocument(node.documentId)" />
+              <ReleaseDrawingWorkspace :key="workspace.project.value.id" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :permissions="workspace.project.value.effectiveProjectPermissions ?? []" :requested-id="requestedDocumentReleaseId" :visible="projectTab === 'documents'" @active="releaseDocumentReviewActive = $event" @inline="releaseDocumentReviewInline = $event" @updated="value => { workspace.releasePackages.value = workspace.releasePackages.value.map(p => p.id === value.id ? value : p); workspace.refreshApprovalInbox() }" v-slot="releaseReview">
+              <WorkspaceExplorerBar :project="workspace.project.value" :selected="releaseReview.selectedNode ?? workspace.selectedNode.value" :local-state="selectedWorkspaceLocalState" :desktop-available="desktopAvailable" @open-folder="openWorkspaceFolder" />
+              <div class="pdm-workspace" :class="{ 'has-release-review': releaseReview.selected }">
+                <DocumentTree :query="releaseReview.selected ? releaseReview.query : workspace.searchQuery.value" @update:query="value => releaseReview.selected ? releaseReview.setQuery(value) : workspace.searchQuery.value=value"
+                  :filter="releaseReview.selected ? releaseReview.filter : workspace.documentFilter.value" @update:filter="value => releaseReview.selected ? releaseReview.setFilter(value) : workspace.setDocumentFilter(value)"
+                  :root="releaseReview.selected ? releaseReview.root : workspace.hasDocuments.value ? workspace.filteredTree.value : undefined" :drawings="releaseReview.selected ? releaseReview.filteredNodes : workspace.filteredDrawings.value"
+                  :selected-id="releaseReview.selected ? releaseReview.drawingId : workspace.selectedNode.value.id" :all-count="releaseReview.selected ? releaseReview.nodes.length : workspace.documentFilterCounts.value.all"
+                  :model-count="releaseReview.selected ? 0 : workspace.documentFilterCounts.value.model" :drawing-count="releaseReview.selected ? releaseReview.nodes.length : workspace.documentFilterCounts.value.drawing"
+                  :warning-count="releaseReview.selected ? Object.values(releaseReview.badges).filter(b=>b.tone==='danger').length : workspace.warningCount.value" :can-edit="!releaseReview.selected && workspace.hasPermission('document.edit')"
+                  :review-states="releaseReview.selected ? releaseReview.badges : drawingReviewStates" :local-states="releaseReview.selected ? {} : workspaceLocalStates" :refreshing="workspace.loading.value || workspaceLocalRefreshing || releaseReview.loading"
+                  @select="node => releaseReview.selected ? releaseReview.selectDocument(node.documentId ?? '') : workspace.selectNode(node)" @refresh="() => { releaseReview.reload(); if(!releaseReview.selected) refreshDocumentTree() }"
+                  @open="workspace.openDocument" @open-folder="openWorkspaceFolder" @versions="node => node.documentId && openVersionDocument(node.documentId)">
+                </DocumentTree>
                 <section class="pdm-stage">
-                  <div class="pdm-preview-layout" :class="{ 'is-desktop-preview': desktopAvailable }">
-                    <PreviewWorkspace :empty-project="!workspace.hasDocuments.value" :selected="workspace.selectedNode.value" :related="workspace.relatedNodes.value" :bom-item="workspace.selectedBomItem.value" :readable-document-ids="workspace.readableDocumentIds.value" :bom-item-for-node="workspace.bomItemForNode" :current-username="workspace.currentUsername.value" :can-manage-lifecycle="workspace.project.value.effectiveProjectPermissions?.includes('document.obsolete') === true" :can-edit-documents="workspace.hasPermission('document.edit')" :desktop-available="desktopAvailable && canProjectOperation('download')" :access-token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :active="activeView === 'workspace' && projectTab === 'documents'" :obscured="workspace.versionDrawerOpen.value || workspace.whereUsedDrawerOpen.value" :review-panel-collapsed="drawingReviewPanelCollapsed" :review-version-id="selectedDrawingReviewVersionId" :review-revision="selectedDrawingReviewRevision" :review-editable="selectedDrawingReviewItem?.drawingState === 'ChangesRequested'" :can-writeback-review-properties="canWritebackSelectedDrawingReview" @open="workspace.openDocument" @preview="workspace.previewDocument" @related="workspace.selectRelatedNode" @more="workspace.openVersionDrawer()" @where-used="workspace.openWhereUsed" @obsolete="obsoleteSelectedDocument">
-                      <DrawingReviewPanel
-                        v-if="workspace.hasDocuments.value && !desktopAvailable"
-                        v-model:collapsed="drawingReviewPanelCollapsed"
-                        v-model:package-id="drawingReviewPackageId"
-                        :packages="workspace.drawingReviews.value"
-                        :candidates="workspace.drawingReviewCandidates.value"
-                        :reviewer-options="drawingReviewReviewerOptions"
-                        :default-reviewers="drawingReviewDefaultReviewers"
-                        :selected-document-id="workspace.selectedNode.value.documentId"
-                        :current-username="workspace.currentUsername.value"
-                        :pending="workspace.operationPending.value"
-                        :can-submit="workspace.hasPermission('drawing-review.submit')"
-                        :can-manage-withdraw="canManageDrawingReviewWithdrawal"
-                        :can-annotate="workspace.hasPermission('drawing-review.annotate')"
-                        :can-decide="canDecideDrawingReview"
-                        :allow-self-review="workspace.hasPermission('drawing-review.self-review')"
-                        :desktop-available="desktopAvailable"
-                        @create="(modelDocumentIds, assignedReviewers) => runOperation(() => createDrawingReviewFromDocuments(modelDocumentIds, assignedReviewers), '图纸审核单已创建，等待审核')"
-                        @refresh="runOperation(workspace.refreshDrawingReviews, '图纸审核状态已刷新')"
-                        @refresh-candidates="runOperation(workspace.refreshDrawingReviews, '审核范围已刷新')"
-                        @withdraw="(packageId, reason) => runOperation(() => workspace.withdrawDrawingReview(packageId, reason), '图纸审核已撤销，编辑锁已释放')"
-                        @abandon-writebacks="(packageId, reason) => runOperation(() => workspace.abandonDrawingReviewWritebacks(packageId, reason), '已放弃写入审核标记，审核单完成、图档编辑锁已释放')"
-                        @select-document="selectDrawingReviewDocument"
-                        @add-markup="(packageId, input) => runOperation(() => workspace.addDrawingReviewMarkup(packageId, input), '图纸批注已保存')"
-                        @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"
-                        @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回待修改')"
-                        @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回待修改')"
-                        @decide-batch="entries => runOperation(() => decideDrawingReviewBatch(entries), `批量审批已提交（${entries.length} 张）`)"
-                        @resubmit-batch="entries => runOperation(async () => { for (const entry of entries) await workspace.resubmitDrawingReviewItem(entry.packageId, entry.itemId) }, '退回图纸已重新提交审核')"
-                      />
-                      <!-- 审核结论栏由页面直接渲染进预览工具条的结论栏容器（网页端与客户端同一份 DOM），
-                           常驻显示；不可操作时由结论栏自身禁用输入与按钮。 -->
-                      <template #decision-bar>
-                        <DrawingReviewAnnotationCard
-                          :package="selectedDrawingReviewPackage"
-                          :selected-document-id="workspace.selectedNode.value.documentId"
-                          :current-username="workspace.currentUsername.value"
-                          :pending="workspace.operationPending.value"
-                          :can-annotate="workspace.hasPermission('drawing-review.annotate')"
-                          :can-decide="canDecideDrawingReview"
-                          :can-resubmit="canResubmitSelectedDrawingReview"
-                          :allow-self-review="workspace.hasPermission('drawing-review.self-review')"
-                          :desktop-available="desktopAvailable"
-                          @add-markup="(packageId, input) => runOperation(() => workspace.addDrawingReviewMarkup(packageId, input), '图纸批注已保存')"
-                          @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"
-                          @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回待修改')"
-                          @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回待修改')"
-                        />
+                  <div class="pdm-preview-layout" :class="{ 'is-desktop-preview': false }">
+                    <PreviewWorkspace :can-annotate="workspace.hasPermission('drawing-review.annotate')" :native-only-review="!!releaseReview.selected" :inline-review-panel="true" :empty-project="!releaseReview.selected && !workspace.hasDocuments.value" :selected="releaseReview.selectedNode ?? workspace.selectedNode.value" :related="workspace.relatedNodes.value" :bom-item="releaseReview.selected ? releaseReview.selectedBom : workspace.selectedBomItem.value" :readable-document-ids="workspace.readableDocumentIds.value" :bom-item-for-node="workspace.bomItemForNode" :current-username="workspace.currentUsername.value" :can-manage-lifecycle="workspace.project.value.effectiveProjectPermissions?.includes('document.obsolete') === true" :can-edit-documents="workspace.hasPermission('document.edit')" :desktop-available="desktopAvailable && canProjectOperation('download')" :access-token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :active="activeView === 'workspace' && projectTab === 'documents'" :obscured="workspace.versionDrawerOpen.value || workspace.whereUsedDrawerOpen.value" :review-panel-collapsed="drawingReviewPanelCollapsed" :review-version-id="releaseReview.reviewItem?.versionId" :review-revision="releaseReview.selected ? releaseReview.selectedNode?.version : undefined" :review-editable="false" :can-writeback-review-properties="false" @open="workspace.openDocument" @preview="workspace.previewDocument" @preview-ready="releaseReview.receiveNativePreview" @related="workspace.selectRelatedNode" @more="workspace.openVersionDrawer()" @where-used="workspace.openWhereUsed" @obsolete="obsoleteSelectedDocument">
+                      <template #default="{markup}">
+                      <DrawingReviewPanel panel-title="发布图纸审核" v-model:collapsed="drawingReviewPanelCollapsed"
+                        package-id="" :packages="[]" :current-username="workspace.currentUsername.value"
+                        :pending="false" :can-submit="false" :can-annotate="false" :can-decide="false" :desktop-available="desktopAvailable">
+
+                  <template #scope><div v-if="workspace.project.value.effectiveProjectPermissions?.includes('release.view')" class="pdm-tree-review-scope">
+                    <label><select :value="releaseReview.selectedId" aria-label="选择图档发布审核" @change="releaseReview.selectPackage(($event.target as HTMLSelectElement).value)"><option value="">浏览全部图档</option><option v-for="item in releaseReview.packages" :key="item.id" :value="item.id">{{ item.number }} · {{ item.steps.find(step => step.status === 'current' && step.id !== 'production-release')?.stage || item.state }}</option></select></label>
+                    <p v-if="releaseReview.error" role="alert">{{ releaseReview.error }}</p>
+                  </div><div v-if="markup.visible" class="pdm-release-review-markup"><PreviewMarkupTools :disabled="markup.disabled" :saving="markup.saving" :dirty="markup.dirty" @command="markup.command" @save="markup.save"/></div></template>
+<template #content>
+                          <ReleaseDrawingReviewPanel v-if="releaseReview.selected" :key="releaseReview.selected.id" :release="releaseReview.selected" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :editable="releaseReview.editable" :emergency="releaseReview.emergency" embedded :selected-document-id="releaseReview.drawingId" :external-preview-ready="releaseReview.previewReady" @select-document="releaseReview.selectDocument" @updated="releaseReview.receive" />
+                          <p v-else class="pdm-release-review-empty">{{ releaseReview.loading ? '正在读取发布包…' : releaseReview.packages.length ? '请在上方选择发布包进行审核。' : '暂无可审核的发布包，请从非标件BOM发起发布。' }}</p>
+                        </template>
+                      </DrawingReviewPanel>
                       </template>
+
                     </PreviewWorkspace>
                   </div>
                 </section>
               </div>
+              </ReleaseDrawingWorkspace>
             </section>
             <ProcurementTracking v-if="projectTab === 'procurement'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" />
             <AuditLog v-else-if="projectTab === 'records'" :entries="workspace.projectAuditEntries.value" :projects="workspace.projectAuditProjects.value" :users="workspace.users.value" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :can-add-manager-note="canAddProjectManagerNote" project-records-only hide-heading @refresh="runOperation(workspace.loadProjectAuditEntries, '项目记录已刷新')" />

@@ -52,8 +52,10 @@ public sealed class ReleasePreviewPolicyApiTests
     }
 
 
-    [Fact]
-    public async Task PreviewRetryRequiresProjectWriteAndReleaseManagementForThePackage()
+    [Theory]
+    [InlineData(ReleaseScope.NonStandardWithDrawing, true)]
+    [InlineData(ReleaseScope.NonStandardLongLead, false)]
+    public async Task PreviewRetryRequiresProjectWriteAndReleaseManagementForThePackage(ReleaseScope scope, bool locksDocuments)
     {
         const string actor = "preview-retry-test";
         var storage = Directory.CreateTempSubdirectory("pdm-preview-retry-");
@@ -74,7 +76,8 @@ public sealed class ReleasePreviewPolicyApiTests
                 var package = new ReleasePackage(Guid.NewGuid(), project.Id, $"RP-RETRY-{suffix}",
                     ReleasePackageState.Published, null, "", "", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null)
                 {
-                    Scope = ReleaseScope.NonStandardWithDrawing, LocksDocuments = true,
+                    Scope = scope, LocksDocuments = locksDocuments,
+                    DrawingReview = new(1, [new(Guid.NewGuid(), Guid.NewGuid(), "hash", "图纸.SLDDRW", "token", [], true, "Confirmed", [])]),
                     PreviewState = ReleasePreviewState.Failed, PreviewAttempts = 5,
                 };
                 await repository.CreateReleasePackageAsync(package, default);

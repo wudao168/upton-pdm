@@ -39,6 +39,13 @@ public sealed partial class PdmAddin
 
     private int OnAssemblyCommandOpening(int command, int userCommand)
     {
+        try { if (TryQueueManagedSave(command)) return 1; }
+        catch (Exception error)
+        {
+            LogDiagnostic("保存前核对当前图档", error);
+            taskPaneControl?.SetCheckoutReminder("本次保存尚未执行，请核对当前图档和编辑权限后重试。", true);
+            return 1;
+        }
         var previous = nativeUiCommandId;
         if (command > 0) { nativeUiCommandId = command; unknownSavedEpoch = 0; }
         var operation = AssemblyStructureOperation(command);

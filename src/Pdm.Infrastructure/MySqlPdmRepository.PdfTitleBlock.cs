@@ -13,8 +13,11 @@ public sealed partial class MySqlPdmRepository
         var affected = await connection.ExecuteAsync(new CommandDefinition("""
             UPDATE release_package SET pdf_title_block_snapshot_json=@Snapshot,row_version=row_version+1
             WHERE id=@Id AND (state IN ('Draft','Rejected') OR
-                (state='Publishing' AND JSON_UNQUOTE(JSON_EXTRACT(pdf_title_block_snapshot_json,'$.quantitiesFrozen'))='false' AND @Frozen=true))
-            """, new { Id = packageId, Snapshot = JsonSerializer.Serialize(snapshot, jsonOptions), Frozen = snapshot.QuantitiesFrozen }, cancellationToken: ct));
+                (state='Publishing' AND JSON_UNQUOTE(JSON_EXTRACT(pdf_title_block_snapshot_json,'$.quantitiesFrozen'))='false' AND @Frozen=true)
+                OR (state IN ('Publishing','Published') AND release_scope='NonStandardLongLead' AND @Frozen=true
+                  AND JSON_LENGTH(pdf_title_block_snapshot_json,'$.enabledFields')>0
+                  AND JSON_LENGTH(pdf_title_block_snapshot_json,'$.drawings')=0 AND @Drawings>0))
+            """, new { Id = packageId, Snapshot = JsonSerializer.Serialize(snapshot, jsonOptions), Frozen = snapshot.QuantitiesFrozen, Drawings = snapshot.Drawings.Count }, cancellationToken: ct));
         if (affected != 1) throw new PdmConflictException("PDF填写快照已冻结或发布状态已变化，请刷新后重试。");
         return await FindReleasePackageAsync(packageId, ct) ?? throw new PdmNotFoundException("发布包不存在。");
     }

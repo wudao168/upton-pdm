@@ -567,28 +567,24 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         var versionIds = versions.GroupBy(version => version.DocumentId)
             .Select(group => group.OrderByDescending(version => version.MatchesRevision).ThenByDescending(version => version.CreatedAt).First().Id).ToArray();
         if (versionIds.Length == 0) return rows.ToArray();
-        var pendingRows = await connection.QueryAsync<PendingDrawingRelationRow>(new CommandDefinition(
-            """
-            SELECT d.id DocumentId,d.project_id ProjectId,d.file_name FileName,v.reference_snapshot_json ReferenceSnapshotJson
-            FROM document_version v INNER JOIN document d ON d.id=v.document_id
-            WHERE v.id IN @VersionIds AND JSON_EXTRACT(v.reference_snapshot_json,'$.structureIndexPending')=TRUE
-            """, new { VersionIds = versionIds }, cancellationToken: cancellationToken));
+        var currentEvidence = await ReadDrawingRelationEvidenceAsync(connection, versionIds, cancellationToken);
         var scope = documentIds?.ToHashSet();
-        var sources = pendingRows.Select(row => new PendingDrawingRelationSource(row.DocumentId, row.ProjectId, row.FileName,
-            JsonSerializer.Deserialize<DocumentReferenceNode>(row.ReferenceSnapshotJson, jsonOptions)!))
-            .Where(source => scope is null || scope.Contains(source.DocumentId) || source.Root.Children.Any(node => node.DocumentId.HasValue && scope.Contains(node.DocumentId.Value))).ToArray();
+        var relatedDrawingIds = rows.Select(row => row.DrawingDocumentId).ToHashSet();
+        var sources = currentEvidence
+            .Where(source => scope is null || scope.Contains(source.DocumentId) || relatedDrawingIds.Contains(source.DocumentId)
+                || source.Root.Children.Any(node => node.DocumentId.HasValue && scope.Contains(node.DocumentId.Value))).ToArray();
         if (sources.Length == 0) return rows.ToArray();
-        var modelIds = sources.SelectMany(source => source.Root.Children).Where(node => node.DocumentId.HasValue)
+        var modelIds = sources.Where(source => source.Root.StructureIndexPending)
+            .SelectMany(source => DrawingModelRelations.KnownModels(source.Root)).Where(node => node.DocumentId.HasValue)
             .Select(node => node.DocumentId!.Value).Distinct().ToArray();
-        if (modelIds.Length == 0) return rows.ToArray();
+        if (modelIds.Length == 0) return PendingDrawingRelations.Reconcile(rows, sources, []);
         var modelVersions = await connection.QueryAsync<DrawingRelationModelVersion>(new CommandDefinition(
             """
             SELECT d.id DocumentId,d.project_id ProjectId,d.file_name FileName,d.kind Kind,v.revision_label RevisionLabel
             FROM document d INNER JOIN document_version v ON v.document_id=d.id
             WHERE d.id IN @ModelIds AND d.kind IN ('Part','Assembly') AND d.deleted_at IS NULL AND d.purged_at IS NULL
             """, new { ModelIds = modelIds }, cancellationToken: cancellationToken));
-        return rows.Concat(PendingDrawingRelations.Recover(sources, modelVersions)).Distinct()
-            .OrderBy(relation => relation.ModelDocumentId).ThenBy(relation => relation.DrawingDocumentId).ToArray();
+        return PendingDrawingRelations.Reconcile(rows, sources, modelVersions);
     }
 
     private sealed class PendingDrawingRelationVersionRow
@@ -597,14 +593,6 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public Guid DocumentId { get; init; }
         public bool MatchesRevision { get; init; }
         public DateTime CreatedAt { get; init; }
-    }
-
-    private sealed class PendingDrawingRelationRow
-    {
-        public Guid DocumentId { get; init; }
-        public Guid ProjectId { get; init; }
-        public string FileName { get; init; } = "";
-        public string ReferenceSnapshotJson { get; init; } = "{}";
     }
 
     public async Task<IReadOnlyList<DocumentWhereUsed>> ListWhereUsedAsync(Guid documentId, CancellationToken cancellationToken)
@@ -1224,9 +1212,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var connection = await OpenAsync(ct);
         var rows = await connection.QueryAsync<(Guid Id, Guid ProjectId, string Number, string State, string PreviewState, int Count, DateTime Created)>(
             new CommandDefinition("""
-                SELECT id,project_id,package_number,state,COALESCE(preview_state,'None'),drawing_document_count,created_at
-                FROM release_package WHERE project_id IN @Ids AND locks_documents=1 AND state IN ('Published','Publishing')
-                  AND release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
+                SELECT id,project_id,package_number,state,COALESCE(preview_state,'None'),
+                    CASE WHEN release_scope='NonStandardLongLead' THEN COALESCE(JSON_LENGTH(drawing_review_json,'$.items'),drawing_document_count)
+                        ELSE drawing_document_count END,created_at
+                FROM release_package WHERE project_id IN @Ids AND state IN ('Published','Publishing')
+                  AND (release_scope IN ('NonStandardLongLead','NonStandardWithDrawing','NonStandardSupplement')
+                    OR (release_scope='LegacyCombined' AND locks_documents=1))
                 ORDER BY created_at DESC
                 """, new { Ids = projectIds }, cancellationToken: ct));
         return rows.Select(row => new PreviewPackageHeader(row.Id, row.ProjectId, row.Number, row.State, row.PreviewState, row.Count,
@@ -1238,7 +1229,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json, model_delivery_artifacts_json,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, drawing_review_json, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json, model_delivery_artifacts_json,
                    reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
@@ -1556,7 +1547,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var row = await connection.QuerySingleOrDefaultAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json, model_delivery_artifacts_json,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, drawing_review_json, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json, model_delivery_artifacts_json,
                    reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
@@ -1653,8 +1644,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                        AND (supply.release_package_id IS NOT NULL OR package.published_at >= tracking_activation.activated_at)
                        AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(supply.payload_json,'$.receivedAt')),'null'),'')=''
                        THEN 1 ELSE 0 END) has_unreceived_non_standard_release,
-                   MAX(CASE WHEN package.state='PublishFailed' OR (package.state IN ('Published','Publishing') AND package.locks_documents=1
-                       AND package.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
+                   MAX(CASE WHEN package.state='PublishFailed' OR (package.state IN ('Published','Publishing')
+                       AND (package.release_scope IN ('NonStandardLongLead','NonStandardWithDrawing','NonStandardSupplement')
+                         OR (package.release_scope='LegacyCombined' AND package.locks_documents=1))
                        AND package.preview_state IN ('Pending','WaitingForServer','Running','Failed')) THEN 1 ELSE 0 END) has_release_attention
               FROM project p
               LEFT JOIN project_reference_root current_root ON current_root.project_id=p.id
@@ -2099,6 +2091,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             DrawingDocumentCount = row.DrawingDocumentCount,
             CreatesManufacturingBaseline = row.CreatesManufacturingBaseline,
             LocksDocuments = row.LocksDocuments,
+            DrawingReview = row.DrawingReviewJson is null ? null : JsonSerializer.Deserialize<ReleaseDrawingReview>(row.DrawingReviewJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
             PdfTitleBlockSnapshot = row.PdfTitleBlockSnapshotJson is null ? null : JsonSerializer.Deserialize<PdfTitleBlockSnapshot>(row.PdfTitleBlockSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
             PdfDeliveryArtifacts = row.PdfDeliveryArtifactsJson is null ? new Dictionary<Guid, DocumentPreviewArtifact>() : JsonSerializer.Deserialize<Dictionary<Guid, DocumentPreviewArtifact>>(row.PdfDeliveryArtifactsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new(),
             ModelDeliveryArtifacts = row.ModelDeliveryArtifactsJson is null ? new Dictionary<Guid, DocumentPreviewArtifact>() : JsonSerializer.Deserialize<Dictionary<Guid, DocumentPreviewArtifact>>(row.ModelDeliveryArtifactsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new(),
@@ -2360,6 +2353,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string? EmergencyRolesJson { get; init; }
         public string SelectedBomItemIdsJson { get; init; } = "[]";
         public string? ConfirmedRemovedBomItemIdsJson { get; init; }
+        public string? DrawingReviewJson { get; init; }
         public string? PdfTitleBlockSnapshotJson { get; init; }
         public string? PdfDeliveryArtifactsJson { get; init; }
         public string? ModelDeliveryArtifactsJson { get; init; }

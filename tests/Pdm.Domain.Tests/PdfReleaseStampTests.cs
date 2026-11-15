@@ -201,6 +201,32 @@ public sealed class PdfReleaseStampTests : IDisposable
         Assert.Equal(first, await File.ReadAllBytesAsync(path));
     }
 
+    [Fact]
+    public async Task FrozenCustomLabelLocatesReviewerCellAndChangesArtifactFingerprint()
+    {
+        var labels = new Dictionary<string, string> { ["reviewer"] = "复核签名", ["material"] = "原材料" };
+        var (service, source, project, package, path) = Fixture(false, 1, titleBlock: true, drawingLabels: labels);
+        var values = new Dictionary<string, string> { ["reviewer"] = "审图人员", ["material"] = "不锈钢" };
+        var snapshot = new PdfTitleBlockSnapshot(["reviewer", "material"],
+            new Dictionary<Guid, PdfDrawingTitleBlockSnapshot> { [source.DocumentId] = new(source.SourceVersionId, source.Sha256, values, []) }, true)
+        {
+            DrawingLabels = labels
+        };
+        package = package with { PdfTitleBlockSnapshot = snapshot };
+        await service.ApplyAsync(package, project, source, path, default);
+        lock (PdfReleasePageEditor.Gate)
+        {
+            var texts = PdfReleasePageEditor.Texts(File.ReadAllBytes(path), 0);
+            Assert.Contains(texts, text => text.Value.Trim() == "复核签名");
+            Assert.Contains(texts, text => text.Value.Trim() == "审图人员");
+            Assert.DoesNotContain(texts, text => text.Value.Trim() == "旧值reviewer");
+            Assert.Contains(texts, text => text.Value.Trim() == "原材料");
+            Assert.Contains(texts, text => text.Value.Trim() == "不锈钢");
+        }
+        Assert.True(service.IsCurrent(path, package, source.SourceVersionId));
+        Assert.False(service.IsCurrent(path, package with { PdfTitleBlockSnapshot = snapshot with { DrawingLabels = null } }, source.SourceVersionId));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -252,13 +278,35 @@ public sealed class PdfReleaseStampTests : IDisposable
         if (all && !string.IsNullOrWhiteSpace(evidence)) File.Copy(path, evidence, true);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task MissingCellOrOverlongValueLeavesEntireOriginalPdfUnchanged(bool longValue)
+    [Fact]
+    public async Task MissingMappedLabelSkipsOnlyThatFieldAndStillStampsPdf()
     {
-        var (service, source, project, package, path) = Fixture(false, 1, titleBlock: longValue);
-        var values = new Dictionary<string, string> { ["material"] = longValue ? new string('材', 400) : "钢" };
+        var (service, source, project, package, path) = Fixture(false, 2, titleBlock: true);
+        var values = new Dictionary<string, string> { ["reviewer"] = "审图人员", ["material"] = "新材质" };
+        package = package with { PdfTitleBlockSnapshot = new(["reviewer", "material"],
+            new Dictionary<Guid, PdfDrawingTitleBlockSnapshot> { [source.DocumentId] = new(source.SourceVersionId, source.Sha256, values, []) }, true)
+        {
+            DrawingLabels = new Dictionary<string, string> { ["reviewer"] = "不存在的标签" }
+        } };
+        await service.ApplyAsync(package, project, source, path, default);
+        Assert.True(service.IsCurrent(path, package, source.SourceVersionId));
+        lock (PdfReleasePageEditor.Gate)
+        {
+            for (var page = 0; page < 2; page++)
+            {
+                var texts = PdfReleasePageEditor.Texts(File.ReadAllBytes(path), page);
+                Assert.Contains(texts, text => text.Value.Trim() == "旧值reviewer");
+                Assert.Contains(texts, text => text.Value.Trim() == "新材质");
+                Assert.DoesNotContain(texts, text => text.Value.Trim() == "审图人员");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task OverlongValueLeavesEntireOriginalPdfUnchanged()
+    {
+        var (service, source, project, package, path) = Fixture(false, 1, titleBlock: true);
+        var values = new Dictionary<string, string> { ["material"] = new string('材', 400) };
         package = package with { PdfTitleBlockSnapshot = new(["material"],
             new Dictionary<Guid, PdfDrawingTitleBlockSnapshot> { [source.DocumentId] = new(source.SourceVersionId, source.Sha256, values, []) }, true) };
         var original = await File.ReadAllBytesAsync(path);
@@ -301,7 +349,7 @@ public sealed class PdfReleaseStampTests : IDisposable
     }
 
     private (PdfReleaseStampProcessor Service, ReleasePreviewSource Source, Project Project, ReleasePackage Package, string Path)
-        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false, string? legacyCode = null, string? frozenCode = null, bool legacyNote = true, bool offsetRequirements = false, bool crowdedRequirements = false, bool titleBlock = false, bool alreadyReleased = false)
+        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false, string? legacyCode = null, string? frozenCode = null, bool legacyNote = true, bool offsetRequirements = false, bool crowdedRequirements = false, bool titleBlock = false, bool alreadyReleased = false, IReadOnlyDictionary<string, string>? drawingLabels = null)
     {
         Directory.CreateDirectory(root);
         var drawingId = Guid.NewGuid(); var modelId = Guid.NewGuid(); var sourceId = Guid.NewGuid();
@@ -358,7 +406,7 @@ public sealed class PdfReleaseStampTests : IDisposable
                         var bottom = 9 + (6 - fieldIndex % 7) * 14;
                         graphics.DrawRectangle(XPens.Black, left, h - bottom - 14, 77, 14);
                         graphics.DrawRectangle(XPens.Black, left + 77, h - bottom - 14, 95, 14);
-                        graphics.DrawString(field.Labels[0], new XFont("UPLM-YaHei", 6), XBrushes.Black, left + 3, h - bottom - 6);
+                        graphics.DrawString(drawingLabels?.GetValueOrDefault(field.Key) ?? field.Labels[0], new XFont("UPLM-YaHei", 6), XBrushes.Black, left + 3, h - bottom - 6);
                         graphics.DrawString("旧值" + field.Key, new XFont("UPLM-YaHei", 5.5), XBrushes.Blue, left + 80, h - bottom - 6);
                     }
                 }

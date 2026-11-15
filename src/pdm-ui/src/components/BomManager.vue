@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ColumnSettingsList from './ColumnSettingsList.vue'
+import { orderColumns, useColumnSettings } from '../columnSettings'
 import { buildBomConfigurationGroups, type ConfigurationRow } from '../bomConfigurationGroups'
 import { recoverRelationAllocations } from '../materialRelationDrafts'
 import { previewBomConfigurationQuantity, requestJson } from '../api'
@@ -69,11 +71,10 @@ type ConfigurableBomView = 'Standard' | 'NonStandard' | 'Electrical' | 'WearPart
 type BomColumnDefinition = { key: BomColumnKey; label: string }
 
 const bomColumnDefinitions: BomColumnDefinition[] = [
-  { key: 'attachments', label: '图纸附件' },
   { key: 'kind', label: '物料分类' }, { key: 'wearPart', label: '易损件' }, { key: 'impact', label: '关键' }, { key: 'unit', label: '单位' },
   { key: 'drawingNumber', label: '物料编码' }, { key: 'name', label: '物料名称' }, { key: 'parentDrawingNumber', label: '上级物料编码' }, { key: 'specification', label: '型号' }, { key: 'revision', label: '发布版本' },
   { key: 'remark', label: '备注信息' }, { key: 'brand', label: '品牌' }, { key: 'material', label: '材质' }, { key: 'surfaceTreatment', label: '表面处理' }, { key: 'heatTreatment', label: '热处理' },
-  { key: 'weight', label: '重量' }, { key: 'quantity', label: '数量' }, { key: 'quantityReference', label: '发布  总/源' }, { key: 'drawing', label: '图纸' },
+  { key: 'weight', label: '重量' }, { key: 'quantity', label: '数量' }, { key: 'quantityReference', label: '发布  总/源' }, { key: 'attachments', label: '图纸附件' }, { key: 'drawing', label: '图纸' },
   { key: 'issue', label: '信息' }, { key: 'dataStatus', label: '资料状态' },
 ]
 
@@ -152,6 +153,7 @@ const structureIndexPending = computed(() => {
   return pending(props.referenceRoot)
 })
 const emit = defineEmits<{
+  releaseReviewDocuments: [releasePackageId: string]
   releasePreviewAttention: [projectId: string, hasIssue: boolean]
   save: [kind: BomKind, items: BomItem[]]
   saveMultiplier: [kind: BomKind, multiplier: number, expectedMultiplier: number]
@@ -435,6 +437,9 @@ const relationDialogOpen = ref(false)
 const downloadingDrawingIds = ref(new Set<string>())
 const bomColumnSettingsOpen = ref(false)
 const visibleBomColumnKeys = ref<BomColumnKey[]>([])
+const bomColumnOrder = ref<BomColumnKey[]>([])
+const bomColumnSettings = useColumnSettings(visibleBomColumnKeys, bomColumnOrder)
+const { draftVisible, draftOrder } = bomColumnSettings
 const relationLoading = ref(false)
 const relationApplying = ref(false)
 const selectedRelationMainId = ref('')
@@ -996,8 +1001,7 @@ function kitGroupRow(source: BomItem): EditableBomRow {
     specification: kit?.model ?? '', brand: kit?.brand ?? '', remark: kit?.description ?? '', quantity,
     relationAllocations: source.engineeringKitRelationAllocations }
 }
-const groupParentColumns = computed(() => [...bomColumnDefinitions.filter(column => column.key !== 'attachments' && !['drawing', 'issue', 'dataStatus'].includes(column.key)),
-  ...bomColumnDefinitions.filter(column => ['attachments', 'drawing', 'issue', 'dataStatus'].includes(column.key))]
+const displayedBomColumns = computed(() => orderColumns(bomColumnDefinitions, bomColumnOrder.value)
   .filter(column => isBomColumnVisible(column.key) && (column.key !== 'impact' || !isSourceView.value && !isWearPartView.value)))
 function groupParentValue(row: EditableBomRow, key: BomColumnKey, kit: boolean, childCount: number) {
   if (key === 'kind') return kit ? '料品套件' : row._quantityMembers ? rowKindLabel(row) : '配套主料'
@@ -1942,15 +1946,29 @@ function issueMasterValueToFill(field: 'brand' | 'specification') {
 }
 const issueBrandToFill = computed(() => issueMasterValueToFill('brand'))
 const issueSpecificationToFill = computed(() => issueMasterValueToFill('specification'))
+const issueNameFromMaster = computed(() => {
+  const row = issueDetailRow.value
+  if (!row || (!issueSpecificationToFill.value && !issueBrandToFill.value)) return ''
+  const name = materialMasterState(row).material?.name?.trim() ?? ''
+  return name !== row.name?.trim() ? name : ''
+})
 
 async function confirmIssueMasterValue(field: 'brand' | 'specification') {
   const row = issueDetailRow.value
   const value = issueMasterValueToFill(field)
+  const name = issueNameFromMaster.value
   const label = field === 'brand' ? '品牌' : '型号'
-  if (!row || !value || !await ensurePublishedRowsAcknowledged([row], `填入${label}`)) return
-  applyBatchInputToRows({ itemIds: operationItemIds(row), fields: [field], [field]: value })
+  if (!row || !value || !await ensurePublishedRowsAcknowledged([row], `填入${label}${name ? "和名称" : ""}`)) return
+  if (row !== issueDetailRow.value || value !== issueMasterValueToFill(field)
+    || name !== issueNameFromMaster.value) return
+  const input: BatchUpdateBomItemsInput = { itemIds: operationItemIds(row), fields: [field], [field]: value }
+  if (name) {
+    input.fields.push('name')
+    input.name = name
+  }
+  applyBatchInputToRows(input)
   if (!shouldShowReconciliation(row)) issueDetailRow.value = null
-  ElMessage.success(`已填入${label}“${value}”，请保存BOM`)
+  ElMessage.success(name ? `已填入${label}“${value}”和名称“${name}”，请保存BOM` : `已填入${label}“${value}”，请保存BOM`)
 }
 
 function openIssueDetails(row: EditableBomRow) {
@@ -3500,6 +3518,7 @@ function bomColumnStorageKey(view: ConfigurableBomView) {
 }
 
 function restoreBomColumns() {
+  bomColumnOrder.value = []
   const view = configurableBomView()
   if (!view) {
     visibleBomColumnKeys.value = availableBomColumns().map(column => column.key)
@@ -3507,8 +3526,9 @@ function restoreBomColumns() {
   }
   visibleBomColumnKeys.value = defaultBomColumnKeys(view)
   try {
-    const saved = JSON.parse(readTablePreference(bomColumnStorageKey(view)) ?? 'null') as { visible?: string[]; standardFiles?: boolean } | null
+    const saved = JSON.parse(readTablePreference(bomColumnStorageKey(view)) ?? 'null') as { visible?: string[]; order?: BomColumnKey[]; standardFiles?: boolean } | null
     const allowed = new Set(availableBomColumns(view).map(column => column.key))
+    bomColumnOrder.value = (saved?.order ?? []).filter(key => allowed.has(key))
     const migrated = (saved?.visible ?? []).map(key => key === 'standard2d' || key === 'standard3d' ? 'attachments' : key)
     const visible = migrated.filter((key, index, values): key is BomColumnKey => allowed.has(key as BomColumnKey) && values.indexOf(key) === index)
     if (visible.length) visibleBomColumnKeys.value = view === 'Standard' && !saved?.standardFiles ? [...new Set<BomColumnKey>([...visible, 'attachments'])] : visible
@@ -3521,6 +3541,7 @@ function isBomColumnVisible(key: BomColumnKey) {
   return visibleBomColumnKeys.value.includes(key)
 }
 
+const bomColumnClasses: Partial<Record<BomColumnKey, string>> = { kind: 'is-kind', wearPart: 'is-wear-part', impact: 'is-impact', unit: 'is-unit', drawingNumber: 'is-code', name: 'is-name', parentDrawingNumber: 'is-parent-code', specification: 'is-model', revision: 'is-revision', remark: 'is-remark', brand: 'is-brand', material: 'is-material', surfaceTreatment: 'is-surface', heatTreatment: 'is-heat', weight: 'is-weight', quantity: 'is-quantity', quantityReference: 'is-quantity-reference', drawing: 'is-drawing-audit', issue: 'is-source', dataStatus: 'is-data-status' }
 const bomColumnWeights: Partial<Record<BomColumnKey, number>> = {
   drawingNumber: 100, name: 100, specification: 115, remark: 75,
   parentDrawingNumber: 90, revision: 55, quantity: 40, weight: 55,
@@ -3549,12 +3570,13 @@ function bomColumnWidth(key: BomColumnKey | 'select' | 'actions' | 'sequence') {
 
 async function saveBomColumns() {
   const view = configurableBomView()
-  if (!view || !visibleBomColumnKeys.value.length) {
+  if (!view || !draftVisible.value.length) {
     ElMessage.warning('请至少保留一列')
     return
   }
+  bomColumnSettings.applyDraft()
   let synced: boolean
-  try { synced = await writeTablePreference(bomColumnStorageKey(view), JSON.stringify({ visible: visibleBomColumnKeys.value, standardFiles: true })) }
+  try { synced = await writeTablePreference(bomColumnStorageKey(view), JSON.stringify({ visible: visibleBomColumnKeys.value, order: bomColumnOrder.value, standardFiles: true })) }
   catch { ElMessage.error('列设置同步失败，当前选择已保留在本机，请重试保存。'); return }
   bomColumnSettingsOpen.value = false
   if (synced) ElMessage.success('BOM列设置已保存到当前账号')
@@ -3563,11 +3585,11 @@ async function saveBomColumns() {
 
 function resetBomColumns() {
   const view = configurableBomView()
-  if (view) visibleBomColumnKeys.value = defaultBomColumnKeys(view)
+  if (view) bomColumnSettings.setDraft(defaultBomColumnKeys(view))
 }
 
 function visibleBomColumnCount() {
-  return bomColumnDefinitions.filter(column => isBomColumnVisible(column.key)).length
+  return displayedBomColumns.value.length
 }
 
 async function restoreSelectedFromSource() {
@@ -4848,9 +4870,7 @@ async function submitBatchUpdate() {
         <small>发布历史</small>
         <strong>{{ categoryReleasePackages.length }} 个</strong>
       </div>
-    </section>
-    <div v-if="!isSourceView && !isWearPartView && baselines.length" class="pdm-bom-version-toolbar">
-      <div v-if="baselines.length" class="pdm-bom-baseline-picker">
+      <div v-if="baselines.length" class="pdm-bom-baseline-picker pdm-bom-inline-baseline">
         <label>制造基线
           <select v-model="selectedBaselineId" aria-label="选择制造BOM基线">
             <option v-for="baseline in baselines" :key="baseline.id" :value="baseline.id">{{ baseline.label }}{{ baselineChangeLabel(baseline) }}</option>
@@ -4858,8 +4878,8 @@ async function submitBatchUpdate() {
         </label>
         <span v-if="selectedBaseline">S {{ versionLabel(selectedBaseline.standardBomVersionId) }} · N {{ versionLabel(selectedBaseline.nonStandardBomVersionId) }} · E {{ versionLabel(selectedBaseline.electricalBomVersionId) }}</span>
       </div>
-    </div>
-    <div v-if="!isSourceView && !isWearPartView" class="pdm-bom-summary-actions" aria-label="BOM统计与操作">
+    </section>
+    <div v-if="!isSourceView && !isWearPartView && comparisonOpen && comparisonBaseline && !releaseComparisonActive" class="pdm-bom-summary-actions" aria-label="BOM统计与操作">
       <div v-if="comparisonOpen && comparisonBaseline && !releaseComparisonActive" class="pdm-bom-comparison-summary">
         <span v-if="rows.some(row => row.releaseConfirmation)" class="pdm-muted">本次无需发布 {{ rows.filter(row => row.releaseConfirmation).length }}</span>
         <div class="pdm-bom-comparison-filters pdm-tabs" role="group" aria-label="筛选发布版差异">
@@ -4874,28 +4894,8 @@ async function submitBatchUpdate() {
         </div>
         <small v-if="comparison.removed.length">已移除：{{ comparison.removed.map(item => item.drawingNumber || item.name).join('、') }}</small>
       </div>
-      <label v-if="kind === 'Standard' || kind === 'NonStandard' || kind === 'Electrical'" class="pdm-bom-multiplier-control" :title="'整套倍率：单套数量乘以此倍率得到发布总量，历史版本保留冻结值。' + (selectedVersion ? '版本冻结' : categoryVersions[0]?.isMultiplierOverridden ? '手动设置' : '项目默认')">
-        <span>倍率</span><input ref="multiplierInput" class="pdm-bom-multiplier" type="number" min="1" max="1000" step="1" aria-label="BOM整套倍率" :value="selectedVersion?.wholeSetMultiplier ?? currentBomMultiplier" :readonly="!multiplierEditEnabled" :disabled="pending || !canOperateCurrentView || hasStagedEdits" :title="canOperateCurrentView ? multiplierEditEnabled ? '修改后离开输入框保存；按Esc取消' : '点击确认后修改整套倍率' : undefined" @click="requestMultiplierEdit" @keydown.enter.prevent="multiplierEditEnabled ? ($event.target as HTMLInputElement).blur() : requestMultiplierEdit()" @keydown.esc.stop.prevent="lockMultiplierEdit" @blur="lockMultiplierEdit" @change="saveMultiplier">
-      </label>
-      <div class="pdm-bom-release-strip-actions">
-        <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">机械BOM待对账 {{ reconciliationReminderCount }} 类（{{ reconciliationReminderInstanceCount }} 个实例）</span>
-        <button type="button" class="pdm-secondary-action" :disabled="pending" @click="refreshCurrentBom">刷新</button>
-        <button v-if="canOperateCurrentView && hasBomOperation('import')" type="button" class="pdm-secondary-action" @click="selectImport" title="导入XLSX">导入</button>
-
-        <button v-if="editable && !releaseComparisonActive" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="对比源数据" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '生成中…' : '源数据' }}</button>
-
-
-        <button type="button" class="pdm-secondary-action" @click="openReleaseDrawer(activeReleasePackages[0]?.id || latestPublishedPackage?.id)">{{ activeReleasePackages.length ? `处理审批 ${activeReleasePackages.length}` : '发布记录' }}</button>
-        <MoreActions><button type="button" class="pdm-secondary-action" v-if="projectExport" @click="openExportDialog(kind as BomKind)" title="导出XLSX">导出</button>
-<button v-if="canEditCurrentView && supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-inventory-action" :disabled="pending || !token || !projectId || !rows.length" title="扫描当前子项目完整BOM的库存相似型号，不受筛选和分页影响" @click="openInventoryRecommendations()">库存推荐</button>
-<button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" :disabled="pending || u9BomReading || !selectedRows.length" @click="previewU9BomDifferences">{{ u9BomReading ? '读取U9…' : '按U9校正' }}</button></MoreActions>
-        <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 条物料</span>
-        <button v-if="canEditCurrentView && hasStagedEdits" type="button" class="pdm-secondary-action pdm-bom-discard-action" :disabled="pending" @click="discardStagedEdits">撤销修改</button>
-        <button v-if="canEditCurrentView" type="button" class="pdm-primary-action pdm-bom-save-action" :disabled="pending" @click="saveCurrentBom">{{ pending ? '保存中…' : '保存BOM' }}</button>
-        <button v-if="canManageCurrentRelease && !releaseComparisonActive" type="button" class="pdm-primary-action" @click="openReleaseDrawer()">发起发布</button>
-      </div>
     </div>
-    <div v-if="canSelectCurrentView || !isSourceView" class="pdm-bom-selection-toolbar pdm-toolbar" :class="{ 'is-release-comparison': releaseComparisonActive, 'is-category-bom': !isSourceView && !isWearPartView }">
+    <div v-if="canSelectCurrentView || !isSourceView" class="pdm-bom-selection-toolbar pdm-toolbar" :style="!isSourceView && !isWearPartView && !releaseComparisonActive ? 'display: grid !important' : undefined" :class="{ 'is-release-comparison': releaseComparisonActive, 'is-category-bom': !isSourceView && !isWearPartView }">
       <div v-if="!isWearPartView && !releaseComparisonActive" class="pdm-bom-selection-actions pdm-toolbar__group">
         <template v-if="canClassifySourceView">
           <button type="button" class="pdm-secondary-action" :disabled="pending || reclassifyPending || selectedIds.length === 0" title="已分类物料也可重新归类，并同步最新图档源属性" @click="classifySelected('Standard')">归标准件</button>
@@ -4908,17 +4908,30 @@ async function submitBatchUpdate() {
           <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedIds.length > 1 || !token || !projectId" @click="openMaterialReference">引用物料</button>
           <button v-if="kind === 'Standard' || kind === 'Electrical'" type="button" class="pdm-secondary-action pdm-bom-relation-action pdm-bom-material-code-toolbar-action" :class="{ 'is-warning': !relationReviewComplete, 'is-complete': relationReviewComplete }" :title="relationReviewTitle" :disabled="pending || !token || !projectId || selectedVersionId !== 'current'" @click="openMaterialRelations">关联物料</button>
           <button v-if="supportsMaterialCodes" type="button" class="pdm-primary-action pdm-bom-material-code-toolbar-action pdm-bom-code-check-action" :disabled="pending || materialCodeResolving || !token || !projectId" @click="resolveMissingStandardMaterialCodes(true)">核对料号</button>
-          <button v-if="supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsNeedingMaterialCode.length === 0" :title="selectedStandardItemsNeedingMaterialCode.length ? '为没有料号、或料号不存在于料品主档的行申请正式料号' : '请先选择需要申请料号的行（没有料号或料号不存在于料品主档）'" @click="applyForMaterialCodes([...new Set(selectedStandardItemsNeedingMaterialCode.flatMap(operationItemIds))])">申请料号</button>
+          <template v-if="isSourceView"><button v-if="supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsNeedingMaterialCode.length === 0" :title="selectedStandardItemsNeedingMaterialCode.length ? '为没有料号、或料号不存在于料品主档的行申请正式料号' : '请先选择需要申请料号的行（没有料号或料号不存在于料品主档）'" @click="applyForMaterialCodes([...new Set(selectedStandardItemsNeedingMaterialCode.flatMap(operationItemIds))])">申请料号</button>
           <button v-if="hasRetainableSelection" type="button" class="pdm-secondary-action" :disabled="pending || !canRetainSelected" :title="!canRetainSelected ? '仅支持同时保留人工待确认或待确认删除的物料' : ''" @click="retainSelected">{{ selectedIds.length > 1 ? '批量确认保留' : '确认保留' }}</button>
           <button type="button" class="pdm-secondary-action pdm-bom-no-publish-action" :disabled="pending || !(canSetNoPublish || canRestorePublish)" :title="mixedPublishConfirmation ? '所选条目确认状态不同，请分别选择后操作' : selectedPublishConfirmed ? '恢复参与后续发布' : '仅确认本次工作修改无需发布；新修改后重新提示'" @click="setSelectedReleaseExclusion(!selectedPublishConfirmed)">{{ selectedPublishConfirmed ? '恢复发布' : '暂不发布' }}</button>
           <button v-if="canRestoreLegacyExclusion" type="button" class="pdm-secondary-action" :disabled="pending" @click="restoreLegacyExclusion">恢复旧的不发布设置</button>
           <button v-if="hasSelectedKitRows" type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="removeSelectedKitReferences">移除套件</button>
           <button v-if="(!isSourceView || canConfirmDeleteSelected) && !hasSelectedKitRows && hasBomOperation('delete')" type="button" class="pdm-secondary-action is-danger" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" @click="deleteItems(selectedPersistedIds)">{{ canConfirmDeleteSelected ? (selectedIds.length > 1 ? '批量确认删除' : '确认删除') : (selectedIds.length > 1 ? '批量删除' : '删除') }}</button>
-          <button v-if="kind === 'Standard' || kind === 'NonStandard'" type="button" class="pdm-secondary-action" :disabled="pending || !canRestoreSourceSelected" :title="selectedIds.length > 0 && !canRestoreSourceSelected ? '仅支持恢复有图档来源的标准件或非标件' : '恢复最新图档源属性，保留汇总数量、分类与排序'" @click="restoreSelectedFromSource" aria-label="恢复源数据">源数据</button>
+          <button v-if="kind === 'Standard' || kind === 'NonStandard'" type="button" class="pdm-secondary-action" :disabled="pending || !canRestoreSourceSelected" :title="selectedIds.length > 0 && !canRestoreSourceSelected ? '仅支持恢复有图档来源的标准件或非标件' : '恢复最新图档源属性，保留汇总数量、分类与排序'" @click="restoreSelectedFromSource" aria-label="恢复源数据">恢复所选源数据</button></template>
         </template>
-        <button v-if="editable" type="button" class="pdm-secondary-action" :disabled="pending" title="查看全部删除记录并按权限恢复，包含未发布物料和历次发布前已删除的物料" @click="recycleBinOpen = true">回收站 {{ recycleBinRows.length }}</button>
-        <button v-if="canSelectSpareParts" type="button" class="pdm-secondary-action" :disabled="pending || addingSpareParts || !selectedRows.length || hasSelectedDraftRows" @click="addSelectedSpareParts">加入备件</button>
+        <template v-if="isSourceView"><button v-if="editable" type="button" class="pdm-secondary-action" :disabled="pending" title="查看全部删除记录并按权限恢复，包含未发布物料和历次发布前已删除的物料" @click="recycleBinOpen = true">回收站 {{ recycleBinRows.length }}</button><button v-if="canSelectSpareParts" type="button" class="pdm-secondary-action" :disabled="pending || addingSpareParts || !selectedRows.length || hasSelectedDraftRows" @click="addSelectedSpareParts">加入备件</button></template>
         <span v-if="canSelectSpareParts && sparePartMessage" role="status">{{ sparePartMessage }}</span>
+        <template v-if="!isSourceView"><template v-if="canEditCurrentView"><button v-if="(!isSourceView || canConfirmDeleteSelected) && !hasSelectedKitRows && hasBomOperation('delete')" type="button" class="pdm-secondary-action is-danger" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" @click="deleteItems(selectedPersistedIds)">{{ canConfirmDeleteSelected ? (selectedIds.length > 1 ? '批量确认删除' : '确认删除') : (selectedIds.length > 1 ? '批量删除' : '删除') }}</button></template><div class="pdm-bom-operation-menu"><MoreActions><label v-if="kind === 'Standard' || kind === 'NonStandard' || kind === 'Electrical'" class="pdm-bom-multiplier-control" :title="'整套倍率：单套数量乘以此倍率得到发布总量，历史版本保留冻结值。' + (selectedVersion ? '版本冻结' : categoryVersions[0]?.isMultiplierOverridden ? '手动设置' : '项目默认')">
+        <span>倍率</span><input ref="multiplierInput" class="pdm-bom-multiplier" type="number" min="1" max="1000" step="1" aria-label="BOM整套倍率" :value="selectedVersion?.wholeSetMultiplier ?? currentBomMultiplier" :readonly="!multiplierEditEnabled" :disabled="pending || !canOperateCurrentView || hasStagedEdits" :title="canOperateCurrentView ? multiplierEditEnabled ? '修改后离开输入框保存；按Esc取消' : '点击确认后修改整套倍率' : undefined" @click="requestMultiplierEdit" @keydown.enter.prevent="multiplierEditEnabled ? ($event.target as HTMLInputElement).blur() : requestMultiplierEdit()" @keydown.esc.stop.prevent="lockMultiplierEdit" @blur="lockMultiplierEdit" @change="saveMultiplier">
+      </label><button v-if="canOperateCurrentView && hasBomOperation('import')" type="button" class="pdm-secondary-action" @click="selectImport" title="导入XLSX">导入</button><button v-if="editable && !releaseComparisonActive" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="对比源数据" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '生成中…' : '对账源数据' }}</button><button type="button" class="pdm-secondary-action" @click="openReleaseDrawer(activeReleasePackages[0]?.id || latestPublishedPackage?.id)">{{ activeReleasePackages.length ? `处理审批 ${activeReleasePackages.length}` : '发布记录' }}</button><template v-if="canEditCurrentView"><button v-if="supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsNeedingMaterialCode.length === 0" :title="selectedStandardItemsNeedingMaterialCode.length ? '为没有料号、或料号不存在于料品主档的行申请正式料号' : '请先选择需要申请料号的行（没有料号或料号不存在于料品主档）'" @click="applyForMaterialCodes([...new Set(selectedStandardItemsNeedingMaterialCode.flatMap(operationItemIds))])">申请料号</button>
+          <button v-if="hasRetainableSelection" type="button" class="pdm-secondary-action" :disabled="pending || !canRetainSelected" :title="!canRetainSelected ? '仅支持同时保留人工待确认或待确认删除的物料' : ''" @click="retainSelected">{{ selectedIds.length > 1 ? '批量确认保留' : '确认保留' }}</button>
+          <button type="button" class="pdm-secondary-action pdm-bom-no-publish-action" :disabled="pending || !(canSetNoPublish || canRestorePublish)" :title="mixedPublishConfirmation ? '所选条目确认状态不同，请分别选择后操作' : selectedPublishConfirmed ? '恢复参与后续发布' : '仅确认本次工作修改无需发布；新修改后重新提示'" @click="setSelectedReleaseExclusion(!selectedPublishConfirmed)">{{ selectedPublishConfirmed ? '恢复发布' : '暂不发布' }}</button>
+          <button v-if="canRestoreLegacyExclusion" type="button" class="pdm-secondary-action" :disabled="pending" @click="restoreLegacyExclusion">恢复旧的不发布设置</button>
+          <button v-if="hasSelectedKitRows" type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="removeSelectedKitReferences">移除套件</button>
+          <button v-if="kind === 'Standard' || kind === 'NonStandard'" type="button" class="pdm-secondary-action" :disabled="pending || !canRestoreSourceSelected" :title="selectedIds.length > 0 && !canRestoreSourceSelected ? '仅支持恢复有图档来源的标准件或非标件' : '恢复最新图档源属性，保留汇总数量、分类与排序'" @click="restoreSelectedFromSource" aria-label="恢复源数据">恢复所选源数据</button></template><button v-if="editable" type="button" class="pdm-secondary-action" :disabled="pending" title="查看全部删除记录并按权限恢复，包含未发布物料和历次发布前已删除的物料" @click="recycleBinOpen = true">回收站 {{ recycleBinRows.length }}</button><button v-if="canSelectSpareParts" type="button" class="pdm-secondary-action" :disabled="pending || addingSpareParts || !selectedRows.length || hasSelectedDraftRows" @click="addSelectedSpareParts">加入备件</button><button type="button" class="pdm-secondary-action" v-if="projectExport" @click="openExportDialog(kind as BomKind)" title="导出XLSX">导出</button>
+<button v-if="canEditCurrentView && supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-inventory-action" :disabled="pending || !token || !projectId || !rows.length" title="扫描当前子项目完整BOM的库存相似型号，不受筛选和分页影响" @click="openInventoryRecommendations()">库存推荐</button>
+<button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" :disabled="pending || u9BomReading || !selectedRows.length" @click="previewU9BomDifferences">{{ u9BomReading ? '读取U9…' : '按U9校正' }}</button></MoreActions>
+        <button v-if="canEditCurrentView" type="button" class="pdm-primary-action pdm-bom-save-action" :disabled="pending" @click="saveCurrentBom">{{ pending ? '保存中…' : '保存BOM' }}</button>
+        <button v-if="canManageCurrentRelease && !releaseComparisonActive" type="button" class="pdm-primary-action" @click="openReleaseDrawer()">发起发布</button></div>
+        <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 条物料</span>
+        <button v-if="canEditCurrentView && hasStagedEdits" type="button" class="pdm-secondary-action pdm-bom-discard-action" :disabled="pending" @click="discardStagedEdits">撤销修改</button></template>
         <label v-if="isSourceView" class="pdm-bom-pending-filter"><input v-model="showPendingOnly" type="checkbox" aria-label="仅显示待处理"><span>仅显示待处理</span></label>
         <span v-if="selectedIds.length" class="pdm-bom-selection-summary" role="status" aria-live="polite">已选择 {{ selectedIds.length }} 项</span>
       </div>
@@ -4932,12 +4945,15 @@ async function submitBatchUpdate() {
         <select v-model="brandFilter" aria-label="筛选品牌"><option value="">全部品牌</option><option v-for="brand in brandOptions" :key="brand" :value="brand">{{ brand }}</option></select>
         <select v-model="materialFilter" aria-label="筛选材质"><option value="">全部材质</option><option v-for="material in materialOptions" :key="material" :value="material">{{ material }}</option></select>
         <button type="button" class="pdm-secondary-action" :disabled="!filtersActive" @click="clearFilters">清空筛选</button>
-        <button v-if="configurableBomView()" type="button" class="pdm-secondary-action pdm-bom-column-settings-action" @click="bomColumnSettingsOpen = true">列设置</button>
-        <button type="button" class="pdm-secondary-action" @click="inspectPageIssue">本页资料缺项</button>
+        <template v-if="isSourceView || isWearPartView"><button v-if="configurableBomView()" type="button" class="pdm-secondary-action pdm-bom-column-settings-action" @click="bomColumnSettings.openDraft(); bomColumnSettingsOpen = true">列设置</button>
+        <button type="button" class="pdm-secondary-action" @click="inspectPageIssue">本页资料缺项</button></template>
+        <template v-else><button type="button" class="pdm-secondary-action" :disabled="pending" @click="refreshCurrentBom">刷新</button><ElPopover trigger="click" placement="bottom-end" :width="200"><template #reference><button type="button" class="pdm-secondary-action">查看设置</button></template><div class="pdm-bom-view-options"><button v-if="configurableBomView()" type="button" class="pdm-secondary-action pdm-bom-column-settings-action" @click="bomColumnSettings.openDraft(); bomColumnSettingsOpen = true">列设置</button>
+        <button type="button" class="pdm-secondary-action" @click="inspectPageIssue">本页资料缺项</button></div></ElPopover></template>
       </div>
       <div v-if="!isSourceView && !isWearPartView" class="pdm-bom-version-picker pdm-toolbar__group">
-        <ElPopover v-model:visible="releasePickerOpen" trigger="click" placement="bottom-end" :width="440" :persistent="true" popper-class="pdm-bom-release-picker-popover">
-          <template #reference><button type="button" class="pdm-secondary-action pdm-bom-release-picker-trigger" aria-label="选择发布包" aria-haspopup="dialog" :aria-expanded="releasePickerOpen">选择发布包{{ selectedComparisonIds.length ? '（' + selectedComparisonIds.length + '/3）' : '' }} ▾</button></template>
+        <button v-if="releaseComparisonActive" type="button" class="pdm-secondary-action" @click="closeReleaseComparison">关闭对比</button>
+        <ElPopover v-else v-model:visible="releasePickerOpen" trigger="click" placement="bottom-end" :width="440" :persistent="true" popper-class="pdm-bom-release-picker-popover">
+          <template #reference><button type="button" class="pdm-secondary-action pdm-bom-release-picker-trigger" aria-label="选择发布包" aria-haspopup="dialog" :aria-expanded="releasePickerOpen">发布对比{{ selectedComparisonIds.length ? '（' + selectedComparisonIds.length + '/3）' : '' }} ▾</button></template>
           <div class="pdm-bom-release-picker-content" :role="releasePickerOpen ? 'dialog' : undefined" aria-label="选择发布包">
             <header><strong>选择发布包</strong><div class="pdm-bom-release-picker-actions"><button type="button" class="pdm-primary-action pdm-bom-start-release-comparison" :disabled="!selectedComparisonIds.length" @click="applyComparisonChoices">对比</button><span>已选 {{ selectedComparisonIds.length }} / 3</span></div></header>
             <div class="pdm-bom-release-picker-options">
@@ -4945,6 +4961,7 @@ async function submitBatchUpdate() {
               <span v-if="!comparisonPickerOptions.length">暂无已发布的BOM版本或发布包</span>
             </div>
             <small>最多勾选3项，勾选后点击“对比”。</small>
+<button type="button" class="pdm-secondary-action" :disabled="!comparisonBaseline && !releaseComparisonActive" @click="comparisonOpen = !comparisonOpen; releasePickerOpen = false">{{ comparisonOpen ? '收起差异' : '对比最新发布版' }}</button>
         <details class="pdm-bom-single-version-in-picker"><summary>单版查看</summary>
         <label>
           <select v-model="selectedVersionId" aria-label="选择BOM版本" @change="selectSingleVersion">
@@ -4953,11 +4970,10 @@ async function submitBatchUpdate() {
           </select>
         </label>
         </details>
+<span v-if="selectedVersion" class="pdm-bom-version-state" :class="`is-${selectedVersion.state.toLocaleLowerCase()}`">{{ versionStateLabel(selectedVersion.state) }} · 只读</span>
+        <span v-if="selectedVersion?.state === 'Released'" class="pdm-muted">2D／3D按此BOM的发布版本取用</span>
           </div>
         </ElPopover>
-        <span v-if="selectedVersion" class="pdm-bom-version-state" :class="`is-${selectedVersion.state.toLocaleLowerCase()}`">{{ versionStateLabel(selectedVersion.state) }} · 只读</span>
-        <span v-if="selectedVersion?.state === 'Released'" class="pdm-muted">2D／3D按此BOM的发布版本取用</span>
-        <button type="button" class="pdm-secondary-action" :disabled="!comparisonBaseline && !releaseComparisonActive" @click="releaseComparisonActive ? closeReleaseComparison() : comparisonOpen = !comparisonOpen">{{ releaseComparisonActive ? '关闭对比' : comparisonOpen ? '收起差异' : '对比发布' }}</button>
       </div>
     </div>
     <BomReleaseComparison v-if="releaseComparisonActive" :key="String(projectId) + ':' + kind" :snapshots="appliedComparisonSnapshots" />
@@ -4982,12 +4998,9 @@ async function submitBatchUpdate() {
       </table>
       <table v-else ref="bomTable" class="pdm-edit-table pdm-bom-table pdm-fit-columns" data-pdm-compact-columns="28,80,36">
         <colgroup>
-          <col class="is-select" :style="bomColumnWidth('select')"><col class="is-row-actions" data-pdm-fixed-width="80" :style="bomColumnWidth('actions')"><col class="is-sequence" :style="bomColumnWidth('sequence')"><col v-if="isBomColumnVisible('kind')" class="is-kind" :style="bomColumnWidth('kind')"><col v-if="isBomColumnVisible('wearPart')" class="is-wear-part" :style="bomColumnWidth('wearPart')"><col v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView" class="is-impact" :style="bomColumnWidth('impact')"><col v-if="isBomColumnVisible('unit')" class="is-unit" :style="bomColumnWidth('unit')"><col v-if="isBomColumnVisible('drawingNumber')" class="is-code" :style="bomColumnWidth('drawingNumber')">
-          <col v-if="isBomColumnVisible('name')" class="is-name" :style="bomColumnWidth('name')"><col v-if="isBomColumnVisible('parentDrawingNumber')" class="is-parent-code" :style="bomColumnWidth('parentDrawingNumber')"><col v-if="isBomColumnVisible('specification')" class="is-model" :style="bomColumnWidth('specification')"><col v-if="isBomColumnVisible('revision')" class="is-revision" :style="bomColumnWidth('revision')"><col v-if="isBomColumnVisible('remark')" class="is-remark" :style="bomColumnWidth('remark')"><col v-if="isBomColumnVisible('brand')" class="is-brand" :style="bomColumnWidth('brand')">
-          <col v-if="isBomColumnVisible('material')" class="is-material" :style="bomColumnWidth('material')"><col v-if="isBomColumnVisible('surfaceTreatment')" class="is-surface" :style="bomColumnWidth('surfaceTreatment')"><col v-if="isBomColumnVisible('heatTreatment')" class="is-heat" :style="bomColumnWidth('heatTreatment')"><col v-if="isBomColumnVisible('weight')" class="is-weight" :style="bomColumnWidth('weight')"><col v-if="isBomColumnVisible('quantity')" class="is-quantity" :style="bomColumnWidth('quantity')"><col v-if="isBomColumnVisible('quantityReference')" class="is-quantity-reference" :style="bomColumnWidth('quantityReference')"><col v-if="isBomColumnVisible('attachments')" :style="bomColumnWidth('attachments')"><col v-if="isBomColumnVisible('drawing')" class="is-drawing-audit" :style="bomColumnWidth('drawing')">
-          <col v-if="isBomColumnVisible('issue')" class="is-source" :style="bomColumnWidth('issue')"><col v-if="isBomColumnVisible('dataStatus')" class="is-data-status" :style="bomColumnWidth('dataStatus')">
+          <col class="is-select" :style="bomColumnWidth('select')"><col class="is-row-actions" data-pdm-fixed-width="80" :style="bomColumnWidth('actions')"><col class="is-sequence" :style="bomColumnWidth('sequence')"><col v-for="column in displayedBomColumns" :key="column.key" :class="bomColumnClasses[column.key]" :style="bomColumnWidth(column.key)">
         </colgroup>
-          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th v-if="isBomColumnVisible('kind')">物料分类</th><th v-if="isBomColumnVisible('wearPart')" title="在正式BOM中明确选择是或否；图档来源行保存后会生成属性写回任务">易损件</th><th v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView">关键</th><th v-if="isBomColumnVisible('unit')">单位</th><th v-if="isBomColumnVisible('drawingNumber')">物料编码</th><th v-if="isBomColumnVisible('name')">物料名称</th><th v-if="isBomColumnVisible('parentDrawingNumber')">上级物料编码</th><th v-if="isBomColumnVisible('specification')">型号</th><th v-if="isBomColumnVisible('revision')">发布版本</th><th v-if="isBomColumnVisible('remark')">备注信息</th><th v-if="isBomColumnVisible('brand')">品牌</th><th v-if="isBomColumnVisible('material')">材质</th><th v-if="isBomColumnVisible('surfaceTreatment')">表面处理</th><th v-if="isBomColumnVisible('heatTreatment')">热处理</th><th v-if="isBomColumnVisible('weight')">重量</th><th v-if="isBomColumnVisible('quantity')">{{ isSourceView ? '源数量' : '单套数量' }}</th><th v-if="isBomColumnVisible('quantityReference')" :title="isWearPartView ? '易损件统计视图不参与发布' : '已发布冻结基线总量 / 当前BOM单套合计 / 源数据合计；不是本次新增需求'">{{ isWearPartView ? '发布状态' : '发布  总/源' }}</th><th v-if="isBomColumnVisible('attachments')">图纸附件</th><th v-if="isBomColumnVisible('drawing')" class="pdm-bom-drawing-audit-header" :title="shouldShowDrawingApprovalStatus ? '非标件BOM正式发布前显示图纸审批状态；正式发布后显示2D/3D图纸。' : undefined">{{ shouldShowDrawingApprovalStatus ? '图纸审批' : '图纸' }}</th><th v-if="isBomColumnVisible('issue')" class="pdm-bom-reconciliation-header">{{ isWearPartView ? '数据来源' : '信息' }}</th><th v-if="isBomColumnVisible('dataStatus')">资料状态</th></tr></thead>
+          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><template v-for="column in displayedBomColumns" :key="column.key"><th v-if="column.key === 'kind'">物料分类</th><th v-if="column.key === 'wearPart'" title="在正式BOM中明确选择是或否；图档来源行保存后会生成属性写回任务">易损件</th><th v-if="column.key === 'impact'">关键</th><th v-if="column.key === 'unit'">单位</th><th v-if="column.key === 'drawingNumber'">物料编码</th><th v-if="column.key === 'name'">物料名称</th><th v-if="column.key === 'parentDrawingNumber'">上级物料编码</th><th v-if="column.key === 'specification'">型号</th><th v-if="column.key === 'revision'">发布版本</th><th v-if="column.key === 'remark'">备注信息</th><th v-if="column.key === 'brand'">品牌</th><th v-if="column.key === 'material'">材质</th><th v-if="column.key === 'surfaceTreatment'">表面处理</th><th v-if="column.key === 'heatTreatment'">热处理</th><th v-if="column.key === 'weight'">重量</th><th v-if="column.key === 'quantity'">{{ isSourceView ? '源数量' : '单套数量' }}</th><th v-if="column.key === 'quantityReference'" :title="isWearPartView ? '易损件统计视图不参与发布' : '已发布冻结基线总量 / 当前BOM单套合计 / 源数据合计；不是本次新增需求'">{{ isWearPartView ? '发布状态' : '发布  总/源' }}</th><th v-if="column.key === 'attachments'">图纸附件</th><th v-if="column.key === 'drawing'" class="pdm-bom-drawing-audit-header" :title="shouldShowDrawingApprovalStatus ? '非标件BOM正式发布前显示图纸审批状态；正式发布后显示2D/3D图纸。' : undefined">{{ shouldShowDrawingApprovalStatus ? '图纸审批' : '图纸' }}</th><th v-if="column.key === 'issue'" class="pdm-bom-reconciliation-header">{{ isWearPartView ? '数据来源' : '信息' }}</th><th v-if="column.key === 'dataStatus'">资料状态</th></template></tr></thead>
         <tbody>
           <template v-for="{ row, index, depth, hasChildren, expanded, structureKey, kitGroup, relationGroup, childCount } in pagedRows" :key="kitGroup || relationGroup || row._configurationChild ? structureKey : row.id || row._clientKey">
           <tr v-if="kitGroup || relationGroup" :data-configuration="row._configurationName" :data-group-row-index="groupActionIndex(row)" :data-bom-group-key="structureKey" class="pdm-bom-kit-group is-group-parent" :class="{ 'pdm-bom-relation-group': relationGroup, 'is-row-dragging': draggedRowIndexes.includes(groupActionIndex(row)), 'is-drag-over-before': dragOverGroupKey===structureKey && dragOverPosition==='before', 'is-drag-over-after': dragOverGroupKey===structureKey && dragOverPosition==='after' }" @click="clickBomGroupRow($event, hasChildren, structureKey)">
@@ -4996,7 +5009,7 @@ async function submitBatchUpdate() {
               <span class="pdm-bom-row-drag-handle" :class="{ 'is-disabled': pending }" role="button" tabindex="0" :aria-label="'拖动'+(kitGroup?'套件 ':'关联配置 ')+row.drawingNumber+' '+row._configurationName" title="拖动整组排序，主料、子料及配件一起移动；同一主料共用的组合一同排序" @pointerdown="startRowPointerDrag(groupActionIndex(row),$event,row)">⠿</span>
               <button type="button" class="pdm-bom-row-action pdm-bom-insert-button" :aria-label="'在'+(kitGroup?'套件 ':'关联配置 ')+row.drawingNumber+' '+row._configurationName+'后插入物料'" title="在整组后插入独立物料" :disabled="pending || !hasBomOperation('create')" @click="addRow(groupActionIndex(row))">+</button>
             </div></td><td></td>
-            <td v-for="column in groupParentColumns" :key="column.key" :class="{ 'pdm-bom-standard-files-cell': column.key === 'attachments' }" :title="groupParentValue(row, column.key, !!kitGroup, childCount ?? 0)">
+            <td v-for="column in displayedBomColumns" :key="column.key" :class="{ 'pdm-bom-standard-files-cell': column.key === 'attachments' }" :title="groupParentValue(row, column.key, !!kitGroup, childCount ?? 0)">
               <div v-if="column.key === 'drawingNumber'" class="pdm-bom-code-content is-grouped">
                 <span class="pdm-bom-structure-indent" :style="{ '--pdm-bom-depth': depth }"><button type="button" class="pdm-bom-structure-toggle" :disabled="!hasChildren" :title="!hasChildren ? row._configurationOtherChildren ? '本页无配件明细，请在对应BOM分类查看配套' : row._configurationChildrenSeparate ? '子料已按各自配置另列' : '暂无已选配配件可展开' : (expanded?'收起':'展开')+' '+row.drawingNumber+' · '+row._configurationName+' · '+groupParentValue(row,'revision',!!kitGroup,childCount??0)" :aria-label="`${expanded ? '折叠' : '展开'}${kitGroup ? '套件' : '配套'} ${row.drawingNumber}`" :aria-expanded="expanded" @click.stop="toggleBomGroup(structureKey)"><span class="pdm-bom-structure-arrow" aria-hidden="true">▶</span></button></span>
                 <span v-stocked-material="row.drawingNumber" class="pdm-bom-cell-value">{{ row.drawingNumber }}</span>
@@ -5020,23 +5033,24 @@ async function submitBatchUpdate() {
               </div>
             </td>
             <td><button v-if="!row._quickEntry" type="button" class="pdm-inspect-link pdm-text-action pdm-bom-sequence-value" :aria-label="row._configurationChild ? `查看${row.drawingNumber}物料详情` : `查看第${index + 1}行物料详情`" @click="inspectBomRow(row)">{{ row._configurationChild ? '—' : index + 1 }}</button></td>
-            <td v-if="isBomColumnVisible('kind')">
+            <template v-for="column in displayedBomColumns" :key="column.key">
+            <td v-if="column.key === 'kind'">
               <select v-if="isInlineEditing(row, 'kind')" v-model="inlineValue" class="pdm-bom-inline-editor" aria-label="内联编辑物料分类" autofocus @change="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit"><option v-if="row.pendingClassification" value="" disabled>请选择分类</option><option value="Standard">标准件</option><option value="NonStandard">非标件</option><option value="Electrical">电气件</option><option value="Virtual">虚拟件</option><option value="ComponentDrawing">部件图</option></select>
               <button v-stocked-material="row.drawingNumber" v-else-if="row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit pdm-bom-kind" :data-kind="rowKind(row)" :class="{ 'is-warning': row.pendingClassification }" title="点击编辑分类" aria-label="编辑物料分类" @click="beginInlineEdit(row, 'kind')">{{ rowKindLabel(row) }}</button>
               <span v-else class="pdm-bom-kind" :data-kind="rowKind(row)" :class="{ 'is-warning': rowNeedsClassification(row) }">{{ rowKindLabel(row) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('wearPart')" class="pdm-bom-wear-part-cell">
+            <td v-if="column.key === 'wearPart'" class="pdm-bom-wear-part-cell">
               <select v-if="(canEditCurrentView && !row._configurationChild)" :value="row.isWearPart === true ? 'true' : 'false'" :aria-label="`选择${row.drawingNumber || row.name || '当前物料'}是否为易损件`" @change="setWearPart(row, $event)"><option value="false">否</option><option value="true">是</option></select>
               <span v-else class="pdm-wear-part-state" :class="{ 'is-active': row.isWearPart }">{{ row.isWearPart ? '是' : '否' }}</span>
             </td>
-            <td v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView" class="pdm-bom-impact-cell">
+            <td v-if="column.key === 'impact'" class="pdm-bom-impact-cell">
               <template v-if="!row._quickEntry">
                 <select v-if="(canEditCurrentView && !row._configurationChild)" :value="row.impactStage ?? ''" :aria-label="`设置${row.drawingNumber || row.name || '当前物料'}影响阶段`" @change="setImpactStage(row, $event)"><option value="">—</option><option value="Assembly">装配</option><option value="Commissioning">调试</option></select>
                 <span v-else class="pdm-bom-cell-value">{{ impactStageLabel(row.impactStage) }}</span>
               </template>
             </td>
-            <td v-if="isBomColumnVisible('unit')"><span class="pdm-bom-cell-value">{{ u9UnitName(row.unit || '001') }}</span></td>
-            <td v-stocked-material="row.drawingNumber" v-if="isBomColumnVisible('drawingNumber')" :class="{ 'pdm-bom-structure-code-cell': displayMode === 'Structure' || depth > 0 || hasChildren }"><div class="pdm-bom-code-content" :class="{'is-grouped': displayMode === 'Structure' || depth > 0 || hasChildren}">
+            <td v-if="column.key === 'unit'"><span class="pdm-bom-cell-value">{{ u9UnitName(row.unit || '001') }}</span></td>
+            <td v-stocked-material="row.drawingNumber" v-if="column.key === 'drawingNumber'" :class="{ 'pdm-bom-structure-code-cell': displayMode === 'Structure' || depth > 0 || hasChildren }"><div class="pdm-bom-code-content" :class="{'is-grouped': displayMode === 'Structure' || depth > 0 || hasChildren}">
               <span v-if="displayMode === 'Structure' || depth > 0 || hasChildren" class="pdm-bom-structure-indent" :style="{ '--pdm-bom-depth': depth }">
                 <button v-if="hasChildren" type="button" class="pdm-bom-structure-toggle" :aria-label="`${expanded ? '折叠' : '展开'} ${row.drawingNumber || row.name}`" :aria-expanded="expanded" @click="displayMode === 'Structure' ? toggleStructureRow(structureKey) : toggleBomGroup(structureKey)"><span class="pdm-bom-structure-arrow" aria-hidden="true">▶</span></button>
                 <span v-else class="pdm-bom-structure-spacer" aria-hidden="true"></span>
@@ -5050,17 +5064,17 @@ async function submitBatchUpdate() {
               <input v-stocked-material="row.drawingNumber" v-else-if="(canEditCurrentView && !row._configurationChild) && !isSourceView" v-model.trim="row.drawingNumber" required aria-label="物料编码" @blur="autofillDraftFromMaterialMaster(row, 'drawingNumber')" @keydown.enter.prevent="autofillDraftFromMaterialMaster(row, 'drawingNumber')">
               <span v-stocked-material="row.drawingNumber" v-else class="pdm-bom-cell-value" :title="row.drawingNumber">{{ displayValue(row.drawingNumber) }}</span>
             </div></td>
-            <td v-stocked-material="row.drawingNumber" v-if="isBomColumnVisible('name')">
+            <td v-stocked-material="row.drawingNumber" v-if="column.key === 'name'">
               <input v-if="isInlineEditing(row, 'name')" v-stocked-material.highlight="row.drawingNumber" v-model="inlineValue" class="pdm-bom-inline-editor pdm-bom-name-input" aria-label="内联编辑物料名称" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
               <button v-stocked-material.highlight="row.drawingNumber" v-else-if="row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit pdm-bom-name-value" :title="row.engineeringKitReferenceId ? `${row.engineeringKitCode} / V${String(row.engineeringKitVersionNumber).padStart(2, '0')} · ${row.engineeringKitComponentOptional ? '可选子料' : '必选子料'}` : row.name || '点击编辑物料名称'" aria-label="编辑物料名称" @click="beginInlineEdit(row, 'name')"><span v-if="row.engineeringKitReferenceId" class="pdm-bom-kit-chip">{{ row.engineeringKitCode }}</span>{{ displayValue(row.name) }}</button>
               <input v-stocked-material.highlight="row.drawingNumber" v-else-if="(canEditCurrentView && !row._configurationChild) && !isSourceView" v-model.trim="row.name" class="pdm-bom-name-input" required aria-label="物料名称" :title="row.name">
               <span v-stocked-material.highlight="row.drawingNumber" v-else class="pdm-bom-cell-value pdm-bom-name-value" :title="row.name">{{ displayValue(row.name) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('parentDrawingNumber')">
+            <td v-if="column.key === 'parentDrawingNumber'">
               <input v-if="!row.id && hasBomOperation('create') && !isSourceView" v-model.trim="row.parentDrawingNumber" aria-label="上级物料编码" placeholder="">
               <span v-else class="pdm-bom-cell-value" :title="parentDrawingNumberDisplay(row)">{{ parentDrawingNumberDisplay(row) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('specification')" class="pdm-bom-model-cell">
+            <td v-if="column.key === 'specification'" class="pdm-bom-model-cell">
               <div v-if="inlineMaterialMatches.has(row.id ?? '')" class="pdm-bom-inline-match" role="status">
                 <span v-if="inlineMaterialMatches.get(row.id ?? '')?.status === 'pending'">匹配中…</span>
                 <template v-else>
@@ -5077,63 +5091,63 @@ async function submitBatchUpdate() {
                 <span v-if="hasDrawingNameModelMismatch(row)" class="pdm-bom-drawing-name-warning" aria-label="图纸名称与BOM型号不一致" :title="drawingNameMismatchTitle(row)">⚠</span>
               </div>
             </td>
-            <td v-if="isBomColumnVisible('revision')">
+            <td v-if="column.key === 'revision'">
               <span v-if="row._quickEntry" class="pdm-bom-cell-value" :title="drawingRevisionHint(row.revision, rowPublishedVersion(row))">{{ rowPublishedVersion(row) }}</span>
               <input v-else-if="!row.id && hasBomOperation('create') && !isSourceView && kind !== 'Standard' && kind !== 'Electrical'" v-model.trim="row.revision" required aria-label="版本">
               <span v-else class="pdm-bom-cell-value" :title="`${drawingRevisionHint(row.revision, rowPublishedVersion(row))}；存档版本：${row.revision}`">{{ rowPublishedVersion(row) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('remark')">
+            <td v-if="column.key === 'remark'">
               <input v-if="isInlineEditing(row, 'remark')" v-model="inlineValue" class="pdm-bom-inline-editor" aria-label="内联编辑备注信息" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
               <button v-stocked-material="row.drawingNumber" v-else-if="row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit" :title="row.remark || '点击编辑备注信息'" aria-label="编辑备注信息" @click="beginInlineEdit(row, 'remark')">{{ displayValue(row.remark) }}</button>
               <input v-else-if="(canEditCurrentView && !row._configurationChild) && !isSourceView" v-model.trim="row.remark" aria-label="备注信息">
               <span v-else class="pdm-bom-cell-value" :title="row.remark">{{ displayValue(row.remark) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('brand')">
+            <td v-if="column.key === 'brand'">
               <BomBrandEditor v-if="isInlineEditing(row, 'brand')" :value="String(inlineValue)" :token="token" @commit="value => commitInlineBrand(row, value)" @cancel="cancelInlineEdit" />
               <button v-stocked-material="row.drawingNumber" v-else-if="row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit" :title="row.brand || '点击编辑品牌'" aria-label="编辑品牌" @click="beginInlineEdit(row, 'brand')">{{ displayValue(row.brand) }}</button>
               <BomBrandEditor v-else-if="(canEditCurrentView && !row._configurationChild) && !isSourceView" :value="row.brand ?? ''" :token="token" persistent label="品牌" @update="value => row.brand = value" @commit="value => commitDraftBrand(row, value)" />
               <span v-else class="pdm-bom-cell-value" :title="row.brand">{{ displayValue(row.brand) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('material')">
+            <td v-if="column.key === 'material'">
               <input v-if="isInlineEditing(row, 'material')" v-model="inlineValue" class="pdm-bom-inline-editor" aria-label="内联编辑材质" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
               <button v-stocked-material="row.drawingNumber" v-else-if="row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit" :title="row.material || '点击编辑材质'" aria-label="编辑材质" @click="beginInlineEdit(row, 'material')">{{ displayValue(row.material) }}</button>
               <input v-else-if="(canEditCurrentView && !row._configurationChild) && !isSourceView" v-model.trim="row.material" aria-label="材质">
               <span v-else class="pdm-bom-cell-value" :title="row.material">{{ displayValue(row.material) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('surfaceTreatment')">
+            <td v-if="column.key === 'surfaceTreatment'">
               <input v-if="isInlineEditing(row, 'surfaceTreatment')" v-model="inlineValue" class="pdm-bom-inline-editor" aria-label="内联编辑表面处理" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
               <button v-stocked-material="row.drawingNumber" v-else-if="row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit" :title="row.surfaceTreatment || '点击编辑表面处理'" aria-label="编辑表面处理" @click="beginInlineEdit(row, 'surfaceTreatment')">{{ displayValue(row.surfaceTreatment) }}</button>
               <input v-else-if="(canEditCurrentView && !row._configurationChild) && !isSourceView" v-model.trim="row.surfaceTreatment" aria-label="表面处理">
               <span v-else class="pdm-bom-cell-value" :title="row.surfaceTreatment">{{ displayValue(row.surfaceTreatment) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('heatTreatment')">
+            <td v-if="column.key === 'heatTreatment'">
               <input v-if="isInlineEditing(row, 'heatTreatment')" v-model="inlineValue" class="pdm-bom-inline-editor" aria-label="内联编辑热处理" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
               <button v-stocked-material="row.drawingNumber" v-else-if="row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit" :title="row.heatTreatment || '点击编辑热处理'" aria-label="编辑热处理" @click="beginInlineEdit(row, 'heatTreatment')">{{ displayValue(row.heatTreatment) }}</button>
               <input v-else-if="(canEditCurrentView && !row._configurationChild) && !isSourceView" v-model.trim="row.heatTreatment" aria-label="热处理">
               <span v-else class="pdm-bom-cell-value" :title="row.heatTreatment">{{ displayValue(row.heatTreatment) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('weight')">
+            <td v-if="column.key === 'weight'">
               <input v-if="!row.id && hasBomOperation('create') && !isSourceView" v-model.trim="row.weight" aria-label="重量">
               <span v-else class="pdm-bom-cell-value">{{ displayValue(row.weight) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('quantity')" class="pdm-bom-quantity-audit">
+            <td v-if="column.key === 'quantity'" class="pdm-bom-quantity-audit">
               <template v-if="row._quickEntry"></template>
               <input v-quantity="requiresWholeQuantity(row.unit)" v-if="isInlineEditing(row, 'quantity')" v-model.number="inlineValue" type="number" min="0.0001" step="any" class="pdm-bom-inline-editor pdm-bom-quantity-editor" aria-label="内联编辑数量" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
               <button v-else-if="!row._quickEntry && row.id && (canEditCurrentView && !row._configurationChild) && !row._configurationChild" type="button" class="pdm-bom-cell-edit" :title="quantityTitle(row)" aria-label="编辑数量" @click="beginInlineEdit(row, 'quantity')">{{ quantityDisplay(row) }}</button>
               <input v-quantity="requiresWholeQuantity(row.unit)" v-else-if="!row._quickEntry && (canEditCurrentView && !row._configurationChild) && !isSourceView" v-model.number="row.quantity" type="number" min="0.0001" step="any" class="pdm-bom-quantity-editor" aria-label="数量">
               <span v-else-if="!row._quickEntry" class="pdm-bom-cell-value" :title="quantityTitle(row)">{{ quantityDisplay(row) }}</span>
             </td>
-            <td v-if="isBomColumnVisible('quantityReference')" class="pdm-bom-quantity-reference" :aria-label="row._quickEntry ? undefined : isWearPartView ? '统计清单，不参与发布' : quantityReferenceTitle(row)" :title="row._quickEntry ? undefined : isWearPartView ? '统计清单，不参与发布' : quantityReferenceTitle(row)">
+            <td v-if="column.key === 'quantityReference'" class="pdm-bom-quantity-reference" :aria-label="row._quickEntry ? undefined : isWearPartView ? '统计清单，不参与发布' : quantityReferenceTitle(row)" :title="row._quickEntry ? undefined : isWearPartView ? '统计清单，不参与发布' : quantityReferenceTitle(row)">
               <span v-if="isWearPartView" class="pdm-wear-part-no-release">不参与发布</span>
               <div v-else-if="!row._quickEntry" class="pdm-bom-quantity-reference-line">
                 <span :class="{ 'is-published': publishedQuantityTotal(row) !== undefined }">{{ quantityReferenceDisplay(publishedQuantityTotal(row) ?? 0) }}</span>
                 <span :class="{ 'is-total-source-mismatch': sourceQuantityDiffers(row) }"><span>{{ quantityReferenceDisplay(bomQuantityTotal(row)) }}</span><span>/</span><span>{{ quantityReferenceDisplay(sourceQuantityTotal(row)) }}</span></span>
               </div>
             </td>
-            <td v-if="isBomColumnVisible('attachments')" class="pdm-bom-standard-files-cell">
+            <td v-if="column.key === 'attachments'" class="pdm-bom-standard-files-cell">
               <button v-if="!row._quickEntry && row.id" type="button" class="pdm-bom-files-link" :aria-label="`${row.drawingNumber} · 图纸附件`" :disabled="row._previewNew || !row.drawingNumber?.trim()" :title="standardFileTitle(row)" @click="selectedFileRow = row">{{ standardFileLabel(row) }}</button>
             </td>
-            <td v-if="isBomColumnVisible('drawing')" class="pdm-bom-drawing-audit-cell">
+            <td v-if="column.key === 'drawing'" class="pdm-bom-drawing-audit-cell">
               <div v-if="!row._quickEntry" class="pdm-bom-drawing-audit-content">
                 <span v-if="kind === 'NonStandard' && !shouldShowDrawingApprovalStatus && selectedVersionId === 'current'" class="pdm-bom-drawing-review-status" :class="`is-${currentDrawingStatus(row).tone}`" :title="currentDrawingStatus(row).title">{{ currentDrawingStatus(row).label }}</span>
                 <span v-if="shouldShowDrawingApprovalStatus" class="pdm-bom-drawing-review-status" :class="`is-${drawingApprovalStatus(row).tone}`" :title="drawingApprovalStatus(row).title">{{ drawingApprovalStatus(row).label }}</span>
@@ -5145,7 +5159,7 @@ async function submitBatchUpdate() {
                 </div>
               </div>
             </td>
-            <td v-if="isBomColumnVisible('issue')" class="pdm-bom-reconciliation-cell">
+            <td v-if="column.key === 'issue'" class="pdm-bom-reconciliation-cell">
               <span v-if="row.engineeringKitCode" class="pdm-bom-kit-source" :title="`${row.engineeringKitCode} / V${String(row.engineeringKitVersionNumber ?? 1).padStart(2, '0')}`">{{ row.engineeringKitCode }}</span>
               <span v-if="!row._quickEntry && !isWearPartView && materialStockPlan(row.drawingNumber)" v-stocked-material.highlight="row.drawingNumber" class="pdm-bom-cell-value">常备件</span>
               <span v-if="isWearPartView" class="pdm-bom-cell-value">{{ bomSourceLabel(row) }}</span>
@@ -5164,8 +5178,9 @@ async function submitBatchUpdate() {
               </div>
               <span v-else-if="!row._quickEntry && !row.engineeringKitCode && !materialStockPlan(row.drawingNumber)" class="pdm-bom-cell-value">—</span>
             </td>
-            <td v-if="isBomColumnVisible('dataStatus') && row._quickEntry" class="pdm-bom-data-status-cell"><span class="pdm-bom-data-status">待录入</span></td>
-            <td v-else-if="isBomColumnVisible('dataStatus')" class="pdm-bom-data-status-cell" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'"><span class="pdm-bom-data-status" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'" :title="(isInventoryReplacement(row) ? '已确认库存替换；' : '') + (row.releaseConfirmation ? `本次无需发布：${row.releaseConfirmation.reason}；后续新修改会重新提示` : row.releaseExcluded ? `不发布：${row.releaseExclusionReason || '未记录原因'}` : dataStatusIssues(row).length ? `待完善：${dataStatusIssues(row).join('、')}` : '必填资料及料品主档校验均已通过')">{{ dataStatusLabel(row) }}</span></td>
+            <td v-if="column.key === 'dataStatus' && row._quickEntry" class="pdm-bom-data-status-cell"><span class="pdm-bom-data-status">待录入</span></td>
+            <td v-else-if="column.key === 'dataStatus'" class="pdm-bom-data-status-cell" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'"><span class="pdm-bom-data-status" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'" :title="(isInventoryReplacement(row) ? '已确认库存替换；' : '') + (row.releaseConfirmation ? `本次无需发布：${row.releaseConfirmation.reason}；后续新修改会重新提示` : row.releaseExcluded ? `不发布：${row.releaseExclusionReason || '未记录原因'}` : dataStatusIssues(row).length ? `待完善：${dataStatusIssues(row).join('、')}` : '必填资料及料品主档校验均已通过')">{{ dataStatusLabel(row) }}</span></td>
+          </template>
           </tr>
           </template>
           <tr v-if="filteredRows.length === 0 && (!canShowQuickEntry || filtersActive)"><td :colspan="3 + visibleBomColumnCount()" class="pdm-empty-info">{{ rows.length ? '没有符合当前筛选条件的物料。' : isWearPartView ? '当前没有标记为易损件的物料。' : isSourceView ? '当前没有图档源数据。' : '当前BOM为空，系统自动按无此类物料处理；可新增物料或导入标准XLSX。' }}</td></tr>
@@ -5188,6 +5203,7 @@ async function submitBatchUpdate() {
               <dl><div><dt>{{ comparison.sourceLabel }}</dt><dd>{{ comparison.source }}</dd></div><div><dt>{{ comparison.currentLabel }}</dt><dd>{{ comparison.current }}</dd></div></dl>
             </div>
           </div>
+          <p v-if="issueNameFromMaster" class="pdm-bom-issue-notice">确认填入时，物料名称将更新为料品主档中的「{{ issueNameFromMaster }}」。</p>
           <p v-if="mismatchFields(issueDetailRow).length && !issueComparisons(issueDetailRow).length" class="pdm-bom-issue-stale">当前值与图档源数据一致，该提示可能为历史记录；可重新执行“对比源数据”刷新。</p>
           <div class="pdm-bom-issue-notice">仅用于提醒，不限制保存、审批及后续操作。</div>
         </div>
@@ -5201,10 +5217,8 @@ async function submitBatchUpdate() {
       <PdfDrawingViewer v-if="drawingPreviewOpen && drawingPreviewUrl" :url="drawingPreviewUrl" />
     </el-dialog>
     <el-dialog v-model="bomColumnSettingsOpen" title="BOM列设置" width="520px" append-to-body>
-      <p class="pdm-bom-column-settings-note">可按当前账号和BOM类型选择显示列，保存后在不同客户端自动恢复。非标件、易损件默认显示热处理，标准件、电气件默认隐藏。</p>
-      <el-checkbox-group v-model="visibleBomColumnKeys" class="pdm-bom-column-settings-list" aria-label="BOM显示列">
-        <el-checkbox v-for="column in availableBomColumns()" :key="column.key" :value="column.key">{{ column.label }}</el-checkbox>
-      </el-checkbox-group>
+      <p class="pdm-bom-column-settings-note">可按账号和BOM类型选择显示列并调整顺序，保存后在不同客户端自动恢复。非标件、易损件默认显示热处理，标准件、电气件默认隐藏。</p>
+      <ColumnSettingsList v-model:visible="draftVisible" v-model:order="draftOrder" :columns="availableBomColumns()" />
       <template #footer>
         <el-button @click="resetBomColumns">恢复默认</el-button>
         <el-button @click="bomColumnSettingsOpen = false">取消</el-button>
@@ -5469,6 +5483,7 @@ async function submitBatchUpdate() {
           <p v-if="!categoryReleasePackages.length">当前BOM尚无发布记录。</p>
         </aside>
         <ReleaseCenter
+          @review-documents="id => { releaseDrawerOpen = false; emit('releaseReviewDocuments', id) }"
           :release-package="selectedReleasePackage"
           :project-id="projectId"
           :standard-items="standardRows"
@@ -5616,6 +5631,7 @@ async function submitBatchUpdate() {
 .pdm-bom-filters>input{width:150px;min-width:150px;max-width:150px}
 .pdm-bom-filters>select{width:120px;min-width:120px;max-width:120px}
 .pdm-relation-allocation-editor{display:grid;gap:8px;padding-bottom:8px;border-bottom:1px solid var(--pdm-border)}.pdm-relation-allocation-editor .pdm-toolbar{flex-wrap:wrap}.pdm-relation-allocation-editor label{display:flex;align-items:center;gap:8px}.pdm-relation-allocation-editor input{box-sizing:border-box;width:120px;height:var(--pdm-button-default);padding:4px 8px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit}.pdm-relation-allocation-warning{color:var(--pdm-danger)}.pdm-material-relation-main-table th:first-child,.pdm-material-relation-main-table td:first-child{width:24px}.pdm-bom-kit-group .pdm-bom-cell-value{text-align:center}
+
 </style>
 <style scoped>
 .pdm-bom-column-settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.4}.pdm-bom-column-settings-list{display:grid;max-height:460px;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid var(--pdm-border);border-radius:8px}.pdm-bom-column-settings-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid var(--pdm-surface-muted)}.pdm-bom-column-settings-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid var(--pdm-surface-muted)}
@@ -5661,4 +5677,55 @@ async function submitBatchUpdate() {
 .pdm-bom-manager-panel :deep(.pdm-bom-table tr:is(.is-quick-entry,.is-entry-pending)>td :is(input:not([type=checkbox],.el-input__inner),select,textarea):focus){border-color:var(--pdm-theme-accent)!important}
 .pdm-bom-manager-panel :deep(.pdm-bom-table tr.is-entry-matched>td :is(input:not([type=checkbox],.el-input__inner),select,textarea):not(:focus)){border-color:transparent!important;box-shadow:none!important}
 .pdm-bom-manager-panel :deep(.pdm-bom-table tr.is-entry-matched>td :is(input:not([type=checkbox],.el-input__inner),select,textarea):focus){box-sizing:border-box;border:1px solid var(--pdm-theme-accent)!important;box-shadow:none!important}
+
+.pdm-bom-view-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-inline-end: 6px !important;
+  overflow: visible;
+}
+.pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) > .pdm-bom-filters {
+  grid-area: 1 / 1;
+  align-items: center;
+}
+.pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) > .pdm-bom-version-picker { grid-area: 1 / 2; }
+.pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) > .pdm-bom-selection-actions {
+  grid-area: 2 / 1 / 3 / -1;
+  flex-wrap: wrap;
+}
+.pdm-bom-operation-menu {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--pdm-control-gap);
+}
+:root body .pdm-bom-row-actions .pdm-bom-row-drag-handle {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  outline: none;
+}
+:root body .pdm-bom-row-actions .pdm-bom-row-drag-handle:not(.is-disabled):is(:hover, :active) {
+  background: var(--pdm-theme-accent-soft) !important;
+}
+@media (max-width: 1100px) {
+  .pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) { display: flex !important; padding-inline-end: 6px !important; }
+}
+
+.pdm-bom-release-strip > .pdm-bom-inline-baseline {
+  flex: 0 1 auto !important;
+  margin-inline-start: auto;
+}
+.pdm-bom-inline-baseline > span { min-width: 0; text-overflow: ellipsis; }
+.pdm-bom-manager-panel .pdm-bom-summary-actions {
+  min-height: 0 !important;
+  padding-block: 2px !important;
+  margin-block: 0 !important;
+}
+.pdm-bom-manager-panel .pdm-bom-summary-actions .pdm-bom-comparison-filters > button {
+  height: 28px !important;
+  min-height: 28px !important;
+}
+.pdm-bom-selection-toolbar.is-category-bom > .pdm-bom-version-picker { justify-self: end; }
 </style>

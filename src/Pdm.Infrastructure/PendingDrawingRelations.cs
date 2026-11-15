@@ -7,6 +7,27 @@ internal sealed record DrawingRelationModelVersion(Guid DocumentId, Guid Project
 
 internal static class PendingDrawingRelations
 {
+    internal static IReadOnlyList<DocumentModelDrawingRelation> Reconcile(
+        IEnumerable<DocumentModelDrawingRelation> stored, IEnumerable<PendingDrawingRelationSource> evidence,
+        IEnumerable<DrawingRelationModelVersion> versions)
+    {
+        var sources = evidence.Where(source => source.Root.Kind == DocumentKind.Drawing
+            && source.Root.DocumentId == source.DocumentId
+            && string.Equals(source.Root.FileName, source.FileName, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var disproved = sources.ToDictionary(source => source.DocumentId,
+            source => DrawingModelRelations.DependencyOnlyModelIds(source.Root));
+        var complete = sources.Where(source => DrawingModelRelations.HasCompleteModelIndex(source.Root))
+            .ToDictionary(source => source.DocumentId,
+                source => DrawingModelRelations.KnownModels(source.Root).Select(node => node.DocumentId!.Value).ToHashSet());
+        // Never turn a missing/partial read into evidence of removal. Explicitly
+        // classified dependencies, however, cannot remain paired-model relations.
+        return stored.Where(row => (!disproved.TryGetValue(row.DrawingDocumentId, out var ids)
+                || !ids.Contains(row.ModelDocumentId)) && (!complete.TryGetValue(row.DrawingDocumentId, out var direct)
+                || direct.Contains(row.ModelDocumentId)))
+            .Concat(Recover(sources, versions)).Distinct()
+            .OrderBy(row => row.ModelDocumentId).ThenBy(row => row.DrawingDocumentId).ToArray();
+    }
+
     // Read-only compatibility for versions saved before partial drawings kept their known relations.
     // Callers supply only current drawing snapshots and versions of live, registered model documents.
     internal static IReadOnlyList<DocumentModelDrawingRelation> Recover(

@@ -7,7 +7,7 @@ import SquareLoader from './SquareLoader.vue'
 import { getProjectExportMetadata } from '../api'
 import { createClientUuid } from '../clientId'
 import { Calendar, ChevronDown, ChevronRight, Download, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, Plus, RotateCw as RefreshCw, Settings, Trash2 } from '@lucide/vue'
-import { ElMessageBox } from 'element-plus'
+import { ElDropdown, ElDropdownItem, ElDropdownMenu, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import {
@@ -433,8 +433,8 @@ function rowDuration(row: TimelineRow) {
 }
 
 function canReportProgress(row: TimelineRow) {
-  return Boolean(projectWritable.value && !inheritedParentPlan.value && row.task && isEffective(row.plan) && (canManageProject(row.projectId)
-    || row.task.assignee?.toLowerCase() === props.currentUsername.toLowerCase()))
+  return Boolean(projectWritable.value && !inheritedParentPlan.value && row.task && isEffective(row.plan) && canManageProject(row.projectId)
+  )
 }
 
 function beginInlineEdit(row: TimelineRow, field: 'assignee' | 'dates' | 'duration' | 'actualFinish') {
@@ -1116,17 +1116,30 @@ async function load() {
   const groupRevision = ++portfolioRevision
   const { id, parentProjectId } = props.project
   const token = props.token
+  templates.value = []
+  void listProjectPlanTemplates(token, false, id).then(items => {
+    if (revision !== planLoadRevision || id !== props.project.id || token !== props.token) return
+    templates.value = items
+    if (generateDialogOpen.value && !generateForm.templateId) {
+      const target = props.projects.find(project => project.id === generateTargetProjectId.value)
+      generateForm.templateId = items.find(item => item.isActive && (!item.projectTypeCode || item.projectTypeCode === target?.projectTypeCode))?.id
+        ?? items.find(item => item.isActive)?.id ?? ''
+    }
+  }).catch(reason => {
+    if (revision === planLoadRevision && id === props.project.id && token === props.token) {
+      console.warn('计划模板读取失败', reason)
+    }
+  })
   loading.value = true
   error.value = ''
   try {
-    const [loadedTemplates, loadedPlan, loadedPortfolio, loadedParentPlan] = await Promise.all([
-      listProjectPlanTemplates(token, false, id),
+    const [loadedPlan, loadedPortfolio, loadedParentPlan] = await Promise.all([
       readProjectPlan(id, token),
       readProjectPlanPortfolio(id, token),
       parentProjectId ? readProjectPlan(rootProject.value.id, token) : Promise.resolve(null),
     ])
     if (revision !== planLoadRevision || id !== props.project.id || token !== props.token) return
-    templates.value = loadedTemplates
+
     inheritedParentPlan.value = Boolean(!loadedPlan && loadedParentPlan)
     plan.value = loadedPlan ?? loadedParentPlan
     if (groupRevision === portfolioRevision) portfolio.value = loadedPortfolio
@@ -1136,7 +1149,6 @@ async function load() {
       if (row) openTask(row)
       emit('taskRequestHandled')
     }
-    if (!generateForm.templateId) generateForm.templateId = loadedTemplates.find(item => item.isActive && (!item.projectTypeCode || item.projectTypeCode === props.project.projectTypeCode))?.id ?? loadedTemplates[0]?.id ?? ''
   } catch (reason) {
     if (revision === planLoadRevision) error.value = reason instanceof Error ? reason.message : '项目计划加载失败'
   } finally {
@@ -1742,25 +1754,32 @@ watch(() => props.project.id, () => { clearTaskSortDrag(); taskSortPreview.value
             <small role="status"><template v-if="taskSortPreview">正在保存任务顺序…</template><template v-else>匹配 {{ matchingPlanTasks.length }} / {{ planTaskEntries.length }} 项任务</template></small>
           </div>
           <div class="pdm-plan-toolbar__actions">
-            <button type="button" class="pdm-plan-delete-action" :disabled="saving || !canDeleteDisplayedPlan || !canManageProject(project.id, 'delete')" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</button>
             <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">退回</button></template>
             <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit && !pendingChange && !editingChangeDraft" type="button" class="pdm-secondary-action pdm-danger-action" :disabled="saving" @click="openChangeRequest">变更计划</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && plan?.changeRequest" type="button" class="pdm-secondary-action" @click="changeReviewOpen = true">{{ pendingChange ? '权限待审批' : '变更申请记录' }}</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-primary-action" :disabled="saving" @click="completeChangeDraft">完成变更并生效</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-secondary-action" :disabled="saving" @click="abandonChangeDraft">放弃变更</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && plan && canManageProject(project.id, 'submit') && !isEffective(plan) && plan.approvalStatus !== 'Pending'" type="button" class="pdm-primary-action" :disabled="saving" @click="submitApproval">提交审批</button>
-            <button v-if="portfolioMode && canEdit" type="button" class="pdm-secondary-action" :disabled="sourceProjectOptions.length === 0" @click="openReuse">复制计划</button>
             <button v-if="portfolioMode && isMasterWithChildren" type="button" class="pdm-primary-action" @click="masterPlanMode = true">编辑主计划</button>
             <button v-if="portfolioMode && (managedChildPlans.length || plan?.childSyncResults?.length || canEditSchedule(plan))" type="button" class="pdm-secondary-action" @click="manageDialogOpen = true">编辑子计划</button>
-            <button v-if="canEdit || canManageSystemTemplates" type="button" class="pdm-secondary-action" @click="templatesDrawerOpen = true"><Settings :size="14" />计划模板</button>
+            <ElDropdown trigger="click">
+              <button type="button" class="pdm-secondary-action">更多操作</button>
+              <template #dropdown>
+                <ElDropdownMenu>
+                  <ElDropdownItem :disabled="saving || !canDeleteDisplayedPlan || !canManageProject(project.id, 'delete')" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</ElDropdownItem>
+                  <ElDropdownItem v-if="portfolioMode && canEdit" :disabled="sourceProjectOptions.length === 0" @click="openReuse">复制计划</ElDropdownItem>
+                  <ElDropdownItem v-if="canEdit || canManageSystemTemplates" @click="templatesDrawerOpen = true"><Settings :size="14" />计划模板</ElDropdownItem>
+                  <ElDropdownItem :disabled="!rootExportPlan && !childExportOptions.length" v-if="projectExport" @click="openExportDialog"><Download :size="14" />导出计划</ElDropdownItem>
+                  <ElDropdownItem @click="openHolidays">假期</ElDropdownItem>
+                </ElDropdownMenu>
+              </template>
+            </ElDropdown>
             <button type="button" class="pdm-secondary-action" :disabled="loading || saving || savingHolidays" @click="load"><RefreshCw :size="14" />刷新</button>
-            <button type="button" class="pdm-secondary-action" :disabled="!rootExportPlan && !childExportOptions.length" v-if="projectExport" @click="openExportDialog"><Download :size="14" />导出计划</button>
             <button v-if="!portfolioMode && isMasterWithChildren" type="button" class="pdm-secondary-action" @click="masterPlanMode = false">查看子项目汇总</button>
             <button v-if="!portfolioMode && canEdit && ((!plan && !project.parentProjectId) || (ownsDisplayedPlan && canEditSchedule(plan)))" type="button" class="pdm-primary-action" @click="openGenerate()"><Calendar :size="14" />{{ plan ? '重新生成' : '生成初始计划' }}</button>
             <label v-if="hasVisibleBaseline" class="pdm-plan-switch"><input v-model="showBaseline" type="checkbox">显示基线</label>
             <div class="pdm-plan-switch">
               <input v-model="showNonWorkingDays" aria-label="显示假期" type="checkbox">
-              <button type="button" class="pdm-secondary-action" @click="openHolidays">假期</button>
             </div>
             <div class="pdm-plan-zoom pdm-tabs" aria-label="甘特图缩放"><button v-for="item in ([['month','月'],['week','周'],['day','日']] as const)" :key="item[0]" :class="{ 'is-active': zoom === item[0] }" @click="zoom = item[0]">{{ item[1] }}</button></div>
             <button v-if="!portfolioMode && canEditSchedule(plan)" type="button" class="pdm-secondary-action" @click="shiftPlan">批量调整</button>
@@ -2127,7 +2146,7 @@ watch(() => props.project.id, () => { clearTaskSortDrag(); taskSortPreview.value
 .pdm-plan-sync-management{display:flex;align-items:center;gap:8px;padding-top:10px;border-top:1px solid var(--pdm-border)}.pdm-plan-sync-management>div{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}.pdm-plan-sync-management strong{font-size:12px}.pdm-plan-sync-management small{color:var(--pdm-muted);font-size:11px}.pdm-plan-sync-management button{flex-shrink:0}
 .pdm-plan-approval-strip{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--plan-accent-border);border-radius:6px;background:var(--plan-accent-soft);font-size:12px}.pdm-plan-approval-strip span{flex:1}.pdm-plan-targets{border:1px solid var(--pdm-border);border-radius:6px;overflow:hidden}.pdm-plan-targets__header{display:flex;align-items:center;gap:12px;padding:8px 10px;background:var(--pdm-surface-muted);font-size:12px}.pdm-plan-targets__header>span{flex:1;color:var(--pdm-muted)}.pdm-plan-targets__list{display:flex;flex-direction:column;max-height:340px;overflow:auto;padding:4px 10px}.pdm-plan-targets__list :deep(.el-checkbox){margin:0;min-height:38px;flex-shrink:0;display:flex;flex-direction:row;align-items:center;border-bottom:1px solid var(--pdm-border)}.pdm-plan-targets__list :deep(.el-checkbox__label){display:flex;flex:1;justify-content:space-between;gap:12px;white-space:normal}.pdm-plan-targets__list small{color:var(--pdm-muted);white-space:nowrap}.pdm-plan-stage-list{max-height:280px;overflow:auto;margin:8px 0}.pdm-plan-stage-editor{display:flex;gap:6px;align-items:center;margin:6px 0}.pdm-plan-stage-editor>.el-input{flex:1}.pdm-plan-stage-editor>span{width:22px}.pdm-plan-stage-editor>button{white-space:nowrap;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface); color:var(--pdm-text);padding:6px}.pdm-plan-stage-editor>button:disabled{opacity:.4}
 .pdm-plan-page { --plan-accent: var(--shell-accent, var(--pdm-blue)); --plan-accent-hover: var(--shell-accent-hover, var(--pdm-blue)); --plan-accent-soft: var(--shell-accent-soft, var(--pdm-blue-soft)); --plan-accent-border: var(--shell-accent-border, var(--pdm-border)); min-width: 0; height: 100%; display: flex; flex-direction: column; gap: var(--pdm-container-gap); padding: 0; overflow: auto; color: var(--pdm-text); background: var(--pdm-bg); }
-.pdm-plan-toolbar__actions { min-width:0; display:flex; flex-wrap:wrap; align-items:center; gap:var(--pdm-control-gap); white-space:nowrap; }.pdm-plan-toolbar__actions > .pdm-primary-action,.pdm-plan-toolbar__actions > .pdm-secondary-action,.pdm-plan-toolbar__actions > .pdm-plan-delete-action{box-sizing:border-box;width:auto;min-width:80px;height:var(--pdm-button-large);min-height:var(--pdm-button-large);padding:0 4px;font-size:11px}.pdm-plan-delete-action{border:1px solid var(--pdm-danger);border-radius:5px;background:var(--pdm-danger);color:#fff;cursor:pointer}.pdm-plan-delete-action:not(:disabled):hover,.pdm-plan-delete-action:not(:disabled):focus-visible{filter:brightness(.92);outline:2px solid color-mix(in srgb,var(--pdm-danger) 25%,transparent);outline-offset:1px}.pdm-plan-delete-action:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);cursor:not-allowed;opacity:1}
+.pdm-plan-toolbar__actions { margin-inline-start:auto; min-width:0; display:flex; flex-wrap:wrap; align-items:center; gap:var(--pdm-control-gap); white-space:nowrap; }.pdm-plan-toolbar__actions > .pdm-primary-action,.pdm-plan-toolbar__actions > .pdm-secondary-action,.pdm-plan-toolbar__actions > .pdm-plan-delete-action{box-sizing:border-box;width:auto;min-width:80px;height:var(--pdm-button-large);min-height:var(--pdm-button-large);padding:0 4px;font-size:11px}.pdm-plan-delete-action{border:1px solid var(--pdm-danger);border-radius:5px;background:var(--pdm-danger);color:#fff;cursor:pointer}.pdm-plan-delete-action:not(:disabled):hover,.pdm-plan-delete-action:not(:disabled):focus-visible{filter:brightness(.92);outline:2px solid color-mix(in srgb,var(--pdm-danger) 25%,transparent);outline-offset:1px}.pdm-plan-delete-action:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);cursor:not-allowed;opacity:1}
 .pdm-plan-delete-task{border:1px solid var(--pdm-danger);border-radius:5px;background:transparent;color:var(--pdm-danger);padding:7px 12px}.pdm-plan-delete-task:disabled{border-color:var(--pdm-border);color:var(--pdm-muted);cursor:not-allowed}.pdm-plan-dialog-spacer{flex:1}.pdm-plan-workflow-lock{padding:8px 10px;border:1px solid var(--plan-accent-border);border-radius:5px;background:var(--plan-accent-soft); color:var(--pdm-text) !important}
 .pdm-plan-summary-action {
   display: flex;

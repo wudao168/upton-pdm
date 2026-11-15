@@ -2344,11 +2344,15 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
     expect(headers()).not.toContain('热处理')
     await wrapper.get('.pdm-bom-column-settings-action').trigger('click')
-    const heatTreatmentOption = wrapper.findAll('.pdm-bom-column-settings-list .el-checkbox').find(option => option.text() === '热处理')!
+    const heatTreatmentOption = wrapper.findAll('.pdm-column-settings-list label').find(option => option.text() === '热处理')!
     await heatTreatmentOption.get('input[type="checkbox"]').setValue(true)
+    await wrapper.get('button[aria-label="上移物料名称"]').trigger('click')
     await wrapper.findAll('.el-dialog button').find(button => button.text() === '保存')!.trigger('click')
     expect(headers()).toContain('热处理')
     expect(window.localStorage.getItem('upton-pdm:bom-columns:engineer:Standard')).toContain('heatTreatment')
+    expect(headers().indexOf('物料名称')).toBeLessThan(headers().indexOf('物料编码'))
+    expect(JSON.parse(window.localStorage.getItem('upton-pdm:bom-columns:engineer:Standard')!).order)
+      .toEqual(expect.arrayContaining(['name', 'drawingNumber']))
 
     await wrapper.findAll('button[role="tab"]')[2].trigger('click')
     expect(headers()).toContain('热处理')
@@ -2588,7 +2592,7 @@ describe('BomManager', () => {
       material: { id: 'master-model', materialCode: '01020012220', name: '接头', specification: 'GD-150F', brand: '福鸟', approvalStatus: 'Approved', isArchived: false },
     }])
     const wrapper = mount(BomManager, { props: {
-      standard: [{ id: 'model-brand', kind: 'Standard', sequence: 1, drawingNumber: '01020012220', name: '接头', specification: 'GD-150F-2021122809001663', brand: '', sourceDocumentId: 'document-1', source: 'Auto', quantity: 2, unit: '001', revision: 'W1', complete: true,
+      standard: [{ id: 'model-brand', kind: 'Standard', sequence: 1, drawingNumber: '01020012220', name: '旧名称', specification: 'GD-150F-2021122809001663', brand: '', sourceDocumentId: 'document-1', source: 'Auto', quantity: 2, unit: '001', revision: 'W1', complete: true,
         reconciliationStatus: 'ManualOverrideMismatch', reconciliationNote: 'BOM维护值与料品主档不一致：型号、品牌、数量。' }],
       nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project-1',
     } })
@@ -2596,6 +2600,7 @@ describe('BomManager', () => {
     await flushPromises()
     await wrapper.get('button[aria-label="查看问题详情：型号等3项不一致"]').trigger('click')
     const dialog = wrapper.get('.pdm-bom-issue-dialog')
+    expect(dialog.text()).toContain('物料名称将更新为料品主档中的「接头」')
     await dialog.findAll('button').find(button => button.text() === '确认填入型号')!.trigger('click')
     await flushPromises()
     expect(wrapper.find('button[aria-label="查看问题详情：品牌、数量不一致"]').exists()).toBe(true)
@@ -2605,7 +2610,7 @@ describe('BomManager', () => {
     expect(wrapper.find('button[aria-label="查看问题详情：数量不一致"]').exists()).toBe(true)
     await wrapper.get('.pdm-bom-save-action').trigger('click')
     const saved = (wrapper.emitted('save')?.[0]?.[1] as BomItem[])[0]!
-    expect(saved).toMatchObject({ drawingNumber: '01020012220', specification: 'GD-150F', brand: '福鸟', quantity: 2 })
+    expect(saved).toMatchObject({ drawingNumber: '01020012220', name: '接头', specification: 'GD-150F', brand: '福鸟', quantity: 2 })
     // 保存后服务器返回历史提示时，也应依据当前值判断。
     await wrapper.setProps({ standard: [{ ...saved }] })
     await flushPromises()
@@ -2694,14 +2699,14 @@ describe('BomManager', () => {
     wrapper.unmount()
   })
 
-  it('fills an empty brand from the material master after confirmation while retaining the material code', async () => {
+  it.each([['接头', '接头'], ['  ', '旧名称']])('fills brand and uses master name %j when available', async (masterName, expectedName) => {
     const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)
     materialApi.resolveBomMaterialCodes.mockResolvedValue([{
       bomItemId: 'brand-empty', status: 'ValidationFailed', candidates: [], application: null, issues: ['图档品牌缺失'],
-      material: { id: 'material-brand', materialCode: '01020009750', name: '接头', specification: 'CEF-1.0', brand: '西霸士', approvalStatus: 'Approved', isArchived: false },
+      material: { id: 'material-brand', materialCode: '01020009750', name: masterName, specification: 'CEF-1.0', brand: '西霸士', approvalStatus: 'Approved', isArchived: false },
     }])
     const wrapper = mount(BomManager, { props: {
-      standard: [{ id: 'brand-empty', kind: 'Standard', sequence: 1, drawingNumber: '01020009750', name: '接头', specification: 'CEF-1.0', brand: '', sourceDocumentId: 'document-1', source: 'Auto', quantity: 1, unit: '001', revision: 'W1', complete: true, reconciliationStatus: 'ManualOverrideMismatch', reconciliationNote: 'BOM维护值与料品主档不一致：品牌。' }],
+      standard: [{ id: 'brand-empty', kind: 'Standard', sequence: 1, drawingNumber: '01020009750', name: '旧名称', specification: 'CEF-1.0', brand: '', sourceDocumentId: 'document-1', source: 'Auto', quantity: 1, unit: '001', revision: 'W1', complete: true, reconciliationStatus: 'ManualOverrideMismatch', reconciliationNote: 'BOM维护值与料品主档不一致：品牌。' }],
       nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project-1',
     } })
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
@@ -2709,12 +2714,14 @@ describe('BomManager', () => {
     await wrapper.get('button[aria-label="查看问题详情：品牌不一致"]').trigger('click')
     const dialog = wrapper.get('.pdm-bom-issue-dialog')
     expect(dialog.text()).toContain('西霸士')
+    expect(dialog.findAll('button').some(button => button.text() === '确认填入型号')).toBe(false)
+    expect(dialog.text().includes('物料名称将更新为料品主档中的「接头」')).toBe(Boolean(masterName.trim()))
     await dialog.findAll('button').find(button => button.text() === '确认填入品牌')!.trigger('click')
     await flushPromises()
     expect(wrapper.find('.pdm-bom-issue-dialog').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="查看问题详情：品牌不一致"]').exists()).toBe(false)
     await wrapper.get('.pdm-bom-save-action').trigger('click')
-    expect((wrapper.emitted('save')?.[0]?.[1] as BomItem[])[0]).toMatchObject({ brand: '西霸士', drawingNumber: '01020009750', specification: 'CEF-1.0' })
+    expect((wrapper.emitted('save')?.[0]?.[1] as BomItem[])[0]).toMatchObject({ brand: '西霸士', name: expectedName, drawingNumber: '01020009750', specification: 'CEF-1.0' })
     wrapper.unmount()
     success.mockRestore()
   })

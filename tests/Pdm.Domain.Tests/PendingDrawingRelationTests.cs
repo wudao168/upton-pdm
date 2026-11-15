@@ -7,6 +7,49 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class PendingDrawingRelationTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OldRelationAbsentFromSnapshotIsRemovedOnlyWithCompleteEvidence(bool pending)
+    {
+        var (repository, project, session) = await Setup();
+        var direct = await Model(repository, project, session, "DIRECT");
+        var old = await Model(repository, project, session, "OLD");
+        var drawing = await Drawing(repository, project, session);
+        await Archive(repository, project, session, drawing, ArchiveBatchTests.Node(drawing) with {
+            StructureIndexPending = pending, Children = [ArchiveBatchTests.Node(direct)] }, 'C');
+        StoredRelations(repository)[(drawing.Id, old.Id)] = new(old.Id, drawing.Id);
+        var relations = await repository.ListDocumentRelationsAsync(project.Id, default);
+        Assert.Equal(pending, relations.Any(row => row.ModelDocumentId == old.Id));
+        Assert.Contains(relations, row => row.ModelDocumentId == direct.Id);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExistingDependencyRelationIsFilteredForListAndControlledOpenWithoutChangingHistory(bool pending)
+    {
+        var (repository, project, session) = await Setup();
+        var direct = await Model(repository, project, session, "ASSEMBLY_VIEW");
+        var dependency = await Model(repository, project, session, "AB02");
+        var drawing = await Drawing(repository, project, session);
+        var tree = ArchiveBatchTests.Node(drawing) with { StructureIndexPending = pending,
+            Children = [ArchiveBatchTests.Node(direct), ArchiveBatchTests.Node(dependency) with { Role = ReferenceRole.ExternalFileDependency }] };
+        await Archive(repository, project, session, drawing, tree, 'C');
+        var historical = Assert.Single(await repository.ListDocumentVersionsAsync(drawing.Id, default));
+        StoredRelations(repository)[(drawing.Id, dependency.Id)] = new(dependency.Id, drawing.Id);
+        Assert.Equal(direct.Id, Assert.Single(await repository.ListDocumentRelationsAsync(project.Id, default)).ModelDocumentId);
+        var workflow = new PdmWorkflowService(repository, new MetadataStorage(), new AtomicReleasePackagePublisher(TimeProvider.System), TimeProvider.System);
+        var partManifest = await workflow.CreateControlledOpenManifestAsync(dependency.Id, null, false, false,
+            "admin", UserRole.Administrator, default, treeScopeOnly: true);
+        Assert.DoesNotContain(partManifest.Files, file => file.DocumentId == drawing.Id);
+        var modelManifest = await workflow.CreateControlledOpenManifestAsync(direct.Id, null, false, false,
+            "admin", UserRole.Administrator, default, treeScopeOnly: true);
+        Assert.Contains(modelManifest.Files, file => file.DocumentId == drawing.Id);
+        Assert.Equal(historical, Assert.Single(await repository.ListDocumentVersionsAsync(drawing.Id, default)));
+        Assert.True(StoredRelations(repository).ContainsKey((drawing.Id, dependency.Id)));
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(true, true)]

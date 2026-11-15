@@ -14,6 +14,11 @@ public sealed partial class PdmAddin
 
     private async Task DiscardSelectedWorkingFilesAsync(IReadOnlyList<CadTreeNode> requestedNodes)
     {
+        // Validate the entire requested scope before releasing even the first lease.
+        // A later native-state change is checked again immediately before replacement.
+        var changingPaths = new HashSet<string>(requestedNodes.Where(DiscardNeedsWindowRestore)
+            .Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase);
+        if (changingPaths.Count > 0) DiscardAffectedDocuments(changingPaths);
         var failures = new List<string>();
         var restore = new List<Tuple<CadTreeNode, Guid>>();
         var alreadyReleased = 0;
@@ -87,8 +92,24 @@ public sealed partial class PdmAddin
             return;
         }
         var linkedWarnings = await ReleaseUnchangedLinkedDrawingsAfterDiscardAsync(completed);
-        taskPaneControl?.SetCheckoutReminder("已放弃所选图档编辑，原工作文件已恢复为存档版本并只读。"
+        taskPaneControl?.SetCheckoutReminder((completed.Any(node => !File.Exists(node.FullPath))
+            ? "已放弃所选图档编辑；已删除的工作文件将在打开最新时重新取回。"
+            : "已放弃所选图档编辑，原工作文件已恢复为存档版本并只读。")
             + (linkedWarnings.Count == 0 ? string.Empty : "\r\n配套工程图：" + string.Join("；", linkedWarnings)), linkedWarnings.Count > 0);
+    }
+
+    private bool DiscardNeedsWindowRestore(CadTreeNode node)
+    {
+        if (string.IsNullOrWhiteSpace(node?.FullPath) || !File.Exists(node.FullPath)) return false;
+        if (FindLoadedDocument(node.FullPath)?.GetSaveFlag() == true) return true;
+        var file = controlledOpenManifests.SelectMany(context => context.Value.Files
+            .Where(item => item.DocumentId == node.DocumentId && PathsEqual(node.FullPath,
+                ControlledReferenceMaterializer.LocalPath(context.Key, item)))).FirstOrDefault();
+        if (file != null) return !ControlledReferenceMaterializer.TryReadVerifiedCopyHash(node.FullPath, file, out _);
+        return !PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var binding)
+            || binding.DocumentId != node.DocumentId || string.IsNullOrWhiteSpace(binding.Sha256)
+            || !string.Equals(ComputeFileHash(node.FullPath), string.IsNullOrWhiteSpace(binding.ResolvedReferenceSha256)
+                ? binding.Sha256 : binding.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<bool> SkipRepeatedDiscardAsync(CadTreeNode node)
@@ -192,6 +213,20 @@ public sealed partial class PdmAddin
         {
             var entry = group.OrderByDescending(item => item.SavedAtUtc).First();
             var file = manifest.Files.Single(item => item.DocumentId == entry.DocumentId);
+            if (!File.Exists(entry.SourcePath) && !Directory.Exists(entry.SourcePath)
+                && FindLoadedDocument(entry.SourcePath) == null)
+            {
+                if (!PdmDocumentIdentityStore.IsControlledWorkspacePath(entry.SourcePath)
+                    || !string.Equals(Path.GetFileName(entry.SourcePath), file.FileName, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("已删除工作文件的恢复路径无法核对，草稿及待恢复记录已保留。");
+                // Deleting the working file already removed the explicitly discarded
+                // changes. Keep draft/backup files; the normal latest-open path must
+                // download and verify a fresh workspace, not revive this obsolete path.
+                foreach (var record in group)
+                { record.DiscardPending = false; record.RestoreOnOpen = false; editJournal.Save(record); }
+                LogOperation("已删除的工作文件不再阻止重新取回；原草稿记录保留：" + entry.SourcePath);
+                continue;
+            }
             var expectedBinding = ValidateDiscardBinding(entry);
             var loaded = FindLoadedDocument(entry.SourcePath);
             if (loaded?.GetSaveFlag() == true || !ControlledReferenceMaterializer.TryReadVerifiedCopyHash(entry.SourcePath, file, out var verifiedHash)) { changed.Add(group); continue; }
@@ -411,7 +446,14 @@ public sealed partial class PdmAddin
         foreach (var source in ReadDiscardNativeReferences(canonicalPath))
         {
             if (!files.TryGetValue(Path.GetFileName(source), out var file))
-                throw new IOException("存档引用未在受控恢复清单中，未猜测替代文件：" + Path.GetFileName(source));
+            {
+                // The hash-verified archive itself contains this unresolved reference.
+                // Preserve its exact address, just as allowMissingComponents on open;
+                // never substitute a similarly named local file or remove the reference.
+                plan[source] = source;
+                RecordArchivedMissingReference(manifest, targetPath, source);
+                continue;
+            }
             var target = ControlledReferenceMaterializer.LocalPath(Path.GetDirectoryName(targetPath), file);
             if (!PdmDocumentIdentityStore.TryReadLocalMetadata(target, out var metadata)
                 || metadata.DocumentId != file.DocumentId || metadata.ProjectId != manifest.ProjectId
@@ -533,8 +575,8 @@ public sealed partial class PdmAddin
         var dirty = snapshots.FirstOrDefault(item => affected.Contains(item.Path) && !discarded.Contains(item.Path)
             && item.HasUnsavedChanges && (!item.HasDiscardableReadOnlySaveFlag || !closing.Contains(item.Path)));
         if (dirty != null)
-            throw new InvalidOperationException("放弃状态已保留，但引用窗口还有其他未保存修改：" + dirty.Title
-                + "。请保存该图档后从PLM重新打开；不会丢弃其他零件的修改。");
+            throw new InvalidOperationException("本地恢复暂不能继续，关联图档仍有未保存状态：" + dirty.Title
+                + "。请先保留并处理该图档的修改后重试；当前窗口和文件均保留。");
         return snapshots.Where(item => closing.Contains(item.Path)).ToArray();
     }
 

@@ -8,7 +8,7 @@
   :root body :is(.wr-project-list > .wr-project, .pdm-project-family__list > button) { border-radius:0 !important; }
   :root body .wr-project-list > .wr-project.selected,
   :root body .pdm-project-family__list > button.is-active { box-shadow:inset 5px 0 0 var(--pdm-theme-accent) !important; background:var(--pdm-selection-bg) !important; }
-  :root body .production-workbench__project-packages { margin-inline:0 !important; padding-inline:0 !important; border-left:0 !important; }
+  :root body .production-workbench__tree .production-workbench__project-packages { margin-inline:0 !important; padding-inline:5px 0 !important; border-left:0 !important; }
   :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package),
   :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package).is-release-attention {
     box-sizing:border-box; width:100% !important; max-width:100% !important; margin-inline:0 !important; padding-inline:17px !important;

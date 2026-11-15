@@ -4,7 +4,7 @@ import { addDays, effectiveTasks, stageName, validDate } from './projectWorkbenc
 export interface CalendarEvent {
   id: string; projectId: string; code: string; projectName: string; title: string; date: string
   owner?: string; actual?: string; baseline?: string; taskId?: string; tab: WorkbenchTab
-  todoId?: string; kind: 'milestone' | 'stage' | 'shipping' | 'risk' | 'todo'; tone: 'normal' | 'danger' | 'done'; detail: string
+  todoId?: string; kind: 'milestone' | 'stage' | 'shipping' | 'risk' | 'todo'; tone: 'normal' | 'done'; detail: string
 }
 export const chinaToday = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10)
 export function shiftMonth(month: string, offset: number) {
@@ -29,7 +29,7 @@ export function calendarEvents(items: WorkbenchProject[], risks: WorkbenchRisk[]
       if (!dated.length) return
       const date = dated.map(task => task.plannedFinish).sort().at(-1)!
       const completed = group.every(task => task.status === 'Completed')
-      if (completed && date < today) return
+      if (kind === "shipping" && completed && date < today) return
       const delayed = group.some(task => task.status !== 'Completed' && task.plannedFinish < today)
       const completeDates = group.map(task => task.actualFinish).filter(validDate) as string[]
       const actual = completed && completeDates.length === group.length ? completeDates.sort().at(-1) : undefined
@@ -44,7 +44,7 @@ export function calendarEvents(items: WorkbenchProject[], risks: WorkbenchRisk[]
         owner: group.length === 1 ? group[0]?.assignee || item.project.primaryProjectManager : item.project.primaryProjectManager,
         baseline: group.map(task => task.baselineFinish).filter(validDate).sort().at(-1),
         taskId: group.length === 1 ? group[0]?.id : undefined, tab: 'project-plan',
-        tone: !shipping && completed ? 'done' : date < today ? 'danger' : 'normal',
+        tone: !shipping && completed ? 'done' : 'normal',
         detail: shipping ? ['计划节点推算，实际发货状态待核实', ...concerns].join('；') : completed ? `已完成${actual ? `，实际完成于${actual}` : '，实际日期待补充'}` : date < today ? '已逾期，请确认执行进度' : incomplete ? '部分任务日期待补充' : delayed ? '阶段内有任务逾期' : '按生效计划推进',
       })
     }
@@ -64,7 +64,7 @@ export function calendarEvents(items: WorkbenchProject[], risks: WorkbenchRisk[]
     if (!item || !validDate(risk.dueDate) || (risk.closed && risk.dueDate < today)) continue
     result.push({ id: `risk-${risk.id}`, projectId: risk.projectId, code: item.project.code, projectName: item.project.name,
       title: risk.title, date: risk.dueDate, owner: risk.owner, kind: 'risk', tab: 'overview',
-      tone: risk.closed ? 'done' : risk.dueDate < today ? 'danger' : 'normal',
+      tone: risk.closed ? 'done' : 'normal',
       detail: risk.closed ? '风险已关闭' : risk.impact, actual: risk.closedAt?.slice(0, 10) })
   }
   return result.sort((a, b) => a.date.localeCompare(b.date) || a.code.localeCompare(b.code))

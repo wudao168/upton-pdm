@@ -96,8 +96,12 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         IReadOnlyList<ReleasePreviewSource> sources, string directory, CancellationToken ct) =>
         GenerateCoreAsync(package, project, sources, directory, ct, true);
 
+    public Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateReviewAsync(ReleasePackage package, Project project,
+        IReadOnlyList<ReleasePreviewSource> sources, string directory, CancellationToken ct) =>
+        GenerateCoreAsync(package, project, sources, directory, ct, false, true);
+
     private async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateCoreAsync(ReleasePackage package, Project project,
-        IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken, bool stampOnly)
+        IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken, bool stampOnly, bool reviewOnly = false)
     {
         var conversionSettings = repository is null
             ? PreviewConversionSettings.Default
@@ -118,7 +122,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
             throw new PdmRuleException("本机SolidWorks转换只能在Windows服务器运行；如需在其他电脑转图，请在系统设置中选择远程转图服务器。");
 
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
-        var previewRelativeRoot = Path.Combine(".release-previews", package.Id.ToString("N"));
+        var previewRelativeRoot = Path.Combine(reviewOnly ? ".review-previews" : ".release-previews", package.Id.ToString("N"));
         var previewRoot = StorageLocationPolicy.ResolveUnder(vaultRoot, previewRelativeRoot);
         var stagingPreviewRoot = StorageLocationPolicy.ResolveUnder(stagingDirectory, "previews");
         var workRoot = Path.Combine(storage.ConversionWorkRoot, "release-preview", package.Id.ToString("N"), Guid.NewGuid().ToString("N"));
@@ -198,7 +202,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
                         : $"服务器未生成图档{source.DrawingNumber}的预览文件。");
                 }
                 var outputName = Path.GetFileName(job.OutputPath);
-                if (source.Kind == DocumentKind.Drawing && pdfReleaseStamp is not null)
+                if (!reviewOnly && source.Kind == DocumentKind.Drawing && pdfReleaseStamp is not null)
                 {
                     try { await pdfReleaseStamp.ApplyAsync(package, project, source, job.OutputPath, cancellationToken); }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }

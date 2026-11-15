@@ -167,7 +167,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ProductionSchedule, "安排自制生产", "生产跟踪", "安排内部资源组、日期和预计工时。", Sensitive: true),
         new(PermissionCodes.ProductionScanManage, "配置生产扫码岗位", "生产跟踪", "维护账号、角色与生产岗位、工位的绑定。", Sensitive: true),
         new(PermissionCodes.ProductionCapacityManage, "维护生产资源可用工时", "生产跟踪", "维护资源组每日可用工时。", Sensitive: true),
-        new(PermissionCodes.ApprovalDecide, "处理业务审批", "审批发布", "处理发布、料号等业务审批；仍须满足实际项目范围和当前流程节点条件。", Sensitive: true),
+        new(PermissionCodes.ApprovalDecide, "处理业务审批", "审批发布", "处理发布、料号等业务审批及发布包内的图纸确认、问题登记；仍须满足实际项目范围和当前流程节点条件。", Sensitive: true),
         new(PermissionCodes.ApprovalEmergencySubstitute, "紧急代批当前节点", "审批发布", "仅在紧急情况下替代当前审批人，必须填写原因，后续节点仍正常流转。", Sensitive: true),
         new(PermissionCodes.ProgramTemplateView, "查看和下载程序模板", "程序模板", "查看集团已发布的PLC、HMI程序模板。"),
         new(PermissionCodes.ProgramTemplateSubmit, "上传和提交程序模板", "程序模板", "维护本人创建的草稿并提交审核。", Sensitive: true),

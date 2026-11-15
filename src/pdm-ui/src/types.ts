@@ -423,7 +423,7 @@ export interface PdmSystemSettings {
   releaseChangeReasonLabels?: Record<string, string>
   formalSupplementPolicies?: FormalSupplementPolicies
   drawingQrPolicy?: DrawingQrPolicy
-  pdfTitleBlockFill?: { enabledFields: string[] }
+  pdfTitleBlockFill?: { enabledFields: string[]; drawingLabels?: Record<string, string> | null }
   previewConversion?: PreviewConversionSettings
 }
 /** 图纸转换（2D转PDF、3D转STEP）的执行位置：Local=API服务器本机，Remote=独立转图电脑上的转图代理。 */
@@ -1126,6 +1126,7 @@ export interface UpdateReleasePackageDraftInput {
 }
 
 export interface ReleasePackageSummary {
+  drawingReview?: ReleaseDrawingReview | null
   relatedOplIssueIds?: string[]
   confirmedRemovedBomItemIds?: string[]
   rootDocumentId?: string | null
@@ -1171,6 +1172,19 @@ export interface ReleasePackageSummary {
   formalSupplementPolicySnapshotted?: boolean
   formalSupplementMaximumCount?: number | null
   formalSupplementValidDays?: number | null
+}
+
+export interface ReleaseDrawingReview {
+  roundId?: string
+  nodeDriven?: boolean
+  revision: number
+  archivedItems?: ReleaseDrawingReview['items']
+  items: Array<{
+    documentId: string; versionId: string; sha256: string; fileName: string; token: string; bomItemIds: string[]
+    required: boolean; status: 'Pending' | 'Confirmed' | 'Issue'
+    preview?: { sourceSha256: string; format: string | number } | null
+    notes: Array<{ status: string; comment: string; actor: string; actorName: string; at: string; versionId: string; approvalTaskId?: string; roundId?: string; token?: string }>
+  }>
 }
 
 export interface ReleaseChangeReasonSelection {

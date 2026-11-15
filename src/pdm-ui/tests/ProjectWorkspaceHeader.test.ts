@@ -305,6 +305,7 @@ describe('ProjectWorkspaceHeader', () => {
     })
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     expect(wrapper.get('[role="dialog"]').text()).toContain('浏览项目')
     expect(wrapper.findAll('[role="option"]')).toHaveLength(2)
     expect(wrapper.findAll('[role="option"]').map(item => item.attributes('aria-label'))).toEqual(['选择浏览项目 P700003', '选择浏览项目 P700002'])
@@ -360,6 +361,7 @@ describe('ProjectWorkspaceHeader', () => {
     })
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     expect(wrapper.findAll('[role="option"]')).toHaveLength(20)
     expect(wrapper.get('[aria-label="项目列表分页"]').text()).toContain('共 53 条')
     await wrapper.get('select[aria-label="每页行数"]').setValue('50')
@@ -381,6 +383,7 @@ describe('ProjectWorkspaceHeader', () => {
     })
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     if (filterLabel === '人员筛选') { wrapper.findAllComponents(ElSelect).find(item => item.props('ariaLabel') === filterLabel)!.vm.$emit('update:modelValue', filterValue); await flushPromises() }
     else await wrapper.get(`select[aria-label="${filterLabel}"]`).setValue(filterValue)
 
@@ -410,6 +413,7 @@ describe('ProjectWorkspaceHeader', () => {
       suggest('R700028', candidates)
       expect(candidates.mock.calls[1]?.[0]).toEqual([])
       await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
       const prefix = wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!
       expect(prefix.props('modelValue')).toEqual(['P'])
       expect(prefix.findAllComponents(ElOption).map(option => option.props('label'))).toEqual(['标准项目 P', '研发项目 R', '售后项目 S', '外发项目 W'])
@@ -427,6 +431,7 @@ describe('ProjectWorkspaceHeader', () => {
       expect(codes()).toHaveLength(5)
       await wrapper.get('button[aria-label="关闭项目浏览"]').trigger('click')
       await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
       expect(wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!.props('modelValue')).toEqual(['P'])
     } finally { wrapper.unmount() }
   })
@@ -439,6 +444,7 @@ describe('ProjectWorkspaceHeader', () => {
       await input.setValue(' r700028 ')
       await input.trigger('blur')
       await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
       expect(wrapper.get('input[aria-label="搜索项目"]').element).toHaveProperty('value', 'r700028')
       expect(wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!.props('modelValue')).toEqual([])
       expect(wrapper.findAll('.pdm-project-browser-list > button')).toHaveLength(1)
@@ -456,6 +462,7 @@ describe('ProjectWorkspaceHeader', () => {
     const wrapper = mount(ProjectWorkspaceHeader, { props: { project: rootProject, projects: [rootProject, repair, ...projects], activeTab: 'overview' } })
     try {
       await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
       await wrapper.get('button[aria-label="下一页"]').trigger('click')
       wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!.vm.$emit('update:modelValue', ['R'])
       await flushPromises()
@@ -474,11 +481,13 @@ describe('ProjectWorkspaceHeader', () => {
     })
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     await wrapper.get('[role="dialog"] footer button').trigger('click')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
     expect(wrapper.emitted('switch')).toBeUndefined()
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     await wrapper.get('input[aria-label="搜索项目"]').setValue('P700003')
     await wrapper.get('button[aria-label="选择浏览项目 P700003"]').trigger('click')
     await flushPromises()

@@ -60,6 +60,7 @@ const props = withDefaults(defineProps<{
   drawingReviews?: DrawingReviewPackage[]
 }>(), { projectId: '', standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
 const emit = defineEmits<{
+  reviewDocuments: [releasePackageId: string]
   create: [input: CreateReleasePackageInput]
   updateDraft: [releasePackageId: string, input: UpdateReleasePackageDraftInput]
   deleteDraft: [releasePackageId: string]
@@ -314,18 +315,15 @@ const releaseItemGroupKey = (item: BomItem, index: number) => {
 const drawingReviewCandidateFor = (item: BomItem) => props.drawingReviewCandidates.find(candidate => Boolean(candidate.bomItemId) && releaseInstanceIds(item).includes(candidate.bomItemId!))
   ?? props.drawingReviewCandidates.find(candidate => Boolean(item.sourceDocumentId) && candidate.modelDocumentId === item.sourceDocumentId)
 const itemDrawingReviewReady = (item: BomItem) => item.kind !== 'NonStandard'
-  || drawingReviewCandidateFor(item)?.state === 'ApprovedCurrent'
-  || (scope.value === 'NonStandardWithDrawing' || scope.value === 'NonStandardSupplement') && drawingReviewCandidateFor(item)?.currentDrawingApproved === true
+  || Boolean(drawingReviewCandidateFor(item)?.drawingDocumentId)
 const releaseRowDrawingReviewReady = (row: { sourceItems: BomItem[] }) => row.sourceItems.length > 0 && row.sourceItems.every(itemDrawingReviewReady)
 const drawingReviewStatusForItem = (item: BomItem) => {
   const candidate = drawingReviewCandidateFor(item)
-  if (candidate?.state === 'ApprovedCurrent') return '图纸已批准'
-  if (candidate?.state === 'InReview') return '图纸待审核'
-  if (candidate?.state === 'Unavailable') return candidate.reason || '图纸不可审核'
-  return candidate?.reason || '图纸待发起审核'
+  if (candidate?.drawingDocumentId) return '随发布包审核'
+  return '缺少关联图纸'
 }
 const releaseRowDrawingReviewStatus = (row: { sourceItems: BomItem[] }) => {
-  if (releaseRowDrawingReviewReady(row)) return '图纸已批准'
+  if (releaseRowDrawingReviewReady(row)) return '随发布包审核'
   return [...new Set(row.sourceItems.map(drawingReviewStatusForItem))].join('；') || '图纸待发起审核'
 }
 const currentReleaseKeysByTrackingId = computed(() => new Map(
@@ -619,8 +617,8 @@ const hasBlockedNonStandardDrawingReview = computed(() => {
 const drawingReviewBlockMessage = computed(() => {
   if (!isNonStandardScope(scope.value)) return ''
   if (scope.value === 'NonStandardLongLead') return longLeadReleaseRows.value.some(row => !releaseRowDrawingReviewReady(row))
-    ? '未完成当前版本图纸审核的非标件已禁用，不能勾选发布。' : ''
-  return hasBlockedNonStandardDrawingReview.value ? '当前发布范围包含未完成当前版本图纸审核的非标件，完成审核后才可创建发布草稿。' : ''
+    ? '缺少关联图纸的非标件暂不能勾选；有关联图纸的物料随本发布包统一审核。' : ''
+  return hasBlockedNonStandardDrawingReview.value ? '当前范围存在未关联图纸的非标件，请补齐关联后创建草稿；无需提前发起2D审核。' : ''
 })
 const createDisabled = computed(() => props.pending
   || deliveryScope.value && !drawingRequiredOn.value
@@ -639,8 +637,7 @@ const createDisabled = computed(() => props.pending
 const requiresDrawingFiles = computed(() => props.releasePackage?.locksDocuments ?? (isNonStandardScope(scope.value) && !isLongLeadScope(scope.value)))
 const isCurrentTaskAssignee = computed(() => Boolean(currentTask.value
   && canSignNode(currentTask.value, props.username)))
-const canHandleCurrentTask = computed(() => projectWritable.value && (isCurrentTaskAssignee.value
-  || Boolean(props.canDecide && currentTask.value && !currentTask.value.participants && props.username.toLowerCase() === 'admin')))
+const canHandleCurrentTask = computed(() => projectWritable.value && props.canDecide && isCurrentTaskAssignee.value)
 const filteredTransferCandidates = computed(() => {
   const query = transferQuery.value.trim().toLocaleLowerCase()
   if (!query) return transferCandidates.value
@@ -1195,7 +1192,7 @@ async function saveItemComment() {
               <div>
                 <strong>{{ step.stage }}</strong>
                 <small><PersonName :name="step.decisionBy ? displayUserName(step.decisionBy) : step.participants?.members.map(name => displayUserName(name)).join('、') || displayUserName(step.assignee)" /> · {{ step.detail }}</small>
-                <em v-if="step.emergencySubstitute">紧急代批：{{ step.emergencyReason }}</em>
+                <em v-if="step.emergencySubstitute">紧急代批{{ step.emergencyReason ? `：${step.emergencyReason}` : '' }}</em>
                 <em v-else-if="step.comment">{{ step.comment }}</em>
               </div>
             </article>
@@ -1217,8 +1214,8 @@ async function saveItemComment() {
             <progress v-if="pending && progress > 0" :value="progress" max="100">{{ progress }}%</progress>
           </div>
 
-          <ApprovalNoteEditor v-if="releasePackage" v-model="businessNote" label="发布备注" :identity="releasePackage.id + (currentTask?.id ?? '')" :nodes="releasePackage.steps.map(step => step.participants)" :editable="!!(canHandleCurrentTask && currentTask?.participants?.policy?.editBusinessNote)" />
-          <div v-if="canHandleCurrentTask && currentTask" class="pdm-decision-box">
+          <ApprovalNoteEditor v-if="releasePackage" v-model="businessNote" label="发布备注" :identity="releasePackage.id + (currentTask?.id ?? '')" :nodes="releasePackage.steps.map(step => step.participants)" :editable="!!(!releasePackage.drawingReview && canHandleCurrentTask && currentTask?.participants?.policy?.editBusinessNote)" />
+          <div v-if="canHandleCurrentTask && currentTask && !releasePackage.drawingReview" class="pdm-decision-box">
             <label>审批意见<textarea v-model="comment" rows="3" maxlength="1000" placeholder="通过可不填；退回必须填写原因" @input="approvalCommentError = ''" /><small v-if="approvalCommentError" class="pdm-inline-error">{{ approvalCommentError }}</small></label>
             <PanelActions><div class="pdm-manager-actions">
               <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="submitDecision('Rejected')">退回</button>
@@ -1232,7 +1229,7 @@ async function saveItemComment() {
               <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '发布失败' ? '退回草稿' : releasePackage.state === '已退回' ? '撤回为草稿' : '撤回审批' }}</button>
             </div></PanelActions>
           </div>
-          <div v-if="canEmergencyCurrent && currentTask && !canHandleCurrentTask" class="pdm-decision-box emergency-decision">
+          <div v-if="canEmergencyCurrent && currentTask && !canHandleCurrentTask && !releasePackage.drawingReview" class="pdm-decision-box emergency-decision">
             <label>紧急代批原因<textarea v-model.trim="emergencyReason" rows="3" maxlength="1000" required placeholder="说明必须立即处理的业务原因；该内容会进入审计记录" /></label>
             <PanelActions><div class="pdm-manager-actions">
               <button type="button" class="pdm-secondary-action is-danger" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Rejected', emergencyReason)">紧急代退回</button>
@@ -1372,6 +1369,11 @@ async function saveItemComment() {
       </p>
       <p v-if="releasePackage.changeReason" class="pdm-release-change-reason"><strong>{{ isSupplementScope(releasePackage.scope) ? '变更原因' : '备注' }}：</strong>{{ releasePackage.changeReason }}</p>
 
+      <section v-if="releasePackage.drawingReview" class="pdm-decision-box">
+        <p>本次图纸与BOM在图档页审核。当前节点全部完成后自动流转，最后批准后系统继续发布。</p>
+        <button type="button" class="pdm-primary-action" @click="emit('reviewDocuments', releasePackage.id)">图档审核</button>
+        <button v-if="canHandleCurrentTask && currentTask && !currentTask.participants?.policy?.disableTransfer && (currentTask.participants?.members.length ?? 1) === 1" type="button" :disabled="pending" @click="openTransfer">转交</button>
+      </section>
       <section v-if="releasePackage.scope !== 'Nameplate'" class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
         <div class="pdm-release-frozen-summary">
           <header>

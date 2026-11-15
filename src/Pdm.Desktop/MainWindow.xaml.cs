@@ -247,7 +247,7 @@ public partial class MainWindow : Window
                     || !string.Equals(appliedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
                     || !string.Equals(appliedUiBaseUrl, latest.UiBaseUrl, StringComparison.OrdinalIgnoreCase))
                 {
-                    var applied = await Dispatcher.InvokeAsync(() => ApplyServerUiConfiguration(latest));
+                    var applied = await Dispatcher.InvokeAsync(() => ApplyServerUiConfiguration(latest, automatic: true));
                     if (applied)
                     {
                         appliedConfigurationVersion = latest.ConfigurationVersion;
@@ -281,8 +281,12 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool ApplyServerUiConfiguration(ClientBootstrapConfiguration latest)
+    private bool ApplyServerUiConfiguration(ClientBootstrapConfiguration latest, bool automatic)
     {
+        // 登录页保持当前文档和输入不变。断网回退、版本轮询及服务器恢复均不得自动导航；
+        // 后台仍检查配置和更新，手动保存服务器设置继续立即生效。
+        if (automatic && string.IsNullOrWhiteSpace(accessToken)) return false;
+
         if (WorkspaceView.CoreWebView2 == null || !Uri.TryCreate(latest.UiBaseUrl, UriKind.Absolute, out var uiUrl))
         {
             // 界面还没准备好时不要记录为已应用，下一次轮询继续尝试，避免客户端永久停在旧界面。
@@ -1137,7 +1141,7 @@ public partial class MainWindow : Window
             activeCompanyId = string.Empty;
             bootstrapConfiguration = latest;
             showingServerSettings = false;
-            ApplyServerUiConfiguration(latest);
+            ApplyServerUiConfiguration(latest, automatic: false);
         }
         catch (OperationCanceledException) when (bootstrapLifetime.IsCancellationRequested) { }
         catch (Exception exception)

@@ -142,26 +142,20 @@ describe('DrawingReviewPanel', () => {
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
     expect(wrapper.find('.drawing-review-overview__batch .is-submit').exists()).toBe(false)
   })
-  it('没有审核单时从图档侧栏选择非标2D范围后发起审核', async () => {
+  it('没有审核单时提示从非标件发布发起，不再提供独立审核入口', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: { packageId: '', packages: [], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
     })
 
-    await wrapper.get('.drawing-review-panel__empty button').trigger('click')
-    expect(wrapper.text()).toContain('选择审核范围')
+    expect(wrapper.text()).toContain('请在非标件BOM中创建发布包并提交统一审批')
+    expect(wrapper.find('.drawing-review-panel__empty button').exists()).toBe(false)
     expect(wrapper.findAll('.drawing-review-scope__modes')).toHaveLength(0)
     expect(wrapper.findAll('.drawing-review-scope__hint')).toHaveLength(0)
-    const candidateRow = wrapper.get('.drawing-review-candidate')
-    expect(candidateRow.classes()).toContain('is-selected')
-    expect(candidateRow.text()).toBe('✓A01-100待发起审核')
-    expect(candidateRow.text()).not.toContain('机架组件')
-    expect(candidateRow.text()).not.toContain('2D W1')
-    expect(candidateRow.attributes('title')).toBe('机架组件')
+    expect(wrapper.findAll('.drawing-review-candidate')).toHaveLength(0)
     expect(wrapper.findAll('.drawing-review-scope__footer button')).toHaveLength(0)
-    expect(wrapper.get('.drawing-review-panel__header .drawing-review-submit').text()).toContain('发起审核')
-    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-1'], ['reviewer']]])
+    expect(wrapper.find('.drawing-review-panel__header .drawing-review-submit').exists()).toBe(false)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
   it('审核栏可折叠为窄条并可再次展开', async () => {
@@ -196,21 +190,21 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.emitted('update:collapsed')).toEqual([[true]])
   })
 
-  it('发起审核按钮位于刷新右侧并打开审核范围', async () => {
+  it('历史审核保留刷新与撤销按钮，移除发起入口', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: { packageId: review.id, packages: [review], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'submitter', ...permissions },
     })
 
     const toolbarButtons = wrapper.findAll('.drawing-review-panel__toolbar button')
-    expect(toolbarButtons.map(button => button.text())).toEqual(['刷新', '发起审核'])
-    // 工具栏去掉"状态"文字标签，刷新按钮固定 80x30（与发起审核同尺寸）。
+    expect(toolbarButtons.map(button => button.text())).toEqual(['刷新'])
     expect(wrapper.find('.drawing-review-panel__toolbar label > span').exists()).toBe(false)
     expect(wrapper.get('.drawing-review-toolbar__refresh').classes()).toContain('drawing-review-toolbar__refresh')
     expect(wrapper.findAll('.drawing-review-package-actions button').map(button => button.text())).toEqual(['撤销审核'])
 
-    await toolbarButtons[1]!.trigger('click')
-    expect(wrapper.text()).toContain('选择审核范围')
+    await toolbarButtons[0]!.trigger('click')
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
   it('明细合并显示并可按状态筛选和定位图纸', async () => {
@@ -335,20 +329,19 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.text()).toContain('1/2项完成')
   })
 
-  it('没有有效非标BOM候选时显示可操作的门禁说明', async () => {
+  it('没有有效非标BOM候选时也提示统一发布入口', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: { packageId: '', packages: [], candidates: [], selectedDocumentId: 'drawing-1', currentUsername: 'designer', ...permissions },
     })
 
-    await wrapper.get('.drawing-review-panel__empty button').trigger('click')
-
-    expect(wrapper.get('.drawing-review-no-candidate').text()).toContain('当前没有有效非标件BOM候选')
-    expect(wrapper.get('.drawing-review-no-candidate').text()).toContain('唯一关联的2D工程图')
-    expect(wrapper.get('.drawing-review-panel__header .drawing-review-submit').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('请在非标件BOM中创建发布包并提交统一审批')
+    expect(wrapper.find('.drawing-review-panel__empty button').exists()).toBe(false)
+    expect(wrapper.find('.drawing-review-panel__header .drawing-review-submit').exists()).toBe(false)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
-  it('已有审核中的图纸包时仍可继续发起其余图纸', async () => {
+  it('已有审核中的图纸包保留历史资料，但不能另发独立图纸审核', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: {
@@ -361,14 +354,13 @@ describe('DrawingReviewPanel', () => {
       },
     })
 
-    const createButton = wrapper.get('.drawing-review-toolbar__create')
-    expect(createButton.attributes('disabled')).toBeUndefined()
-    await createButton.trigger('click')
-    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-1'], ['reviewer']]])
+    expect(wrapper.find('.drawing-review-toolbar__create').exists()).toBe(false)
+    expect(wrapper.find('.drawing-review-panel__header .drawing-review-submit').exists()).toBe(false)
+    expect(wrapper.text()).toContain('A01-100')
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
-  it('shows source-less non-standard BOM rows as disabled blockers', async () => {
+  it('无来源模型的候选仍不可选择，不能从旧面板绕过联合发布校验', async () => {
     const blocker: DrawingReviewCandidate = {
       candidateId: 'bom-blocker',
       bomItemId: 'bom-blocker',
@@ -387,15 +379,11 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: '', packages: [], candidates: [candidate, blocker], selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
     })
 
-    await wrapper.get('.drawing-review-panel__empty button').trigger('click')
-
-    const blockedRow = wrapper.get('.drawing-review-candidate.is-unavailable')
-    expect(blockedRow.attributes('disabled')).toBeDefined()
+    const blockedRow = wrapper.findAll('.drawing-review-overview__row').find(row => row.text().includes('02040000005'))!
+    expect(blockedRow.get('input[type="checkbox"]').attributes('disabled')).toBeDefined()
     expect(blockedRow.text()).toContain('02040000005')
-    expect(blockedRow.text()).toContain('不可发起')
-    expect(blockedRow.text()).not.toContain('没有来源模型')
-    expect(blockedRow.attributes('title')).toContain('没有来源模型')
-    expect(wrapper.get('.drawing-review-scope__footer').text()).toContain('已选择 1 张')
+    expect(wrapper.find('.drawing-review-submit').exists()).toBe(false)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
   it('显示指定审核人到机械主管的两级节点并限制当前处理人', async () => {
@@ -438,7 +426,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.text()).toContain('当前处理人（批准）：机械主管')
   })
 
-  it('未选择审核人时发起按钮置灰，选择多人后按并行提交', async () => {
+  it('旧面板不会因可选审核人变化恢复独立提交入口', async () => {
     const openReview: DrawingReviewPackage = { ...review, assignedReviewers: [], assignedReviewerNames: [] }
     const twoReviewers = {
       ...permissions,
@@ -452,20 +440,15 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: openReview.id, packages: [openReview], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'reviewer-b', ...twoReviewers },
     })
 
-    await wrapper.get('.drawing-review-toolbar__create').trigger('click')
-    expect(wrapper.get('.drawing-review-panel__header .drawing-review-submit').attributes('disabled')).toBeDefined()
-    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
+    expect(wrapper.find('.drawing-review-toolbar__create').exists()).toBe(false)
+    expect(wrapper.find('.drawing-review-panel__header .drawing-review-submit').exists()).toBe(false)
     expect(wrapper.emitted('create')).toBeUndefined()
-
-    await wrapper.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', ['reviewer-b'])
-    await wrapper.vm.$nextTick()
-    expect(wrapper.get('.drawing-review-panel__header .drawing-review-submit').attributes('disabled')).toBeUndefined()
-
-    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-1'], ['reviewer-b']]])
+    await wrapper.setProps({ defaultReviewers: ['reviewer-b'] })
+    expect(wrapper.find('.drawing-review-submit').exists()).toBe(false)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
-  it('发起审核默认选择有审图权限的项目主设计，批量发起也沿用该默认值', async () => {
+  it('配置了默认主设计也不能从旧面板批量发起新审核', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: {
@@ -479,19 +462,14 @@ describe('DrawingReviewPanel', () => {
       },
     })
 
-    await wrapper.get('.drawing-review-toolbar__create').trigger('click')
-    expect(wrapper.findComponent({ name: 'ElSelect' }).props('modelValue')).toEqual(['lead'])
-    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-1'], ['lead']]])
-
+    expect(wrapper.find('.drawing-review-toolbar__create').exists()).toBe(false)
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
-    await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
-    expect(wrapper.emitted('create')).toHaveLength(1)
-    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-1'], ['lead']], [['model-1'], ['lead']]])
+    expect(wrapper.find('.drawing-review-overview__batch .is-submit').exists()).toBe(false)
+    expect(wrapper.find('.drawing-review-submit').exists()).toBe(false)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
-  it('仅选择允许发起的图纸，已批准版本不能单选或全选', async () => {
+  it('未发起与已批准候选均不能在旧面板单选或全选发起', async () => {
     const candidates: DrawingReviewCandidate[] = [
       candidate,
       { ...candidate, candidateId: 'second-candidate', modelDocumentId: 'second-model', drawingDocumentId: 'second-drawing', drawingNumber: 'NS-200' },
@@ -504,17 +482,14 @@ describe('DrawingReviewPanel', () => {
     const overviewChecks = wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]')
     expect(overviewChecks[2]!.attributes('disabled')).toBeDefined()
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
-    expect(overviewChecks.map(input => (input.element as HTMLInputElement).checked)).toEqual([true, true, false])
+    expect(overviewChecks.map(input => (input.element as HTMLInputElement).checked)).toEqual([false, false, false])
     await wrapper.setProps({ candidates: candidates.map((item, index) => index === 1 ? { ...item, selectable: false } : item) })
     expect((overviewChecks[1]!.element as HTMLInputElement).checked).toBe(false)
     await wrapper.setProps({ candidates })
-    await wrapper.get('.drawing-review-panel__empty button').trigger('click')
     expect(wrapper.findAll('.drawing-review-scope__modes')).toHaveLength(0)
-    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(2)
-    const approved = wrapper.findAll('.drawing-review-candidate').find(button => button.text().includes('OLD-100'))!
-    await approved.trigger('click')
-    expect(approved.attributes('disabled')).toBeDefined()
-    expect(approved.classes()).not.toContain('is-selected')
+    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(0)
+    expect(overviewChecks.every(input => input.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
   it('发起人可填写原因撤销审核', async () => {
@@ -676,7 +651,7 @@ describe('DrawingReviewPanel', () => {
     confirm.mockRestore()
   })
 
-  it('批量发起先选择审核人，候选刷新保留勾选范围', async () => {
+  it('旧单撤销后候选刷新仍不能从旧面板批量发起新审核', async () => {
     const candidates: DrawingReviewCandidate[] = [
       { ...candidate, candidateId: 'r1', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'Ready' },
       { ...candidate, candidateId: 'r2', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'Ready' },
@@ -688,21 +663,16 @@ describe('DrawingReviewPanel', () => {
 
     const boxes = wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]')
     expect(boxes).toHaveLength(2)
-    expect(boxes.every(box => box.attributes('disabled') === undefined)).toBe(true)
-    expect(wrapper.get('.drawing-review-overview__batch .is-submit').attributes('disabled')).toBeDefined()
+    expect(boxes.every(box => box.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.find('.drawing-review-overview__batch .is-submit').exists()).toBe(false)
 
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
-    await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
-
-    expect(wrapper.text()).toContain('指定审核人')
+    expect(wrapper.find('.drawing-review-submit').exists()).toBe(false)
     expect(wrapper.emitted('create')).toBeUndefined()
-    await wrapper.findAll('.drawing-review-candidate')[1]!.trigger('click')
     await wrapper.setProps({ candidates: candidates.map(item => ({ ...item })) })
-    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(1)
-    wrapper.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', ['other-reviewer'])
-    await wrapper.vm.$nextTick()
-    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-2'], ['other-reviewer']]])
+    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(0)
+    expect(wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]').every(box => box.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
   it('审核明细栏内不再渲染审核结论条（结论条在预览工具条里）', () => {
@@ -714,4 +684,12 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('非标 BOM · 2D')
   })
+  it('复用原边栏容器承载发布审核，折叠时保持审核实例',async()=>{
+    const w=mount(DrawingReviewPanel,{attachTo:document.body,props:{packageId:'',packages:[],currentUsername:'admin',pending:false,canSubmit:false,canAnnotate:false,canDecide:true,desktopAvailable:false,panelTitle:'发布图纸审核'},slots:{content:'<input data-session value="待提交意见">'},global:{plugins:[ElementPlus]}})
+    const input=w.get('[data-session]').element
+    expect(w.get('aside').classes()).toContain('drawing-review-panel');expect(w.text()).not.toContain('暂无历史审核单')
+    await w.get('[aria-label="折叠图纸审核栏"]').trigger('click');expect(w.get('[data-session]').isVisible()).toBe(false);expect(w.get('[data-session]').element).toBe(input)
+    await w.get('[aria-label="展开图纸审核栏"]').trigger('click');expect(w.get('[data-session]').isVisible()).toBe(true);w.unmount()
+  })
+
 })

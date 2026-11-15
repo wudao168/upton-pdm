@@ -29,9 +29,10 @@ public sealed partial class PdmAddin
                 || !File.Exists(path) || !string.Equals(ComputeFileHash(path), manifest.RetainedWorkingHashes[file.DocumentId], StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("恢复新增引用时原编辑基准发生变化，文件和草稿已保留：" + file.FileName);
         }
-        void Read(string owner)
+        async Task Read(string owner, ControlledOpenFileDto archivedOwner = null)
         {
             if (!visited.Add(owner)) return;
+            HashSet<string> archivedReferences = null;
             foreach (var source in PdmDependencyEntries(application.GetDocumentDependencies2(owner, false, false, false) as Array, owner)
                 .SelectMany(entry => entry.Value))
             {
@@ -39,7 +40,24 @@ public sealed partial class PdmAddin
                     || NativeArchiveManifest.IsInterconnectCachePath(source)
                     || !new[] { ".SLDPRT", ".SLDASM" }.Contains(Path.GetExtension(source), StringComparer.OrdinalIgnoreCase)) continue;
                 if (!File.Exists(source))
+                {
+                    // A missing entry in the server file list is not evidence of
+                    // a locally added component. Compare exact native references
+                    // against this owner's verified archive, never a basename or
+                    // a findings file produced from the edited working copy.
+                    if (archivedOwner != null)
+                    {
+                        if (archivedReferences == null)
+                            archivedReferences = await ReadArchivedDirectReferencesAsync(archivedOwner);
+                        RequireOwner(archivedOwner);
+                        if (archivedReferences.Any(path => PathsEqual(path, source)))
+                        {
+                            RecordArchivedMissingReference(manifest, owner, source);
+                            continue;
+                        }
+                    }
                     throw new InvalidOperationException("上次编辑新增的本地引用尚未入库，原文件缺失，草稿已保留。请恢复该原文件后重试：" + source);
+                }
                 ControlledCacheMaintenance.RequireOrdinaryPath(source, Path.GetPathRoot(source));
                 if (PdmDocumentIdentityStore.TryReadLocalMetadata(source, out var binding))
                 {
@@ -64,10 +82,11 @@ public sealed partial class PdmAddin
                     record.WorkspacePath = peer;
                 }
                 pending.Add(record.FileName, record);
-                if (Path.GetExtension(source).Equals(".SLDASM", StringComparison.OrdinalIgnoreCase)) Read(source);
+                if (Path.GetExtension(source).Equals(".SLDASM", StringComparison.OrdinalIgnoreCase)) await Read(source);
             }
         }
-        foreach (var file in owners) { RequireOwner(file); Read(ControlledReferenceMaterializer.LocalPath(directory, file)); }
+        foreach (var file in owners) { RequireOwner(file); await Read(ControlledReferenceMaterializer.LocalPath(directory, file), file); }
+        foreach (var file in owners) RequireOwner(file);
         if (pending.Count == 0) return;
         var documents = await apiClient.GetDocumentsAsync(manifest.ProjectId, lifetime.Token);
         foreach (var record in pending.Values)
@@ -101,5 +120,28 @@ public sealed partial class PdmAddin
         }
         manifest.LocalCompatibilityNotes.Add("已恢复 " + pending.Count + " 个本次编辑新增的引用；新增图档或装配关系仍待确认存档，未生成新的服务器版本。");
         LogOperation("恢复已保存编辑中的本地新增引用 files=" + pending.Count + " registered=0 uploaded=0");
+    }
+
+    private async Task<HashSet<string>> ReadArchivedDirectReferencesAsync(ControlledOpenFileDto file)
+    {
+        var staging = Path.Combine(Path.GetTempPath(), "UPLM", "reference-baseline", Guid.NewGuid().ToString("N"));
+        var canonical = await apiClient.DownloadControlledOpenFileAsync(file, staging, lifetime.Token);
+        if (!ControlledReferenceMaterializer.Matches(canonical, file))
+            throw new InvalidOperationException("缺失引用的存档基准尚未核对，工作文件与草稿均保留：" + file.FileName);
+        var dependencies = application.GetDocumentDependencies2(canonical, false, false, false) as Array;
+        if (dependencies == null)
+            throw new InvalidOperationException("尚未读到存档基准的引用清单，无法确认缺件是否为本次新增；工作文件与草稿均保留：" + file.FileName);
+        return new HashSet<string>(PdmDependencyEntries(dependencies, canonical)
+            .SelectMany(entry => entry.Value), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void RecordArchivedMissingReference(ControlledOpenManifestDto manifest, string owner, string source)
+    {
+        if (File.Exists(source) || Directory.Exists(source) || FindLoadedDocument(source) != null)
+            throw new IOException("存档引用未在受控清单中，原路径存在文件或已打开窗口，未作为缺件放行：" + Path.GetFileName(source));
+        manifest.ReferenceIssues = OpenReferenceFindings.Merge((manifest.ReferenceIssues ?? new List<OpenReferenceIssueDto>())
+            .Concat(new[] { new OpenReferenceIssueDto { FileName = Path.GetFileName(source), OriginalPath = source,
+                InstancePath = Path.GetFileName(owner), Reason = "存档基准中的引用文件缺失，已保留原引用，未猜测替代文件。" } }));
+        LogOperation("已核对存档原有缺失引用，未认定为本次编辑新增：" + source);
     }
 }

@@ -134,7 +134,7 @@ describe('项目日历', () => {
   })
   it('历史逾期风险保留，已关闭风险不是逾期', () => {
     const risks=[{id:'r',projectId:'root',title:'整改',impact:'需处理',owner:'pm',dueDate:'2026-09-01',severity:'warning',createdBy:'pm',createdAt:'',closed:false,canClose:true}]
-    expect(calendarEvents([item()],risks,today).find(event=>event.kind==='risk')?.tone).toBe('danger')
+    expect(calendarEvents([item()],risks,today).find(event=>event.kind==='risk')?.tone).toBe('normal')
     risks[0]!.closed=true
     expect(calendarEvents([item()],risks,today).find(event=>event.kind==='risk')).toBeUndefined()
   })

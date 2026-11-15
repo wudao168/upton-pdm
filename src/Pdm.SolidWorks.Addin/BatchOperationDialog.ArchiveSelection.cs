@@ -15,6 +15,10 @@ internal sealed partial class BatchOperationDialog
     private HashSet<string> initialArchivePaths;
     private readonly HashSet<string> archiveModelUpdatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     internal Func<CadTreeNode, CancellationToken, Task<IReadOnlyList<DocumentVersionDto>>> LoadArchiveVersionsAsync { get; set; }
+    internal bool IncludePairedArchiveChanges { get; set; } = true;
+
+    private bool IsArchiveChange(CadTreeNode node) => SelectionStateFor(node) is ArchiveSelectionState.New
+        or ArchiveSelectionState.Changed or ArchiveSelectionState.DrawingUpdate or ArchiveSelectionState.PendingSave;
 
     private void CancelArchiveAnalysis()
     {
@@ -149,25 +153,33 @@ internal sealed partial class BatchOperationDialog
             checkedPaths.RemoveWhere(path => itemsByPath.TryGetValue(path, out var item) && !CanSelectNode(item.Node));
             if (selectChangedItems) checkedPaths.Clear();
             if (selectChangedItems || !archiveSelectionTouched)
+            {
                 foreach (var item in eligible)
                     if (CanSelectNode(item.Node) && (!selectChangedItems && initialArchivePaths != null
                         ? initialArchivePaths.Contains(SelectionKey(item.Node))
-                        : SelectionStateFor(item.Node) == ArchiveSelectionState.New || SelectionStateFor(item.Node) == ArchiveSelectionState.Changed || SelectionStateFor(item.Node) == ArchiveSelectionState.DrawingUpdate || SelectionStateFor(item.Node) == ArchiveSelectionState.PendingSave))
+                        : IsArchiveChange(item.Node)))
                         checkedPaths.Add(SelectionKey(item.Node));
-            if (selectChangedItems || !archiveSelectionTouched)
-            {
-                var models = eligible.Where(item => item.Node.Kind != CadDocumentKind.Drawing
-                    && checkedPaths.Contains(SelectionKey(item.Node))
-                    && (SelectionStateFor(item.Node) == ArchiveSelectionState.Changed || SelectionStateFor(item.Node) == ArchiveSelectionState.New || SelectionStateFor(item.Node) == ArchiveSelectionState.PendingSave))
-                    .Select(item => item.Node).ToArray();
-                foreach (var drawing in eligible.Where(item => SelectionStateFor(item.Node) == ArchiveSelectionState.DrawingUpdate
-                    && CanSelectNode(item.Node) && models.Any(model => PdmAddin.DrawingUsesWorkingModel(item.Node, model))))
-                    checkedPaths.Add(SelectionKey(drawing.Node));
+                if (!selectChangedItems && initialArchivePaths != null && IncludePairedArchiveChanges)
+                {
+                    var requested = eligible.Where(item => initialArchivePaths.Contains(SelectionKey(item.Node))
+                        && CanSelectForCheckIn(item.Node, username)).Select(item => item.Node).ToArray();
+                    var requestedDrawings = requested.Where(node => node.Kind == CadDocumentKind.Drawing).ToArray();
+                    var requestedModels = requested.Where(node => node.Kind is CadDocumentKind.Part or CadDocumentKind.Assembly).ToArray();
+                    foreach (var item in eligible.Where(item => IsArchiveChange(item.Node) && CanSelectNode(item.Node)))
+                    {
+                        var node = item.Node;
+                        if (node.Kind == CadDocumentKind.Drawing
+                            ? requestedModels.Any(model => PdmAddin.DrawingUsesWorkingModel(node, model))
+                            : node.Kind is CadDocumentKind.Part or CadDocumentKind.Assembly
+                                && requestedDrawings.Any(drawing => PdmAddin.DrawingUsesWorkingModel(drawing, node)))
+                            checkedPaths.Add(SelectionKey(node));
+                    }
+                }
             }
             RefreshFileTreePresentation();
             SetSelectionHint("未变更" + archiveSelectionStates.Values.Count(state => state == ArchiveSelectionState.Unchanged)
                 + "个，待核对" + archiveSelectionStates.Values.Count(state => state == ArchiveSelectionState.Pending) + "个");
-            ArchiveSession.Current?.ReportAnalysisProgress(eligible.Length, eligible.Length, null,
+            ArchiveSession.Current?.ReportAnalysisProgress(eligible.Length, eligible.Length, root.FileName,
                 "分析完成，请核对本次存档范围。", true);
         }
         catch (OperationCanceledException) { }

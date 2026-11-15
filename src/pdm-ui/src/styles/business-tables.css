@@ -9,4 +9,8 @@
   :root body :is(.pdm-app-shell, .el-dialog, .el-drawer, .pdm-custom-drawer) .el-table__empty-text {
     text-align: center !important;
   }
+  /* 图档发布审核侧栏的两处冻结BOM明细按用户要求左对齐。 */
+  :root body :is(.pdm-app-shell, .el-dialog, .el-drawer, .pdm-custom-drawer) table.release-review-bom-table :is(th, td) {
+    text-align: left !important;
+  }
 }

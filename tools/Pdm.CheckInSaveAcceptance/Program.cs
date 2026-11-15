@@ -28,6 +28,8 @@ internal static partial class Program
   if(args.Length>0&&args[0]=="--archive-status-proxy-host") { RunArchiveStatusProxyHost(args); return; }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--drawing-association-safety")
+  {try{DrawingAssociationSafetyScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--maintenance-flow-regression")
   {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{ReferenceActivationScenario(args[2]);await MaintenanceJournalScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
   if(args.Length>1&&args[1]=="--idle-maintenance-regression")

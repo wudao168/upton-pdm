@@ -8,6 +8,10 @@ $ErrorActionPreference = 'Stop'
 function Write-InstallStep([int]$Number, [string]$Message) {
     Write-Output ("[UPLM_STEP:{0}/6] {1}" -f $Number, $Message)
 }
+
+function Write-InstallDiagnostic([string]$Message) {
+    [Console]::Error.WriteLine('[UPLM_DIAGNOSTIC] ' + ($Message -replace '[\r\n]+', ' | '))
+}
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw '请在实际使用人的 Windows 账号中，以管理员身份运行客户端安装脚本。'
@@ -102,6 +106,74 @@ function Resolve-UplmProgramPath([string]$Root, [string]$RelativePath) {
     return $full
 }
 
+function Get-UplmServerSettingsPlan([string]$Root, [uri]$ServerUri) {
+    $path = Resolve-UplmProgramPath $Root 'server-settings.json'
+    $original = $null
+    $invalidBackup = $null
+    $values = @{}
+    if ([IO.File]::Exists($path)) {
+        $original = [IO.File]::ReadAllBytes($path)
+        try {
+            $stream = [IO.MemoryStream]::new($original, $false)
+            $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true)
+            try { $json = $reader.ReadToEnd().Trim().TrimStart([char]0xFEFF).Trim() }
+            finally { $reader.Dispose(); $stream.Dispose() }
+            if (!$json.StartsWith('{') -or !$json.EndsWith('}')) { throw '服务器设置不是 JSON 对象。' }
+            $settings = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+            if ($settings -isnot [pscustomobject]) { throw '服务器设置不是 JSON 对象。' }
+            foreach ($property in $settings.PSObject.Properties) { $values[$property.Name] = $property.Value }
+        }
+        catch {
+            $values.Clear()
+            $relative = 'server-settings.invalid-' + [Guid]::NewGuid().ToString('N') + '.json.bak'
+            $invalidBackup = Resolve-UplmProgramPath $Root $relative
+            # The parser can include settings values in its exception message.
+            Write-InstallDiagnostic ('无法解析旧服务器设置，类型：' + $_.Exception.GetType().FullName + '；原始字节将保存在 ' + $invalidBackup)
+        }
+    }
+    elseif (Test-Path -LiteralPath $path) {
+        throw '服务器设置路径不是普通文件，请联系管理员核对。'
+    }
+    $values['ServerAddress'] = $ServerUri.GetLeftPart([UriPartial]::Authority).TrimEnd('/')
+    return [pscustomobject]@{
+        Path = $path
+        Original = $original
+        InvalidBackup = $invalidBackup
+        Replacement = [Text.UTF8Encoding]::new($false).GetBytes(($values | ConvertTo-Json -Depth 100))
+    }
+}
+
+function Write-UplmSettingsAtomically([string]$Path, [byte[]]$Bytes, [string]$Backup = '') {
+    $temporary = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllBytes($temporary, $Bytes)
+        if ([IO.File]::Exists($Path)) {
+            if ($Backup) { [IO.File]::Replace($temporary, $Path, $Backup) }
+            else { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
+        }
+        else {
+            if ($Backup) { throw '旧服务器设置已变化，请重新运行安装。' }
+            [IO.File]::Move($temporary, $Path)
+        }
+    }
+    finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+}
+
+function Apply-UplmServerSettings($Plan) {
+    $path = $Plan.Path
+    $present = [IO.File]::Exists($path)
+    if ($present -ne ($null -ne $Plan.Original) -or
+        ($present -and -not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals([IO.File]::ReadAllBytes($path), $Plan.Original))) {
+        throw '服务器设置在安装期间已变化，请重新运行安装。'
+    }
+    Write-UplmSettingsAtomically $path $Plan.Replacement $Plan.InvalidBackup
+}
+
+function Restore-UplmServerSettings($Plan) {
+    if ($null -ne $Plan.Original) { Write-UplmSettingsAtomically $Plan.Path $Plan.Original }
+    else { [IO.File]::Delete($Plan.Path) }
+}
+
 $script:previousProgramBackups = New-Object System.Collections.Generic.List[object]
 $script:previousInstallRoots = @()
 function Backup-PreviousUplmPrograms([string]$Root) {
@@ -146,7 +218,8 @@ function Restore-PreviousUplmPrograms([string]$RegAsm) {
         }
         catch {
             $null = $failedRoots.Add($record.Root)
-            $results.Add("程序目录恢复未完成，旧文件仍保留在备份目录：$($record.BackupRoot)；$($_.Exception.Message)")
+            Write-InstallDiagnostic ($_ | Out-String)
+            $results.Add("程序目录恢复未完成，旧文件仍保留在备份目录：$($record.BackupRoot)。请核对目录权限和文件占用。")
         }
     }
     foreach ($candidate in $script:previousInstallRoots) {
@@ -211,7 +284,6 @@ function Unregister-PreviousUplmAddin([string]$RegAsm, [string]$OldAddin) {
 }
 
 function Remove-PreviousUplmInstallation {
-    Stop-PreviousDesktopClient
     $candidateRoots = New-Object System.Collections.Generic.List[string]
     foreach ($candidate in @($InstallRoot, (Join-Path $env:LOCALAPPDATA 'UPLM'))) {
         if ((Test-UplmInstallRoot $candidate) -and ((Test-UplmInstallation $candidate) -or $candidate -eq $InstallRoot)) { $candidateRoots.Add(([IO.Path]::GetFullPath($candidate).TrimEnd('\'))) }
@@ -268,11 +340,17 @@ if ([string]::IsNullOrWhiteSpace($webView2Version)) {
 else { Write-InstallStep 2 "已检测到 Microsoft Edge WebView2 Runtime $webView2Version，跳过离线安装。" }
 
 $serverSettingsWritten = $false
-$serverSettingsOriginal = $null
+$failureHint = '请正常退出 SolidWorks 和 UPLM，再重试安装。'
 try {
+Stop-PreviousDesktopClient
+$failureHint = '无法读取本机服务器设置。请检查 UPLM 配置目录权限后重试。'
+$serverSettingsRoot = Join-Path $env:LOCALAPPDATA 'UPLM'
+$serverSettings = Get-UplmServerSettingsPlan $serverSettingsRoot $serverUri
+$failureHint = '无法备份旧版程序或清理插件注册。请检查程序占用和安装目录权限后重试。'
 Write-InstallStep 3 '正在备份并替换旧版客户端和 SolidWorks 插件程序…'
 Remove-PreviousUplmInstallation
 
+$failureHint = '无法复制新版程序。请检查安装目录权限、磁盘空间和文件占用后重试。'
 Write-InstallStep 4 '正在复制新版客户端文件…'
 $desktopTarget = Join-Path $InstallRoot 'client'
 $addinTarget = Join-Path $InstallRoot 'solidworks-addin'
@@ -290,23 +368,18 @@ Copy-Item -LiteralPath $uninstallerSource -Destination $uninstallerScriptTarget 
 $locator = [ordered]@{ BootstrapUrl = "$ServerBaseUrl/client-bootstrap.json" } | ConvertTo-Json
 $utf8 = New-Object Text.UTF8Encoding($false)
 foreach ($target in @($desktopTarget, $addinTarget)) { [IO.File]::WriteAllText((Join-Path $target 'uplm-bootstrap.json'), $locator, $utf8) }
-$serverSettingsRoot = Join-Path $env:LOCALAPPDATA 'UPLM'
+$failureHint = '无法保存本机服务器设置。请检查 UPLM 配置目录权限后重试。'
 New-Item -ItemType Directory -Path $serverSettingsRoot -Force | Out-Null
-$serverSettingsPath = Join-Path $serverSettingsRoot 'server-settings.json'
-$serverSettingsOriginal = if (Test-Path -LiteralPath $serverSettingsPath -PathType Leaf) { [IO.File]::ReadAllBytes($serverSettingsPath) } else { $null }
-$serverSettingsValues = @{}
-if (Test-Path -LiteralPath $serverSettingsPath -PathType Leaf) {
-    $existingSettings = Get-Content -LiteralPath $serverSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    foreach ($property in $existingSettings.PSObject.Properties) { $serverSettingsValues[$property.Name] = $property.Value }
-}
-$serverSettingsValues['ServerAddress'] = $serverUri.GetLeftPart([UriPartial]::Authority).TrimEnd('/')
-$serverSettings = $serverSettingsValues | ConvertTo-Json -Depth 100
-[IO.File]::WriteAllText((Join-Path $serverSettingsRoot 'server-settings.json'), $serverSettings, $utf8)
+Apply-UplmServerSettings $serverSettings
 $serverSettingsWritten = $true
+if ($serverSettings.InvalidBackup) {
+    Write-Output "旧服务器设置无法读取，原文件已备份，已使用本次选择的服务器地址。备份：$($serverSettings.InvalidBackup)"
+}
 
 $regAsm = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe'
 $addinDll = Join-Path $addinTarget 'Upton.Pdm.SolidWorks.Addin.dll'
 $addinRegistered = $false
+$failureHint = 'SolidWorks 插件注册失败。请确认已正常退出 SolidWorks，并以管理员身份重试。'
 Write-InstallStep 5 '正在注册 SolidWorks 插件…'
 if (Test-Path -LiteralPath $regAsm -PathType Leaf) {
     $addinTlb = [IO.Path]::ChangeExtension($addinDll, '.tlb')
@@ -316,6 +389,7 @@ if (Test-Path -LiteralPath $regAsm -PathType Leaf) {
 }
 else { Write-Warning '未找到 64 位 RegAsm；已安装 Windows 客户端，但未注册 SolidWorks 插件。' }
 
+$failureHint = '无法完成快捷方式或安装记录配置。请以管理员身份重试。'
 $desktopExe = Join-Path $desktopTarget 'Upton.Pdm.Desktop.exe'
 $icon = Join-Path $desktopTarget 'UPTON-PLM.ico'
 $shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'UPLM.lnk'
@@ -361,15 +435,17 @@ Write-Host "UPLM 客户端安装完成：桌面端 $($manifest.desktopVersion)�
 if ($rebootRequired) { Write-Warning '系统运行环境已更新，请重启电脑后再打开 UPLM 和 SolidWorks。' }
 }
 catch {
-    $installError = $_.Exception.Message
+    Write-InstallDiagnostic ($_ | Out-String)
     $settingsRollback = ''
     if ($serverSettingsWritten) {
         try {
-            if ($null -ne $serverSettingsOriginal) { [IO.File]::WriteAllBytes($serverSettingsPath, $serverSettingsOriginal) }
-            else { Remove-Item -LiteralPath $serverSettingsPath -Force -ErrorAction Stop }
+            Restore-UplmServerSettings $serverSettings
         }
         catch { $settingsRollback = '服务器设置恢复未完成，请在客户端中重新核对服务器地址。' }
     }
     $rollback = Restore-PreviousUplmPrograms (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe')
-    throw ("升级未完成，未删除用户文件。" + [Environment]::NewLine + $installError + [Environment]::NewLine + $rollback + [Environment]::NewLine + $settingsRollback)
+    Write-Output "升级未完成，未删除用户文件。$failureHint"
+    if ($rollback) { Write-Output $rollback }
+    if ($settingsRollback) { Write-Output $settingsRollback }
+    exit 1
 }

@@ -65,6 +65,7 @@ public sealed partial class MySqlPdmRepository
                 updated_at=@Now,
                 row_version=row_version+1
             WHERE id=@DocumentId
+              AND lifecycle_state NOT IN ('InReview','Obsolete')
               AND (checked_out_by IS NULL
                    OR (checked_out_by=@Actor
                        AND (checkout_machine=@MachineName OR checkout_machine IS NULL OR checkout_machine='')))
@@ -75,6 +76,7 @@ public sealed partial class MySqlPdmRepository
         if (affected != 1)
         {
             var current = await FindDocumentAsync(connection, transaction, documentId, cancellationToken);
+            if (current?.State == DocumentLifecycleState.InReview) throw new PdmConflictException("图档正在发布审批，不能获取编辑权限。");
             throw current is null
                 ? new PdmNotFoundException("图档不存在。 ")
                 : new PdmConflictException($"图档正在由{current.CheckedOutBy}编辑。 ");
@@ -660,6 +662,12 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
         }
 
+        if (decision == ApprovalDecision.Approved)
+        {
+            var reviewPackage = await FindReleasePackageAsync(connection, transaction, row.ReleasePackageId, cancellationToken)
+                ?? throw new PdmNotFoundException("发布包不存在。");
+            ReleaseDrawingReviewService.RequireComplete(reviewPackage, reviewPackage.ApprovalTasks.Single(task => task.Id == taskId), actor);
+        }
         var signedAt = timeProvider.GetUtcNow();
         var now = signedAt.UtcDateTime;
         var signed = ApprovalNodeRules.Sign(participants, actor, decision, comment, signedAt, emergencySubstitute, out var waiting, businessNote);

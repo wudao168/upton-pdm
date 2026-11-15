@@ -33,7 +33,7 @@ internal static partial class Program
   {
    var modes=missingOnly?new[]{"missing-suppressed","missing-nested","missing-actually-loaded","missing-edit",
      "missing-toolbox","missing-toolbox-language-dir","missing-toolbox-edit","missing-toolbox-known","missing-toolbox-and-outside"}
-     :new[]{"verified","fallback","fallback-fails","preloaded-mismatch","same-title","historical","disabled-rule","legacy-warning"};
+     :new[]{"verified","known-source-mismatch","fallback","fallback-fails","preloaded-mismatch","same-title","historical","disabled-rule","legacy-warning"};
    var constants=Assembly.LoadFrom(Path.Combine(Path.GetDirectoryName(assembly.Location),"SolidWorks.Interop.swconst.dll"));
    var toolboxSearchOption=Convert.ToInt32(Enum.Parse(constants.GetType("SolidWorks.Interop.swconst.swUserPreferenceToggle_e",true),"swUseFolderAsDefaultSearchLocation"));
    foreach(var mode in modes)
@@ -56,8 +56,8 @@ internal static partial class Program
     }
     var rootPath=Path.Combine(folder,"ROOT.SLDASM");var partPath=Path.Combine(folder,"PART-1.SLDPRT");var otherPath=Path.Combine(directory,"user-draft.SLDPRT");File.WriteAllText(otherPath,"unselected dirty user draft");
     var externalPath=Path.Combine(directory,"external","PART-1.SLDPRT");Directory.CreateDirectory(Path.GetDirectoryName(externalPath));File.WriteAllBytes(externalPath,bytes);
-    var preloaded=mode=="preloaded-mismatch";var wrong=mode=="fallback"||mode=="fallback-fails"||preloaded||mode=="same-title"||mode=="legacy-warning";
-    var loaded=preloaded;var opens=0;var closes=0;var scans=0;var replacements=0;var search="";var rules=false;
+    var preloaded=mode=="preloaded-mismatch";var wrong=mode=="known-source-mismatch"||mode=="fallback"||mode=="fallback-fails"||preloaded||mode=="same-title"||mode=="legacy-warning";
+    var loaded=preloaded;var opens=0;var closes=0;var scans=0;var prechecks=0;var replacements=0;var search="";var rules=false;
     var plugin=New("PdmAddin");var appType=plugin.GetType().GetField("application",Flags).FieldType;var interop=appType.Assembly;var modelType=interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
     var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="ListExternalFileReferences2"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
     object Part(string path)=>new Proxy(modelType,call=>{
@@ -93,7 +93,14 @@ internal static partial class Program
         throw new Exception("A same-name part outside the configured Toolbox browser was allowed to load");
        opens++;loaded=true;active=root;return root;
       case "CloseDoc":if((string)call.Args[0]!="ROOT.SLDASM")throw new Exception("Closed unselected draft");closes++;loaded=false;active=other;return null;
-      case "GetDocumentDependencies2":scans++;
+      case "GetDocumentDependencies2":
+       // The current policy first asks for the root's recursive dependency list.
+       // This single query is not a per-file materialization pass. Keep the
+       // fallback fixtures unresolved here so native-load verification still
+       // exercises the bounded retry when that initial list is incomplete.
+       if ((bool)call.Args[1] && !loaded)
+       { prechecks++; return mode=="known-source-mismatch" ? new[]{"PART-1.SLDPRT",externalPath} : new string[0]; }
+       scans++;
        if(mode=="missing-nested"&&(string)call.Args[0]==Path.Combine(folder,"DEFERRED.SLDASM"))
         return new[]{"MISSING.SLDPRT",missingPath,"PART-3.SLDPRT",Path.Combine(directory,"original","PART-3.SLDPRT")};
        return (string)call.Args[0]==rootPath&&wrong?new[]{"PART-1.SLDPRT",externalPath}:new string[0];
@@ -111,20 +118,23 @@ internal static partial class Program
     using var pane=missing?(System.Windows.Forms.Control)New("PdmTaskPaneControl","缺件打开验收"):null;
     if(pane!=null)SetField(plugin,"taskPaneControl",pane);
     var failed=false;string failureMessage=null;try{var opened=DiscardCall(plugin,"OpenControlledReadOnlyDocument",rootPath,2,"Default",manifest);if(opened!=root)throw new Exception("Wrong returned document");}catch(InvalidOperationException error){failed=true;failureMessage=error.Message;}catch(IOException error){failed=true;failureMessage=error.Message;}
-    var shouldFail=preloaded||mode=="same-title"||mode=="fallback-fails"||mode=="missing-actually-loaded"
+    // Turning off optional precheck rules never permits an actual foreign file.
+    var shouldFail=preloaded||mode=="same-title"||mode=="fallback-fails"||mode=="legacy-warning"||mode=="missing-actually-loaded"
       ||toolbox&&mode!="missing-toolbox"&&mode!="missing-toolbox-language-dir"&&mode!="missing-toolbox-edit";
     if(failed!=shouldFail||search!=""||rules||toolboxSearch!=toolbox||File.ReadAllText(otherPath)!="unselected dirty user draft")throw new Exception("Native-first validation/scope failure "+mode+": "+failureMessage);
     if(missing&&!shouldFail&&(opens!=1||closes!=0||!((System.Windows.Forms.Control)Field(pane,"checkoutReminder")).Text.Contains("MISSING.SLDPRT")))
       throw new Exception("Missing component open did not keep the window and report the missing file: "+mode);
     if(mode=="missing-nested"&&((System.Windows.Forms.Control)Field(pane,"checkoutReminder")).Text.Contains("PART-3.SLDPRT"))
       throw new Exception("A verified deferred component was reported as missing because of its saved path");
-    if(mode=="verified"&&(scans!=0||opens!=1||closes!=0||replacements!=0))throw new Exception("Verified native open performed an unnecessary 214-file prepass");
+    if(prechecks>1)throw new Exception("Recursive root precheck repeated unnecessarily");
+    if(mode=="verified"&&(prechecks!=1||scans!=0||opens!=1||closes!=0||replacements!=0))throw new Exception("Verified native open performed an unnecessary 214-file prepass");
+    if(mode=="known-source-mismatch"&&(prechecks!=1||scans!=214||opens!=1||closes!=0||replacements!=1))throw new Exception("Known stale source was not repaired before the first native open");
     if(mode=="fallback"&&(scans!=214||opens!=2||closes!=1||replacements!=1))throw new Exception("Reference mismatch did not run one bounded materialization retry");
     if(mode=="fallback-fails"&&(scans!=214||opens!=2||closes!=2))throw new Exception("Invalid fallback was accepted or retried indefinitely");
     if((preloaded||mode=="same-title")&&(closes!=0||scans!=0))throw new Exception("Pre-existing or same-title user window was closed");
     if(mode=="historical"&&(scans!=214||opens!=1||closes!=0))throw new Exception("Historical open used the fast path");
     if(mode=="disabled-rule"&&(scans!=0||opens!=1||closes!=0))throw new Exception("Verified fast open depended on optional precheck settings");
-    if(mode=="legacy-warning"&&(scans!=214||opens!=2||closes!=1))throw new Exception("Fast-path failure changed the configured legacy fallback policy");
+    if(mode=="legacy-warning"&&(scans!=214||opens!=2||closes!=2))throw new Exception("Optional rules bypassed mandatory loaded-source verification");
     foreach(var file in files.Skip(1)){var p=Path.Combine(folder,(string)Get(file,"FileName"));if(!File.ReadAllBytes(p).SequenceEqual(bytes)||(File.GetAttributes(p)&FileAttributes.ReadOnly)==0)throw new Exception("Native-first changed an unselected file");}
     Console.WriteLine("PASS: 214-file controlled native-first "+mode+"; dependencyScans="+scans+" opens="+opens+" closes="+closes+"; configured source validation and unselected draft retained");
    }

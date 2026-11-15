@@ -1098,18 +1098,14 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             .GroupBy(version => version.DocumentId).Select(group => group
                 .OrderByDescending(version => version.Revision == liveDocuments[version.DocumentId].Revision)
                 .ThenByDescending(version => version.CreatedAt).First())
-            .Where(version => version.ReferenceSnapshot.StructureIndexPending)
             .Select(version => new PendingDrawingRelationSource(version.DocumentId, liveDocuments[version.DocumentId].ProjectId,
                 liveDocuments[version.DocumentId].FileName, version.ReferenceSnapshot));
         var modelVersions = storedVersions.Select(version => new DrawingRelationModelVersion(version.DocumentId,
             liveDocuments[version.DocumentId].ProjectId, liveDocuments[version.DocumentId].FileName,
             liveDocuments[version.DocumentId].Kind.ToString(), version.Revision.Display));
-        return Task.FromResult<IReadOnlyList<DocumentModelDrawingRelation>>(documentRelations.Values
-            .Where(item => documentIds.Contains(item.ModelDocumentId) && documentIds.Contains(item.DrawingDocumentId))
-            .Concat(PendingDrawingRelations.Recover(pendingDrawings, modelVersions)).Distinct()
-            .OrderBy(item => item.ModelDocumentId)
-            .ThenBy(item => item.DrawingDocumentId)
-            .ToArray());
+        return Task.FromResult(PendingDrawingRelations.Reconcile(documentRelations.Values
+            .Where(item => documentIds.Contains(item.ModelDocumentId) && documentIds.Contains(item.DrawingDocumentId)),
+            pendingDrawings, modelVersions));
     }
 
     public Task<IReadOnlyList<DocumentWhereUsed>> ListWhereUsedAsync(Guid documentId, CancellationToken cancellationToken)
@@ -1748,6 +1744,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException($"图档正在由{document.CheckedOutBy}编辑。 ");
             }
 
+            if (document.State == DocumentLifecycleState.InReview)
+                throw new PdmConflictException("图档正在发布审批，不能获取编辑权限。");
             RequireHandoffRecipient(documentId, actor);
             editHandoffs.Remove(documentId);
 
@@ -1931,6 +1929,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 && IsActiveDrawingReviewWriteback(documentId, drawingReviewWritebackId.Value);
             if (drawingReviewWritebackId.HasValue && !IsActivePropertyWriteback(documentId, drawingReviewWritebackId.Value))
                 throw new PdmConflictException("审核标记回写任务已结束或已失效，未提交任何新版本。");
+            if (document.State == DocumentLifecycleState.InReview)
+                throw new PdmConflictException("图档正在发布审批，不能提交存档。");
             if (IsDocumentUnderActiveDrawingReview(documentId) && !controlledWriteback)
             {
                 throw new PdmConflictException("图档正在进行图纸审核，不能提交存档。");
@@ -2017,8 +2017,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 ChangeKind = controlledWriteback ? DocumentVersionChangeKind.PropertyWriteback : commit.ChangeKind,
                 DrawingVersionNumber = (versions.Values.Where(item => item.DocumentId == documentId).Max(item => item.DrawingVersionNumber) ?? 0) + 1
             };
-            versions[version.Id] = version;
             var updated = ApplyArchiveEditDisposition(renamedDocument with { Revision = revision, State = DocumentLifecycleState.Work }, commit, actor, version.Id, timeProvider.GetUtcNow());
+            if (!archiveBatchId.HasValue && document.Kind == DocumentKind.Drawing)
+                updated = AdoptArchivedReviewDrawing(updated, version);
+            versions[version.Id] = version;
             documents[documentId] = updated;
             if (!string.IsNullOrWhiteSpace(sourceFileSha256)) documentSourceFingerprints[documentId] = sourceFileSha256;
             if (commit.IsProjectRoot)
@@ -2425,6 +2427,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
             }
 
+            if (decision == ApprovalDecision.Approved) ReleaseDrawingReviewService.RequireComplete(package, task, actor);
             var signed = ApprovalNodeRules.Sign(task.Participants, actor, decision, comment, timeProvider.GetUtcNow(), emergencySubstitute, out var waiting, businessNote);
             if (waiting)
             {
@@ -2566,7 +2569,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         Task.FromResult<IReadOnlyList<ReleasePackage>>(packages.Values
             .Where(package => package.State == ReleasePackageState.Published
                 && ReleasePreviewPolicy.RequiresConversion(package)
-                && package.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Failed
+                && (ReleasePreviewPolicy.NeedsInitialBackfill(package)
+                    || package.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Failed)
                 && !(package.PreviewState == ReleasePreviewState.Failed && package.PreviewError?.StartsWith(PartialPreviewConversionException.ItemErrorPrefix, StringComparison.Ordinal) == true)
                 && package.PreviewAttempts < maxAttempts)
             .OrderBy(package => package.PreviewUpdatedAt ?? DateTimeOffset.MinValue)
@@ -2594,20 +2598,20 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var updated = new List<DocumentVersion>();
             var deliveryPackage = packages[releasePackageId];
             var modelArtifacts = new Dictionary<Guid, DocumentPreviewArtifact>(deliveryPackage.ModelDeliveryArtifacts);
+            var pdfArtifacts = new Dictionary<Guid, DocumentPreviewArtifact>(deliveryPackage.PdfDeliveryArtifacts);
             foreach (var binding in deliveryPackage.VersionBindings?.Where(item => !item.Publish) ?? [])
             {
                 if (!previews.TryGetValue(binding.DocumentId, out var artifact)) continue;
                 var document = documents.GetValueOrDefault(binding.DocumentId);
                 var source = versions.GetValueOrDefault(binding.VersionId);
-                if (document?.Kind is not (DocumentKind.Part or DocumentKind.Assembly)
-                    || source is null || source.DocumentId != binding.DocumentId || source.Sha256 != binding.Sha256
-                    || artifact.Format != DocumentPreviewFormat.Step
-                    || !string.Equals(artifact.SourceSha256, binding.Sha256, StringComparison.OrdinalIgnoreCase))
-                    throw new PdmConflictException("STEP交付产物与发布包冻结模型版本不一致，未挂接。");
-                modelArtifacts[binding.DocumentId] = artifact;
+                var format = ReleasePreviewService.FrozenDeliveryFormat(deliveryPackage, binding, document?.Kind);
+                if (source is null || source.DocumentId != binding.DocumentId || source.Sha256 != binding.Sha256
+                    || artifact.Format != format || !string.Equals(artifact.SourceSha256, binding.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException("交付件格式或来源与发布包冻结版本不一致，未挂接。");
+                (format == DocumentPreviewFormat.Pdf ? pdfArtifacts : modelArtifacts)[binding.DocumentId] = artifact;
                 updated.Add(source with { Preview = artifact });
             }
-            packages[releasePackageId] = deliveryPackage with { ModelDeliveryArtifacts = modelArtifacts };
+            packages[releasePackageId] = deliveryPackage with { ModelDeliveryArtifacts = modelArtifacts, PdfDeliveryArtifacts = pdfArtifacts };
             var reusedIds = packages.GetValueOrDefault(releasePackageId)?.VersionBindings?.Where(item => item.Publish && !item.RequiresPromotion).Select(item => item.VersionId).ToHashSet() ?? [];
             foreach (var version in versions.Values.Where(item => item.Status == DocumentVersionStatus.Released && (item.ReleasePackageId == releasePackageId || reusedIds.Contains(item.Id))).ToArray())
             {

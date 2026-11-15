@@ -54,9 +54,10 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
         {
             if (!IsStamped(path, package.Id, sourceVersionId)) return false;
             using var document = PdfReader.Open(path, PdfDocumentOpenMode.Import);
-            var values = package.PdfTitleBlockSnapshot is { Enabled: true } snapshot
+            var snapshot = package.PdfTitleBlockSnapshot;
+            var values = snapshot is { Enabled: true }
                 ? snapshot.Drawings.FirstOrDefault(pair => pair.Value.SourceVersionId == sourceVersionId).Value?.Values : null;
-            return document.Info.Elements.GetString("/UPLMTitleBlockFingerprint") == Fingerprint(values ?? new Dictionary<string, string>());
+            return document.Info.Elements.GetString("/UPLMTitleBlockFingerprint") == Fingerprint(values ?? new Dictionary<string, string>(), snapshot?.DrawingLabels);
         }
     }
 
@@ -103,7 +104,7 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
                     throw new PdmConflictException("PDF属性填写快照不完整或与本次冻结来源不一致，请核对发布记录。");
                 foreach (var key in snapshot.EnabledFields) values[key] = frozen.Values[key];
             }
-            lock (PdfReleasePageEditor.Gate) Apply(stamp, source.DocumentId, pdfPath, cadCodes, values,
+            lock (PdfReleasePageEditor.Gate) Apply(stamp, source.DocumentId, pdfPath, cadCodes, values, package.PdfTitleBlockSnapshot?.DrawingLabels,
                 reissue ? new HashSet<Guid>(new[] { version.Id, version.SourceVersionId ?? version.Id }) : null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -114,13 +115,21 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
         }
     }
 
-    private static string Fingerprint(IReadOnlyDictionary<string, string> values) => values.Count == 0 ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-        JsonSerializer.Serialize(values.OrderBy(pair => pair.Key, StringComparer.Ordinal)))));
-
-    private static void Apply(Stamp stamp, Guid drawingId, string path, IReadOnlySet<string> cadCodes, IReadOnlyDictionary<string, string> values,
-        IReadOnlySet<Guid>? reuseSources)
+    private static string Fingerprint(IReadOnlyDictionary<string, string> values, IReadOnlyDictionary<string, string>? drawingLabels)
     {
-        var fingerprint = Fingerprint(values);
+        if (values.Count == 0) return "";
+        var sortedValues = values.OrderBy(pair => pair.Key, StringComparer.Ordinal);
+        var labels = drawingLabels?.Where(pair => values.ContainsKey(pair.Key)).OrderBy(pair => pair.Key, StringComparer.Ordinal).ToArray();
+        var payload = labels is { Length: > 0 }
+            ? JsonSerializer.Serialize(new { Values = sortedValues, Labels = labels })
+            : JsonSerializer.Serialize(sortedValues);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
+    }
+
+    private void Apply(Stamp stamp, Guid drawingId, string path, IReadOnlySet<string> cadCodes, IReadOnlyDictionary<string, string> values,
+        IReadOnlyDictionary<string, string>? drawingLabels, IReadOnlySet<Guid>? reuseSources)
+    {
+        var fingerprint = Fingerprint(values, drawingLabels);
         var reuse = false;
         using (var existing = PdfReader.Open(path, PdfDocumentOpenMode.Import))
         {
@@ -160,7 +169,7 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
             GlobalFontSettings.FontResolver ??= new PdfReleaseFontResolver();
             var regular = new XFont("UPLM-YaHei", FontSize, XFontStyleEx.Regular);
             var bold = new XFont("UPLM-YaHei", FontSize, XFontStyleEx.Bold);
-            if (values.Count > 0) PdfReleasePageEditor.FillTitleBlock(prepared, filled, values);
+            var missing = values.Count > 0 ? PdfReleasePageEditor.FillTitleBlock(prepared, filled, values, drawingLabels) : [];
             using var document = PdfReader.Open(values.Count > 0 ? filled : prepared, PdfDocumentOpenMode.Modify);
             if (document.PageCount != layouts.Count) throw new PdmRuleException("PDF页数在标识处理时发生变化，请重新转换。");
             using var qr = QRCodeGenerator.GenerateQrCode(stamp.Code, QRCodeGenerator.ECCLevel.M);
@@ -187,6 +196,8 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
             document.Info.Elements.SetString("/UPLMPublishedAt", stamp.PublishedAt.ToString("O", CultureInfo.InvariantCulture));
             document.Save(result);
             File.Move(result, path, true);
+            if (missing.Count > 0)
+                logger.LogWarning("发布包 {PackageId} 图纸 {DrawingId} 跳过未找到图框标签的字段：{Fields}", stamp.PackageId, drawingId, string.Join("、", missing));
         }
         finally
         {

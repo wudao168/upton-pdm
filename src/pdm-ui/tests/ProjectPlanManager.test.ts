@@ -38,8 +38,21 @@ function render(project = child, requestedTaskId?: string) {
   wrappers.push(wrapper)
   return wrapper
 }
+function deleteMenuItem(wrapper: import('@vue/test-utils').VueWrapper) {
+  const trigger = wrapper.findAll('button').find(item => item.text() === '更多操作')
+  if (trigger?.attributes('aria-expanded') !== 'true') trigger?.element.click()
+  const item = [...document.querySelectorAll<HTMLElement>('[role=menuitem]')].find(element => element.textContent?.trim() === '删除计划')
+  return { attributes: (name: string) => name === 'disabled'
+    ? item?.getAttribute('aria-disabled') === 'true' ? '' : undefined
+    : item?.getAttribute(name) ?? undefined }
+}
 async function clickText(text: string) {
-  const button = [...document.querySelectorAll('button')].find(item => item.textContent?.trim() === text)
+  if (['删除计划', '复制计划', '计划模板', '导出计划', '假期'].includes(text)) {
+    const trigger = [...document.querySelectorAll<HTMLButtonElement>('.pdm-plan-toolbar button')].find(item => item.textContent?.trim() === '更多操作')
+    if (trigger?.getAttribute('aria-expanded') !== 'true') trigger?.click()
+    await flushPromises()
+  }
+  const button = [...document.querySelectorAll<HTMLElement>('button, [role=menuitem]')].find(item => item.textContent?.trim() === text)
   expect(button, text).toBeTruthy()
   button!.click()
   await flushPromises()
@@ -475,8 +488,8 @@ describe('项目计划审批和配置', () => {
     const wrapper = render(root)
     await flushPromises()
     expect(wrapper.find('.pdm-plan-view-tabs').text()).toMatch(/^全部子项目（\d+）$/)
-    expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 3).map(item => item.text())).toEqual(['删除计划', '复制计划', '编辑主计划'])
-    expect(wrapper.find('.pdm-plan-toolbar__actions').text()).toContain('删除计划复制计划编辑主计划编辑子计划计划模板刷新')
+    expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 3).map(item => item.text())).toEqual(['编辑主计划', '编辑子计划', '刷新'])
+    expect(wrapper.find('.pdm-plan-toolbar__actions').text()).toContain('更多操作')
     expect(wrapper.find('.pdm-plan-toolbar__actions').text()).not.toContain('同步子项目')
     expect(wrapper.find('.pdm-plan-toolbar__actions').text()).not.toContain('同步结果与差异')
     expect(wrapper.find('.pdm-plan-toolbar__actions').text()).not.toContain('显示基线')
@@ -484,7 +497,7 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.text()).not.toContain('保存主项目计划会同步跟随且未批准的子项目计划')
     expect(wrapper.text()).not.toContain('点击责任人、计划日期或工期可直接编辑')
     expect(wrapper.find('[aria-label="编辑方案检查计划日期"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('删除计划')
+    expect(wrapper.find('.pdm-plan-toolbar').text()).toContain('更多操作')
     await clickText('查看子项目汇总')
     await clickText('编辑子计划')
     expect(document.body.textContent).toContain('主项目同步')
@@ -737,13 +750,13 @@ describe('项目计划审批和配置', () => {
     expect(api.deleteProjectPlan).not.toHaveBeenCalled()
     await clickText('取消')
     await wrapper.setProps({ canEdit: false })
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('title')).toBe('当前账号没有删除该计划的权限')
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeDefined()
+    expect(deleteMenuItem(wrapper).attributes('title')).toBe('当前账号没有删除该计划的权限')
     api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), projectId: 'root', approvalStatus: 'Approved' })
     await wrapper.setProps({ canEdit: true })
     await clickText('刷新')
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('title')).toContain('已审批生效')
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeDefined()
+    expect(deleteMenuItem(wrapper).attributes('title')).toContain('已审批生效')
   })
 
   it('总览提供子项目修改入口，已生效计划没有删除按钮', async () => {
@@ -789,8 +802,8 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.text()).toContain('主项目尚未建立计划')
     expect(wrapper.text()).toContain('请返回主项目建立计划')
     expect(wrapper.text()).not.toContain('生成初始计划')
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('title')).toBe('当前项目及其子项目没有可删除的未审批计划')
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeDefined()
+    expect(deleteMenuItem(wrapper).attributes('title')).toBe('当前项目及其子项目没有可删除的未审批计划')
     expect(api.generateProjectPlan).not.toHaveBeenCalled()
   })
 
@@ -804,7 +817,7 @@ describe('项目计划审批和配置', () => {
     ] })
     const wrapper = render(root)
     await flushPromises()
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeUndefined()
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeUndefined()
     await clickText('删除计划')
     expect(document.body.textContent).toContain('确认删除 P1-1 · 设备一 的整份未批准计划')
     expect(api.deleteProjectPlan).not.toHaveBeenCalled()
@@ -847,8 +860,8 @@ describe('项目计划审批和配置', () => {
     api.readProjectPlan.mockResolvedValue(null)
     await clickText('确认删除计划')
     expect(api.deleteProjectPlan).toHaveBeenCalledWith('child', 2, false, 'test')
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeDefined()
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('title')).toBe('当前项目及其子项目没有可删除的未审批计划')
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeDefined()
+    expect(deleteMenuItem(wrapper).attributes('title')).toBe('当前项目及其子项目没有可删除的未审批计划')
     expect(document.body.textContent).toContain('主项目尚未建立计划')
     expect(document.body.textContent).not.toContain('生成初始计划')
   })
@@ -884,7 +897,7 @@ describe('项目计划审批和配置', () => {
       ],
     })
     await flushPromises()
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeDefined()
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeDefined()
     await clickText('编辑子计划')
     expect(document.querySelectorAll('.pdm-plan-management-list article')[0]!.textContent).toContain('查看计划')
     expect(document.querySelectorAll('.pdm-plan-management-list article')[0]!.textContent).not.toContain('删除计划')
@@ -905,7 +918,7 @@ describe('项目计划审批和配置', () => {
       ],
     })
     await flushPromises()
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeUndefined()
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeUndefined()
     await clickText('编辑子计划')
     expect(document.querySelectorAll('.pdm-plan-management-list article')[0]!.textContent).toContain('删除计划')
   })
@@ -1123,7 +1136,7 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-gantt-timeline-head').text()).toBe(ticks)
     await wrapper.find('[aria-label="展开全部阶段"]').trigger('click')
     expect(wrapper.findAll('.pdm-gantt-info-row')).toHaveLength(wrapper.findAll('.pdm-gantt-timeline-row').length)
-    expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 4).map(item => item.text())).toEqual(['删除计划', '提交审批', '计划模板', '刷新'])
+    expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 2).map(item => item.text())).toEqual(['提交审批', '刷新'])
     expect(wrapper.find('.pdm-plan-summary').text()).toContain('项目发货日期2026-09-15')
   })
 
@@ -1271,7 +1284,7 @@ describe('项目计划审批和配置', () => {
     const wrapper = render()
     await flushPromises()
 
-    const deleteButton = wrapper.find('.pdm-plan-delete-action')
+    const deleteButton = deleteMenuItem(wrapper)
     expect(deleteButton.attributes('disabled')).toBeUndefined()
     expect(deleteButton.attributes('title')).toBe('删除现行计划和变更草稿')
     await clickText('删除计划')
@@ -1280,7 +1293,7 @@ describe('项目计划审批和配置', () => {
     api.readProjectPlan.mockResolvedValue(null)
     await clickText('确认删除计划')
     expect(api.deleteProjectPlan).toHaveBeenCalledWith('child', 5, false, 'test')
-    expect(wrapper.find('.pdm-plan-delete-action').attributes('disabled')).toBeDefined()
+    expect(deleteMenuItem(wrapper).attributes('disabled')).toBeDefined()
   })
 
   it('审批生效计划不显示单独设置基线并可填写原因恢复正常阶段', async () => {
@@ -1340,13 +1353,13 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.text()).toContain('重新生成')
     expect(wrapper.find('.pdm-plan-summary').text()).toContain('项目发货日期2026-09-15')
     expect(wrapper.text()).not.toContain('修改计划会自动撤回本次审批')
-    expect(wrapper.text()).toContain('删除计划')
+    expect(wrapper.find('.pdm-plan-toolbar').text()).toContain('更多操作')
   })
 
   it('项目计划工具栏打开模板设置，项目经理可复制系统模板', async () => {
     const wrapper = render()
     await flushPromises()
-    expect(wrapper.findAll('.pdm-plan-toolbar__actions button').some(button => button.text().includes('计划模板'))).toBe(true)
+    expect(wrapper.find('.pdm-plan-toolbar').text()).toContain('更多操作')
     await clickText('计划模板')
     expect(document.body.textContent).toContain('项目计划模板')
     expect(document.body.textContent).toContain('复制为个人模板')

@@ -452,12 +452,13 @@ public sealed class ProjectPlanningService(
     public async Task<ProjectPlan> UpdateProgressAsync(Guid projectId, Guid taskId, UpdateProjectPlanTaskProgressCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var project = await RequireReadProjectAsync(projectId, actor, role, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, ProjectCenterPermissions.Write, cancellationToken);
+        if (!await CanManageAsync(project, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有该项目的计划进度填报权限。");
         var current = await plans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目计划不存在。");
         RequireEffective(current);
         if (current.RowVersion != command.ExpectedRowVersion) throw new PdmConflictException("计划数据已更新，请重新确认后操作。");
         var task = current.Tasks.FirstOrDefault(item => item.Id == taskId) ?? throw new PdmNotFoundException("计划任务不存在。");
-        if (!await CanManageAsync(project, actor, role, cancellationToken) && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
-            throw new UnauthorizedAccessException("仅任务责任人或项目经理可以填报实际进度。");
         if (command.CompletionPercent is < 0 or > 100) throw new PdmRuleException("完成比例必须为0至100。");
         var today = DateOnly.FromDateTime(timeProvider.GetLocalNow().DateTime);
         if (command.ActualStart > today || command.ActualFinish > today) throw new PdmRuleException("实际开始和实际完成不能晚于今天。");

@@ -5,8 +5,9 @@ import '../styles/project-calendar-cards.css'
 import SearchField from './SearchField.vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, RotateCw as RefreshCw, Maximize2, Minimize2 } from '@lucide/vue'
-import { readProjectCalendar, readCalendarTodos, createUserTodo } from '../api'
+import { readProjectCalendar, readCalendarTodos, createUserTodo, updateProjectPlanTaskProgress, PdmApiError } from '../api'
 import { ElDialog, ElPopover } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import ProjectTodoFields from './ProjectTodoFields.vue'
 import type { PdmUser, UserNotification } from '../types'
 import type { WorkbenchData, WorkbenchTab } from '../projectWorkbench'
@@ -28,7 +29,7 @@ const todoUsers = computed(() => {
 const activeEventId = ref('')
 const activeDayAgenda = ref('')
 function setDayAgenda(day: string, visible: boolean) { if (visible) { activeDayAgenda.value = day; activeEventId.value = ''; select(day) } else if (activeDayAgenda.value === day) activeDayAgenda.value = '' }
-function setEventVisible(id: string, visible: boolean) { if (visible) { activeEventId.value = id; activeDayAgenda.value = '' } else if (activeEventId.value === id) activeEventId.value = '' }
+function setEventVisible(id: string, visible: boolean) { if (visible) { completionError.value = ''; activeEventId.value = id; activeDayAgenda.value = '' } else if (activeEventId.value === id) activeEventId.value = '' }
 function closeEventOnEscape(event: KeyboardEvent) { if (event.key === 'Escape') { activeEventId.value = ''; activeDayAgenda.value = '' } }
 window.addEventListener('keydown', closeEventOnEscape)
 onBeforeUnmount(() => window.removeEventListener('keydown', closeEventOnEscape))
@@ -64,7 +65,7 @@ const data = ref<WorkbenchData>()
 const loading = ref(false)
 const error = ref('')
 const query = ref(''), unit = ref(''), manager = ref(''), mine = ref(false), kind = ref('')
-const display = ref<'double' | 'month' | 'week' | 'list'>('double')
+const display = ref<'double' | 'month' | 'week' | 'list'>('month')
 let generation = 0
 let request: AbortController | undefined
 async function load() {
@@ -103,7 +104,7 @@ const allEvents = computed<CalendarEvent[]>(() => [...calendarEvents(items.value
   .filter(todo => [todo.title, todo.content].join(' ').toLowerCase().includes(query.value.trim().toLowerCase()))
   .map(todo => ({ id: `todo-${todo.id}`, todoId: todo.id, projectId: todo.projectId || '', code: '待办', projectName: todo.title,
     title: todo.content, date: todo.dueDate!, owner: todo.recipient, kind: 'todo' as const, tab: 'overview' as const,
-    tone: todo.dueDate! < today.value ? 'danger' as const : 'normal' as const,
+    tone: 'normal' as const,
     detail: '仅创建者和指定接收人可见；与“我的待办”共用。' }))].sort((a, b) => a.date.localeCompare(b.date)))
 const events = computed(() => allEvents.value.filter(event => !kind.value || event.kind === kind.value))
 const months = computed(() => display.value === 'double' ? [month.value, shiftMonth(month.value, 1)] : [month.value])
@@ -122,7 +123,7 @@ const weekDays = computed(() => {
 })
 const label = (value: string) => `${value.slice(0, 4)}年${Number(value.slice(5, 7))}月`
 const name = (username?: string) => props.users.find(user => user.username === username)?.displayName || (username ? '姓名待补充' : '待安排')
-const toneLabel = { normal: '待完成', danger: '逾期', done: '已完成' }
+const toneLabel = { normal: '未完成', done: '完成' }
 const kindLabel = { milestone: '里程碑', stage: '阶段节点', shipping: '计划发货', risk: '风险期限', todo: '待办事项' }
 const holidayDays = ref(new Map<string, { name: string; isOffDay: boolean }>())
 void loadGlobalStatusContent().then(library => {
@@ -143,6 +144,44 @@ function move(offset: number) { activeEventId.value = ''; activeDayAgenda.value 
 }
 function reset() { today.value = chinaToday(); month.value = today.value.slice(0, 7) + '-01'; selected.value = today.value }
 function select(day: string) { selected.value = day }
+const completing = ref(false)
+const completionError = ref('')
+function completionTarget(event: CalendarEvent) {
+  if (event.tone !== 'normal' || !event.taskId || (event.kind !== 'milestone' && event.kind !== 'stage')) return
+  const item = allItems.value.find(row => row.project.id === event.projectId)
+  const permissions = item?.project.effectiveProjectPermissions
+  const plan = item?.plan
+  if (!permissions?.includes('project.plan.edit') || !permissions.includes('project.content.write') || plan?.approvalStatus !== 'Approved' || plan.projectId !== event.projectId) return
+  const task = plan.tasks.find(task => task.id === event.taskId && task.status !== 'Completed')
+  if (task) return { plan, task }
+}
+async function complete(event: CalendarEvent) {
+  const target = completionTarget(event)
+  if (!target || completing.value || loading.value) return
+  const { plan, task } = target
+  const context = [props.token, props.companyId, props.currentUsername]
+  const sameContext = () => context[0] === props.token && context[1] === props.companyId && context[2] === props.currentUsername
+  const date = chinaToday()
+  completing.value = true
+  completionError.value = ''
+  try {
+    const saved = await updateProjectPlanTaskProgress(plan.projectId, task.id, {
+      completionPercent: 100, actualStart: task.actualStart || date, actualFinish: date, expectedRowVersion: plan.rowVersion,
+    }, props.token)
+    if (!sameContext()) return
+    const item = allItems.value.find(row => row.project.id === event.projectId)
+    if (item) item.plan = { ...(saved.changeDraftSource ?? saved), rowVersion: saved.rowVersion }
+    ElMessage.success('计划任务已完成。')
+    await load()
+  } catch (reason) {
+    if (!sameContext()) return
+    completionError.value = reason instanceof PdmApiError && reason.status === 409
+      ? '计划已更新，请刷新日历后重新确认。'
+      : reason instanceof PdmApiError && reason.status === 403
+        ? '当前账号没有该项目的计划进度填报权限。'
+        : '完成操作未能确认，请刷新日历核对后重试。'
+  } finally { completing.value = false }
+}
 function open(event: CalendarEvent) { activeEventId.value = ''; activeDayAgenda.value = '';  if (event.kind === 'todo') { const todo = todos.value.find(item => item.id === event.todoId); if (todo) emit('openNotification', todo); return }; emit('open', event.projectId, event.tab, event.taskId) }
 </script>
 
@@ -173,7 +212,7 @@ function open(event: CalendarEvent) { activeEventId.value = ''; activeDayAgenda.
 </span>
           <template v-if="day.startsWith(entry.slice(0, 7))"><el-popover v-for="event in dayEvents(day).slice(0, visibleEventLimit)" :key="event.id" trigger="click" :visible="activeEventId === event.id" @update:visible="setEventVisible(event.id, $event)" placement="right-start" :width="350" popper-class="pc-event-popover" transition="pc-card" :show-arrow="false" :hide-after="0">
 <template #reference><button type="button" class="pc-event" :class="event.tone" :title="`${event.title} · ${event.code} · ${event.detail}`" @click.stop="select(day)"><b>{{ event.code }} · {{ event.title }}</b></button></template>
-<div class="pc-event-card"><header><strong>{{ event.title }}</strong><span>{{ event.date }}</span></header><dl><div><dt>项目</dt><dd>{{ event.code }} · {{ event.projectName }}</dd></div><div><dt>负责人</dt><dd><PersonName :name="name(event.owner) || '未分配'" /></dd></div><div><dt>状态</dt><dd>{{ toneLabel[event.tone] }}</dd></div><div v-if="event.baseline"><dt>基线日期</dt><dd>{{ event.baseline }}</dd></div><div v-if="event.actual"><dt>实际日期</dt><dd>{{ event.actual }}</dd></div><div><dt>说明</dt><dd>{{ event.detail || '暂无补充说明' }}</dd></div></dl><button type="button" class="pdm-primary-action pc-event-action" :class="event.tone" @click="open(event)">{{ event.kind === 'todo' ? '查看待办' : event.kind === 'risk' ? '查看项目' : '查看计划' }}</button></div>
+<div class="pc-event-card"><header><strong>{{ event.title }}</strong><span>{{ event.date }}</span></header><dl><div><dt>项目</dt><dd>{{ event.code }} · {{ event.projectName }}</dd></div><div><dt>负责人</dt><dd><PersonName :name="name(event.owner) || '未分配'" /></dd></div><div><dt>状态</dt><dd>{{ toneLabel[event.tone] }}</dd></div><div v-if="event.baseline"><dt>基线日期</dt><dd>{{ event.baseline }}</dd></div><div v-if="event.actual"><dt>实际日期</dt><dd>{{ event.actual }}</dd></div><div><dt>说明</dt><dd>{{ event.detail || '暂无补充说明' }}</dd></div></dl><p v-if="completionError" role="alert" class="pc-todo-error">{{ completionError }}</p><div class="pc-event-actions"><button v-if="completionTarget(event)" type="button" class="pdm-primary-action" :disabled="completing || loading" @click="complete(event)">完成</button><button type="button" class="pdm-primary-action pc-event-action" :class="event.tone" @click="open(event)">{{ event.kind === 'todo' ? '查看待办' : event.kind === 'risk' ? '查看项目' : '查看计划' }}</button></div></div>
 </el-popover></template>
         </div></div>
       </article>
@@ -192,7 +231,7 @@ function open(event: CalendarEvent) { activeEventId.value = ''; activeDayAgenda.
 </template>
 
 <style scoped>
-.project-calendar{height:100%;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:12px;color:var(--pdm-text);padding:4px 4px 16px;container-type:inline-size}.project-calendar>*{flex-shrink:0}.project-calendar button,.project-calendar input,.project-calendar select{font:inherit;color:inherit}.project-calendar button{cursor:pointer}.pc-heading,.pc-heading h1,.pc-toolbar,.pc-toolbar>div,.pc-filters{display:flex;align-items:center;gap:8px}.pc-heading{justify-content:space-between}.pc-heading h1{font-size:22px;margin:0}.pc-heading p,.pc-note{font-size:12px;color:var(--pdm-muted);margin:4px 0}.pc-heading>button,.pc-toolbar button,.pc-filters button,.pc-filters select,.pc-filters input,.pc-table button{border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface,#fff);padding:7px 10px}.pc-heading>button{display:flex;align-items:center;gap:5px}.pc-filters{flex-wrap:wrap}.pc-filters input{flex:1;min-width:160px}.pc-filters button[aria-pressed=true],.pc-toolbar button[aria-pressed=true]{background:var(--pdm-blue,var(--pdm-theme-accent));color:white}.pc-toolbar{justify-content:space-between;flex-wrap:wrap}.pc-toolbar strong{font-size:15px}.pc-toolbar>div{flex-wrap:wrap}.pc-months{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.pc-months.single{grid-template-columns:1fr}.pc-month{overflow:hidden;min-width:0}.pc-month h2,.pc-details h2,.pc-attention h2{font-size:16px;margin:0;padding:12px 14px;border-bottom:1px solid var(--pdm-border)}.pc-month h2 small{font-size:11px;padding:3px 9px;border-radius:12px;background:var(--pdm-theme-accent-soft,var(--pdm-theme-accent-soft)); color:var(--pdm-text);margin-left:10px}.pc-weekdays,.pc-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}.pc-weekdays span{padding:8px;text-align:center;font-size:12px;border-bottom:1px solid var(--pdm-border)}.pc-grid .pc-day{min-width:0;min-height:104px;padding:6px 4px;border:0;border-right:1px solid var(--pdm-border-soft,var(--pdm-border-soft));border-bottom:1px solid var(--pdm-border-soft,var(--pdm-border-soft));background:var(--pdm-surface,#fff);text-align:left;display:flex;flex-direction:column;gap:3px;overflow:hidden}.pc-grid .pc-day.outside{background:var(--pdm-surface-muted,var(--pdm-table-header));color:var(--pdm-muted)}.pc-grid .pc-day.selected{background:var(--pdm-theme-accent-soft,var(--pdm-theme-accent-soft));box-shadow:inset 0 0 0 1px var(--pdm-blue)}.pc-date{font-size:12px;display:grid;place-items:center;width:23px;height:23px}.pc-date.today{background:var(--pdm-blue,var(--pdm-theme-accent));color:white;border-radius:50%}.pc-event{display:block;border:0;border-left:3px solid currentColor;border-radius:3px;padding:3px 4px;text-align:left;max-width:100%;background:transparent;font-size:11px;line-height:1.4}.pc-event b,.pc-event small{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-weight:400}.normal{color:var(--pc-pending-text)}.danger{color:var(--pc-overdue-text)}.done{color:var(--pc-done-text)}.pc-more{font-size:10px; color:var(--pdm-text)}.pc-legend{display:flex;gap:18px;font-size:12px}.pc-bottom{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:14px}.pc-table{overflow:auto;max-height:400px}.pc-table table{border-collapse:collapse;width:100%;font-size:12px;text-align:left}.pc-table td,.pc-table th{padding:10px;border-bottom:1px solid var(--pdm-border-soft);vertical-align:top}.pc-table small{display:block;font-size:11px;line-height:1.6;max-width:320px}.pc-table th{font-weight:500;color:var(--pdm-muted)}.pc-attention button{border:0;border-bottom:1px solid var(--pdm-border-soft);background:transparent;width:100%;padding:12px;text-align:left;display:flex;justify-content:space-between;font-size:12px}.pc-attention>small{display:block;font-size:11px;color:var(--pdm-muted);padding:12px}.pc-empty{text-align:center;padding:20px;color:var(--pdm-muted);font-size:12px}.pc-missing{display:block;border:0;background:transparent;padding:12px;text-align:left}.pc-list>button{display:flex;gap:20px;align-items:center;border:0;border-bottom:1px solid var(--pdm-border);background:transparent;width:100%;padding:12px;text-align:left}.pc-list strong{flex:1}.pc-week-view{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;overflow:auto}.pc-week-view article{padding:8px;min-width:110px;min-height:200px}.pc-week-view button{display:block;margin-bottom:8px;border:0}.pc-week-view p{font-size:12px;color:var(--pdm-muted)}.pc-error{padding:12px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}.project-calendar button:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:-2px}@container (max-width:1000px){.pc-months{grid-template-columns:1fr}.pc-bottom{grid-template-columns:1fr}.pc-attention{order:-1}.pc-week-view{grid-template-columns:repeat(7,140px)}}@container (max-width:550px){.pc-filters>*{max-width:100%}.pc-toolbar strong{font-size:12px}.pc-legend{gap:8px;font-size:10px}.pc-grid .pc-day{padding:3px 1px}.pc-event{padding:2px;font-size:10px}.pc-list>button{flex-wrap:wrap;font-size:12px}}
+.project-calendar{height:100%;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:12px;color:var(--pdm-text);padding:4px 4px 16px;container-type:inline-size}.project-calendar>*{flex-shrink:0}.project-calendar button,.project-calendar input,.project-calendar select{font:inherit;color:inherit}.project-calendar button{cursor:pointer}.pc-heading,.pc-heading h1,.pc-toolbar,.pc-toolbar>div,.pc-filters{display:flex;align-items:center;gap:8px}.pc-heading{justify-content:space-between}.pc-heading h1{font-size:22px;margin:0}.pc-heading p,.pc-note{font-size:12px;color:var(--pdm-muted);margin:4px 0}.pc-heading>button,.pc-toolbar button,.pc-filters button,.pc-filters select,.pc-filters input,.pc-table button{border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface,#fff);padding:7px 10px}.pc-heading>button{display:flex;align-items:center;gap:5px}.pc-filters{flex-wrap:wrap}.pc-filters input{flex:1;min-width:160px}.pc-filters button[aria-pressed=true],.pc-toolbar button[aria-pressed=true]{background:var(--pdm-blue,var(--pdm-theme-accent));color:white}.pc-toolbar{justify-content:space-between;flex-wrap:wrap}.pc-toolbar strong{font-size:15px}.pc-toolbar>div{flex-wrap:wrap}.pc-months{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.pc-months.single{grid-template-columns:1fr}.pc-month{overflow:hidden;min-width:0}.pc-month h2,.pc-details h2,.pc-attention h2{font-size:16px;margin:0;padding:12px 14px;border-bottom:1px solid var(--pdm-border)}.pc-month h2 small{font-size:11px;padding:3px 9px;border-radius:12px;background:var(--pdm-theme-accent-soft,var(--pdm-theme-accent-soft)); color:var(--pdm-text);margin-left:10px}.pc-weekdays,.pc-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}.pc-weekdays span{padding:8px;text-align:center;font-size:12px;border-bottom:1px solid var(--pdm-border)}.pc-grid .pc-day{min-width:0;min-height:104px;padding:6px 4px;border:0;border-right:1px solid var(--pdm-border-soft,var(--pdm-border-soft));border-bottom:1px solid var(--pdm-border-soft,var(--pdm-border-soft));background:var(--pdm-surface,#fff);text-align:left;display:flex;flex-direction:column;gap:3px;overflow:hidden}.pc-grid .pc-day.outside{background:var(--pdm-surface-muted,var(--pdm-table-header));color:var(--pdm-muted)}.pc-grid .pc-day.selected{background:var(--pdm-theme-accent-soft,var(--pdm-theme-accent-soft));box-shadow:inset 0 0 0 1px var(--pdm-blue)}.pc-date{font-size:12px;display:grid;place-items:center;width:23px;height:23px}.pc-date.today{background:var(--pdm-blue,var(--pdm-theme-accent));color:white;border-radius:50%}.pc-event{display:block;border:0;border-left:3px solid currentColor;border-radius:3px;padding:3px 4px;text-align:left;max-width:100%;background:transparent;font-size:11px;line-height:1.4}.pc-event b,.pc-event small{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-weight:400}.normal{color:var(--pc-pending-text)}.done{color:var(--pc-done-text)}.pc-more{font-size:10px; color:var(--pdm-text)}.pc-legend{display:flex;gap:18px;font-size:12px}.pc-bottom{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:14px}.pc-table{overflow:auto;max-height:400px}.pc-table table{border-collapse:collapse;width:100%;font-size:12px;text-align:left}.pc-table td,.pc-table th{padding:10px;border-bottom:1px solid var(--pdm-border-soft);vertical-align:top}.pc-table small{display:block;font-size:11px;line-height:1.6;max-width:320px}.pc-table th{font-weight:500;color:var(--pdm-muted)}.pc-attention button{border:0;border-bottom:1px solid var(--pdm-border-soft);background:transparent;width:100%;padding:12px;text-align:left;display:flex;justify-content:space-between;font-size:12px}.pc-attention>small{display:block;font-size:11px;color:var(--pdm-muted);padding:12px}.pc-empty{text-align:center;padding:20px;color:var(--pdm-muted);font-size:12px}.pc-missing{display:block;border:0;background:transparent;padding:12px;text-align:left}.pc-list>button{display:flex;gap:20px;align-items:center;border:0;border-bottom:1px solid var(--pdm-border);background:transparent;width:100%;padding:12px;text-align:left}.pc-list strong{flex:1}.pc-week-view{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;overflow:auto}.pc-week-view article{padding:8px;min-width:110px;min-height:200px}.pc-week-view button{display:block;margin-bottom:8px;border:0}.pc-week-view p{font-size:12px;color:var(--pdm-muted)}.pc-error{padding:12px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}.project-calendar button:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:-2px}@container (max-width:1000px){.pc-months{grid-template-columns:1fr}.pc-bottom{grid-template-columns:1fr}.pc-attention{order:-1}.pc-week-view{grid-template-columns:repeat(7,140px)}}@container (max-width:550px){.pc-filters>*{max-width:100%}.pc-toolbar strong{font-size:12px}.pc-legend{gap:8px;font-size:10px}.pc-grid .pc-day{padding:3px 1px}.pc-event{padding:2px;font-size:10px}.pc-list>button{flex-wrap:wrap;font-size:12px}}
 
 /* A bounded grid keeps both calendars and the detail strip in one viewport. */
 .project-calendar{box-sizing:border-box;overflow:hidden;display:grid;grid-template-rows:auto minmax(90px,18%) minmax(180px,1fr) auto;gap:6px;padding:4px 4px 6px;position:relative}
@@ -206,7 +245,7 @@ function open(event: CalendarEvent) { activeEventId.value = ''; activeDayAgenda.
 
 .project-calendar,.pc-filters,.pc-toolbar,.pc-toolbar>div,.pc-months,.pc-months.single,.pc-bottom,.pc-week-view{gap:5px}
 
-.pc-event,.pc-event.danger,.pc-event.done{background:transparent;border-left:0}.pc-table table{min-width:1100px;table-layout:fixed}.pc-table th,.pc-table td{white-space:nowrap;vertical-align:middle;text-align:center;overflow:hidden;text-overflow:ellipsis}
+.pc-event,.pc-event.done{background:transparent;border-left:0}.pc-table table{min-width:1100px;table-layout:fixed}.pc-table th,.pc-table td{white-space:nowrap;vertical-align:middle;text-align:center;overflow:hidden;text-overflow:ellipsis}
 
 .pc-bottom{grid-template-columns:minmax(0,1fr)}
 

@@ -184,6 +184,8 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition("SELECT id FROM project WHERE id=@ProjectId FOR UPDATE",
                 new { commit.ReferenceSnapshot.ProjectId }, transaction, cancellationToken: cancellationToken));
         var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
+        if (locked.LifecycleState == "InReview")
+            throw new PdmConflictException("图档正在发布审批，不能提交存档。");
         await ValidateArchiveUploadAsync(connection, transaction, documentId, actor, sessionId, archiveBatchId, commit.File, cancellationToken);
         if (!string.Equals(locked.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || locked.CheckoutSessionId != sessionId)
             throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。");
@@ -336,7 +338,11 @@ public sealed partial class MySqlPdmRepository
         if (affected != 1) throw new PdmConflictException("图档已被其他存档操作更新，本次存档未生效。");
         var document = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
         if (!archiveBatchId.HasValue)
+        {
+            if (document.Kind == DocumentKind.Drawing)
+                document = await AdoptArchivedReviewDrawingAsync(connection, transaction, document, version, cancellationToken);
             await RefreshWorkingReferenceRootsAsync(connection, transaction, document.ProjectId, actor, version.CreatedAt, cancellationToken);
+        }
         return new DocumentCheckInResult(document, version, true) { HandoffTo = commit.HandoffTo };
     }
 
@@ -689,9 +695,11 @@ public sealed partial class MySqlPdmRepository
             """
             SELECT id FROM release_package
             WHERE state='Published'
-              AND locks_documents=1
-              AND release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
-              AND preview_state IN ('Pending','WaitingForServer','Failed')
+              AND (release_scope IN ('NonStandardLongLead','NonStandardWithDrawing','NonStandardSupplement')
+                OR (release_scope='LegacyCombined' AND locks_documents=1))
+              AND (preview_state IN ('Pending','WaitingForServer','Failed')
+                OR (release_scope='NonStandardLongLead' AND COALESCE(preview_state,'None')='None'
+                  AND JSON_LENGTH(version_bindings_json)>0 AND JSON_LENGTH(drawing_review_json,'$.items')>0))
               AND NOT (preview_state='Failed' AND COALESCE(preview_error,'') LIKE '逐项转图结果：%')
               AND preview_attempts < @MaxAttempts
             ORDER BY preview_updated_at IS NULL DESC, preview_updated_at, created_at
@@ -745,7 +753,7 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         return (await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT id FROM release_package WHERE state='Publishing' AND (preview_state<>'Failed' OR locks_documents=0 OR release_scope NOT IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')) ORDER BY created_at LIMIT @Limit",
+            "SELECT id FROM release_package WHERE state='Publishing' AND (preview_state<>'Failed' OR (release_scope NOT IN ('NonStandardLongLead','NonStandardWithDrawing','NonStandardSupplement') AND (release_scope<>'LegacyCombined' OR locks_documents=0))) ORDER BY created_at LIMIT @Limit",
             new { Limit = limit }, cancellationToken: cancellationToken))).ToArray();
     }
 
@@ -766,22 +774,24 @@ public sealed partial class MySqlPdmRepository
             new { PackageId = releasePackageId, ReusedIds = reusedIds }, cancellationToken: cancellationToken));
         var updated = new List<DocumentVersion>();
         var modelArtifacts = new Dictionary<Guid, DocumentPreviewArtifact>(package.ModelDeliveryArtifacts);
+        var pdfArtifacts = new Dictionary<Guid, DocumentPreviewArtifact>(package.PdfDeliveryArtifacts);
         foreach (var binding in package.VersionBindings?.Where(item => !item.Publish) ?? [])
         {
             if (!previews.TryGetValue(binding.DocumentId, out var artifact)) continue;
             var document = await FindDocumentAsync(binding.DocumentId, cancellationToken);
             var source = await FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, cancellationToken);
-            if (document?.Kind is not (DocumentKind.Part or DocumentKind.Assembly)
-                || source is null || source.Sha256 != binding.Sha256 || artifact.Format != DocumentPreviewFormat.Step
+            var format = ReleasePreviewService.FrozenDeliveryFormat(package, binding, document?.Kind);
+            if (source is null || source.Sha256 != binding.Sha256 || artifact.Format != format
                 || !string.Equals(artifact.SourceSha256, binding.Sha256, StringComparison.OrdinalIgnoreCase))
-                throw new PdmConflictException("STEP交付产物与发布包冻结模型版本不一致，未挂接。");
-            modelArtifacts[binding.DocumentId] = artifact;
+                throw new PdmConflictException("交付件格式或来源与发布包冻结版本不一致，未挂接。");
+            (format == DocumentPreviewFormat.Pdf ? pdfArtifacts : modelArtifacts)[binding.DocumentId] = artifact;
             updated.Add(source with { Preview = artifact });
         }
-        if (modelArtifacts.Count != package.ModelDeliveryArtifacts.Count || updated.Count > 0)
+        if (updated.Count > 0)
             await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE release_package SET model_delivery_artifacts_json=@Artifacts WHERE id=@Id",
-                new { Id = package.Id, Artifacts = JsonSerializer.Serialize(modelArtifacts, jsonOptions) }, cancellationToken: cancellationToken));
+                "UPDATE release_package SET model_delivery_artifacts_json=@Models,pdf_delivery_artifacts_json=@Drawings WHERE id=@Id",
+                new { Id = package.Id, Models = JsonSerializer.Serialize(modelArtifacts, jsonOptions),
+                    Drawings = JsonSerializer.Serialize(pdfArtifacts, jsonOptions) }, cancellationToken: cancellationToken));
         foreach (var row in rows)
         {
             var version = MapDocumentVersion(row);
@@ -821,7 +831,7 @@ public sealed partial class MySqlPdmRepository
         }
         if (package.PdfTitleBlockSnapshot is { Enabled: true })
         {
-            var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>(package.PdfDeliveryArtifacts);
+            var artifacts = pdfArtifacts;
             foreach (var version in updated.Where(v => v.Preview?.Format == DocumentPreviewFormat.Pdf)) artifacts[version.DocumentId] = version.Preview!;
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE release_package SET pdf_delivery_artifacts_json=@Artifacts WHERE id=@Id",
@@ -972,7 +982,7 @@ public sealed partial class MySqlPdmRepository
     }
 
     private static async Task<LockedDocumentRow> LockDocumentAsync(DbConnection connection, DbTransaction transaction, Guid documentId, CancellationToken cancellationToken) =>
-        await connection.QuerySingleOrDefaultAsync<LockedDocumentRow>(new CommandDefinition("SELECT id,kind,revision_label,checked_out_by,checkout_session_id,row_version FROM document WHERE id=@DocumentId FOR UPDATE", new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
+        await connection.QuerySingleOrDefaultAsync<LockedDocumentRow>(new CommandDefinition("SELECT id,kind,lifecycle_state,revision_label,checked_out_by,checkout_session_id,row_version FROM document WHERE id=@DocumentId FOR UPDATE", new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
         ?? throw new PdmNotFoundException("图档不存在。");
 
     private DocumentVersion MapDocumentVersion(DocumentVersionRow row) => new(
@@ -1000,7 +1010,7 @@ public sealed partial class MySqlPdmRepository
 
     private const string VersionSelect = "SELECT id,document_id,drawing_version_number,revision_label,version_status,change_kind,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,preview_format,preview_storage_relative_path,preview_file_length,preview_sha256,preview_source_sha256,created_by,created_at,(SELECT published.revision_label FROM document_version published JOIN release_package package ON package.id=published.release_package_id WHERE published.document_id=document_version.document_id AND published.version_status='Released' AND package.state='Published' ORDER BY published.revision_label DESC LIMIT 1) latest_published_version FROM document_version";
 
-    private sealed class LockedDocumentRow { public Guid Id { get; init; } public string Kind { get; init; } = string.Empty; public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
+    private sealed class LockedDocumentRow { public Guid Id { get; init; } public string Kind { get; init; } = string.Empty; public string LifecycleState { get; init; } = string.Empty; public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
     private sealed class LatestVersionFingerprintRow
     {
         public Guid Id { get; init; }

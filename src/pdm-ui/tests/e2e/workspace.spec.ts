@@ -408,11 +408,12 @@ test('flat BOM quantity saves four legacy halves as one total without allocation
   await mockPlanCompanionPanels(page);await mockBomHierarchySummary(page)
   await page.addInitScript(()=>{window.setInterval=(()=>0) as unknown as typeof window.setInterval})
   const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message))
-  const project={id:projectId,code:'FLAT-QA',name:'汇总总数维护验证',owner:'admin',vaultLocation:'D:/qa',releaseLocation:'D:/release',isActive:true,quantity:1,serialNumbers:[],designers:['admin'],canReadContent:true,effectiveProjectPermissions:['project.edit','bom.mechanical.edit','release.manage', 'release.mechanical']}
+  const project={id:projectId,code:'FLAT-QA',name:'汇总总数维护验证',owner:'admin',vaultLocation:'D:/qa',releaseLocation:'D:/release',isActive:true,quantity:1,serialNumbers:[],designers:['admin'],canReadContent:true,effectiveProjectPermissions:['project.edit','bom.mechanical.edit','bom.electrical.edit','bom.mechanical.row.update','bom.electrical.row.update','bom.mechanical.row.delete','bom.electrical.row.delete','release.manage', 'release.mechanical']}
   const base={projectId,kind:'Standard',drawingNumber:'01021000173',name:'DLVC-L150',specification:'DLVC-L150',brand:'YHDA',quantity:1,unit:'001',revision:'W1',isComplete:true,source:'Auto',sourceDocumentId:'model',isPublishedInBom:true,bomPublishedVersion:'S-FLAT-V05'}
   const frozen=Array.from({length:4},(_,i)=>({...base,id:'flat-source-'+i,sequence:i+1,sourceInstancePath:'ASM/DLVC-'+i}))
   let row={...frozen[0]!,quantity:2,summaryItemIds:frozen.map(item=>item.id),summaryFingerprint:'before',displayRevision:'S-FLAT-V05'}
   let saves=0,rawReads=0
+  await page.route('**/bom-baselines', r => r.fulfill({ json: [{ id: 'flat-baseline', label: 'BL-FLAT-001', projectId, standardBomVersionId: 'flat-version' }] }))
   await page.route('**/api/projects',r=>r.fulfill({json:[project]}));await page.route('**/api/projects/'+projectId,r=>r.fulfill({json:project}))
   await page.route('**/api/projects/*/bom-versions**',r=>r.fulfill({json:[{id:'flat-version',projectId,kind:'Standard',versionNumber:5,label:'S-FLAT-V05',state:'Released',items:frozen,createdBy:'admin',createdAt:'2026-11-02',updatedBy:'admin',updatedAt:'2026-11-02'}]}))
   await page.route('**/api/projects/*/boms/Standard**',async r=>{
@@ -425,6 +426,36 @@ test('flat BOM quantity saves four legacy halves as one total without allocation
   await page.setViewportSize({width:1959,height:1080});await page.goto('/')
   const login=page.getByLabel('登录PLM');await login.getByRole('textbox',{name:'账号'}).fill('admin');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
   await enterProject(page);await page.getByRole('button',{name:'BOM',exact:true}).click();await page.getByRole('tab',{name:/^标准件(?:\s|（)/}).click()
+  await page.setViewportSize({ width: 1718, height: 1018 })
+  const toolbar = page.locator('.pdm-bom-selection-toolbar.is-category-bom')
+  for (const category of ['标准件', '非标件', '电气件', '标准件']) {
+    await page.getByRole('tab', { name: new RegExp('^' + category + '(?:\\s|（)') }).click()
+    await expect(toolbar.getByRole('button', { name: '查看设置', exact: true })).toBeVisible()
+    const baseline = await page.getByLabel('选择制造BOM基线').boundingBox()
+    const version = await page.getByText('当前工作版', { exact: true }).boundingBox()
+    expect(Math.abs(baseline!.y + baseline!.height / 2 - version!.y - version!.height / 2)).toBeLessThan(5)
+    const bounds = await toolbar.evaluate(element => {
+      const rect = element.getBoundingClientRect()
+      const controls = Array.from(element.querySelectorAll<HTMLElement>(
+        '.pdm-bom-filters > *, .pdm-bom-version-picker > button, .pdm-bom-selection-actions > button, .pdm-bom-operation-menu summary, .pdm-bom-publish-actions > button',
+      )).filter(control => control.getClientRects().length).map(control => control.getBoundingClientRect())
+      return { height: rect.height, right: rect.right, controls: controls.map(control => ({ bottom: control.bottom, right: control.right })) }
+    })
+    expect(bounds.height).toBeLessThanOrEqual(86)
+    const filter = await toolbar.locator('.pdm-bom-filters').boundingBox()
+    const actions = await toolbar.locator('.pdm-bom-selection-actions').boundingBox()
+    expect(filter!.y).toBeLessThan(actions!.y)
+    const compare = await toolbar.locator('.pdm-bom-release-picker-trigger').boundingBox()
+    expect(bounds.right - compare!.x - compare!.width).toBeLessThan(12)
+    const publish = await toolbar.getByRole('button', { name: '发起发布', exact: true }).boundingBox()
+    expect(bounds.right - publish!.x - publish!.width).toBeLessThan(12)
+    await expect(toolbar.locator('.pdm-bom-selection-actions > button').filter({ hasText: /^删除$/ })).toBeVisible()
+    await toolbar.getByText('更多操作', { exact: true }).click()
+    await expect(toolbar.getByRole('button', { name: '发布记录', exact: true })).toBeVisible()
+    await toolbar.getByText('更多操作', { exact: true }).press('Escape')
+  }
+  await page.screenshot({ path: testInfo.outputPath('bom-two-toolbar-rows.png'), animations: 'disabled' })
+
   const beforeEditingReads=rawReads
   await page.getByRole('button',{name:'编辑数量',exact:true}).click()
   const warning=page.getByRole('dialog').filter({hasText:'已发布'})
@@ -3181,9 +3212,13 @@ test('editing request needs one click and no reason dialog over HTTP', async ({ 
   await page.screenshot({ path: join(tmpdir(), 'pdm-edit-request-http.png') })
 })
 
-test('version details are available in system settings when navigation is collapsed', async ({ page }, testInfo) => {
+test('system information shows versions and update history with navigation collapsed', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1703, height: 963 })
   await page.route('**/health', route => route.fulfill({ json: { status: 'Healthy', database: 'MySQL', databaseName: 'qa-isolated' } }))
-  await page.route('**/client-bootstrap.json', route => route.fulfill({ json: { ConfigurationVersion: '2026.11.11.221712', ReleaseNote: '本机验收版本。' } }))
+  await page.route('**/client-bootstrap.json', route => route.fulfill({ json: {
+    ConfigurationVersion: '2026.11.11.221712', ReleaseNote: '本机验收版本。',
+    Desktop: { Version: '2026.11.10.173200' }, SolidWorksAddin: { Version: '2026.11.10.161500' },
+  } }))
   await page.route('**/api/notifications/mine**', route => route.fulfill({ json: Array.from({ length: 105 }, (_, i) => ({
     id: 'todo-' + i, category: 'ReleaseManagementRisk', recipient: 'admin', projectId, title: '待办验收',
     content: '待办验收', sourceKey: 'todo-' + i, createdAt: '2026-11-11T00:00:00Z',
@@ -3213,17 +3248,26 @@ test('version details are available in system settings when navigation is collap
   expect(position).toEqual({ x: overviewLeft, noOverlap: true, labelFits: true, centered: true })
   await page.getByRole('button', { name: '折叠主导航', exact: true }).click()
   await sidebar.getByRole('button', { name: '系统设置', exact: true }).click()
-  const version = page.getByLabel('系统管理', { exact: true }).getByRole('button', { name: /版本.*点击查看详情/ })
-  await expect(version).toHaveText('版本 V2026.11.11.221712')
+  const tabs = page.getByRole('navigation', { name: '系统管理功能' })
+  const version = tabs.getByRole('button', { name: '系统信息', exact: true })
+  await expect(tabs.getByRole('button').last()).toHaveText('系统信息')
   await version.click()
-  const details = page.getByRole('dialog', { name: '系统版本信息', exact: true })
+  const details = page.getByRole('region', { name: '系统版本信息', exact: true })
+  await expect(details).toContainText('V2026.11.11.221712')
   await expect(details).toContainText('MySQL · qa-isolated')
-  await expect(details).toContainText('Windows客户端')
-  await expect(details).toContainText('SolidWorks插件')
-  await details.getByRole('button', { name: '版本记录' }).click()
-  await expect(details.getByLabel('版本记录')).toContainText('本机验收版本。')
+  await expect(details).toContainText('Windows 客户端发布版本')
+  await expect(details).toContainText('V2026.11.10.173200')
+  await expect(details).toContainText('SolidWorks 插件发布版本')
+  await expect(details).toContainText('V2026.11.10.161500')
+  const history = page.getByRole('region', { name: '更新日志' })
+  await expect(history).toContainText('本机验收版本。')
+  const detailsBox = (await details.boundingBox())!
+  expect((await history.boundingBox())!.x).toBeGreaterThan(detailsBox.x)
   await page.screenshot({ path: testInfo.outputPath('version-in-system-settings.png') })
-  await details.getByRole('button', { name: '关闭此对话框' }).click()
+  await page.setViewportSize({ width: 814, height: 963 })
+  await expect.poll(async () => (await history.boundingBox())!.y - (await details.boundingBox())!.y).toBeGreaterThan(0)
+  await expect(history).toBeInViewport()
+  await tabs.getByRole('button', { name: '系统接口', exact: true }).click()
   await expect(details).toBeHidden()
 })
 test('running project list text inset and typography match project center family selection', async ({ page }, testInfo) => {

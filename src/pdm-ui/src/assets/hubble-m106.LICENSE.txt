@@ -1,0 +1,8 @@
+M106 / heic1302a
+Source: https://esahubble.org/images/heic1302a/
+Downloaded original publication JPEG: https://cdn.esahubble.org/archives/images/publicationjpg/heic1302a.jpg
+License: Creative Commons Attribution 4.0 International
+https://creativecommons.org/licenses/by/4.0/
+Usage terms: https://esahubble.org/copyright/
+Credit: NASA, ESA, the Hubble Heritage Team (STScI/AURA), and R. Gendler (for the Hubble Heritage Team). Acknowledgment: J. GaBany
+Presentation modifications: responsive cropping, shading, slow pan/zoom/rotation, and decorative animated stars. Animation does not represent measured astronomical motion.

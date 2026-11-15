@@ -218,7 +218,7 @@ describe('ReleaseCenter', () => {
       releasePackage: null, allowedScopes: [scope], preferredScope: scope, releaseItems: [item,
         { ...item, id: 'deferred', summaryItemIds: ['deferred', 'deferred-2'], drawingNumber: 'OTHER', quantity: 2 }],
       username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
-      drawingReviewCandidates: [{ candidateId: 'review', bomItemId: ids[0], drawingNumber: '01020003283', name: item.name,
+      drawingReviewCandidates: [{ candidateId: 'review', bomItemId: ids[0], drawingDocumentId: 'drawing-compact', drawingNumber: '01020003283', name: item.name,
         bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false }],
     } })
     await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-18')
@@ -240,6 +240,15 @@ describe('ReleaseCenter', () => {
     electricalBomSnapshot: scope === 'ElectricalSupplement' ? items : [],
   })
   const frozenProps = { username: 'reviewer', pending: false, progress: 0, error: '', canManage: true, canDecide: false }
+  it('联合发布只在图档页审核，发布页保留入口而不重复通过', async () => {
+    const release: ReleasePackageSummary = {...frozenPackage([],'NonStandardSupplement'),state:'工艺审核',steps:[{id:'main',stage:'主设审核',assignee:'reviewer',status:'current',detail:''}],drawingReview:{revision:1,items:[]}}
+    const wrapper=mount(ReleaseCenter,{props:{...frozenProps,canDecide:true,releasePackage:release}})
+    expect(wrapper.findAll('button').some(b=>b.text()==='通过')).toBe(false)
+    expect(wrapper.find('.release-drawing-review').exists()).toBe(false)
+    await wrapper.findAll('button').find(b=>b.text()==='图档审核')!.trigger('click')
+    expect(wrapper.emitted('reviewDocuments')?.[0]).toEqual([release.id])
+    wrapper.unmount()
+  })
   it('提前4首次纳入目标6只新增2，后续增加与删除恢复不重复抵扣，并按单位分开合计', async () => {
     const a = {...frozenItem('first'),drawingNumber:'FIRST',quantity:1}
     const b = {...frozenItem('deferred'),drawingNumber:'DEFERRED',quantity:6}
@@ -667,7 +676,7 @@ describe('ReleaseCenter', () => {
       props: {
         releasePackage: null, allowedScopes: ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'],
         preferredScope: 'NonStandardLongLead', releaseItems: [item], username: 'engineer',
-        drawingReviewCandidates: [{ candidateId: 'review-ns-1', bomItemId: 'ns-1', drawingNumber: 'NS-001', name: '非标长交期件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false }],
+        drawingReviewCandidates: [{ candidateId: 'review-ns-1', bomItemId: 'ns-1', drawingDocumentId: 'drawing-ns-1', drawingNumber: 'NS-001', name: '非标长交期件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false }],
         pending: false, progress: 0, error: '', canManage: true, canDecide: true,
       },
     })
@@ -684,7 +693,7 @@ describe('ReleaseCenter', () => {
     expect(created.selectedBomItemQuantities).toEqual({ 'ns-1': 2 })
   })
 
-  it('lets a non-standard formal release defer an item whose drawing is not approved yet', async () => {
+  it('缺少关联图纸的物料可顺延，其余随包审核', async () => {
     const approved: BomItem = { id: 'ns-ok', kind: 'NonStandard', sequence: 1, drawingNumber: 'NS-200',
       name: '已批准件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-ok' }
     const pending: BomItem = { id: 'ns-pending', kind: 'NonStandard', sequence: 2, drawingNumber: 'NS-201',
@@ -694,14 +703,14 @@ describe('ReleaseCenter', () => {
         releasePackage: null, allowedScopes: ['NonStandardWithDrawing'], preferredScope: 'NonStandardWithDrawing',
         releaseItems: [approved, pending], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
         drawingReviewCandidates: [
-          { candidateId: 'review-ok', bomItemId: 'ns-ok', modelDocumentId: 'model-ok', drawingNumber: 'NS-200', name: '已批准件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false },
+          { candidateId: 'review-ok', bomItemId: 'ns-ok', modelDocumentId: 'model-ok', drawingDocumentId: 'drawing-ok', drawingNumber: 'NS-200', name: '已批准件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false },
           { candidateId: 'review-pending', bomItemId: 'ns-pending', modelDocumentId: 'model-pending', drawingNumber: 'NS-201', name: '待审图件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true },
         ],
       },
     })
 
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
-    expect(wrapper.text()).toContain('当前发布范围包含未完成当前版本图纸审核的非标件')
+    expect(wrapper.text()).toContain('当前范围存在未关联图纸的非标件')
     await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-01')
     await wrapper.get('input[aria-label="本次发布物料 NS-201"]').setValue(false)
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeUndefined()
@@ -713,7 +722,7 @@ describe('ReleaseCenter', () => {
     wrapper.unmount()
   })
 
-  it('allows approved unnumbered items after unselecting unreviewed unnumbered items', async () => {
+  it('取消未关联图纸的空料号物料后可提交其余物料', async () => {
     const approved: BomItem = { id: 'ns-ok', kind: 'NonStandard', sequence: 1, drawingNumber: '',
       name: '已批准件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-ok' }
     const pending: BomItem = { id: 'ns-pending', kind: 'NonStandard', sequence: 2, drawingNumber: '',
@@ -723,14 +732,14 @@ describe('ReleaseCenter', () => {
         releasePackage: null, allowedScopes: ['NonStandardWithDrawing'], preferredScope: 'NonStandardWithDrawing',
         releaseItems: [approved, pending], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
         drawingReviewCandidates: [
-          { candidateId: 'review-ok', bomItemId: 'ns-ok', modelDocumentId: 'model-ok', drawingNumber: '', name: '已批准件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false },
+          { candidateId: 'review-ok', bomItemId: 'ns-ok', modelDocumentId: 'model-ok', drawingDocumentId: 'drawing-ok', drawingNumber: '', name: '已批准件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false },
           { candidateId: 'review-pending', bomItemId: 'ns-pending', modelDocumentId: 'model-pending', drawingNumber: '', name: '待审图件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true },
         ],
       },
     })
 
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
-    expect(wrapper.text()).toContain('当前发布范围包含未完成当前版本图纸审核的非标件')
+    expect(wrapper.text()).toContain('当前范围存在未关联图纸的非标件')
     await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-01')
     await wrapper.findAll('input[aria-label^="本次发布物料"]')[1]!.setValue(false)
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeUndefined()
@@ -821,7 +830,7 @@ describe('ReleaseCenter', () => {
     }
   })
 
-  it('disables non-standard release selection until the current drawing version is approved', async () => {
+  it('未关联图纸的非标件不能纳入审核包', async () => {
     const item: BomItem = { id: 'ns-unreviewed', kind: 'NonStandard', sequence: 1, drawingNumber: '',
       name: '待审图非标件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-unreviewed' }
     const wrapper = mount(ReleaseCenter, {
@@ -834,8 +843,8 @@ describe('ReleaseCenter', () => {
 
     const checkbox = wrapper.get('input[aria-label="选择长交期物料 "]')
     expect(checkbox.attributes()).toHaveProperty('disabled')
-    expect(wrapper.text()).toContain('当前工程图尚未发起审核')
-    expect(wrapper.text()).toContain('不能勾选发布')
+    expect(wrapper.text()).toContain('缺少关联图纸')
+    expect(wrapper.text()).toContain('暂不能勾选')
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
     await checkbox.setValue(true)
     expect(wrapper.emitted('create')).toBeUndefined()
@@ -862,12 +871,12 @@ describe('ReleaseCenter', () => {
     })
 
     const checkbox = wrapper.get('input[aria-label="选择长交期物料 NS-100"]')
-    expect(checkbox.attributes()).toHaveProperty('disabled')
-    expect(wrapper.text()).toContain('图纸待审核')
+    expect(checkbox.attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).toContain('随发布包审核')
     expect(wrapper.text()).not.toContain('图纸已批准')
     await wrapper.setProps({ drawingReviewCandidates: [{ ...wrapper.props('drawingReviewCandidates')![0]!, state: 'ApprovedCurrent' }] })
     expect(checkbox.attributes('disabled')).toBeUndefined()
-    expect(wrapper.text()).toContain('图纸已批准')
+    expect(wrapper.text()).toContain('随发布包审核')
   })
 
   it('lets the current assignee decide or transfer without showing the withdraw action', () => {
@@ -880,7 +889,7 @@ describe('ReleaseCenter', () => {
     const wrapper = mount(ReleaseCenter, {
       props: {
         releasePackage, username: 'main-designer', pending: false, progress: 0, error: '',
-        canManage: true, canDecide: false,
+        canManage: true, canDecide: true,
       },
     })
 
@@ -1502,10 +1511,10 @@ describe('ReleaseCenter', () => {
     const updatedCandidates = candidates.map((candidate, index) => ({ ...candidate, bomKinds: [...candidate.bomKinds], hasUnreleasedDrawingChanges: [7, 9].includes(index), state: 'Ready' as const }))
     await wrapper.setProps({ drawingReviewCandidates: updatedCandidates })
     expect(wrapper.findAll('.release-change-tag').map(tag => tag.text())).toEqual(['修改', '修改'])
-    expect(wrapper.findAll('.release-detail-picker tbody tr').every(row => row.text().includes('图纸待发起审核'))).toBe(true)
+    expect(wrapper.findAll('.release-detail-picker tbody tr').every(row => row.text().includes('随发布包审核'))).toBe(true)
     expect(wrapper.findAll('.release-detail-picker tbody tr').some(row => row.text().includes('图纸已批准'))).toBe(false)
     await wrapper.setProps({ drawingReviewCandidates: updatedCandidates.map(candidate => ({ ...candidate, state: 'ApprovedCurrent' as const })) })
-    expect(wrapper.findAll('.release-detail-picker tbody tr').every(row => row.text().includes('图纸已批准'))).toBe(true)
+    expect(wrapper.findAll('.release-detail-picker tbody tr').every(row => row.text().includes('随发布包审核'))).toBe(true)
     expect(wrapper.text()).toContain('2D图纸较正式版有新存档')
     const checks = wrapper.findAll('.pdm-edit-table.is-supplement tbody input[type="checkbox"]')
     expect(checks).toHaveLength(2)

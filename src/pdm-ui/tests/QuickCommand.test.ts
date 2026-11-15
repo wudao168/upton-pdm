@@ -4,7 +4,7 @@ import QuickCommand from '../src/components/QuickCommand.vue'
 import { listMaterials } from '../src/api'
 
 vi.mock('../src/api', () => ({ listMaterials: vi.fn() }))
-const stubs = { Teleport: true, ElDialog: { props: ['modelValue'], template: '<div v-if="modelValue"><slot /></div>' }, ObjectInspector: true }
+const stubs = { Teleport: true, ElDrawer: { props: ['modelValue'], template: '<div v-if="modelValue"><slot /></div>' }, ObjectInspector: true }
 const props = { token: 'session', companyId: 'company', canSearchMaterials: false, items: [{ id: 'project', label: 'P001 测试项目', kind: '项目' }] }
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks() })
 
@@ -14,6 +14,15 @@ describe('快速查找', () => {
     const wrapper = mount(QuickCommand, { props, attachTo: document.body, global: { stubs } })
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))
     await flushPromises()
+    expect(wrapper.find('.pdm-command-results').exists()).toBe(false)
+    await wrapper.get('input').setValue(' P0 ')
+    expect(wrapper.find('.pdm-command-results').exists()).toBe(false)
+    await wrapper.get('input').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('choose')).toBeUndefined()
+    await wrapper.get('input').setValue('P00')
+    expect(wrapper.get('.pdm-command-results').text()).toContain('测试项目')
+    await wrapper.get('input').setValue('P0')
+    expect(wrapper.find('.pdm-command-results').exists()).toBe(false)
     await wrapper.get('input').setValue('P001')
     await vi.advanceTimersByTimeAsync(350)
     expect(listMaterials).not.toHaveBeenCalled()
@@ -33,6 +42,9 @@ describe('快速查找', () => {
     const wrapper = mount(QuickCommand, { props: { ...props, canSearchMaterials: true }, global: { stubs } })
     await wrapper.get('.pdm-command-trigger').trigger('click')
     await wrapper.get('input').setValue('轴承')
+    await vi.advanceTimersByTimeAsync(350)
+    expect(listMaterials).not.toHaveBeenCalled()
+    await wrapper.get('input').setValue('滚动轴承')
     await vi.advanceTimersByTimeAsync(350)
     const signal = vi.mocked(listMaterials).mock.calls[0]![5]!
     await wrapper.setProps({ companyId: 'other' })

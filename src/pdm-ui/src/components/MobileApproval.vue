@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import PersonName from './PersonName.vue'
+import ReleaseDrawingReviewPanel from './ReleaseDrawingReviewPanel.vue'
 import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
 const displayUserName = usePersonDisplayName()
 import ApprovalNoteEditor from './ApprovalNoteEditor.vue'
@@ -18,7 +19,7 @@ const scope = props.task.qualityAcceptance ? '/quality' : ''
 const { write: projectWritable } = useProjectCenterAccess()
 const active = computed(() => projectWritable.value && (props.permissions.includes('approval.decide') || props.task.kind === 'validationPlan' && props.permissions.includes('validation-plan.edit')) && (props.task.kind === 'validationPlan'
   ? plan.value?.id === props.task.validationPlanId && plan.value?.approvalTasks.some(task => task.id === props.task.id && canSignNode(task, props.username) && task.decision == null)
-  : release.value?.steps.some(step => step.id === props.task.id && step.status === 'current' && (canSignNode(step, props.username) || !step.participants && props.username.toLowerCase() === 'admin'))))
+  : release.value?.steps.some(step => step.id === props.task.id && step.status === 'current' && canSignNode(step, props.username))))
 const note = ref<string>()
 const nodes = computed(() => plan.value?.approvalTasks ?? release.value?.steps ?? [])
 const editNote = computed(() => nodes.value.find(node => node.id === props.task.id)?.participants?.policy?.editBusinessNote === true)
@@ -76,6 +77,7 @@ onBeforeUnmount(closePreview)
     <template v-if="release">
       <h3>审批流程</h3><ol><li v-for="step in release.steps" :key="step.id">{{ step.stage }} · <PersonName :name="displayUserName(step.assignee)" /> · {{ step.detail }}<p v-if="step.comment">处理意见：{{ step.comment }}</p></li></ol>
       <p v-if="release.changeReason">变更原因：{{ release.changeReason }}</p>
+      <ReleaseDrawingReviewPanel v-if="release.drawingReview" :release="release" :token="token" :username="username" :editable="!!active" @updated="release = $event" />
       <h3>本次审批的图档版本</h3><p v-if="!bindings.length">本次审批未绑定图档。</p>
       <article v-for="binding in bindings" :key="binding.documentId" class="mobile-record"><strong>{{ binding.fileName || binding.documentId }}</strong><p>版本 {{ binding.revision }}</p><button v-if="/\.slddrw$|\.pdf$/i.test(binding.fileName || '')" :disabled="pending" @click="showDrawing(binding)">查看此版本图纸</button></article>
       <h3>BOM审批内容（{{ items.length }}项）</h3><article v-for="(item, index) in items" :key="`${item.id}-${index}`" class="mobile-record"><strong>{{ item.drawingNumber }} · {{ item.name }}</strong><p>数量 {{ item.quantity }}</p></article>
@@ -86,8 +88,8 @@ onBeforeUnmount(closePreview)
       <h3>审批附件</h3><button v-for="file in plan.attachments" :key="file.id" :disabled="pending" @click="attachment(file.id, file.originalFileName)">{{ file.originalFileName }} · 第{{ file.fileVersion }}版</button>
       <ol><li v-for="step in plan.approvalTasks" :key="step.id">{{ step.stepName }} · <PersonName :name="displayUserName(step.assignee)" /><p v-if="step.decisionComment">{{ step.decisionComment }}</p></li></ol>
     </template>
-    <ApprovalNoteEditor v-model="note" :identity="task.id" :label="plan ? '计划备注' : '发布备注'" :nodes="nodes.map(node => node.participants)" :editable="!!active && editNote" />
-    <form v-if="active" class="mobile-approval-actions" @submit.prevent="decide('Approved')">
+    <ApprovalNoteEditor v-if="!release?.drawingReview" v-model="note" :identity="task.id" :label="plan ? '计划备注' : '发布备注'" :nodes="nodes.map(node => node.participants)" :editable="!!active && editNote" />
+    <form v-if="active && !release?.drawingReview" class="mobile-approval-actions" @submit.prevent="decide('Approved')">
       <label>处理意见<textarea v-model="comment" aria-label="审批处理意见" rows="3" maxlength="500" :disabled="pending" /></label>
       <button type="submit" class="pdm-primary-action" :disabled="pending">{{ pending ? '正在处理…' : '通过审批' }}</button>
       <button type="button" :disabled="pending" @click="decide('Rejected')">退回修改</button>

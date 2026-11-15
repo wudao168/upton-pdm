@@ -152,6 +152,25 @@ public sealed class ProductionTrackingTests
     }
 
     [Fact]
+    public async Task ProjectListIncludesUnassignedPackagesAndMarksOnlyOutstandingUnscheduledDemand()
+    {
+        var fixture = await FixtureAsync();
+        var project = Assert.Single(await fixture.Service.ListAsync("admin", UserRole.Administrator, Ct, selfOnly: true));
+        var summary = Assert.Single(project.Packages);
+        Assert.Equal(fixture.Package.Id, summary.ReleasePackageId);
+        Assert.True(summary.HasUnscheduledProduction);
+
+        var received = await fixture.Service.ReceiveAsync(fixture.Package.Id, Guid.NewGuid(), "admin", UserRole.Administrator, Ct);
+        var line = Assert.Single(received.State.Lines);
+        var lot = new ProductionLot(Guid.NewGuid(), line.Id, "Self", line.RequiredQuantity, null, "机加", null, null, null, 0);
+        var assigned = received.State with { Lots = [lot] };
+        Assert.True(ProductionTrackingRules.Summary(assigned).HasUnscheduledProduction);
+        var scheduled = lot with { Schedule = [new("机加", DateOnly.FromDateTime(DateTime.UtcNow), 2)] };
+        Assert.False(ProductionTrackingRules.Summary(assigned with { Lots = [scheduled] }).HasUnscheduledProduction);
+        Assert.False(ProductionTrackingRules.Summary(assigned with { Lots = [lot with { Route = "External" }] }).HasUnscheduledProduction);
+    }
+
+    [Fact]
     public async Task SelfOnlyProjectListDropsExternalOnlyPackagesAndRefreshesAfterRouteChange()
     {
         var fixture = await FixtureAsync();

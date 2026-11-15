@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import DepartmentSelectField from './DepartmentSelectField.vue'
 import SearchField from './SearchField.vue'
+import ColumnSettingsList from './ColumnSettingsList.vue'
+import { orderColumns, useColumnSettings } from '../columnSettings'
 import UserSelect from './UserSelect'
 import { readTablePreference, tablePreferenceVersion, writeTablePreference } from '../tablePreferences'
 import { ElMessage } from '../statusMessage'
@@ -53,24 +55,28 @@ const error = ref('')
 const editPriority = ref<DrawingPriority>('Normal')
 const editRequiredOn = ref('')
 const visibleColumnKeys = ref<ColumnKey[]>([...defaultColumns])
-const columnDraft = ref<ColumnKey[]>([...defaultColumns])
+const columnOrder = ref<ColumnKey[]>([])
+const columnSettings = useColumnSettings(visibleColumnKeys, columnOrder)
+const { draftVisible, draftOrder } = columnSettings
 const columnSettingsOpen = ref(false)
-const visibleColumns = computed(() => columnDefinitions.filter(column => visibleColumnKeys.value.includes(column.key)))
+const visibleColumns = computed(() => orderColumns(columnDefinitions, columnOrder.value).filter(column => visibleColumnKeys.value.includes(column.key)))
 const columnStorageKey = () => `upton-pdm:production-drawing-columns:${props.username || 'anonymous'}`
 function restoreColumns() {
+  columnOrder.value = []
   visibleColumnKeys.value = [...defaultColumns]
   try {
-    const saved = JSON.parse(readTablePreference(columnStorageKey()) ?? 'null') as { visible?: ColumnKey[] } | null
+    const saved = JSON.parse(readTablePreference(columnStorageKey()) ?? 'null') as { visible?: ColumnKey[]; order?: ColumnKey[] } | null
     const allowed = new Set(columnDefinitions.map(column => column.key))
     const visible = (saved?.visible ?? []).filter((key, index, values) => allowed.has(key) && values.indexOf(key) === index)
+    columnOrder.value = (saved?.order ?? []).filter(key => allowed.has(key))
     if (visible.length) visibleColumnKeys.value = visible
   } catch { /* 浏览器禁用本地存储时使用默认列。 */ }
 }
 async function saveColumns() {
-  if (!columnDraft.value.length) return
-  visibleColumnKeys.value = [...columnDraft.value]
+  if (!draftVisible.value.length) return
+  columnSettings.applyDraft()
   let synced: boolean
-  try { synced = await writeTablePreference(columnStorageKey(), JSON.stringify({ visible: visibleColumnKeys.value })) }
+  try { synced = await writeTablePreference(columnStorageKey(), JSON.stringify({ visible: visibleColumnKeys.value, order: columnOrder.value })) }
   catch { ElMessage.error('列设置同步失败，当前选择已保留在本机，请重试保存。'); return }
   columnSettingsOpen.value = false
   if (synced) ElMessage.success('列设置已保存到当前账号')
@@ -325,7 +331,7 @@ onMounted(() => { restoreColumns(); void refresh() })
 
             <div class="production-drawings__toolbar-actions">
               <span v-if="downloadStatus" class="production-drawings__download-status" role="status" aria-live="polite">{{ downloadStatus }}</span>
-              <button type="button" class="pdm-secondary-action" @click="columnDraft = [...visibleColumnKeys]; columnSettingsOpen = true">列设置</button>
+              <button type="button" class="pdm-secondary-action" @click="columnSettings.openDraft(); columnSettingsOpen = true">列设置</button>
               <button type="button" class="pdm-secondary-action" :disabled="downloading || detailLoading || !drawings.length" title="同时下载本包STEP、PDF和BOM" @click="downloadPackage">下载本包</button>
             </div>
           </div>
@@ -387,10 +393,8 @@ onMounted(() => { restoreColumns(); void refresh() })
       <section class="production-drawings__column-dialog" role="dialog" aria-modal="true" aria-label="生产图纸列设置">
         <header><h2>列设置</h2><button type="button" aria-label="关闭列设置" @click="columnSettingsOpen = false">×</button></header>
         <p>字段来自发布包冻结的非标件 BOM；缺失的数据以“—”显示。列设置随当前账号保存，下次打开自动恢复。</p>
-        <div class="production-drawings__column-options">
-          <label v-for="column in columnDefinitions" :key="column.key"><input v-model="columnDraft" type="checkbox" :value="column.key">{{ column.label }}</label>
-        </div>
-        <footer><button type="button" class="pdm-secondary-action" @click="columnDraft = [...defaultColumns]">恢复默认</button><button type="button" class="pdm-primary-action" :disabled="!columnDraft.length" @click="saveColumns">保存</button></footer>
+        <ColumnSettingsList v-model:visible="draftVisible" v-model:order="draftOrder" :columns="columnDefinitions" />
+        <footer><button type="button" class="pdm-secondary-action" @click="columnSettings.setDraft(defaultColumns)">恢复默认</button><button type="button" class="pdm-primary-action" :disabled="!draftVisible.length" @click="saveColumns">保存</button></footer>
       </section>
     </div>
   </section>

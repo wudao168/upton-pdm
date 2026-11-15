@@ -5,11 +5,11 @@ import type { ProjectPlan } from '../types'
 const props = defineProps<{ plan: ProjectPlan | null; baseline: ProjectPlan | null; baselineUnavailable: boolean; progressTone?: 'success' | 'warning' | 'danger' }>()
 const emit = defineEmits<{ openTask: [taskId?: string] }>()
 const phases = [
-  { name: '设计', codes: ['Design'], color: '#9ae600', baselineColor: '#85bf32' },
+  { name: '设计', codes: ['Design'], color: 'var(--pdm-timeline-green)', baselineColor: '#85bf32' },
   { name: '备料', codes: ['MaterialPreparation'], color: '#3392ff', baselineColor: '#4d8bd1' },
   { name: '装配', codes: ['Assembly'], color: '#c27aff', baselineColor: '#aa78d0' },
   { name: '调试', codes: ['Commissioning', 'ClientCommissioning'], color: '#fb64b6', baselineColor: '#dc70aa' },
-  { name: '验收', codes: ['AcceptanceProgress', 'FinalAcceptance'], color: '#fdc700', baselineColor: '#d8ad28' },
+  { name: '验收', codes: ['AcceptanceProgress', 'FinalAcceptance'], color: 'var(--pdm-timeline-amber)', baselineColor: '#d8ad28' },
 ]
 const today = new Date().toLocaleDateString('sv-SE')
 const progressLabel = computed(() => props.progressTone === 'danger' ? '已滞后' : props.progressTone === 'warning' ? '有风险' : props.progressTone === 'success' ? '正常' : '进度状态未知')

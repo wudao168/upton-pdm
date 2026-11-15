@@ -223,6 +223,7 @@ builder.Services.AddSingleton<PurchaseAnalysisSyncCoordinator>();
 builder.Services.AddHostedService<PurchaseAnalysisSyncHostedService>();
 builder.Services.AddScoped<ProjectCopyService>();
 builder.Services.AddScoped<ReleaseItemCommentService>();
+builder.Services.AddScoped<ReleaseDrawingReviewService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
 builder.Services.AddScoped<MaterialBrandService>();

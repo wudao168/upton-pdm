@@ -143,6 +143,7 @@ export interface ProductionReleaseSummary {
   publishedAt: string
   receivedAt?: string | null
   hasReleaseAttention?: boolean
+  hasUnscheduledProduction?: boolean
   status: string
   totalLines: number
   totalQuantity: number

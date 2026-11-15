@@ -5,6 +5,7 @@ import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
 
 GlobalWorkerOptions.workerSrc = workerUrl
 const props = defineProps<{ url: string; fillHeight?: boolean }>()
+const emit = defineEmits<{ ready: [ready: boolean] }>()
 const canvas = ref<HTMLCanvasElement>()
 const pageFrame = ref<HTMLDivElement>()
 const page = ref(1)
@@ -19,6 +20,7 @@ let renderTask: RenderTask | undefined
 let generation = 0
 let renderGeneration = 0
 let resizeObserver: ResizeObserver | undefined
+let resizeFrame = 0, frameWidth = 0, frameHeight = 0
 let wheelDelta = 0, wheelZooming = false
 let wheelPoint: { x: number; y: number } | undefined
 let wheelPageAt = -Infinity
@@ -31,6 +33,7 @@ async function renderPage() {
   await renderTask?.promise.catch(() => {})
   if (current !== renderGeneration) return
   busy.value = true
+  emit('ready', false)
   error.value = ''
   try {
     const pdfPage = await source.getPage(page.value)
@@ -46,13 +49,15 @@ async function renderPage() {
     canvas.value.height = viewport.height
     renderTask = pdfPage.render({ canvas: canvas.value, viewport })
     await renderTask.promise
+    if (current === renderGeneration) emit('ready', true)
   } catch (cause) {
-    if (current === renderGeneration && (cause as Error).name !== 'RenderingCancelledException') error.value = 'PDF渲染失败，请下载文件查看。'
+    if (current === renderGeneration && (cause as Error).name !== 'RenderingCancelledException') { error.value = 'PDF渲染失败，请下载文件查看。'; emit('ready', false) }
   } finally { if (current === renderGeneration) busy.value = false }
 }
 
 watch(() => props.url, async url => {
   const current = ++generation
+  emit('ready', false)
   wheelDelta = 0
   wheelPageAt = -Infinity
   ++renderGeneration
@@ -77,7 +82,7 @@ watch(() => props.url, async url => {
     await nextTick()
     await renderPage()
   } catch {
-    if (current === generation) error.value = 'PDF加载失败，请下载文件查看。'
+    if (current === generation) { error.value = 'PDF加载失败，请下载文件查看。'; emit('ready', false) }
   } finally { if (current === generation) busy.value = false }
 }, { immediate: true })
 
@@ -141,10 +146,16 @@ async function onWheel(event: WheelEvent) {
   } finally { wheelZooming = false }
 }
 onMounted(() => {
-  resizeObserver = new ResizeObserver(() => { if ((props.fillHeight || zoom.value !== 1) && document) void renderPage() })
+  resizeObserver = new ResizeObserver(entries => {
+    const size = entries[0]?.contentRect
+    if (!size || Math.abs(size.width - frameWidth) < 1 && Math.abs(size.height - frameHeight) < 1) return
+    frameWidth = size.width; frameHeight = size.height
+    cancelAnimationFrame(resizeFrame)
+    resizeFrame = requestAnimationFrame(() => { if ((props.fillHeight || zoom.value !== 1) && document) void renderPage() })
+  })
   if (pageFrame.value) resizeObserver.observe(pageFrame.value)
 })
-onBeforeUnmount(() => { generation++; renderGeneration++; wheelDelta = 0; resizeObserver?.disconnect(); renderTask?.cancel(); void loadingTask?.destroy() })
+onBeforeUnmount(() => { generation++; renderGeneration++; wheelDelta = 0; cancelAnimationFrame(resizeFrame); resizeObserver?.disconnect(); renderTask?.cancel(); void loadingTask?.destroy() })
 </script>
 
 <template>
@@ -160,10 +171,9 @@ onBeforeUnmount(() => { generation++; renderGeneration++; wheelDelta = 0; resize
         <button aria-label="图纸放大" :disabled="busy || !pages || zoom >= 3" @click="setZoom(zoom + .25)">放大</button>
         <button :disabled="busy || !pages" @click="setZoom(1)">适应窗口</button>
       </div>
-      <span v-if="busy" role="status">正在渲染图纸…</span>
     </div>
     <p v-if="error" role="alert">{{ error }}</p>
-    <div ref="pageFrame" class="pdf-drawing-viewer__pages" :class="{ 'is-zoomed': zoom !== 1 }" tabindex="0" aria-label="图纸查看区域" title="普通滚轮滚动图纸，到页边界翻页；Ctrl + 滚轮缩放" @wheel="onWheel"><canvas v-show="pages > 0 && !error" ref="canvas" :style="canvasSize" aria-label="图纸页面" /></div>
+    <div ref="pageFrame" class="pdf-drawing-viewer__pages" :class="{ 'is-zoomed': zoom !== 1 }" tabindex="0" aria-label="图纸查看区域" title="普通滚轮滚动图纸，到页边界翻页；Ctrl + 滚轮缩放" @wheel="onWheel"><span v-if="busy" class="pdf-drawing-viewer__loading" role="status">正在渲染图纸…</span><canvas v-show="pages > 0 && !error" ref="canvas" :style="canvasSize" aria-label="图纸页面" /></div>
   </section>
 </template>
 
@@ -172,5 +182,6 @@ onBeforeUnmount(() => { generation++; renderGeneration++; wheelDelta = 0; resize
 .pdf-drawing-viewer__pages{position:relative;height:min(72vh,calc(100dvh - 180px));min-height:80px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--pdm-border);padding:8px;box-sizing:border-box}.pdf-drawing-viewer__pages.is-zoomed{overflow:auto;align-items:flex-start;justify-content:flex-start}.is-zoomed canvas{flex:none;max-width:none;max-height:none;margin:auto}
 .is-fill-height{display:flex;flex:1;flex-direction:column;min-width:0;min-height:0}.is-fill-height .pdf-drawing-viewer__toolbar{flex-shrink:0;flex-wrap:wrap;gap:8px;margin-bottom:6px}.is-fill-height .pdf-drawing-viewer__pages{flex:1;height:auto;min-height:0}
 canvas{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;background:white}
+.pdf-drawing-viewer__loading{position:absolute;top:8px;left:8px;z-index:1;padding:4px 8px;background:var(--pdm-surface);color:var(--pdm-text);pointer-events:none}
 [role=alert]{color:var(--pdm-danger)}
 </style>

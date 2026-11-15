@@ -34,7 +34,7 @@ internal static class Program
                 Exception failure = null;
                 host.Shown += (_, __) =>
                 {
-                    try { DialogChecks(host); }
+                    try { DialogChecks(host); DrawingSyncButtonChecks(host); }
                     catch (Exception e) { failure = e; }
                     finally { host.Close(); }
                 };
@@ -212,6 +212,74 @@ internal static class Program
             Require((string)Call(drawing, "PropertyValue", "型号") == "模型 A", "同步覆盖工程图未读字段");
         }
         Console.WriteLine("PASS: 多模型冲突不覆盖工程图，一致值继续联动，未读字段保持保护。");
+    }
+
+    private static void DrawingSyncButtonChecks(Form host)
+    {
+        var card = Card("drawing-sync", "型号", "品牌", "备注");
+        var model = Item("sync-model", card);
+        var drawing = Item("sync-drawing", card);
+        var unrelated = Item("unrelated-drawing", card);
+        object Node(object item) => Get(Get(item, "OperationItem"), "Node");
+        foreach (var item in new[] { drawing, unrelated })
+        {
+            Set(Node(item), "Kind", Enum.Parse(Type("CadDocumentKind"), "Drawing"));
+            Set(item, "Selected", false);
+            Call(item, "SetPropertyValue", "型号", "工程图旧值");
+        }
+        var reference = New("CadTreeNode");
+        Set(reference, "FullPath", Get(Node(model), "FullPath"));
+        Set(reference, "Configuration", "默认");
+        var references = (IList)Get(Node(drawing), "ReferencedModels");
+        references.Add(reference);
+        var list = Array.CreateInstance(Type("BatchPropertyEditItem"), 3);
+        list.SetValue(model, 0); list.SetValue(drawing, 1); list.SetValue(unrelated, 2);
+        using (var dialog = (Form)New("BatchPropertyEditDialog", list, Array.CreateInstance(Type("PropertyWritebackPreviewItem"), 0), 0,
+            Enum.Parse(Type("PropertyOperationMode"), "BatchEdit"), null, null, null, null, null, null, null, null, host.Handle))
+        {
+            dialog.Opacity = 0; dialog.ShowInTaskbar = false; dialog.Show(host); Application.DoEvents();
+            var rename = (Control)Field(dialog, "batchRenameControl");
+            IEnumerable<Control> Descendants(Control parent) => parent.Controls.Cast<Control>().SelectMany(c => new[] { c }.Concat(Descendants(c)));
+            var button = Descendants(rename).OfType<Button>().Single(b => b.Text == "工程图同步");
+            var row = (TableLayoutPanel)button.Parent;
+            Require(row.Controls.Cast<Control>().Any(c => c.Text == "属性替换"), "工程图同步未放在属性替换行");
+            Require(row.GetColumn(button) > row.Controls.Cast<Control>().Where(c => c != button).Max(c => row.GetColumn(c)), "工程图同步不是行内最右操作");
+            button.PerformClick();
+            Require((string)Call(drawing, "PropertyValue", "型号") == "原型号", "模型未修改时按钮未主动同步属性");
+            Require((bool)Get(drawing, "Selected") && !(bool)Get(model, "HasChanges"), "同步未选择目标或错误修改模型");
+            Require((string)Call(unrelated, "PropertyValue", "型号") == "工程图旧值", "同步修改了无关联工程图");
+            Call(drawing, "SetPropertyValue", "型号", "保留值");
+            Set(reference, "Configuration", "其他配置"); button.PerformClick();
+            Require((string)Call(drawing, "PropertyValue", "型号") == "保留值", "错误借用其他配置属性");
+            Set(reference, "Configuration", "默认");
+            var missing = New("CadTreeNode"); Set(missing, "FullPath", Path.Combine(fixtures, "not-loaded.SLDPRT")); references.Add(missing);
+            button.PerformClick();
+            Require((string)Call(drawing, "PropertyValue", "型号") == "保留值", "引用未完整加载时同步了部分模型值");
+            references.Remove(missing);
+            Call(model, "SetUnreadProperties", (object)new[] { "型号" }); button.PerformClick();
+            Require((string)Call(drawing, "PropertyValue", "型号") == "保留值", "读取失败时清空了工程图属性");
+            Call(model, "SetUnreadProperties", (object)Array.Empty<string>());
+            Set(model, "Selected", false); Set(drawing, "Selected", true); button.PerformClick();
+            Require((string)Call(drawing, "PropertyValue", "型号") == "原型号", "仅勾选工程图时不能同步");
+            foreach (var width in new[] { 1100, 1920, 2560 })
+            {
+                dialog.Size = new System.Drawing.Size(width, 800); Application.DoEvents();
+                var viewport = rename.Parent.Parent.Parent as Panel;
+                Require(viewport != null, "工具栏缺少窄屏滚动容器");
+                viewport.ScrollControlIntoView(button); Application.DoEvents();
+                Require(button.Width >= 100 && row.GetColumnWidths()[row.GetColumn(button)] >= button.Width, "工程图同步被挤压裁切");
+                var buttonLocation = viewport.PointToClient(button.PointToScreen(System.Drawing.Point.Empty));
+                Require(buttonLocation.X >= 0 && buttonLocation.X + button.Width <= viewport.ClientSize.Width,
+                    "窄屏滚动后仍不能完整显示工程图同步：" + width);
+                using (var bitmap = new System.Drawing.Bitmap(dialog.Width, dialog.Height))
+                {
+                    dialog.DrawToBitmap(bitmap, new System.Drawing.Rectangle(0, 0, dialog.Width, dialog.Height));
+                    bitmap.Save(Path.Combine(fixtures, "drawing-sync-" + width + ".png"));
+                }
+            }
+            dialog.Close();
+        }
+        Console.WriteLine("PASS: 工程图同步按钮位于属性替换行最右侧；主动同步、目标选择、配置隔离、缺失引用和未读属性保护、窄屏布局通过。");
     }
 
     private static object Card(string name, params string[] fields)

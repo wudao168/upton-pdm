@@ -23,6 +23,7 @@ public sealed partial class InMemoryPdmRepository
             var oldHistory = referenceSnapshotHistory.ToDictionary(); var oldFingerprints = documentSourceFingerprints.ToDictionary();
             var oldPending = pendingArchiveDocuments.ToDictionary(); var oldRelations = documentRelations.ToDictionary();
             var oldHandoffs = editHandoffs.ToDictionary();
+            var oldPackages = packages.ToDictionary();
             try
             {
                 var ordered = ArchiveBatchRules.Order(files);
@@ -82,6 +83,13 @@ public sealed partial class InMemoryPdmRepository
                     referenceSnapshotHistory[snapshot.SnapshotId] = snapshot;
                     if (file.Commit.IsProjectRoot) referenceRoots[(projectId, file.DocumentId)] = snapshot;
                 }
+                foreach (var result in results.Values.ToArray())
+                {
+                    if (!result.VersionCreated || result.Version is null || result.Document.Kind != DocumentKind.Drawing) continue;
+                    var adopted = AdoptArchivedReviewDrawing(result.Document, result.Version);
+                    documents[adopted.Id] = adopted;
+                    results[adopted.Id] = result with { Document = adopted };
+                }
                 RefreshWorkingReferenceRoots(projectId, actor, timeProvider.GetUtcNow());
                 var receipt = new ArchiveBatchReceipt(batchId, projectId, actor, requestHash, ordered.Select(file => results[file.DocumentId]).ToArray()) { FollowupPending = true };
                 archiveBatchReceipts[batchId] = receipt;
@@ -102,6 +110,7 @@ public sealed partial class InMemoryPdmRepository
                 RestoreArchiveState(referenceSnapshotHistory, oldHistory); RestoreArchiveState(documentSourceFingerprints, oldFingerprints);
                 RestoreArchiveState(pendingArchiveDocuments, oldPending); RestoreArchiveState(documentRelations, oldRelations);
                 RestoreArchiveState(editHandoffs, oldHandoffs);
+                RestoreArchiveState(packages, oldPackages);
                 throw;
             }
         }

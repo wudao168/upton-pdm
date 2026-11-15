@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using SolidWorks.Interop.sldworks;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -10,6 +11,22 @@ internal enum ArchiveSelectionState { Pending, New, Changed, Unchanged, DrawingU
 
 public sealed partial class PdmAddin
 {
+    private CadTreeNodeEventArgs EnsureArchiveEntryTree(CadTreeNodeEventArgs selection)
+    {
+        var activePath = (application?.ActiveDoc as IModelDoc2)?.GetPathName();
+        if (currentTree != null && !string.IsNullOrWhiteSpace(activePath)
+            && !PathsEqual(currentTree.FullPath, activePath))
+        {
+            // A switch between windows can arrive before the deferred tree refresh.
+            // The native tree helper rebuilds from the active window and remaps any explicit selection.
+            currentTree.LocalStructureDeferred = true;
+        }
+        var result = EnsureNativeTreeForOperation(selection);
+        if (!string.IsNullOrWhiteSpace(activePath) && !PathsEqual(currentTree?.FullPath, activePath))
+            throw new InvalidOperationException("当前图档的设计树尚未就绪，请刷新后重新提交存档。");
+        return result;
+    }
+
     private async Task RefreshArchiveSelectionAccessAsync(CadTreeNode root, Guid projectId, CancellationToken token)
     {
         if (!EnumerateCadNodes(root).Any(node => node.DocumentId.HasValue)) return;
@@ -23,11 +40,13 @@ public sealed partial class PdmAddin
     private BatchOperationDialog CreateBatchOperationDialog(CadTreeNode root, IReadOnlyList<BatchOperationItem> items,
         IReadOnlyList<ProjectDto> projects, Guid? projectId, string username, BatchOperationKind operation,
         IReadOnlyCollection<string> selectedPaths, IReadOnlyDictionary<string, Guid> inheritedProjects,
-        IReadOnlyDictionary<string, string> displayNames, bool canUseStandardLibrary, bool standardLibrary, int drawingType)
+        IReadOnlyDictionary<string, string> displayNames, bool canUseStandardLibrary, bool standardLibrary, int drawingType,
+        bool includePairedChanges)
     {
         var dialog = new BatchOperationDialog(root, items, projects, projectId, username, operation,
             selectedPaths, inheritedProjects, displayNames, canUseStandardLibrary, standardLibrary, drawingType);
         dialog.LoadArchiveVersionsAsync = async (node, token) => await GetNavigationLatestVersionsAsync(node.DocumentId.Value, token);
+        dialog.IncludePairedArchiveChanges = includePairedChanges;
         return dialog;
     }
 

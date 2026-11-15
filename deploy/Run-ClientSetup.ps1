@@ -36,7 +36,7 @@ try {
     else {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ServerBaseUrl $ServerBaseUrl -InstallRoot $InstallRoot
     }
-    if ($LASTEXITCODE -ne 0) { throw "客户端$Mode失败，退出码：$LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }

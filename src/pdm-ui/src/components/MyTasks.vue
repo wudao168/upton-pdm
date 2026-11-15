@@ -231,7 +231,7 @@ const rows = computed<TaskCenterRow[]>(() => [
     status: '待审批',
     statusClass: 'is-remind',
     title: task.kind === 'validationPlan' ? `${task.projectCode} ${task.qualityAcceptance ? '质量验收' : '验证计划'}审批` : `${task.projectCode} BOM发布审批`,
-    content: task.kind === 'validationPlan' ? `${task.projectName} · R${task.validationPlanRevision} · ${task.stepName || stageLabel(task.stage)}` : `${task.projectName} · ${task.releasePackageNumber} · ${stageLabel(task.stage)}`,
+    content: task.kind === 'validationPlan' ? `${task.projectName} · R${task.validationPlanRevision} · ${task.stepName || stageLabel(task.stage)}` : `${task.projectName} · ${task.releasePackageNumber} · ${task.stepName || '审批节点（名称待补充）'}`,
     createdAt: approvalNotifications.value.get(task.id)?.createdAt ?? task.createdAt,
     approval: task,
     notification: approvalNotifications.value.get(task.id),

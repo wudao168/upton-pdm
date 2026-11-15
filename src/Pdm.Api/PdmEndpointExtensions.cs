@@ -1607,16 +1607,11 @@ public static class PdmEndpointExtensions
             return Results.Ok(candidates.Select(item => new ApprovalTransferCandidateResponse(item.Username, item.DisplayName)));
         });
 
-        api.MapPost("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, CreateDrawingReviewRequest? request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (request is null) return Results.BadRequest(new { message = "请求内容不完整。" });
-            IReadOnlyList<string>? assignedReviewers = request.AssignedReviewers is { Count: > 0 }
-                ? request.AssignedReviewers
-                : string.IsNullOrWhiteSpace(request.AssignedReviewer) ? null : [request.AssignedReviewer];
-            if (assignedReviewers is null || assignedReviewers.All(string.IsNullOrWhiteSpace))
-                return Results.BadRequest(new { message = "发起图纸审核时必须至少指定一位审核人。" });
-            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, request.ModelDocumentIds, assignedReviewers, actor, role, cancellationToken));
+            await ProjectPermissionPolicy.RequireAsync(repository,projectId,actor,role,PermissionCodes.DrawingReviewSubmit,cancellationToken);
+            return Results.Conflict(new { message = "2D图纸审核已并入非标件发布流程，请在非标件BOM中发起发布；历史审核单仍可继续处理和查看。" });
         });
 
         api.MapPost("/drawing-reviews/{packageId:guid}/withdraw", async (Guid packageId, WithdrawDrawingReviewRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -2089,6 +2084,66 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.WithdrawReleasePackageAsync(releasePackageId, actor, role, request.Comment, cancellationToken));
+        });
+
+        api.MapGet("/projects/{projectId:guid}/release-drawing-reviews", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await ProjectPermissionPolicy.RequireAsync(repository,projectId,actor,role,"release.view",ct);
+            if (!await repository.HasProjectContentReadAccessAsync(projectId,actor,role,ct)) return Results.Forbid();
+            return Results.Ok((await repository.ListReleasePackagesAsync(projectId,ct)).Where(p=>p.DrawingReview is not null));
+        });
+        api.MapPost("/release-packages/{releasePackageId:guid}/drawing-review", async (Guid releasePackageId, ReleaseDrawingReviewDecision request, HttpContext context, ReleaseDrawingReviewService service, PdmWorkflowService workflow, ReleasePublishingCoordinator publishingCoordinator, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+
+            var result = await service.DecideAndAdvanceAsync(releasePackageId,request with { EmergencyReason=null },actor,role,workflow,ct);
+            if (result.State == ReleasePackageState.Publishing) publishingCoordinator.TryStart("DrawingNodeApproval");
+            return Results.Ok(result);
+        });
+        api.MapPost("/release-packages/{releasePackageId:guid}/drawing-review/emergency", async (Guid releasePackageId, ReleaseDrawingReviewDecision request, HttpContext context, ReleaseDrawingReviewService service, PdmWorkflowService workflow, ReleasePublishingCoordinator publishingCoordinator, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (request.Status == "Issue" && string.IsNullOrWhiteSpace(request.EmergencyReason))
+                throw new PdmRuleException("请填写代批原因。");
+            var result = await service.DecideAndAdvanceAsync(releasePackageId,request,actor,role,workflow,ct,emergencySubstitute:true);
+            if (result.State == ReleasePackageState.Publishing) publishingCoordinator.TryStart("DrawingNodeApproval");
+            return Results.Ok(result);
+        });
+        api.MapPost("/release-packages/{releasePackageId:guid}/drawing-review/node", async (Guid releasePackageId, ReleaseDrawingNodeDecision request, HttpContext context, ReleaseDrawingReviewService service, PdmWorkflowService workflow, ReleasePublishingCoordinator publishingCoordinator, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+
+            var result = await service.CompleteNodeAsync(releasePackageId,request with { EmergencyReason=null },actor,role,workflow,ct);
+            if (result.State == ReleasePackageState.Publishing) publishingCoordinator.TryStart("DrawingNodeApproval");
+            return Results.Ok(result);
+        });
+        api.MapPost("/release-packages/{releasePackageId:guid}/drawing-review/node/emergency", async (Guid releasePackageId, ReleaseDrawingNodeDecision request, HttpContext context, ReleaseDrawingReviewService service, PdmWorkflowService workflow, ReleasePublishingCoordinator publishingCoordinator, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (request.Decision == ApprovalDecision.Rejected && string.IsNullOrWhiteSpace(request.EmergencyReason))
+                throw new PdmRuleException("请填写退回原因。");
+            var result = await service.CompleteNodeAsync(releasePackageId,request,actor,role,workflow,ct,emergencySubstitute:true);
+            if (result.State == ReleasePackageState.Publishing) publishingCoordinator.TryStart("DrawingNodeApproval");
+            return Results.Ok(result);
+        });
+        api.MapPost("/release-packages/{releasePackageId:guid}/drawing-review/{documentId:guid}/preview", async (Guid releasePackageId, Guid documentId, HttpContext context, ReleaseDrawingReviewService service, PdmWorkflowService workflow, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var (_,item) = await service.ReadAsync(releasePackageId,documentId,actor,role,ct);
+            await workflow.AuditVersionReadAsync(documentId,item.VersionId,actor,role,"release.drawing-review.generate",ct);
+            return Results.Ok(await service.GeneratePreviewAsync(releasePackageId,documentId,actor,role,ct));
+        });
+        api.MapGet("/release-packages/{releasePackageId:guid}/drawing-review/{documentId:guid}/preview", async (Guid releasePackageId, Guid documentId, HttpContext context, ReleaseDrawingReviewService service, IFileStorage storage, PdmWorkflowService workflow, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var (project,item) = await service.ReadAsync(releasePackageId,documentId,actor,role,ct);
+            if (item.Preview is not { Format: DocumentPreviewFormat.Pdf } preview || preview.SourceSha256!=item.Sha256)
+                throw new PdmRuleException("此冻结版本尚无PDF预览，请生成审核预览后查看。");
+            await workflow.AuditVersionReadAsync(documentId,item.VersionId,actor,role,"release.drawing-review.read",ct);
+            await storage.VerifyPreviewFileAsync(project,preview,ct);
+            var stream = await storage.OpenReadAsync(StorageLocationPolicy.ResolveUnder(project.VaultLocation,preview.StorageRelativePath),ct);
+            return Results.File(stream,"application/pdf",enableRangeProcessing:true);
         });
 
         api.MapGet("/release-packages/{releasePackageId:guid}/item-comments", async (Guid releasePackageId, HttpContext context, ReleaseItemCommentService comments, CancellationToken cancellationToken) =>

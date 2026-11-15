@@ -216,6 +216,34 @@ internal static partial class Program
   root=drawing;items=Array.CreateInstance(itemType,2);items.SetValue(New("BatchOperationItem",drawing,0),0);items.SetValue(New("BatchOperationItem",nodes[1],1),1);
   Set(drawing,"RequiresModelUpdate",false);Set(drawing,"DrawingUpdatePendingReason",null);Set(drawing,"IsModifiedInSolidWorks",true);Set(drawing,"CheckedOutBy","tester");Set(drawing,"CheckoutSessionId",Guid.NewGuid());
   Set(nodes[1],"IsModifiedInSolidWorks",true);Set(nodes[1],"CheckedOutBy","tester");Set(nodes[1],"CheckoutSessionId",Guid.NewGuid());
+  using(var dialog=Dialog(new[]{(string)Get(drawing,"FullPath")}))
+  {
+   Set(drawing,"IsModifiedInSolidWorks",false);
+   Set(nodes[1],"IsModifiedInSolidWorks",false);
+   File.AppendAllText((string)Get(drawing,"FullPath"),"|saved annotations");
+   await Analyze(dialog,false);
+   Check(Selected(dialog).Length==2&&Selected(dialog).Contains(drawing)&&Selected(dialog).Contains(nodes[1]),
+    "首次从已保存的工程图发起时，即使入口只传工程图也默认勾选已保存的关联零件变更");
+   Set(nodes[1],"CheckedOutBy","another-user");await Analyze(dialog,false);
+   Check(Selected(dialog).SequenceEqual(new[]{drawing}),"工程图入口不勾选他人编辑的关联模型");
+   Set(nodes[1],"CheckedOutBy","tester");
+  }
+  using(var dialog=Dialog(new[]{(string)Get(drawing,"FullPath")}))
+  {
+   Set(dialog,"IncludePairedArchiveChanges",false);
+   await Analyze(dialog,false);
+   Check(Selected(dialog).SequenceEqual(new[]{drawing}),"补充工程图重新打开范围确认时保留已经确认的勾选");
+  }
+  root=nodes[1];
+  using(var dialog=Dialog(new[]{(string)Get(nodes[1],"FullPath")}))
+  {
+   await Analyze(dialog,false);
+   Check(Selected(dialog).Length==2&&Selected(dialog).Contains(drawing)&&Selected(dialog).Contains(nodes[1]),
+    "从3D发起时也默认勾选独立修改过的配套2D图档");
+  }
+  root=drawing;
+  File.WriteAllText((string)Get(drawing,"FullPath"),"archived:DRAWING.SLDDRW");
+  Set(drawing,"IsModifiedInSolidWorks",true);Set(nodes[1],"IsModifiedInSolidWorks",true);
   using(var dialog=Dialog())
   {
    await Analyze(dialog);

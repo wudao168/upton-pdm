@@ -893,6 +893,7 @@ public sealed record ReleasePackage(
     string? PublishedPath)
 {
     public PdfTitleBlockSnapshot? PdfTitleBlockSnapshot { get; init; }
+    public ReleaseDrawingReview? DrawingReview { get; init; }
 
     public IReadOnlyDictionary<Guid, DocumentPreviewArtifact> PdfDeliveryArtifacts { get; init; } = new Dictionary<Guid, DocumentPreviewArtifact>();
 

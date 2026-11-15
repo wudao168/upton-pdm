@@ -15,6 +15,7 @@ internal static partial class Program
     [STAThread] static int Main(string[] args)
     {
         try {
+            if (args.Length > 0 && args[0] == "--login-stability") return RunLoginStabilityChecks(args);
             if (args.Length > 0 && args[0] == "--preview-transfer") return RunPreviewTransferChecks(args);
             if (args.Length > 0 && args[0] == "--preview-download-benchmark") return RunPreviewDownloadBenchmark(args).GetAwaiter().GetResult();
             return args.Length > 0 && args[0].StartsWith("--original-preview", StringComparison.Ordinal) ? RunOriginalPreviewChecks(args) : Run(args);
@@ -330,5 +331,5 @@ internal static partial class Program
         }
         Console.WriteLine("PASS actual MainWindow verifies real server versions, repairs stale root/part metadata and retains corrupted drawing warning");
     }
-    static void Exit(Window window) => window.GetType().GetMethod("ExitApplication", Flags).Invoke(window, null);
+    static void Exit(Window window) => window.GetType().GetMethod("ExitApplication", Flags).Invoke(window, new object[] { false });
 }

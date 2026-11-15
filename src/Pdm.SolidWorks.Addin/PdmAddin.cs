@@ -467,6 +467,7 @@ public sealed partial class PdmAddin : ISwAddin
                 {
                     drawingEventDocumentPath = activePath;
                     drawingEvents.FileSavePostNotify += OnDrawingFileSaved;
+                    drawingEvents.ModifyNotify += OnDrawingAssociationChanged;
                 }
                 return;
             }
@@ -594,6 +595,7 @@ public sealed partial class PdmAddin : ISwAddin
         try
         {
             drawingEvents.FileSavePostNotify -= OnDrawingFileSaved;
+            drawingEvents.ModifyNotify -= OnDrawingAssociationChanged;
         }
         catch (Exception exception)
         {
@@ -786,9 +788,16 @@ public sealed partial class PdmAddin : ISwAddin
 
     private int OnDrawingFileSaved(int saveType, string fileName)
     {
+        drawingAssociationProofs.Clear();
         if (Volatile.Read(ref draftSnapshotInProgress) != 0) return 0;
         InvalidateCurrentTreeCache();
         ScheduleTreeRefresh(forceScan: false);
+        return 0;
+    }
+
+    private int OnDrawingAssociationChanged()
+    {
+        drawingAssociationProofs.Clear();
         return 0;
     }
 
@@ -863,6 +872,7 @@ public sealed partial class PdmAddin : ISwAddin
         // Scanning (which may resolve components), saving, or activating documents can interrupt it.
         if (IsSolidWorksCommandActive()) return 0;
         if (ShowBlockedControlledOpen()) return 0;
+        if (TrySavePendingManagedDocument()) return 0;
         if (TryStartAssemblyPermissionPrompt()) return 0;
         TryInitializeServerAfterStartup();
         TryStartQueuedControlledOpen();
@@ -2515,6 +2525,11 @@ public sealed partial class PdmAddin : ISwAddin
             }
 
             var drawingNode = FindCadNodeByPath(currentTree, drawingPath);
+            if (DrawingAssociationDisproved(drawingPath, new[] { eventArgs.Node.FullPath }, true))
+            {
+                ScheduleTreeRefresh();
+                throw new InvalidOperationException("这张工程图直接引用的是其他模型，不能作为当前零件的配套工程图打开。请从对应装配体或工作区打开工程图。");
+            }
             if (drawingNode?.DocumentId.HasValue == true && !IsCheckedOutByCurrentUser(drawingNode))
             {
                 BeginControlledOpen(drawingNode, ControlledOpenMode.LatestReadOnly);
@@ -5732,7 +5747,8 @@ public sealed partial class PdmAddin : ISwAddin
         }
 
         ArchiveSession.Current?.SetStage("正在读取当前设计树…");
-        EnsureNativeTreeForOperation(null);
+        if (initialOperation == BatchOperationKind.CheckIn) EnsureArchiveEntryTree(null);
+        else EnsureNativeTreeForOperation(null);
         if (currentTree == null || (initialOperation == BatchOperationKind.CheckIn && currentTree.IsReadOnlyPreview))
         {
             ShowError("请先打开当前工作装配，只读预览不能执行整套操作。");
@@ -5775,6 +5791,7 @@ public sealed partial class PdmAddin : ISwAddin
         var inheritedDrawingProjects = await ResolveInheritedDrawingProjectsAsync(items, initialProjectId);
         LogCheckInCheckpoint("batch-dialog-create", currentTree.FullPath);
         ArchiveSelection dialog;
+        var includePairedChanges = true;
         while (true)
         {
             ArchiveSession.Current?.SetStep(2, "请选择本次存档项目和图档，点击确认存档后将自动检查并完成提交。", 1);
@@ -5787,7 +5804,8 @@ public sealed partial class PdmAddin : ISwAddin
                 initialOperation,
                 initiallySelectedPaths,
                 inheritedDrawingProjects,
-                userDisplayNames, standardLibraryArchiveAllowed, initialStandardLibrary, initialStandardDrawingType));
+                userDisplayNames, standardLibraryArchiveAllowed, initialStandardLibrary, initialStandardDrawingType,
+                includePairedChanges));
             LogCheckInCheckpoint("batch-dialog-show", currentTree.FullPath);
             var dialogResult = dialog.Result;
             LogCheckInCheckpoint("batch-dialog-result-" + dialogResult, currentTree.FullPath);
@@ -5797,6 +5815,7 @@ public sealed partial class PdmAddin : ISwAddin
                 taskPaneControl.SetTree(currentTree);
                 items = BuildBatchOperationItems(currentTree);
                 initiallySelectedPaths = dialog.SelectedItems.Select(item => item.Node.FullPath).ToArray();
+                includePairedChanges = false;
                 initialProjectId = dialog.SelectedProjectId ?? initialProjectId;
                 if (initialOperation == BatchOperationKind.CheckIn && initialProjectId.HasValue)
                     await RefreshArchiveSelectionAccessAsync(currentTree, initialProjectId.Value, operationToken);
@@ -9169,7 +9188,7 @@ public sealed partial class PdmAddin : ISwAddin
 
     private void StartCheckInRequest(CadTreeNodeEventArgs eventArgs)
     {
-        eventArgs = EnsureNativeTreeForOperation(eventArgs);
+        eventArgs = EnsureArchiveEntryTree(eventArgs);
         var requestedNodes = eventArgs.Nodes
             .Where(candidate => candidate != null)
             .GroupBy(candidate => candidate.FullPath ?? candidate.InstancePath ?? candidate.FileName, StringComparer.OrdinalIgnoreCase)
@@ -9181,9 +9200,10 @@ public sealed partial class PdmAddin : ISwAddin
             return;
         }
 
-        if (node.Kind == CadDocumentKind.Drawing && requestedNodes.Length <= 1
-            && (!ReferenceEquals(currentTree, node) || IsNewDrawingInLatestPreview(node)))
+        if (node.Kind == CadDocumentKind.Drawing && requestedNodes.Length <= 1 && IsNewDrawingInLatestPreview(node))
         {
+            if (!PathsEqual(currentTree?.FullPath, node.FullPath))
+                throw new InvalidOperationException("这张新工程图位于只读预览目录。请先打开该工程图，再从工程图页面提交存档。");
             try
             {
                 node = PrepareDrawingCheckInContext(node);
@@ -10956,6 +10976,7 @@ public sealed partial class PdmAddin : ISwAddin
             cancellationToken.ThrowIfCancellationRequested();
             if (!ReferenceEquals(currentTree, targetTree) || currentProjectId != projectId) return;
             if (DeferBackgroundTreeRefresh()) return;
+            relations = FilterDrawingRelations(relations, Path.GetDirectoryName(targetTree.FullPath ?? string.Empty), false);
             ReconcileProjectDrawings(targetTree, byId, relations);
             BindDesignDrawingFiles(targetTree);
             if (IsSolidWorksCommandActive()) { ScheduleTreeRefresh(); return; }
@@ -11230,7 +11251,7 @@ public sealed partial class PdmAddin : ISwAddin
             {
                 if (string.IsNullOrWhiteSpace(drawing.FullPath) && drawing.DocumentId.HasValue
                     && paths.TryGetValue(drawing.DocumentId.Value, out var path)) drawing.FullPath = path;
-                if (!drawing.ReferencedModels.Any(reference => reference.DocumentId == model.DocumentId))
+                if (!drawing.DrawingViewsRead && !drawing.ReferencedModels.Any(reference => reference.DocumentId == model.DocumentId))
                     drawing.ReferencedModels.Add(model);
             }
     }

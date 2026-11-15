@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { repairMojibake } from '../mojibake'
 
 type SystemReleaseHistoryEntry = {
@@ -16,20 +16,15 @@ const props = defineProps<{
   releaseNote?: string
   releaseHistory?: SystemReleaseHistoryEntry[]
   desktopVersion?: string
+  publishedDesktopVersion?: string
   solidWorksAddinVersion?: string
 }>()
 
-const versionDialogOpen = ref(false)
-const versionHistoryOpen = ref(false)
-const versionLoading = ref(false)
-const runtimeDatabase = ref('—')
+const emit = defineEmits<{ refresh: [] }>()
+const runtimeDatabase = ref('读取中…')
 
 const fullVersion = computed(() => props.version.trim())
-const displayVersion = computed(() => {
-  if (!fullVersion.value) return '未知'
-  return `V${fullVersion.value.split('-', 1)[0]}`
-})
-const versionTitle = computed(() => fullVersion.value ? `版本 ${fullVersion.value}` : '版本未知')
+const displayVersion = computed(() => displayReleaseVersion(fullVersion.value))
 function displayReleaseVersion(version: string) {
   const normalized = version.trim()
   return normalized ? `V${normalized.split('-', 1)[0]}` : '未知'
@@ -67,7 +62,7 @@ const releaseHistory = computed(() => {
       Version: fullVersion.value,
       ReleasedAt: props.releasedAt,
       ReleaseNote: releaseNote.value,
-      DesktopVersion: props.desktopVersion,
+      DesktopVersion: props.publishedDesktopVersion,
       SolidWorksAddinVersion: props.solidWorksAddinVersion,
     })
   }
@@ -82,10 +77,8 @@ const releaseHistory = computed(() => {
   })
 })
 
-async function openVersionInfo() {
-  versionDialogOpen.value = true
-  versionHistoryOpen.value = false
-  versionLoading.value = true
+onMounted(async () => {
+  emit('refresh')
   try {
     const response = await fetch('/health', { cache: 'no-store' })
     if (!response.ok) throw new Error()
@@ -93,26 +86,21 @@ async function openVersionInfo() {
     runtimeDatabase.value = [health.database, health.databaseName].filter(Boolean).join(' · ') || '—'
   } catch {
     runtimeDatabase.value = '暂时无法读取'
-  } finally {
-    versionLoading.value = false
   }
-}
-
+})
 </script>
 
 <template>
-  <button type="button" class="pdm-system-version-trigger" :title="`${versionTitle}，点击查看详情`" :aria-label="`${versionTitle}，点击查看详情`" @click="openVersionInfo">
-    版本 {{ displayVersion }}
-  </button>
-  <el-drawer v-model="versionDialogOpen" title="系统版本信息" size="min(420px, 100%)" append-to-body>
-    <section v-loading="versionLoading" class="pdm-system-version-detail" aria-label="系统版本详情">
-      <header><strong>{{ displayVersion }}</strong><el-tag type="success" effect="plain">当前版本</el-tag></header>
+  <section class="pdm-system-info" aria-label="系统信息">
+    <section class="pdm-panel pdm-system-version-detail" aria-label="系统版本信息">
+      <h2>当前版本</h2>
       <dl>
+        <div><dt>服务器 / 网页端</dt><dd>{{ displayVersion }}</dd></div>
         <div><dt>发布标识</dt><dd>{{ fullVersion || '—' }}</dd></div>
         <div><dt>发布时间</dt><dd>{{ releaseTime }}</dd></div>
-        <div><dt>服务器 / 网页端</dt><dd>{{ displayVersion }}</dd></div>
-        <div><dt>Windows客户端</dt><dd>{{ props.desktopVersion ? displayReleaseVersion(props.desktopVersion) : '未连接客户端' }}</dd></div>
-        <div><dt>SolidWorks插件</dt><dd>{{ props.solidWorksAddinVersion ? displayReleaseVersion(props.solidWorksAddinVersion) : '—' }}</dd></div>
+        <div><dt>Windows 客户端发布版本</dt><dd>{{ publishedDesktopVersion ? displayReleaseVersion(publishedDesktopVersion) : '—' }}</dd></div>
+        <div v-if="desktopVersion"><dt>当前 Windows 客户端</dt><dd>{{ displayReleaseVersion(desktopVersion) }}</dd></div>
+        <div><dt>SolidWorks 插件发布版本</dt><dd>{{ solidWorksAddinVersion ? displayReleaseVersion(solidWorksAddinVersion) : '—' }}</dd></div>
         <div><dt>数据库</dt><dd>{{ runtimeDatabase }}</dd></div>
       </dl>
       <section>
@@ -122,34 +110,35 @@ async function openVersionInfo() {
         </ol>
         <p v-else>{{ releaseNote }}</p>
       </section>
-      <button
-        type="button"
-        class="pdm-system-version-history__toggle"
-        :aria-expanded="versionHistoryOpen"
-        aria-controls="pdm-system-version-history"
-        @click="versionHistoryOpen = !versionHistoryOpen"
-      >
-        版本记录
-      </button>
-      <section
-        v-if="versionHistoryOpen"
-        id="pdm-system-version-history"
-        class="pdm-system-version-history"
-        aria-label="版本记录"
-      >
-        <article v-for="entry in releaseHistory" :key="entry.version" class="pdm-system-version-history__item">
-          <header><strong>{{ displayReleaseVersion(entry.version) }}</strong><time>{{ entry.releasedAt }}</time></header>
-          <ol v-if="entry.items.length > 1" class="pdm-system-version-note">
-            <li v-for="item in entry.items" :key="item">{{ item }}</li>
-          </ol>
-          <p v-else>{{ entry.note }}</p>
-        </article>
-      </section>
-      <p class="pdm-system-version-detail__note">版本说明与历史记录来自服务器发布清单；数据库状态在打开详情时实时读取。</p>
     </section>
-  </el-drawer>
+    <section class="pdm-panel pdm-system-version-history" aria-label="更新日志">
+      <h2>更新日志</h2>
+      <p v-if="!releaseHistory.length" class="pdm-system-version-history__empty">暂无更新记录。</p>
+      <article v-for="entry in releaseHistory" :key="entry.version" class="pdm-system-version-history__item">
+        <header><strong>{{ displayReleaseVersion(entry.version) }}</strong><time>{{ entry.releasedAt }}</time></header>
+        <ol v-if="entry.items.length > 1" class="pdm-system-version-note">
+          <li v-for="item in entry.items" :key="item">{{ item }}</li>
+        </ol>
+        <p v-else>{{ entry.note }}</p>
+      </article>
+    </section>
+  </section>
 </template>
 
 <style scoped>
-:root body .pdm-system-version-trigger { flex: 0 0 auto; width: auto !important; min-width: max-content; white-space: nowrap; }
+.pdm-system-info {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  align-items: start;
+  gap: var(--pdm-container-gap);
+  min-height: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.pdm-system-info > section { padding: 16px; }
+.pdm-system-info h2 { margin: 0 0 12px; font-size: 15px; }
+.pdm-system-version-history__empty { margin: 16px 0; color: var(--pdm-text-soft); text-align: center; }
+@media (max-width: 900px) {
+  .pdm-system-info { grid-template-columns: minmax(0, 1fr); }
+}
 </style>

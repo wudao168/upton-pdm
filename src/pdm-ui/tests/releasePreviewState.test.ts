@@ -12,6 +12,13 @@ it.each(['StandardFormal', 'StandardSupplement', 'StandardLongLead', 'Electrical
   expect(releasePreviewStateTag(old)).toBe('')
 })
 
+it('非标件长交期不锁图档也显示转图状态', () => {
+  const longLead = { ...release('NonStandardLongLead'), locksDocuments: false, state: '已发布' }
+  expect(requiresReleasePreview(longLead)).toBe(true)
+  expect(releasePreviewUnfinished(longLead)).toBe(true)
+  expect(releasePreviewStateTag(longLead)).toBe('待转图')
+})
+
 it('巡检误留Pending但次数耗尽时按暂停处理，不再承诺后台自动重试', () => {
   const paused = release('NonStandardSupplement', 'Pending', 5)
   expect(releasePreviewNeedsAttention(paused)).toBe(true)

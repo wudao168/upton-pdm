@@ -102,7 +102,7 @@ describe('ProcurementTracking', () => {
     await flushPromises()
     expect(wrapper.findAll('.el-table__header-wrapper th').map(th => th.text())).not.toContain('图纸附件')
     await wrapper.findAll('button').find(button => button.text() === '列设置')!.trigger('click'); await flushPromises()
-    const option = wrapper.findAll('.procurement-tracking__column-list .el-checkbox').find(label => label.text() === '图纸附件')!
+    const option = wrapper.findAll('.procurement-tracking__column-list label').find(label => label.text() === '图纸附件')!
     await option.get('input').setValue(true)
     await wrapper.findAll('button').find(button => button.text() === '保存')!.trigger('click'); await flushPromises()
     expect(wrapper.findAll('.el-table__header-wrapper th').map(th => th.text())).toContain('图纸附件')
@@ -749,12 +749,11 @@ describe('ProcurementTracking', () => {
     await wrapper.findAll('button').find(button => button.text().trim() === '列设置')!.trigger('click')
     await flushPromises()
     expect(wrapper.find('.procurement-tracking__settings-note').text()).toContain('选择显示列')
-    expect(wrapper.find('.procurement-tracking__settings-note').text()).not.toContain('调整列顺序')
-    expect(wrapper.findAll('.procurement-tracking__column-list button')).toHaveLength(0)
+    await wrapper.get('button[aria-label="上移项目号"]').trigger('click')
     const optionalLabels = ['项目号', '子项目号', 'PR']
     const headerText = () => wrapper.find('.el-table__header-wrapper').text()
     for (const label of optionalLabels) {
-      const checkbox = wrapper.findAll('.el-checkbox').find(item => item.text() === label)!.find('input')
+      const checkbox = wrapper.findAll('.procurement-tracking__column-list label').find(item => item.text() === label)!.find('input')
       expect((checkbox.element as HTMLInputElement).checked).toBe(false)
       await checkbox.setValue(true)
     }
@@ -763,8 +762,9 @@ describe('ProcurementTracking', () => {
     for (const label of optionalLabels) expect(headerText()).toContain(label)
     const savedColumns = JSON.parse(window.localStorage.getItem('upton-pdm:procurement-columns:engineer')!)
     expect(savedColumns.visible).toEqual(expect.arrayContaining(['projectCode', 'subprojectCode', 'purchaseRequisitionNumbers']))
-    expect(savedColumns).toEqual(expect.objectContaining({ version: 4 }))
-    expect(savedColumns).not.toHaveProperty('order')
+    expect(savedColumns).toEqual(expect.objectContaining({ version: 5 }))
+    expect(savedColumns.order.slice(0, 2)).toEqual(['projectCode', 'sequence'])
+    expect(wrapper.findAll('.el-table__header-wrapper th').slice(0, 2).map(th => th.text())).toEqual(['项目号', '序号'])
     wrapper.unmount()
     wrapper = mount(ProcurementTracking, options)
     await flushPromises()
@@ -773,7 +773,10 @@ describe('ProcurementTracking', () => {
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text().trim() === '恢复默认')!.trigger('click')
     await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '保存')!.trigger('click')
+    await flushPromises()
     for (const label of optionalLabels) expect(headerText()).not.toContain(label)
+    expect(wrapper.find('.el-table__header-wrapper th').text()).toBe('序号')
     wrapper.unmount()
   })
 

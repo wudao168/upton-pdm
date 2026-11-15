@@ -35,11 +35,11 @@ internal static partial class Program
   catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){blocked=error.InnerException.Message.Contains("700020.05.00-09");}
   if(!blocked||!dirty)throw new Exception("Selected model pending edits were not protected");
   Console.WriteLine("PASS: Selected model with pending edits still requires saving; reference-only model does not");
-  foreach(var mode in new[]{"missing-manager","partial-names","native-read-error"})
+  foreach(var mode in new[]{"complete","missing-manager","partial-names","native-read-error"})
   {
    var manager=mode=="missing-manager"?null:new Proxy(interop.GetType("SolidWorks.Interop.sldworks.CustomPropertyManager",true),call=>
    {
-    if(call.MethodName=="get_Count")return 2;
+    if(call.MethodName=="get_Count")return mode=="complete"?1:2;
     if(call.MethodName=="GetNames"){if(mode=="native-read-error")throw new InvalidOperationException("native test failure");return new[]{"名称"};}
     if(call.MethodName=="Get6")return new ReturnMessage(2,new object[]{"名称",true,"连接件","连接件",true,false},6,call.LogicalCallContext,call);
     throw new Exception(call.MethodName);
@@ -47,9 +47,13 @@ internal static partial class Program
    var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="get_CustomPropertyManager"?manager:throw new Exception("Unexpected mutation "+call.MethodName)).GetTransparentProxy();
    var doc=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="get_Extension"?extension:throw new Exception("Unexpected mutation "+call.MethodName)).GetTransparentProxy();
    var node=New("CadTreeNode");Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),2));Set(node,"FileName","NEW.SLDDRW");
-   var properties=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("ReadArchiveProperties",Flags).Invoke(plugin,new object[]{doc,node,null,null});
-   if(mode=="partial-names"&&properties["全局/名称"]!="连接件")throw new Exception("Readable property value lost");
-   Console.WriteLine("PASS: Native drawing retained when optional property indexing fails: "+mode);
+   IReadOnlyDictionary<string,string> properties=null;var rejected=false;
+   try{properties=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("ReadArchiveProperties",Flags).Invoke(plugin,new object[]{doc,node,null,null});}
+   catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException)
+   { rejected=error.InnerException.Message.Contains("本批尚未上传")&&!error.InnerException.Message.Contains("native test failure"); }
+   if(mode=="complete" ? rejected||properties?["全局/名称"]!="连接件" : !rejected)
+    throw new Exception("Archive property completeness guard failed: "+mode);
+   Console.WriteLine("PASS: Complete properties required before upload; native drawing and edits retained: "+mode);
   }
  }
 }

@@ -1,4 +1,4 @@
-/* 单行输入和筛选统一胶囊；搜索框及多行输入保留其专用规则。 */
+/* 操作行、搜索和筛选保留胶囊；普通文字表单使用小圆角矩形。 */
 :root { --pdm-field-height: 28px; }
 .mobile-office, .production-scan-page { --pdm-field-height: 32px; }
 @layer pdm-button-sizing {
@@ -32,6 +32,52 @@
   :root body .el-input-number:focus-within:not(:where(.pdm-search-field, .pdm-search-field *)) { box-shadow:0 0 0 2px var(--pdm-theme-accent-focus); }
   :root body .el-input-number:not(.is-controls-right) .el-input-number__decrease { border-radius:999px 0 0 999px; }
   :root body .el-input-number:not(.is-controls-right) .el-input-number__increase { border-radius:0 999px 999px 0; }
-  :root body :is(.pdm-login-input-frame, textarea[rows="1"], .el-textarea:has(> textarea[rows="1"])) { border-radius:999px !important; }
-  :root body :is(textarea, .el-textarea__inner):not(:where(.pdm-search-field, .pdm-search-field *)) { border-radius:16px !important; }
+  :root body :is(.pdm-login-input-frame, textarea[rows="1"], .el-textarea:has(> textarea[rows="1"])) { border-radius:8px !important; }
+  :root body :is([role="toolbar"], [class*="toolbar"], .pdm-field-action-row) :is(textarea[rows="1"], .el-textarea:has(> textarea[rows="1"])) { border-radius:999px !important; }
+  :root body :is(textarea, .el-textarea, .el-textarea__inner):not(:where(.pdm-search-field, .pdm-search-field *)) { border-radius:8px !important; }
+
+  /* 只调整文字输入的实际外框；下拉、日期、数字控件和搜索内层不受影响。
+     自定义操作行可显式使用 .pdm-field-action-row，普通表单无需额外标记。 */
+  :root body :is(
+    input:not([type]), input[type="text"], input[type="password"], input[type="email"], input[type="url"], input[type="tel"],
+    .el-input:has(input:is(:not([type]), [type="text"], [type="password"], [type="email"], [type="url"], [type="tel"])),
+    .el-input__wrapper:has(input:is(:not([type]), [type="text"], [type="password"], [type="email"], [type="url"], [type="tel"])),
+    .pdm-login-input-frame
+  ):not(:where(
+    .el-input__inner, .el-select__input, .el-range-input, .el-cascader__search-input,
+    .el-select *, .el-date-editor, .el-date-editor *, .el-cascader *, .el-input-number *,
+    .pdm-search-field, .pdm-search-field *, [role="search"] *, [role="toolbar"] *,
+    [class*="toolbar"] *, [class*="filter"] *, [class*="search"] *,
+    .pdm-field-action-row *,
+    :is(div, span, label):has(> button) > input,
+    :is(div, span, label):has(> button) > .el-input,
+    :is(div, span, label):has(> button) > .el-input *
+  )) { border-radius:8px !important; }
+
+  /* 与页面分隔线共用主题边框色，焦点和校验状态仍提供清晰提示。
+     Element Plus 以 inset shadow 绘制外框，因此同时设置其边框变量。 */
+  :root body :is(.el-input, .el-textarea, .el-select, .el-date-editor) {
+    --el-input-border-color: var(--pdm-container-border, var(--pdm-border));
+    --el-input-hover-border-color: var(--pdm-theme-accent-border);
+    --el-input-focus-border-color: var(--pdm-theme-accent);
+    --el-border-color: var(--pdm-container-border, var(--pdm-border));
+    --el-border-color-light: var(--pdm-container-border, var(--pdm-border));
+    --el-disabled-border-color: var(--pdm-container-border, var(--pdm-border));
+  }
+  :root body :is(
+    input:not([type="checkbox"], [type="radio"], [type="hidden"], [type="range"], [type="file"], [type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"], .el-input__inner, .el-select__input, .el-range-input, .el-cascader__search-input),
+    select, textarea, .pdm-login-input-frame
+  ):not(:focus):not(:hover):not([aria-invalid="true"]):not(:where(.is-error *, .pdm-search-field *)) {
+    border-color:var(--pdm-container-border, var(--pdm-border)) !important;
+  }
+
+  /* 原生文字输入的悬停与焦点也沿用主题色，组件内层和校验状态不覆盖。 */
+  :root body :is(input:not([type]), input[type="text"], input[type="email"], input[type="url"], input[type="tel"], input[type="password"], textarea):not(:where(.el-input__inner, .el-textarea__inner, .el-select__input, .el-range-input, .el-cascader__search-input, .pdm-search-field *, .is-error *, [aria-invalid="true"], :disabled)):hover {
+    border-color:var(--pdm-theme-accent-border) !important;
+  }
+  :root body :is(input:not([type]), input[type="text"], input[type="email"], input[type="url"], input[type="tel"], input[type="password"], textarea):not(:where(.el-input__inner, .el-textarea__inner, .el-select__input, .el-range-input, .el-cascader__search-input, .pdm-search-field *, .is-error *, [aria-invalid="true"], :disabled)):focus {
+    border-color:var(--pdm-theme-accent) !important;
+    outline:1px solid var(--pdm-theme-accent);
+    outline-offset:0;
+  }
 }

@@ -82,6 +82,25 @@ public sealed class ReleasePreviewService(
         return archived.Count;
     }
 
+    public static DocumentPreviewFormat? FrozenDeliveryFormat(ReleasePackage package, ReleaseVersionBinding binding, DocumentKind? kind)
+    {
+        if (kind is DocumentKind.Part or DocumentKind.Assembly) return DocumentPreviewFormat.Step;
+        if (kind == DocumentKind.Drawing && ReleasePreviewPolicy.DeliversFrozenDrawings(package)
+            && package.DrawingReview?.Items.Any(item => item.DocumentId == binding.DocumentId && item.VersionId == binding.VersionId
+                && string.Equals(item.Sha256, binding.Sha256, StringComparison.OrdinalIgnoreCase)) == true)
+            return DocumentPreviewFormat.Pdf;
+        return null;
+    }
+
+    public static void RequireFrozenDrawings(ReleasePackage package, IReadOnlyList<ReleasePreviewSource> sources)
+    {
+        if (!ReleasePreviewPolicy.RequiresConversion(package)) return;
+        if (package.DrawingReview is not { } review) return;
+        var drawingIds = sources.Where(source => source.Kind == DocumentKind.Drawing).Select(source => source.DocumentId).ToHashSet();
+        if (!drawingIds.SetEquals(review.Items.Select(item => item.DocumentId)))
+            throw new PdmConflictException("发布包的转图来源不完整，请核对冻结的审核图纸。");
+    }
+
     public async Task<int> ProcessPendingAsync(CancellationToken cancellationToken)
     {
         var pending = await repository.ListReleasePackagesAwaitingPreviewAsync(MaxAttempts, BatchSize, cancellationToken);
@@ -128,6 +147,7 @@ public sealed class ReleasePreviewService(
         await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, package.PreviewError, package.PreviewAttempts, now, cancellationToken);
         try
         {
+            package = await PdfTitleBlockSnapshotBuilder.RestoreMissingLongLeadSnapshotAsync(repository, package, project, cancellationToken);
             var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
             var completed = new HashSet<Guid>();
             foreach (var version in await ReleasedVersionsAsync(package.Id, cancellationToken))
@@ -139,8 +159,11 @@ public sealed class ReleasePreviewService(
                     && !pdfReleaseStamp.IsCurrent(StorageLocationPolicy.ResolveUnder(vaultRoot, version.Preview.StorageRelativePath), package, bindingId)) continue;
                 completed.Add(version.DocumentId);
             }
-            var sources = (await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken))
-                .Where(source => !completed.Contains(source.DocumentId)).ToArray();
+            var frozenSources = await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken);
+            RequireFrozenDrawings(package, frozenSources);
+            if (ReleasePreviewPolicy.DeliversFrozenDrawings(package) && !frozenSources.Any(source => source.Kind == DocumentKind.Drawing))
+                throw new PdmRuleException("该历史长交期发布包缺少可以核实的冻结图纸，无法补转。");
+            var sources = frozenSources.Where(source => !completed.Contains(source.DocumentId)).ToArray();
             var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
             Directory.CreateDirectory(stagingDirectory);
             // A mixed response can contain both permanent drawing errors and unconfirmed host work.
@@ -182,7 +205,7 @@ public sealed class ReleasePreviewService(
             if ((await ListItemsAsync(package.Id, cancellationToken)).Any(item => !item.Succeeded))
                 throw new PdmRuleException("发布资料尚未齐套，请检查失败图档并重试转图。");
             await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, attempts, timeProvider.GetUtcNow(), cancellationToken);
-            await NotifyAsync(package, project, "图纸转换已完成", $"STEP/PDF 已生成并绑定正式版本（第{attempts}次处理）", "completed", cancellationToken, archiveVerified);
+            await NotifyAsync(package, project, "图纸转换已完成", $"本发布包的 STEP/PDF 已生成并投放（第{attempts}次处理）", "completed", cancellationToken, archiveVerified);
             return true;
         }
         catch (PreviewServerUnavailableException exception)
@@ -268,11 +291,16 @@ public sealed class ReleasePreviewService(
                 .Where(item => item.ReleasePackageId == packageId || source.AlreadyReleased && item.Id == source.SourceVersionId)
                 .OrderByDescending(item => item.ReleasePackageId == packageId).ThenByDescending(item => item.CreatedAt).FirstOrDefault();
             var binding = package.VersionBindings?.FirstOrDefault(item => item.DocumentId == source.DocumentId);
-            if (binding is { Publish: false } && source.Kind is DocumentKind.Part or DocumentKind.Assembly)
+            if (binding is { Publish: false })
             {
-                var frozen = await repository.FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, cancellationToken);
-                if (frozen?.Sha256 == binding.Sha256)
-                    version = frozen with { Preview = package.ModelDeliveryArtifacts.GetValueOrDefault(source.DocumentId) };
+                var frozenDeliveryDrawing = source.Kind == DocumentKind.Drawing && ReleasePreviewPolicy.DeliversFrozenDrawings(package);
+                if (frozenDeliveryDrawing || source.Kind is DocumentKind.Part or DocumentKind.Assembly)
+                {
+                    var frozen = await repository.FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, cancellationToken);
+                    if (frozen?.Sha256 == binding.Sha256)
+                        version = frozen with { Preview = (frozenDeliveryDrawing ? package.PdfDeliveryArtifacts : package.ModelDeliveryArtifacts)
+                            .GetValueOrDefault(source.DocumentId) };
+                }
             }
             if (version is not null) result.Add(PdfTitleBlockSnapshotBuilder.DeliveryVersion(package, version));
         }
@@ -346,6 +374,7 @@ public sealed class ReleasePreviewService(
         if (!ReleasePreviewPolicy.RequiresConversion(package)) throw new PdmRuleException("该发布类型不支持转图。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
+        package = await PdfTitleBlockSnapshotBuilder.RestoreMissingLongLeadSnapshotAsync(repository, package, project, cancellationToken);
         var sources = await repository.ListReleasePreviewSourcesAsync(releasePackageId, cancellationToken);
         var wanted = documentIds.ToHashSet();
         var targets = sources.Where(item => wanted.Contains(item.DocumentId)).ToArray();
@@ -371,7 +400,7 @@ public sealed class ReleasePreviewService(
                 : await ConvertPreviewsAsync(package, project, missingTargets, stagingDirectory, cancellationToken, stampOnly);
             var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
             if (missingTargets.Count > 0 && releasedVersions.Count == 0 && failures is null)
-                throw new PdmRuleException("该图档还没有正式版本，无法挂接预览；请重新发布后再转图。");
+                throw new PdmRuleException("该图档的交付件无法绑定，请核对发布包冻结版本后重试。");
             await CopyPreviewsIntoPublishedPathAsync(package, vaultRoot, await ReleasedVersionsAsync(package.Id, cancellationToken), cancellationToken);
             await ArchiveDeliveryAsync(package, actor, cancellationToken);
             var items = await ListItemsAsync(package.Id, cancellationToken);

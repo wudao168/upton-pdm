@@ -21,8 +21,9 @@ internal static partial class Program
   void Check(bool ok,string message){if(!ok)throw new Exception(message);Console.WriteLine("PASS: "+message);}
   try
   {
-   foreach(var mode in new[]{"external","loaded","copied-peer","workspace","subassembly","registered-empty","managed","managed-stale","managed-other-path","missing-source","conflicting-peer","ambiguous","registered","bound-file","source-race","owner-race","no-resume","no-retained","invalid-list","tamper"})
+   foreach(var mode in new[]{"archived-missing","archived-missing-two","archived-missing-and-new","archived-missing-other-path","archived-missing-corrupt-base","archived-missing-unreadable-base","archived-missing-owner-race","external","loaded","copied-peer","workspace","subassembly","registered-empty","managed","managed-stale","managed-other-path","missing-source","conflicting-peer","ambiguous","registered","bound-file","source-race","owner-race","no-resume","no-retained","invalid-list","tamper"})
    {
+    var archivedMissing=mode.StartsWith("archived-missing",StringComparison.Ordinal);
     var folder=Path.Combine(output,mode);var directory=Path.Combine(folder,"View","QA","装配工作区");var desktop=Path.Combine(folder,"Desktop","测试");Directory.CreateDirectory(directory);Directory.CreateDirectory(desktop);
     var rootPath=Path.Combine(directory,"ROOT.SLDASM");File.WriteAllText(rootPath,"server base assembly");var baseHash=WorkingReuseHash(rootPath);var baseLength=new FileInfo(rootPath).Length;
     var project=Guid.NewGuid();var id=Guid.NewGuid();var version=Guid.NewGuid();
@@ -46,7 +47,8 @@ internal static partial class Program
     var peer=Path.Combine(directory,name);if(mode=="copied-peer"||mode=="conflicting-peer")File.WriteAllText(peer,mode=="conflicting-peer"?"different preexisting local file":File.ReadAllText(source));
     var child=Path.Combine(desktop,"子件.SLDPRT");if(mode=="subassembly")File.WriteAllText(child,"nested new part");
     var other=Path.Combine(folder,"Other",name);if(mode=="ambiguous"){Directory.CreateDirectory(Path.GetDirectoryName(other));File.WriteAllText(other,"second distinct file with same name");}
-    if(mode=="missing-source")File.Delete(source);
+    if(mode=="missing-source"||archivedMissing)File.Delete(source);
+    var addedSource=Path.Combine(desktop,"本次新增.SLDPRT");if(mode=="archived-missing-and-new")File.WriteAllText(addedSource,"new local part to retain");
     if(mode=="bound-file")identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{source,Guid.NewGuid(),Guid.NewGuid(),Guid.NewGuid(),"W1",WorkingReuseHash(source),new FileInfo(source).Length});
     var reads=0;var forbidden=0;var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
     var selectedPath=mode=="copied-peer"?peer:source;
@@ -54,7 +56,7 @@ internal static partial class Program
     var includeExistingPart=false;var loadedDirty=false;
     var loadedPart=new Proxy(modelType,call=>{switch(call.MethodName){case "GetPathName":return selectedPath;case "GetSaveFlag":return loadedDirty;case "GetType":return 1;case "get_Extension":return null;default:forbidden++;throw new Exception(call.MethodName);}}).GetTransparentProxy();
     var componentType=interop.GetType("SolidWorks.Interop.sldworks.Component2",true);
-    var component=new Proxy(componentType,call=>{switch(call.MethodName){case "GetPathName":return selectedPath;case "GetModelDoc2":return mode=="loaded"?loadedPart:null;case "get_IsVirtual":return false;case "get_Name2":return "底座-1";case "GetParent":return null;default:throw new Exception(call.MethodName);}}).GetTransparentProxy();
+    var component=new Proxy(componentType,call=>{switch(call.MethodName){case "GetPathName":return selectedPath;case "GetModelDoc2":return mode=="loaded"?loadedPart:null;case "IsSuppressed":return archivedMissing;case "get_IsVirtual":return false;case "get_Name2":return "底座-1";case "GetParent":return null;default:throw new Exception(call.MethodName);}}).GetTransparentProxy();
     var model=new AssemblyProxy(modelType,call=>{switch(call.MethodName){case "GetPathName":return rootPath;case "GetType":return 2;case "GetComponents":return new[]{component};case "get_Extension":return null;default:forbidden++;throw new Exception("恢复不得保存、关闭或改写模型："+call.MethodName);}}).GetTransparentProxy();
     var app=new Proxy(appType,call=>{
      if(call.MethodName=="GetDocuments")return includeExistingPart?new[]{loadedPart}:new object[0];
@@ -62,20 +64,43 @@ internal static partial class Program
      {
       reads++;if((bool)call.Args[1]||(bool)call.Args[2]||(bool)call.Args[3])throw new Exception("仅可读取保存的直接引用，不进行全盘搜索或打开模型");
       var owner=(string)call.Args[0];if(mode=="invalid-list")return new[]{"incomplete"};
-      if(owner==rootPath)return mode=="ambiguous"?new[]{name,source,name,other}:new[]{name,source};
+      if(owner==rootPath)return mode=="ambiguous"?new[]{name,source,name,other}:mode=="archived-missing-and-new"?new[]{name,source,"本次新增.SLDPRT",addedSource}:mode=="archived-missing-two"?new[]{name,source,"第二个缺件.SLDPRT",Path.Combine(desktop,"第二个缺件.SLDPRT")}:new[]{name,source};
+      if(archivedMissing&&Path.GetFileName(owner)=="ROOT.SLDASM")return mode=="archived-missing-unreadable-base"?null:mode=="archived-missing-two"?new[]{name,source,"第二个缺件.SLDPRT",Path.Combine(desktop,"第二个缺件.SLDPRT")}:new[]{name,mode=="archived-missing-other-path"?other:source};
       if(mode=="subassembly"&&owner==source)return new[]{"子件.SLDPRT",child};return new string[0];
      }
      forbidden++;throw new Exception("恢复不得打开、关闭、保存或修改模型："+call.MethodName);
     }).GetTransparentProxy();SetField(plugin,"application",app);
+    void ValidateLoaded(ISet<string> missing)
+    {
+     using(var workingScope=(IDisposable)New("ControlledWorkingCopyScope",rootPath,manifest))
+      TreeCall(plugin,"ValidateControlledLoadedSources",model,rootPath,manifest,app,missing,true);
+    }
     var document=New("DocumentDto");Set(document,"Id",id);Set(document,"ProjectId",project);Set(document,"FileName","ROOT.SLDASM");
     var documents=new List<object>{document};if(mode=="registered"||mode=="registered-empty"){var registered=New("DocumentDto");Set(registered,"Id",Guid.NewGuid());Set(registered,"ProjectId",project);Set(registered,"FileName",name);Set(registered,"StoredVersionCount",mode=="registered"?1:0);documents.Add(registered);}
     if(managed){var registered=New("DocumentDto");Set(registered,"Id",managedId);Set(registered,"ProjectId",project);Set(registered,"FileName",name);Set(registered,"Kind",(int)Enum.Parse(Type("CadDocumentKind"),"Part"));Set(registered,"StoredVersionCount",1);documents.Add(registered);}
-    var network=new RetainedLocalHandler(documents,()=>{if(mode=="source-race")File.AppendAllText(source,"concurrent local edit");if(mode=="owner-race")File.AppendAllText(rootPath,"concurrent assembly edit");},serverVersion);
+    var network=new RetainedLocalHandler(documents,()=>{if(mode=="source-race")File.AppendAllText(source,"concurrent local edit");if(mode=="owner-race"||mode=="archived-missing-owner-race")File.AppendAllText(rootPath,"concurrent assembly edit");},serverVersion){CorruptBaseline=mode=="archived-missing-corrupt-base"};
     using(var client=(IDisposable)New("PdmApiClient","http://local-recovery.invalid/"))using(var http=new HttpClient(network){BaseAddress=new Uri("http://local-recovery.invalid/")})using(var lifetime=new CancellationTokenSource())
     {
-     SetField(client,"httpClient",http);SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);
+     SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);
      var before=Directory.GetFiles(folder,"*",SearchOption.AllDirectories).ToDictionary(path=>path,WorkingReuseHash);
      Exception failure=null;try{var method=Type("PdmAddin").GetMethod("PrepareRetainedLocalReferencesAsync",Flags);if(method!=null)await (Task)method.Invoke(plugin,new[]{rootPath,manifest});}catch(Exception error){failure=error is TargetInvocationException?error.InnerException:error;}
+     if(archivedMissing)
+     {
+      var shouldReject=mode=="archived-missing-other-path"||mode=="archived-missing-corrupt-base"||mode=="archived-missing-owner-race"||mode=="archived-missing-unreadable-base";
+      Check((failure!=null)==shouldReject,mode+"：以原存档精确路径与校验和区分旧缺件，拒绝同名异路径、坏基准和并发修改");
+      var retained=(IDictionary)Get(manifest,"RetainedLocalReferences");
+      Check(retained.Count==(mode=="archived-missing-and-new"?1:0),mode+"：缺件不变成新增放行许可，真正新增的现有零件继续保留");
+      if(!shouldReject)
+      {
+       Check(((IList)Get(manifest,"ReferenceIssues")).Count==(mode=="archived-missing-two"?2:1),mode+"：原有缺件保留原引用并明确记录，不伪造替代文件");
+       var missing=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+       ValidateLoaded(missing);
+       Check(missing.Contains(source),mode+"：已恢复的草稿可继续原生加载来源校验，旧缺件仍明确呈现");
+      }
+      Check(network.Downloads==1&&network.Writes==0&&forbidden==0&&files.Count==1,mode+"：只核对一份原存档，不上传、不登记、不保存或关闭模型");
+      Check(!File.Exists(source)&&(mode=="archived-missing-owner-race"||WorkingReuseHash(rootPath)==savedHash),mode+"：原工作修改与缺失引用保持原样");
+      continue;
+     }
      var rejected=new[]{"managed-stale","managed-other-path","missing-source","conflicting-peer","ambiguous","registered","bound-file","source-race","owner-race","invalid-list"}.Contains(mode);
      if(rejected)Check(failure is InvalidOperationException,mode+"：缺件、同名冲突、登记身份和并发变化均停止恢复，保留本地文件");
      else
@@ -88,7 +113,7 @@ internal static partial class Program
       Check(blocked!=permitted,mode+"：受控边界仅放行精确核对的本地新增文件");
       if(permitted)
       {
-       TreeCall(plugin,"ValidateControlledLoadedSources",model,rootPath,manifest,app,null);Check(true,mode+"：未加载的新增零件或子装配按本地待存档引用核对，不误报服务器缺件");
+       ValidateLoaded(null);Check(true,mode+"：未加载的新增零件或子装配按本地待存档引用核对，不误报服务器缺件");
        if(managed)
        {
         includeExistingPart=true;loadedDirty=true;var blockedUnsaved=false;
@@ -110,7 +135,7 @@ internal static partial class Program
        File.Delete(unknown);
        if(mode=="tamper")
        {
-        File.AppendAllText(source,"changed after proof");var caught=false;try{TreeCall(plugin,"ValidateControlledLoadedSources",model,rootPath,manifest,app,null);}catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){caught=true;}
+        File.AppendAllText(source,"changed after proof");var caught=false;try{ValidateLoaded(null);}catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){caught=true;}
         Check(caught,"新增文件在原生打开期间变化时不能认定打开完成");
        }
       }
@@ -127,11 +152,12 @@ internal static partial class Program
  }
  sealed class RetainedLocalHandler:HttpMessageHandler
  {
-  readonly List<object> documents;readonly Action read;readonly object version;internal int Writes,Requests;
+  readonly List<object> documents;readonly Action read;readonly object version;internal int Writes,Requests,Downloads;internal bool CorruptBaseline;
   internal RetainedLocalHandler(List<object> documents,Action read,object version){this.documents=documents;this.read=read;this.version=version;}
   protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
   {
    Requests++;if(request.Method==HttpMethod.Get&&request.RequestUri.AbsolutePath.EndsWith("/versions")&&version!=null)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(new JavaScriptSerializer().Serialize(new[]{version}))});
+   if(request.Method==HttpMethod.Get&&request.RequestUri.AbsolutePath.EndsWith("/file")){Downloads++;read();return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(System.Text.Encoding.UTF8.GetBytes(CorruptBaseline?"corrupted archive":"server base assembly"))});}
    if(request.Method!=HttpMethod.Get||!request.RequestUri.AbsolutePath.EndsWith("/documents")){Writes++;throw new Exception("只能读取项目图档及版本，不能登记或上传");}
    read();return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(new JavaScriptSerializer().Serialize(documents))});
   }

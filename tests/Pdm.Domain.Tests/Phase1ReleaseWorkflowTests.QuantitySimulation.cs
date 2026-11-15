@@ -70,7 +70,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
             Assert.Equal(ids.Order(),package.SelectedBomItemIds.Order());
             if(!formal)package=await workflow.UpdateReleasePackageDraftAsync(package.Id,"设计问题 / 设计变更",ids,null,
                 "admin",UserRole.Administrator,default,wholeSetMultiplier:multiplier,confirmedRemovedBomItemIds:removed);
-            package=await PublishThroughAllStepsAsync(workflow,package);
+            package=await PublishThroughAllStepsAsync(workflow,package,repository);
             Assert.Equal(ReleasePackageState.Published,package.State);
             var actual=SimulationTotals(package,kind);
             Assert.Equal(expected.OrderBy(pair=>pair.Key).ToArray(),actual.OrderBy(pair=>pair.Key).ToArray());
@@ -142,7 +142,7 @@ public sealed partial class Phase1ReleaseWorkflowTests
             var package=await workflow.CreateScopedReleasePackageAsync(ProjectId,null,"","",formal?"":"设计问题 / 设计变更","未指定",null,
                 formal?ReleaseScope.NonStandardWithDrawing:ReleaseScope.NonStandardSupplement,selected,"admin",UserRole.Administrator,default,
                 wholeSetMultiplier:multiplier,confirmedRemovedBomItemIds:removed);
-            package=await PublishThroughAllStepsAsync(workflow,package);
+            package=await PublishThroughAllStepsAsync(workflow,package,repository);
             Assert.Equal(ReleasePackageState.Published,package.State);
             Assert.Equal(expected,package.NonStandardBomSnapshot.Sum(item=>item.Quantity)*package.WholeSetMultiplier);
             foreach(var frozen in history)Assert.Equal(frozen.Value,SimulationFingerprint((await repository.FindReleasePackageAsync(frozen.Key,default))!,BomKind.NonStandard));

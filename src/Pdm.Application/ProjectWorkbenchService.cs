@@ -170,7 +170,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("验收情况暂时无法读取"); }
                 }
                 var canRegister = project.EffectiveProjectPermissions.Contains("project.risk.manage");
-                result.Add(new(project, effective, plan?.ApprovalStatus.ToString() ?? "Missing", budget, purchasing, acceptance, warnings, canRegister,
+                result.Add(new(project, calendarOnly && effective is not null && plan is not null ? effective with { RowVersion = plan.RowVersion } : effective, plan?.ApprovalStatus.ToString() ?? "Missing", budget, purchasing, acceptance, warnings, canRegister,
                     effective?.ApprovalStatus == ProjectPlanApprovalStatus.Approved && effective.Tasks.Count > 0 ? ProjectPlanningService.CompletionPercent(effective.Tasks, effective.Stages) : null,
                     project.EffectiveProjectPermissions.Contains("project.record.manage")));
             }

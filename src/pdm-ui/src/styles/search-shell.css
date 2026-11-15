@@ -5,7 +5,7 @@
 /* 外框与搜索按钮等高，右侧按钮覆盖边框内缩，外沿贴合。 */
 @layer pdm-button-sizing {
   :root body .pdm-search-field.pdm-search-field {
-    border:1px solid var(--pdm-border) !important;
+    border:1px solid var(--pdm-container-border, var(--pdm-border)) !important;
     padding-left:3px !important; padding-right:0 !important;
     grid-template-rows:minmax(0, 1fr);
     background:#fff !important;

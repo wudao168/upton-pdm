@@ -202,6 +202,33 @@ public sealed class ReleasePackagePublisherTests
         }
     }
 
+    [Fact]
+    public async Task MergedRelease_WaitsForAllPdfsAndRetryDoesNotNeedAnotherApproval()
+    {
+        var root=Path.Combine(Path.GetTempPath(),"pdm-merged-publication",Guid.NewGuid().ToString("N"));
+        var packageId=Guid.NewGuid(); var documentId=Guid.NewGuid(); var now=DateTimeOffset.UtcNow;
+        var task=new ApprovalTask(Guid.NewGuid(),packageId,ApprovalStage.MechanicalSupervisor,"assigned","actual",ApprovalDecision.Approved,"批准",now);
+        var package=new ReleasePackage(packageId,Guid.NewGuid(),"RP-MERGED-PDF",ReleasePackageState.Publishing,null,"","",[task],now,null,null)
+            {Scope=ReleaseScope.NonStandardWithDrawing,DrawingReview=new(1,[])};
+        var project=new Project(package.ProjectId,"TEST","联合发布","admin",Path.Combine(root,"vault"),Path.Combine(root,"release"),true);
+        var converter=new RecordingServerPreviewConverter {PartialFailure=true};
+        var publisher=new AtomicReleasePackagePublisher(TimeProvider.System,converter);
+        var source=new ReleasePreviewSource(documentId,Guid.NewGuid(),"D","D.SLDDRW",DocumentKind.Drawing,"source.slddrw",10,"hash","hash");
+        try
+        {
+            await publisher.PrepareAsync(package,project,default);
+            var error=await Assert.ThrowsAsync<ReleaseConversionPendingException>(()=>publisher.PublishAsync(package,project,[source],default));
+            Assert.Contains("BOM与图纸暂未发布",error.Message);
+            Assert.False(Directory.Exists(Path.Combine(project.ReleaseLocation,package.Number)));
+            converter.PartialFailure=false;
+            var result=await publisher.PublishAsync(package,project,[source],default);
+            Assert.Null(result.PreviewError);
+            Assert.Equal(ApprovalDecision.Approved,package.ApprovalTasks[0].Decision);
+            Assert.True(File.Exists(Path.Combine(result.PublishedPath,"approval.json")));
+        }
+        finally { if(Directory.Exists(root)) Directory.Delete(root,true); }
+    }
+
     private sealed class RecordingServerPreviewConverter : IServerPreviewConverter
     {
         public Exception? FinalizationError { get; set; }

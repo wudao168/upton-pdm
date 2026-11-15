@@ -203,6 +203,11 @@ internal sealed class BatchPropertyEditItem
         .Where(name => !IsIdentityProperty(name))
         .ToArray();
 
+    internal IEnumerable<string> SynchronizationPropertyNames => sourcePropertyNames
+        .Concat(ChangedProperties().Select(property => property.Key))
+        .Where(name => !IsIdentityProperty(name))
+        .Distinct(StringComparer.OrdinalIgnoreCase);
+
     internal IReadOnlyList<string> VisiblePropertyCardNames => EffectivePropertyCardFields
         .Select(cardField => cardField.EditorPropertyName)
         .Select(NormalizePropertyName)
@@ -844,12 +849,14 @@ internal sealed class BatchPropertyEditDialog : Form
             ColumnCount = 1,
             RowCount = 2
         };
-        page.RowStyles.Add(new RowStyle(SizeType.Absolute, 114));
+        page.RowStyles.Add(new RowStyle(SizeType.Absolute, 134));
         page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var tools = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
+            Height = 114,
+            MinimumSize = new Size(2355, 114),
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             ColumnCount = 2,
@@ -869,6 +876,7 @@ internal sealed class BatchPropertyEditDialog : Form
             executeDocumentRenames,
             grid);
         batchRenameControl.Completed += (_, _) => BeginInvoke(new Action(RefreshAfterBatchRename));
+        batchRenameControl.DrawingSyncRequested += (_, _) => SynchronizeSelectedDrawings();
         batchRenameHost.Dock = DockStyle.Fill;
         batchRenameHost.Margin = new Padding(20, 0, 0, 0);
         batchRenameHost.BackColor = SystemColors.Control;
@@ -879,7 +887,11 @@ internal sealed class BatchPropertyEditDialog : Form
         batchContentHost.Dock = DockStyle.Fill;
         batchContentHost.Margin = Padding.Empty;
         batchContentHost.Controls.Add(grid);
-        page.Controls.Add(tools, 0, 0);
+        var toolbarViewport = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = Padding.Empty };
+        toolbarViewport.AutoScrollMinSize = tools.MinimumSize;
+        toolbarViewport.SizeChanged += (_, _) => tools.Width = Math.Max(tools.MinimumSize.Width, toolbarViewport.ClientSize.Width);
+        toolbarViewport.Controls.Add(tools);
+        page.Controls.Add(toolbarViewport, 0, 0);
         page.Controls.Add(batchContentHost, 0, 1);
         propertyWorkspaceHost.Controls.Add(page);
         return propertyWorkspaceHost;
@@ -1469,7 +1481,11 @@ internal sealed class BatchPropertyEditDialog : Form
         return items.Where(candidate =>
             candidate.OperationItem.Node.Kind == CadDocumentKind.Assembly
             || candidate.OperationItem.Node.Kind == CadDocumentKind.Part)
-            .Where(candidate => DrawingReferencesModel(drawing, candidate.OperationItem.Node));
+            .Where(candidate => DrawingReferencesModel(drawing, candidate.OperationItem.Node))
+            .Where(candidate => drawing.ReferencedModels.Count == 0 || drawing.ReferencedModels.Any(reference =>
+                SameReferencedModel(reference, candidate.OperationItem.Node)
+                && (string.IsNullOrWhiteSpace(reference.Configuration)
+                    || string.Equals(reference.Configuration.Trim(), candidate.ConfigurationName, StringComparison.OrdinalIgnoreCase))));
     }
 
     private IEnumerable<BatchPropertyEditItem> RelatedDrawingItems(BatchPropertyEditItem modelItem)
@@ -1486,14 +1502,77 @@ internal sealed class BatchPropertyEditDialog : Form
 
     private static bool DrawingReferencesModel(CadTreeNode drawing, CadTreeNode model)
     {
-        if (drawing.RelatedModelDocumentId.HasValue) return drawing.RelatedModelDocumentId == model.DocumentId;
         if (drawing.ReferencedModels.Count > 0)
-            return drawing.ReferencedModels.Any(reference => reference.DocumentId.HasValue && model.DocumentId.HasValue
-                ? reference.DocumentId == model.DocumentId
-                : !string.IsNullOrWhiteSpace(reference.FullPath) && string.Equals(reference.FullPath, model.FullPath, StringComparison.OrdinalIgnoreCase));
-        var stem = Path.GetFileNameWithoutExtension(drawing.FileName ?? string.Empty);
-        return !string.IsNullOrWhiteSpace(stem) && string.Equals(stem, Path.GetFileNameWithoutExtension(model.FileName ?? string.Empty), StringComparison.OrdinalIgnoreCase)
-            && string.Equals(Path.GetDirectoryName(drawing.FullPath), Path.GetDirectoryName(model.FullPath), StringComparison.OrdinalIgnoreCase);
+            return drawing.ReferencedModels.Any(reference => SameReferencedModel(reference, model));
+        return drawing.RelatedModelDocumentId.HasValue && drawing.RelatedModelDocumentId == model.DocumentId;
+    }
+
+    private static bool SameReferencedModel(CadTreeNode reference, CadTreeNode model) =>
+        reference.DocumentId.HasValue && model.DocumentId.HasValue
+            ? reference.DocumentId == model.DocumentId
+            : !string.IsNullOrWhiteSpace(reference.FullPath)
+                && string.Equals(reference.FullPath, model.FullPath, StringComparison.OrdinalIgnoreCase);
+
+    // Shared by explicit drawing synchronization and all automatic model-edit paths.
+    private bool SynchronizeDrawingProperty(BatchPropertyEditItem drawing, string propertyName,
+        BatchPropertyEditItem[] sources, out string issue)
+    {
+        issue = null;
+        if (!drawing.IsPropertyApplicable(propertyName)) return false;
+        if (sources.Length == 0 || sources.Any(source => source.IsPropertyUnread(propertyName))
+            || drawing.OperationItem.Node.ReferencedModels.Any(reference => !sources.Any(source =>
+                SameReferencedModel(reference, source.OperationItem.Node)
+                && (string.IsNullOrWhiteSpace(reference.Configuration)
+                    || string.Equals(reference.Configuration.Trim(), source.ConfigurationName, StringComparison.OrdinalIgnoreCase)))))
+            issue = "关联模型或属性尚未完整读取";
+        else if (sources.Any(source => !source.SynchronizationPropertyNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase)))
+            issue = "关联模型中缺少该属性";
+        else if (sources.Select(source => source.PropertyValue(propertyName)).Distinct(StringComparer.Ordinal).Count() != 1)
+            issue = "关联模型属性不一致";
+        if (issue != null) return false;
+        var value = sources[0].PropertyValue(propertyName);
+        if (string.Equals(drawing.PropertyValue(propertyName), value, StringComparison.Ordinal)) return false;
+        drawing.SetPropertyValue(propertyName, value);
+        return true;
+    }
+
+    private void SynchronizeSelectedDrawings()
+    {
+        if (operationRunning || synchronizingProperties) return;
+        grid.EndEdit();
+        var selectedModels = items.Where(item => item.Selected
+            && item.OperationItem.Node.Kind is CadDocumentKind.Part or CadDocumentKind.Assembly).ToArray();
+        var drawings = items.Where(item => item.OperationItem.Node.Kind == CadDocumentKind.Drawing
+            && (item.Selected || selectedModels.Any(model => DrawingReferencesModel(item.OperationItem.Node, model.OperationItem.Node)))).ToArray();
+        var issues = new List<string>();
+        var changed = 0;
+        foreach (var drawing in drawings)
+        {
+            var sources = RelatedModelItems(drawing).ToArray();
+            if (sources.Length == 0)
+            {
+                issues.Add(drawing.FileName + "：未找到对应配置的关联模型，请加载模型后重试。");
+                continue;
+            }
+            var modified = false;
+            foreach (var name in sources.SelectMany(source => source.SynchronizationPropertyNames).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                modified |= SynchronizeDrawingProperty(drawing, name, sources, out var issue);
+                if (issue != null) issues.Add(drawing.FileName + "：“" + name + "”" + issue + "，已保留原值。");
+            }
+            if (modified) { drawing.Selected = true; changed++; }
+        }
+        RefreshGridComboBoxValues();
+        RefreshDynamicPropertyColumns();
+        grid.Refresh();
+        propertyCardGrid.Refresh();
+        InvalidatePropertyCardConfirmation();
+        UpdateSummary();
+        plmSyncStatus.Text = drawings.Length == 0 ? "请勾选工程图或其关联的3D模型"
+            : "工程图同步：已更新 " + changed + " 个，需核对 " + issues.Count + " 项；请确认后批量写入";
+        plmSyncStatus.ForeColor = issues.Count > 0 ? Color.FromArgb(210, 110, 0) : Color.FromArgb(31, 132, 92);
+        fillResultToolTip.SetToolTip(plmSyncStatus, string.Join(Environment.NewLine, issues));
+        PluginDiagnosticLog.Record("工程图同步", plmSyncStatus.Text + Environment.NewLine + string.Join(Environment.NewLine, issues));
     }
 
     private void SynchronizeRelatedDrawings(BatchPropertyEditItem modelItem, string propertyName)
@@ -1503,29 +1582,18 @@ internal sealed class BatchPropertyEditDialog : Form
             return;
         }
 
-        var value = modelItem.PropertyValue(propertyName);
         foreach (var drawing in RelatedDrawingItems(modelItem))
         {
             var sources = RelatedModelItems(drawing).ToArray();
-            if (!drawing.IsPropertyApplicable(propertyName)
-                || sources.Any(source => source.IsPropertyUnread(propertyName)))
+            var changed = SynchronizeDrawingProperty(drawing, propertyName, sources, out var issue);
+            if (issue != null)
             {
-                continue;
-            }
-            if (sources.Select(source => source.PropertyValue(propertyName)).Distinct(StringComparer.Ordinal).Count() != 1)
-            {
-                plmSyncStatus.Text = "关联模型属性不一致，未自动覆盖工程图，请核对";
+                plmSyncStatus.Text = issue + "，未自动覆盖工程图，请核对";
                 plmSyncStatus.ForeColor = Color.FromArgb(210, 110, 0);
-                fillResultToolTip.SetToolTip(plmSyncStatus, drawing.FileName + "：“" + propertyName + "”的关联模型值不一致，工程图原值已保留。");
+                fillResultToolTip.SetToolTip(plmSyncStatus, drawing.FileName + "：“" + propertyName + "”" + issue + "，工程图原值已保留。");
                 continue;
             }
-            if (string.Equals(drawing.PropertyValue(propertyName), value, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            drawing.SetPropertyValue(propertyName, value);
-            if (modelItem.Selected)
+            if (changed && modelItem.Selected)
             {
                 drawing.Selected = true;
             }

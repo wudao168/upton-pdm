@@ -68,7 +68,7 @@ internal static partial class Program
     Exception failure=null;try{await (Task)DiscardCall(plugin,"DiscardSelectedWorkingFilesAsync",DiscardNodes(partNode));}catch(Exception error){failure=error;}
     var fails=mode=="dirty-owner"||mode=="restore-owner-failed";
     if((failure!=null)!=fails)throw new Exception("Unexpected discard result "+mode,failure);
-    if(mode=="dirty-owner"){if(closes.Count!=0||!rootLoaded||!partLoaded||File.ReadAllText(fixture.CurrentPath)!="selected real saved part edit")throw new Exception("丢弃了上层总装未保存修改");}
+    if(mode=="dirty-owner"){if(handler.Discards!=0||closes.Count!=0||!rootLoaded||!partLoaded||File.ReadAllText(fixture.CurrentPath)!="selected real saved part edit")throw new Exception("存在上层总装未保存修改时不得先释放权限或改写文件");}
     else if(mode=="restore-owner-failed"){if(failure==null||!failure.Message.Contains("原窗口"))throw new Exception("总装恢复失败被报告为成功");}
     else
     {

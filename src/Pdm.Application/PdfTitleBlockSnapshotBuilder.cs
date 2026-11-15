@@ -13,13 +13,34 @@ public static class PdfTitleBlockSnapshotBuilder
         return PdfTitleBlockFields.All.Where(field => selected.Contains(field.Key)).Select(field => field.Key).ToArray();
     }
 
-    public static async Task<PdfTitleBlockSnapshot> BuildAsync(IPdmRepository repository, ReleasePackage package,
-        Project project, PdmSystemSettings settings, CancellationToken ct)
+    public static Dictionary<string, string> NormalizeDrawingLabels(IReadOnlyDictionary<string, string>? labels)
     {
-        var fields = Normalize(settings.PdfTitleBlockFill.EnabledFields);
+        var normalized = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (labels is null) return normalized;
+        foreach (var (key, raw) in labels.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            if (!PdfTitleBlockFields.All.Any(field => field.Key == key))
+                throw new PdmRuleException("PDF图框映射包含未知字段，请刷新后重试。");
+            var label = raw?.Trim() ?? "";
+            if (label.Length > 60 || label.Any(char.IsControl) || PdfTitleBlockFields.NormalizeLabel(label).Length == 0)
+                throw new PdmRuleException($"“{PdfTitleBlockFields.Get(key).Name}”的图框标签须为1至60个字符。");
+            normalized.Add(key, label);
+        }
+        return normalized;
+    }
+
+    public static async Task<PdfTitleBlockSnapshot> BuildAsync(IPdmRepository repository, ReleasePackage package,
+        Project project, PdmSystemSettings settings, CancellationToken ct) =>
+        await BuildAsync(repository, package, project, settings.PdfTitleBlockFill, ct);
+
+    private static async Task<PdfTitleBlockSnapshot> BuildAsync(IPdmRepository repository, ReleasePackage package,
+        Project project, PdfTitleBlockFillSettings settings, CancellationToken ct)
+    {
+        var fields = Normalize(settings.EnabledFields);
         var drawings = new Dictionary<Guid, PdfDrawingTitleBlockSnapshot>();
         if (fields.Length == 0) return new(fields, drawings, true);
-        var reviews = fields.Any(key => key is "reviewer" or "reviewedOn" or "approver" or "approvedOn")
+        var merged = package.DrawingReview is not null;
+        var reviews = !merged && fields.Any(key => key is "designer" or "drafter" or "designedOn" or "reviewer" or "reviewedOn" or "approver" or "approvedOn")
             ? await repository.ListDrawingReviewPackagesAsync(project.Id, ct) : [];
         var items = ProductionDrawingQuantities.FrozenItems(package);
         foreach (var source in (await ReleaseBoundSourceReader.ReadAsync(repository, package, true, ct)).Where(s => s.Kind == DocumentKind.Drawing))
@@ -33,9 +54,22 @@ public static class PdfTitleBlockSnapshotBuilder
                     && (item.EffectiveDrawingVersionId == version.Id || item.EffectiveDrawingVersionId == version.SourceVersionId))
                     .Select(item => (Review: review, Item: item))).ToArray();
             var reviewMatch = matches.OrderByDescending(match => match.Review.ApprovedAt).FirstOrDefault();
+            // 审核回写和正式版本的创建人不代表设计人；追溯本张图纸实际送审的存档版本。
+            var designVersion = version;
+            if (fields.Any(key => key is "designer" or "drafter" or "designedOn"))
+            {
+                var designVersionId = reviewMatch.Item?.DrawingVersionId ?? version.SourceVersionId ?? version.Id;
+                if (designVersionId != version.Id)
+                    designVersion = await repository.FindDocumentVersionAsync(source.DocumentId, designVersionId, ct)
+                        ?? throw new PdmConflictException($"图纸{source.FileName}的PLM送审存档版本不存在，请核对图纸审核记录。");
+            }
+            var designer = fields.Any(key => key is "designer" or "drafter")
+                ? await PersonNameAsync(repository, designVersion.CreatedBy, null, ct) : null;
             var values = new Dictionary<string, string>();
             foreach (var key in fields)
             {
+                // 当前发布审批尚未发生；仅冻结来源规则，实际签字在最终批准后取值。
+                if (merged && (IsApprovalField(key) || key == "materialCode")) continue;
                 if (key == "quantity")
                 {
                     if (bom.Length == 0 || bom.Select(BomReleaseAggregation.MaterialKey).Distinct().Count() != 1)
@@ -44,25 +78,50 @@ public static class PdfTitleBlockSnapshotBuilder
                 }
                 string? value = key switch
                 {
-                    "designer" or "drafter" => Property(version, null, "设计"),
-                    "designedOn" => DesignDate(Property(version, null, "设计日期"), source.FileName),
-                    "reviewer" => reviewMatch.Item?.DrawingReviewerName,
+                    "designer" or "drafter" => designer,
+                    "designedOn" => Date(designVersion.CreatedAt),
+                    "reviewer" => await PersonNameAsync(repository, reviewMatch.Item?.DrawingReviewer, reviewMatch.Item?.DrawingReviewerName, ct),
                     "reviewedOn" => Date(reviewMatch.Item?.DrawingReviewedAt),
-                    "approver" => reviewMatch.Review?.SupervisorReviewedByName,
+                    "approver" => await PersonNameAsync(repository, reviewMatch.Review?.SupervisorReviewedBy, reviewMatch.Review?.SupervisorReviewedByName, ct),
                     "approvedOn" => Date(reviewMatch.Review?.SupervisorReviewedAt),
                     "projectNumber" => project.Code,
                     "projectName" => project.Name,
                     "revision" => source.ExpectedFormalRevision,
-                    _ => await MaterialValueAsync(repository, package, version, bom, key, settings, source.FileName, ct)
+                    _ => MaterialValue(bom, key, source.FileName)
                 };
                 if (string.IsNullOrWhiteSpace(value))
-                    throw new PdmRuleException($"图纸{source.FileName}缺少已启用的“{PdfTitleBlockFields.Get(key).Name}”，请补齐来源数据并重新提交发布。");
+                    throw new PdmRuleException($"图纸{source.FileName}缺少已启用的“{PdfTitleBlockFields.Get(key).Name}”，请补齐PLM中的{SourceDescription(key)}后重新提交发布。");
                 values[key] = value.Trim();
             }
             var binding = package.VersionBindings!.Single(item => item.DocumentId == source.DocumentId);
             drawings[source.DocumentId] = new(binding.VersionId, binding.Sha256, values, bom.Select(item => item.Id).ToArray());
         }
-        return new(fields, drawings, !fields.Any(key => key is "quantity" or "materialCode"));
+        var labels = NormalizeDrawingLabels(settings.DrawingLabels);
+        return new(fields, drawings, !fields.Any(key => key is "quantity" or "materialCode" || merged && IsApprovalField(key)))
+        {
+            UseReleaseApproval = merged,
+            DrawingLabels = fields.Where(key => labels.ContainsKey(key) || PdfTitleBlockFields.PersonLabels.ContainsKey(key))
+                .ToDictionary(key => key, key => labels.GetValueOrDefault(key, PdfTitleBlockFields.DefaultLabel(key)))
+        };
+    }
+
+    public static async Task<ReleasePackage> RestoreMissingLongLeadSnapshotAsync(IPdmRepository repository, ReleasePackage package,
+        Project project, CancellationToken ct)
+    {
+        if (!ReleasePreviewPolicy.DeliversFrozenDrawings(package)
+            || package.PdfTitleBlockSnapshot is not { Enabled: true, Drawings.Count: 0 } missing
+            || package.DrawingReview?.Items.Count is not > 0) return package;
+
+        var snapshot = await BuildAsync(repository, package, project, new PdfTitleBlockFillSettings
+        {
+            EnabledFields = missing.EnabledFields,
+            DrawingLabels = missing.DrawingLabels
+        }, ct);
+        if (snapshot.Drawings.Count != package.DrawingReview.Items.Count)
+            throw new PdmConflictException("长交期发布包的PDF图签与冻结审核图纸清单不一致。");
+        var restored = await FreezeForPublicationAsync(repository, package with { PdfTitleBlockSnapshot = snapshot },
+            await repository.ListReleasePackagesAsync(package.ProjectId, ct), ct);
+        return await repository.SaveReleasePdfTitleBlockAsync(package.Id, restored, ct);
     }
 
     public static PdfTitleBlockSnapshot FreezeQuantities(ReleasePackage package, IEnumerable<ReleasePackage> history)
@@ -92,18 +151,68 @@ public static class PdfTitleBlockSnapshotBuilder
         return snapshot with { Drawings = drawings, QuantitiesFrozen = true };
     }
 
-    private static string? Property(DocumentVersion version, string? configuration, string name) =>
-        CadPropertyCardSnapshot.Read(version.PropertySnapshot, configuration ?? string.Empty, name)?.Trim();
+    private static bool IsApprovalField(string key) => key is "reviewer" or "reviewedOn" or "approver" or "approvedOn";
+
+    public static async Task<PdfTitleBlockSnapshot> FreezeForPublicationAsync(IPdmRepository repository,
+        ReleasePackage package, IEnumerable<ReleasePackage> history, CancellationToken ct)
+    {
+        var snapshot = package.PdfTitleBlockSnapshot!;
+        if (snapshot.QuantitiesFrozen) return snapshot;
+        var frozen = FreezeQuantities(package, history);
+        if (!snapshot.UseReleaseApproval || !snapshot.EnabledFields.Any(IsApprovalField)) return frozen;
+        if (package.ApprovalTasks.Count == 0 || package.ApprovalTasks.Any(t => t.Decision != ApprovalDecision.Approved))
+            throw new PdmConflictException("发布审批尚未全部通过，不能生成正式PDF签字。");
+        var review = ReleaseDrawingReview.ReviewTask(package);
+        var approval = package.ApprovalTasks.OrderBy(t => t.StepOrder).LastOrDefault(t => t.Stage == ApprovalStage.MechanicalSupervisor)
+            ?? package.ApprovalTasks.OrderBy(t => t.StepOrder).Last();
+        async Task<string> Names(ApprovalTask? task)
+        {
+            if (task is null) throw new PdmConflictException("发布包缺少实际审核节点，无法填写PDF。");
+            var actors = (task.Participants?.Signatures ?? []).Concat(task.Participants?.Departments.SelectMany(d => d.Signatures) ?? [])
+                .Select(s => s.Actor).Append(task.DecisionBy ?? "").Where(a => !string.IsNullOrWhiteSpace(a)).Distinct(StringComparer.OrdinalIgnoreCase);
+            var names = new List<string>();
+            foreach (var actor in actors) names.Add(await PersonNameAsync(repository, actor, null, ct) ?? "姓名待补充");
+            if (names.Count == 0) throw new PdmConflictException("发布审批缺少实际签字人员，请核对审批记录。");
+            return string.Join("、", names);
+        }
+        var values = new Dictionary<string, string>();
+        foreach (var key in snapshot.EnabledFields.Where(IsApprovalField))
+        {
+            var value = key switch {
+                "reviewer" => await Names(review), "reviewedOn" => Date(review?.DecidedAt),
+                "approver" => await Names(approval), _ => Date(approval.DecidedAt)
+            };
+            if (string.IsNullOrWhiteSpace(value)) throw new PdmConflictException("发布审批缺少实际处理日期，请核对审批记录。");
+            values[key] = value;
+        }
+        return frozen with { Drawings = frozen.Drawings.ToDictionary(p => p.Key, p => {
+            var filled = new Dictionary<string,string>(p.Value.Values);
+            foreach (var entry in values) filled[entry.Key] = entry.Value;
+            return p.Value with { Values = filled };
+        }) };
+    }
 
     private static string? Date(DateTimeOffset? date) => date?.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-    private static string? DesignDate(string? value, string fileName)
+    private static async Task<string?> PersonNameAsync(IPdmRepository repository, string? username, string? snapshotName, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        if (DateOnly.TryParse(value, CultureInfo.GetCultureInfo("zh-CN"), DateTimeStyles.None, out var date))
-            return date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-        throw new PdmRuleException($"图纸{fileName}的设计日期无法识别，请按yyyy-MM-dd填写后重新存档。");
+        if (!string.IsNullOrWhiteSpace(snapshotName) && !string.Equals(snapshotName, username, StringComparison.OrdinalIgnoreCase))
+            return snapshotName.Trim();
+        if (string.IsNullOrWhiteSpace(username)) return null;
+        var user = await repository.FindUserAsync(username, ct);
+        return string.IsNullOrWhiteSpace(user?.DisplayName) || string.Equals(user.DisplayName, username, StringComparison.OrdinalIgnoreCase)
+            ? "姓名待补充" : user.DisplayName.Trim();
     }
+
+    private static string SourceDescription(string key) => key switch
+    {
+        "designer" or "drafter" or "designedOn" => "图纸送审版本存档记录",
+        "reviewer" or "reviewedOn" => "图纸实际审核记录",
+        "approver" or "approvedOn" => "图纸实际批准记录",
+        "projectNumber" or "projectName" => "项目信息",
+        "revision" => "图纸发布版本信息",
+        _ => "发布BOM物料信息"
+    };
 
     private static string? BomValue(BomItem item, string key) => key switch
     {
@@ -113,29 +222,11 @@ public static class PdfTitleBlockSnapshotBuilder
         _ => throw new PdmRuleException("不支持的PDF物料属性。")
     };
 
-    private static async Task<string?> MaterialValueAsync(IPdmRepository repository, ReleasePackage package,
-        DocumentVersion drawing, IReadOnlyList<BomItem> items, string key, PdmSystemSettings settings, string fileName, CancellationToken ct)
+    private static string? MaterialValue(IReadOnlyList<BomItem> items, string key, string fileName)
     {
         var values = items.Select(item => BomValue(item, key)?.Trim() ?? "").Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (values.Length != 1) throw new PdmRuleException($"图纸{fileName}对应的“{PdfTitleBlockFields.Get(key).Name}”不唯一，请核对模型配置和发布BOM。");
-        var propertyKey = key == "materialCode" ? "drawingNumber" : key;
-        var propertyName = BomPropertyMappingCatalog.SolidWorksProperty(settings, propertyKey, PdfTitleBlockFields.Get(key).Name);
-        void Check(string? value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return;
-            if (key == "wearPart") value = BomPropertyMappingCatalog.IsWearPartValue(value) ? "是" : "否";
-            if (!string.Equals(value.Trim(), values[0], StringComparison.OrdinalIgnoreCase))
-                throw new PdmConflictException($"图纸{fileName}的“{PdfTitleBlockFields.Get(key).Name}”与冻结BOM不一致，请修正、重新存档并审核后发布。");
-        }
-        foreach (var item in items)
-        {
-            Check(Property(drawing, item.SourceConfiguration, propertyName));
-            var binding = package.VersionBindings?.SingleOrDefault(b => b.DocumentId == item.SourceDocumentId);
-            if (binding is null) throw new PdmConflictException($"图纸{fileName}的模型没有冻结版本，无法核对物料属性。");
-            var model = await repository.FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, ct)
-                ?? throw new PdmConflictException($"图纸{fileName}的冻结模型版本不存在。");
-            Check(Property(model, item.SourceConfiguration, propertyName));
-        }
+        // PDF 图签以 PLM 发布 BOM 为准，CAD 属性既不参与取值，也不作为一致性门槛。
         return values[0];
     }
 

@@ -44,9 +44,13 @@ public static class ReleaseBoundSourceReader
         var nativeIndexes = await repository.ListNativeReferenceIndexesAsync(package.ProjectId, ct);
         var bomModels = ProductionDrawingQuantities.FrozenItems(package).Where(item => item.SourceDocumentId.HasValue)
             .Select(item => item.SourceDocumentId!.Value).ToHashSet();
+        var frozenDelivery = ReleasePreviewPolicy.DeliversFrozenDrawings(package);
+        var frozenDrawingIds = frozenDelivery
+            ? (package.DrawingReview?.Items ?? []).Select(item => item.DocumentId).ToHashSet() : [];
         foreach (var binding in package.VersionBindings ?? [])
         {
-            if (previewsOnly && !binding.Publish && !bomModels.Contains(binding.DocumentId)) continue;
+            if (previewsOnly && !binding.Publish && !bomModels.Contains(binding.DocumentId)
+                && !frozenDrawingIds.Contains(binding.DocumentId)) continue;
             var document = await repository.FindDocumentAsync(binding.DocumentId, ct)
                 ?? throw new PdmRuleException("发布绑定的图档不存在。");
             if (previewsOnly && document.Kind is not (DocumentKind.Part or DocumentKind.Drawing)
@@ -55,18 +59,22 @@ public static class ReleaseBoundSourceReader
             var original = history.FirstOrDefault(version => version.Id == binding.VersionId);
             if (original is null || original.Sha256 != binding.Sha256)
                 throw new PdmConflictException("发布绑定的源版本内容不一致，已停止转图。");
+            var deliveryDrawing = frozenDrawingIds.Contains(binding.DocumentId) && document.Kind == DocumentKind.Drawing;
+            if (deliveryDrawing && !package.DrawingReview!.Items.Any(item => item.DocumentId == binding.DocumentId
+                && item.VersionId == binding.VersionId && string.Equals(item.Sha256, binding.Sha256, StringComparison.OrdinalIgnoreCase)))
+                throw new PdmConflictException("发布包冻结转图来源与图纸审核版本不一致。");
             var source = package.State == ReleasePackageState.Published && binding.Publish
                 ? history.FirstOrDefault(version => version.ReleasePackageId == package.Id && version.SourceVersionId == binding.VersionId) ?? original
                 : original;
             if (package.State == ReleasePackageState.Published && binding.Publish && source.Status != DocumentVersionStatus.Released)
                 throw new PdmConflictException("发布图档尚无对应正式版本，不能标记资料齐套。");
             source.PropertySnapshot.TryGetValue("SourceFileSha256", out var originalHash);
-            var independent = ArchiveSafety.NativeCopy(nativeIndexes, document.Id, source);
+            var independent = deliveryDrawing ? null : ArchiveSafety.NativeCopy(nativeIndexes, document.Id, source);
             result.Add(new(document.Id, source.Id, document.DrawingNumber, FileName(string.IsNullOrWhiteSpace(binding.FileName) ? document.FileName : binding.FileName),
                 document.Kind, independent?.RelativePath ?? source.StorageRelativePath, independent?.Length ?? source.FileLength, independent?.Sha256 ?? source.Sha256,
-                source.Status == DocumentVersionStatus.Released || string.IsNullOrWhiteSpace(originalHash) ? source.Sha256 : originalHash,
-                source.Status == DocumentVersionStatus.Released ? source.Revision.Display : source.Revision.Release().Display,
-                source.Status == DocumentVersionStatus.Released && source.ReleasePackageId != package.Id
+                frozenDelivery || source.Status == DocumentVersionStatus.Released || string.IsNullOrWhiteSpace(originalHash) ? source.Sha256 : originalHash,
+                deliveryDrawing || source.Status == DocumentVersionStatus.Released ? source.Revision.Display : source.Revision.Release().Display,
+                !deliveryDrawing && source.Status == DocumentVersionStatus.Released && source.ReleasePackageId != package.Id
                     && (binding.Publish || source.Preview?.Format == DocumentPreviewFormat.Step)));
         }
         return result;

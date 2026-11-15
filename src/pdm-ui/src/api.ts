@@ -603,6 +603,7 @@ interface ApiApprovalTask {
 }
 
 interface ApiReleasePackage {
+  drawingReview?: ReleasePackageSummary['drawingReview']
   versionBindings?: ReleasePackageSummary['versionBindings']
   relatedOplIssueIds?: string[]
   rootDocumentId?: string | null
@@ -1552,6 +1553,18 @@ export function importU9MaterialSample(categoryCodes: string[], limitPerCategory
 
 export function listDocumentVersions(documentId: string, token: string): Promise<DocumentVersionSummary[]> {
   return requestJson<DocumentVersionSummary[]>(`/api/documents/${documentId}/versions`, {}, token)
+}
+
+export async function decideReleaseDrawing(packageId: string, input: { documentId: string; token: string; status: string; comment: string; emergencyReason?: string; approvalTaskId?: string; roundId?: string; businessNote?: string }, token: string, emergency = false) {
+  return mapReleasePackage(await requestJson<ApiReleasePackage>(`/api/release-packages/${packageId}/drawing-review${emergency ? '/emergency' : ''}`, { method: 'POST', body: JSON.stringify(input) }, token))
+}
+export async function generateReleaseDrawingPreview(packageId: string, documentId: string, token: string) {
+  return mapReleasePackage(await requestJson<ApiReleasePackage>(`/api/release-packages/${packageId}/drawing-review/${documentId}/preview`, { method: 'POST' }, token))
+}
+export async function readReleaseDrawingPreview(packageId: string, documentId: string, token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/release-packages/${packageId}/drawing-review/${documentId}/preview`, { headers: authenticatedHeaders(token), cache: 'no-store' })
+  if (!response.ok) throw new PdmApiError(response.status === 403 ? '当前账号没有查看此审批图纸的权限。' : '此版本的PDF预览尚未就绪，可生成审核预览后重试。', response.status)
+  return response.blob()
 }
 
 export async function readDocumentPreviewFile(documentId: string, versionId: string, token: string, download = false): Promise<Blob> {
@@ -3307,7 +3320,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     : task.decision
   const rejectedOrder = approvalTasks.find(task => decisionOf(task) === 'Rejected')?.stepOrder
   const steps: ApprovalStep[] = approvalTasks.map((task) => {
-    const stage = task.stepName || approvalStage(task.stage)
+    const stage = task.stepName?.trim() || '审批节点（名称待补充）'
     const done = Boolean(task.decidedAt || task.decisionBy || task.decision !== null && task.decision !== undefined)
     const current = !done && currentTaskId === task.id && ['审批中', '工艺审核', '待批准'].includes(state)
     const decision = decisionOf(task)
@@ -3341,6 +3354,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
   })
 
   return {
+    drawingReview: releasePackage.drawingReview,
     id: releasePackage.id, number: releasePackage.number, state, steps,
     rootDocumentId: releasePackage.rootDocumentId,
     publishedPath: releasePackage.publishedPath ?? undefined, publishError: releasePackage.publishError ?? undefined,
@@ -3445,15 +3459,10 @@ function mapReferenceStatus(value: number | string): ReferenceStatus {
   return (['Normal', 'Suppressed', 'Hidden', 'Lightweight', 'Virtual', 'Missing'][value] ?? 'Normal') as ReferenceStatus
 }
 
-function approvalStage(value: number | string): string {
-  const key = typeof value === 'number' ? ({ 1: 'ProcessReview', 2: 'Approval', 10: 'MechanicalEngineer', 20: 'MainDesigner', 30: 'MechanicalSupervisor', 40: 'HardwareEngineer', 50: 'HardwareSupervisor', 60: 'StandardizationSupervisor' } as Record<number, string>)[value] : value
-  return ({ ProcessReview: '工艺审核', Approval: '批准', MechanicalEngineer: '机械工程师自检', MainDesigner: '主设计审核', MechanicalSupervisor: '机械主管批准', HardwareEngineer: '硬件工程师自检', HardwareSupervisor: '硬件主管审核', StandardizationSupervisor: '标准化主管批准' } as Record<string, string>)[key] ?? String(value)
-}
-
 function releaseState(value: number | string): string {
   const name = typeof value === 'number'
-    ? ['草稿', '工艺审核', '待批准', '已退回', '发布中', '已发布', '发布失败'][value]
-    : ({ Draft: '草稿', ProcessReview: '审批中', Approval: '待批准', Rejected: '已退回', Publishing: '发布中', Published: '已发布', PublishFailed: '发布失败' } as Record<string, string>)[value]
+    ? ['草稿', '审批中', '审批中', '已退回', '发布中', '已发布', '发布失败'][value]
+    : ({ Draft: '草稿', ProcessReview: '审批中', Approval: '审批中', Rejected: '已退回', Publishing: '发布中', Published: '已发布', PublishFailed: '发布失败' } as Record<string, string>)[value]
   return name ?? String(value)
 }
 
@@ -3597,3 +3606,10 @@ export const archiveProjectFileForm = (projectId: string, kind: import('./projec
   expectedRowVersion: number, token: string) =>
   requestJson<import('./projectFileForms').ProjectFileFormSummary>(projectFileFormPath(projectId, kind, id) + '/archive',
     { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token, 120000, '生成存档失败，请检查项目文件目录后重试。')
+
+export async function listReleaseDrawingReviews(projectId: string, token: string): Promise<ReleasePackageSummary[]> {
+  return (await requestJson<ApiReleasePackage[]>(`/api/projects/${projectId}/release-drawing-reviews`, {}, token)).map(mapReleasePackage)
+}
+export async function decideReleaseDrawingNode(packageId: string, input: { approvalTaskId: string; roundId?: string; decision: 'Approved' | 'Rejected'; comment: string; businessNote?: string; emergencyReason?: string }, token: string, emergency = false) {
+  return mapReleasePackage(await requestJson<ApiReleasePackage>(`/api/release-packages/${packageId}/drawing-review/node${emergency ? '/emergency' : ''}`, { method: 'POST', body: JSON.stringify({ ...input, decision: input.decision === 'Approved' ? 0 : 1 }) }, token))
+}

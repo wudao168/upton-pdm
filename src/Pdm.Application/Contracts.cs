@@ -790,6 +790,7 @@ public interface IPdmRepository
         IReadOnlyList<ArchiveBatchFile> files, CancellationToken cancellationToken);
     Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> SaveReleasePdfTitleBlockAsync(Guid packageId, PdfTitleBlockSnapshot snapshot, CancellationToken cancellationToken);
+    Task<ReleasePackage> SaveReleaseDrawingReviewAsync(Guid packageId, ReleaseDrawingReview review, int expectedRevision, Guid? approvalTaskId, CancellationToken cancellationToken, Guid? documentId = null);
     Task AttachWorkVersionPreviewAsync(Guid documentId, Guid versionId, DocumentPreviewArtifact preview, CancellationToken ct);
     Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
         Guid releasePackageId,
@@ -903,6 +904,10 @@ public interface IReleasePackagePublisher
 
 public interface IServerPreviewConverter
 {
+    /// <summary>仅转换审批预览；不填写正式签字、不盖发布标识、不回写原图。</summary>
+    Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateReviewAsync(ReleasePackage package, Project project,
+        IReadOnlyList<ReleasePreviewSource> sources, string directory, CancellationToken ct) =>
+        throw new PdmRuleException("当前转图服务不支持审核预览，请联系管理员更新服务。");
     Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> StampCachedAsync(ReleasePackage package, Project project,
         IReadOnlyList<ReleasePreviewSource> sources, string directory, CancellationToken ct) =>
         throw new PdmRuleException("此转换程序不支持单独重试标识。");

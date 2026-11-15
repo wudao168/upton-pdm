@@ -18,7 +18,7 @@ public sealed partial class PdmAddin
         var warnings = new List<string>();
         try
         {
-            var relations = await apiClient.GetDocumentRelationsAsync(projectId, token);
+            var relations = FilterDrawingRelations(await apiClient.GetDocumentRelationsAsync(projectId, token), directory, true, ids);
             var drawingIds = new HashSet<Guid>(relations.Where(relation => ids.Contains(relation.ModelDocumentId)).Select(relation => relation.DrawingDocumentId));
             if (drawingIds.Count == 0) return;
             var documents = await apiClient.GetDocumentsAsync(projectId, token);

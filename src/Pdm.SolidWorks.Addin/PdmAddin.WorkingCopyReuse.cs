@@ -41,12 +41,15 @@ public sealed partial class PdmAddin
         if (rootModel == null) return false;
         if (!EnsureEditJournal())
             throw new InvalidOperationException("当前编辑恢复记录尚未准备完成，已保留窗口，请重新登录后重试获取权限。");
+        if (editJournal.ReadAll().Any(entry => entry.DiscardPending && entry.ProjectId == projectId
+            && selected.Any(item => item.Node.DocumentId == entry.DocumentId && PathsEqual(item.Node.FullPath, entry.SourcePath))))
+            throw new InvalidOperationException("上次放弃编辑后的本地恢复尚未完成。请先从PLM工作区打开最新版本完成恢复，再获取权限；原文件及草稿记录仍保留。");
 
         await apiClient.RefreshDocumentRulesAsync(lifetime.Token);
         var latest = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token, allowMissingComponents: true,
             useLatestModelReferences: context.Value.UsesLatestModelReferences);
         var requestedIds = new HashSet<Guid>(selected.Where(item => item.Node.DocumentId.HasValue).Select(item => item.Node.DocumentId.Value));
-        var relations = await apiClient.GetDocumentRelationsAsync(projectId, lifetime.Token);
+        var relations = FilterDrawingRelations(await apiClient.GetDocumentRelationsAsync(projectId, lifetime.Token), context.Key, true, requestedIds);
         var requiredDrawings = new HashSet<Guid>(selected.Where(item => item.Node.Kind == CadDocumentKind.Drawing && item.Node.DocumentId.HasValue)
             .Select(item => item.Node.DocumentId.Value).Concat(relations.Where(relation => requestedIds.Contains(relation.ModelDocumentId)).Select(relation => relation.DrawingDocumentId)));
         var workingManifest = ReconcileRequestedWorkingArchives(context.Key, context.Value, latest, requiredDrawings);

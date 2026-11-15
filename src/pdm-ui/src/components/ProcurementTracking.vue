@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import PersonName from './PersonName.vue'
+import ColumnSettingsList from './ColumnSettingsList.vue'
+import { orderColumns, useColumnSettings } from '../columnSettings'
 import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
 const displayUserName = usePersonDisplayName()
 import SearchField from './SearchField.vue'
@@ -275,7 +277,11 @@ const sortedItems = computed(() => {
 function changeDeliverySort({ prop, order }: { prop: string; order: 'ascending' | 'descending' | null }) {
   deliverySort.value = order && deliveryColumns.includes(prop as DeliveryColumn) ? { prop: prop as DeliveryColumn, order } : null
 }
-const visibleKeys = ref<ColumnKey[]>(columnDefinitions.filter(column => column.defaultVisible).map(column => column.key))
+const defaultColumnKeys = columnDefinitions.filter(column => column.defaultVisible).map(column => column.key)
+const visibleKeys = ref<ColumnKey[]>([...defaultColumnKeys])
+const columnOrder = ref<ColumnKey[]>([])
+const columnSettings = useColumnSettings(visibleKeys, columnOrder)
+const { draftVisible, draftOrder } = columnSettings
 let refreshTimer: number | undefined
 let refreshCooldownTimer: number | undefined
 
@@ -284,19 +290,21 @@ const hasManufacturing = computed(() => !!result.value?.items.some(isManufacturi
 const manufacturingOnly = computed(() => filters.bomKind === '非标件' || !!result.value?.items.length && result.value.items.every(isManufacturing))
 const mixedSources = computed(() => hasManufacturing.value && !manufacturingOnly.value && !filters.bomKind)
 const manufacturingColumns = ['dataSource','revision','supplier','productionReceivedAt']
-const columns = computed(() => columnDefinitions.filter(column => visibleKeys.value.includes(column.key)
+const columns = computed(() => orderColumns(columnDefinitions, columnOrder.value).filter(column => visibleKeys.value.includes(column.key)
   && (manufacturingOnly.value || mixedSources.value || !manufacturingColumns.includes(column.key))
   && (!manufacturingOnly.value || column.key !== 'latestDeliveryDate')))
 const manufacturingDetail = ref<ProjectProcurementTrackingItem | null>(null), manufacturingDetailOpen = ref(false)
 function showManufacturing(row: ProjectProcurementTrackingItem) { manufacturingDetail.value=row; manufacturingDetailOpen.value=true }
 
 function restoreColumns() {
-  visibleKeys.value = columnDefinitions.filter(column => column.defaultVisible).map(column => column.key)
+  columnOrder.value = []
+  visibleKeys.value = [...defaultColumnKeys]
   try {
     const saved = JSON.parse(readTablePreference(storageKey.value) ?? 'null') as { version?: number; order?: ColumnKey[]; visible?: ColumnKey[] } | null
     const allowed = new Set(columnDefinitions.map(column => column.key))
     const savedOrder = (saved?.order ?? []).filter((key, index, array) => allowed.has(key) && array.indexOf(key) === index)
     const savedVisible = (saved?.visible ?? []).filter(key => allowed.has(key))
+    if ((saved?.version ?? 0) >= 5) columnOrder.value = savedOrder
     if (savedVisible.length) visibleKeys.value = savedVisible
     const savedVersion = saved?.version ?? 0
     for (const key of manufacturingColumns as ColumnKey[]) if (saved && savedVersion < 4 && !visibleKeys.value.includes(key)) visibleKeys.value.push(key)
@@ -325,12 +333,13 @@ function restoreColumns() {
 }
 
 async function saveColumns() {
-  if (!visibleKeys.value.length) {
+  if (!draftVisible.value.length) {
     ElMessage.warning('请至少保留一列')
     return
   }
+  columnSettings.applyDraft()
   let synced: boolean
-  try { synced = await writeTablePreference(storageKey.value, JSON.stringify({ version: 4, visible: visibleKeys.value })) }
+  try { synced = await writeTablePreference(storageKey.value, JSON.stringify({ version: 5, visible: visibleKeys.value, order: columnOrder.value })) }
   catch { ElMessage.error('列设置同步失败，当前选择已保留在本机，请重试保存。'); return }
   settingsVisible.value = false
   if (synced) ElMessage.success('采购跟踪列设置已保存到当前账号')
@@ -338,7 +347,7 @@ async function saveColumns() {
 }
 
 function resetColumns() {
-  visibleKeys.value = columnDefinitions.filter(column => column.defaultVisible).map(column => column.key)
+  columnSettings.setDraft(defaultColumnKeys)
 }
 
 async function load(showError = true) {
@@ -711,7 +720,7 @@ onBeforeUnmount(() => {
       </div>
       <span class="procurement-tracking__updated" :title="hasManufacturing ? `制造数据读取：${formatDate(result?.manufacturingReadAt,true)}` : ''">{{ manufacturingOnly ? '制造读取' : '刷新' }}：{{ formatDate(manufacturingOnly ? result?.manufacturingReadAt : result?.lastSuccessfulRefreshAt, true) }}</span>
       <div class="procurement-tracking__actions">
-        <el-button @click="settingsVisible = true">列设置</el-button>
+        <el-button @click="columnSettings.openDraft(); settingsVisible = true">列设置</el-button>
         <el-button type="primary" :loading="refreshStarting" :disabled="refreshCoolingDown" @click="refreshFromU9">刷新</el-button>
         <el-button v-if="projectWritable && !manufacturingOnly" @click="openInventorySettings">库存设置</el-button>
         <el-button v-if="projectExport" :loading="exporting" :disabled="loading || !filteredItems.length || !columns.length" @click="exportExcel">导出 Excel</el-button>
@@ -731,6 +740,8 @@ onBeforeUnmount(() => {
     </div>
 
     <el-table
+      :key="columns.map(column => column.key).join(',')"
+      :default-sort="deliverySort ?? undefined"
       :data="pagedItems"
       @sort-change="changeDeliverySort"
       :row-class-name="rowClassName"
@@ -801,10 +812,8 @@ onBeforeUnmount(() => {
     <BomFilesDialog v-if="selectedFiles" :project-id="projectId" :row="{ drawingNumber: selectedFiles.materialCode, files: selectedFiles.files }" :token="token" :can-edit="false" procurement :procurement-supplement="selectedFiles.filesFromCurrentBom" @close="selectedFiles = null" />
     <el-dialog class="procurement-tracking-dialog" v-model="settingsVisible" title="采购跟踪列设置" width="520px" append-to-body>
       <div class="procurement-tracking__settings-body">
-      <p class="procurement-tracking__settings-note">可按当前账号选择显示列，保存后在不同客户端自动恢复；价格、税额、币种及其他财务信息不提供。</p>
-      <el-checkbox-group v-model="visibleKeys" class="procurement-tracking__column-list" aria-label="采购跟踪显示列">
-        <el-checkbox v-for="column in columnDefinitions" :key="column.key" :value="column.key">{{ column.label }}</el-checkbox>
-      </el-checkbox-group>
+      <p class="procurement-tracking__settings-note">可选择显示列并调整顺序，保存后在不同客户端自动恢复；价格、税额、币种及其他财务信息不提供。</p>
+      <ColumnSettingsList class="procurement-tracking__column-list" v-model:visible="draftVisible" v-model:order="draftOrder" :columns="columnDefinitions" />
       </div>
       <template #footer>
         <el-button @click="resetColumns">恢复默认</el-button>

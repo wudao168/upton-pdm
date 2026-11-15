@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { Eye, EyeOff, LockKeyhole, UserRound } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { postDesktopMessage, requestPasswordReset } from '../api'
 import companyLogo from '../assets/company-logo-white.png'
-import melonJellyUrl from '../assets/melon-jelly.html?url'
-import pirateJellyUrl from '../assets/pirate-jelly.html?url'
+import PdmGalaxyScene from './PdmGalaxyScene.vue'
+
 
 const props = withDefaults(defineProps<{ pending: boolean; error: string; online: boolean; compact?: boolean }>(), { compact: false })
 const emit = defineEmits<{ submit: [username: string, password: string, rememberCredentials: boolean] }>()
@@ -14,10 +14,6 @@ const desktopCredentialStorageAvailable = Boolean(window.chrome?.webview)
 const username = ref('')
 const password = ref('')
 const rememberCredentials = ref(desktopCredentialStorageAvailable)
-const scene = ref<'melon' | 'pirate'>('melon')
-const interactiveSceneAvailable = window.isSecureContext && 'gpu' in navigator
-const sceneUrl = computed(() => scene.value === 'melon' ? melonJellyUrl : pirateJellyUrl)
-const sceneTitle = computed(() => scene.value === 'melon' ? '西瓜软糖：拖动拉伸，松手回弹' : '海盗果冻：拖动海水造浪，点击船只开炮')
 const showPassword = ref(false)
 const passwordHelpVisible = ref(false)
 const passwordResetPending = ref(false)
@@ -65,32 +61,13 @@ async function submitPasswordReset() {
 </script>
 
 <template>
-  <main class="pdm-login-shell has-melon" :class="{ 'is-compact': props.compact }">
+  <main class="pdm-login-shell has-upton" :class="{ 'is-compact': props.compact }">
     <section class="pdm-login-layout">
-      <aside class="pdm-login-melon" :aria-label="scene === 'melon' ? '西瓜软糖交互区' : '海盗果冻交互区'">
-        <div v-if="interactiveSceneAvailable" class="pdm-login-scene-picker" role="group" aria-label="切换互动场景">
-          <button type="button" :aria-pressed="scene === 'melon'" @click="scene = 'melon'">西瓜软糖</button>
-          <button type="button" :aria-pressed="scene === 'pirate'" @click="scene = 'pirate'">海盗果冻</button>
+      <aside class="pdm-login-artwork" aria-label="UPTON M106 星系主题画面">
+        <PdmGalaxyScene />
+        <div class="pdm-login-artwork__brand">
+          <img :src="companyLogo" alt="UPTON 阿普顿" class="pdm-login-artwork__logo">
         </div>
-        <iframe
-          v-if="interactiveSceneAvailable"
-          :key="scene"
-          class="pdm-login-melon-frame"
-          :src="`${sceneUrl}?embed=login`"
-          sandbox="allow-scripts"
-          :title="sceneTitle"
-        />
-        <svg v-else class="pdm-login-melon-frame" viewBox="0 0 600 600" role="img" aria-label="西瓜软糖展示">
-          <defs><radialGradient id="melon-backdrop"><stop stop-color="#fffaf1" /><stop offset="1" stop-color="#e8eee4" /></radialGradient></defs>
-          <rect width="600" height="600" fill="url(#melon-backdrop)" />
-          <ellipse cx="300" cy="445" rx="185" ry="25" fill="#364c3b" opacity=".12" />
-          <g transform="rotate(-15 300 300)">
-            <path d="M110 260 A190 190 0 0 0 490 260 Z" fill="#538756" />
-            <path d="M124 260 A176 176 0 0 0 476 260 Z" fill="#d8e7b2" />
-            <path d="M139 260 A161 161 0 0 0 461 260 Z" fill="#e57b79" />
-            <g fill="#574042"><ellipse cx="220" cy="300" rx="5" ry="10" transform="rotate(-30 220 300)" /><ellipse cx="300" cy="310" rx="5" ry="10" /><ellipse cx="380" cy="300" rx="5" ry="10" transform="rotate(30 380 300)" /><ellipse cx="260" cy="365" rx="5" ry="10" /><ellipse cx="340" cy="365" rx="5" ry="10" /></g>
-          </g>
-        </svg>
       </aside>
 
       <section class="pdm-login-content">
@@ -100,7 +77,6 @@ async function submitPasswordReset() {
         <form class="pdm-login-form" aria-label="登录PLM" autocomplete="off" @submit.prevent="submit">
           <header class="pdm-login-heading">
             <h1>产品生命周期管理系统</h1>
-            <p>请输入账号与密码</p>
           </header>
 
           <label class="pdm-login-field" for="pdm-login-username">
@@ -161,7 +137,6 @@ async function submitPasswordReset() {
           </button>
 
           <small v-if="desktopCredentialStorageAvailable">账号和密码仅加密保存在当前Windows用户下。</small>
-          <small v-else>保存账号和密码仅适用于Windows客户端。</small>
         </form>
       </section>
     </section>
@@ -184,58 +159,91 @@ async function submitPasswordReset() {
 </template>
 
 <style scoped>
-.pdm-login-shell.has-melon { height: 100vh; height: 100dvh; min-height: 0; display: block; padding: 0; overflow: hidden; background: #f6f5f0; }
-.pdm-login-shell.has-melon .pdm-login-layout { position: relative; width: 100%; max-width: 1920px; height: 100%; min-height: 0; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 380px; }
-.pdm-login-melon { min-width: 0; min-height: 0; height: 100%; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); }
-.pdm-login-scene-picker { position: relative; z-index: 2; display: flex; gap: 4px; padding: 16px 24px 8px; }
-.pdm-login-scene-picker button { min-height: 32px; padding: 6px 15px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #687064; font: inherit; font-size: 13px; cursor: pointer; }
-.pdm-login-scene-picker button[aria-pressed="true"] { border-color: #d8ddce; background: #fffef9; color: #294332; }
-.pdm-login-scene-picker button:hover { background: #e8eddf; }
-.pdm-login-scene-picker button:focus-visible { outline: 2px solid #42684d; outline-offset: 2px; }
-.pdm-login-melon-frame { display: block; width: 100%; height: 100%; border: 0; background: #f6f5f0; }
-.pdm-login-shell.has-melon .pdm-login-content { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr); justify-items: center; padding: 24px 28px; background: transparent; }
-.pdm-login-shell.has-melon .pdm-login-compact-brand { grid-row: 1; align-self: end; display: flex; margin-bottom: 28px; }
-.pdm-login-shell.has-melon .pdm-login-brand__logo { width: 180px; filter: brightness(0) saturate(100%) invert(16%) sepia(12%) saturate(1212%) hue-rotate(39deg) brightness(91%) contrast(88%); }
-.pdm-login-shell.has-melon .pdm-login-form { grid-row: 2; width: min(100%, 400px); margin: 0; padding: 27px 24px; transform: none; border: 1px solid #deded2; border-radius: 10px; background: rgba(255, 254, 250, .7); backdrop-filter: blur(10px); box-shadow: none; }
-.pdm-login-shell.has-melon .pdm-login-heading { display: block; }
-.pdm-login-shell.has-melon .pdm-login-heading h1 { font-size: 20px; }
-.pdm-login-shell.has-melon .pdm-login-options { align-items: flex-start; flex-direction: column; gap: 12px; }
-.pdm-login-shell.has-melon .pdm-login-remember { margin-left: 0; }
-@media (max-width: 900px) {
-  .pdm-login-shell.has-melon .pdm-login-layout { grid-template-columns: minmax(0, 1fr); }
-  .pdm-login-melon { position: absolute; inset: 0; width: 100%; }
-  .pdm-login-shell.has-melon .pdm-login-content { position: relative; z-index: 1; padding: 20px; pointer-events: none; }
-  .pdm-login-shell.has-melon .pdm-login-form { pointer-events: auto; }
+.pdm-login-shell.has-upton {
+  height: 100vh; height: 100dvh; min-height: 0; display: block; padding: 0; overflow: auto;
+  background: var(--pdm-bg);
 }
-@media (max-height: 760px) {
-  .pdm-login-shell.has-melon .pdm-login-content { padding-block: 12px; }
-  .pdm-login-shell.has-melon .pdm-login-compact-brand { margin-bottom: 16px; }
-  .pdm-login-shell.has-melon .pdm-login-brand__logo { width: 160px; }
-  .pdm-login-shell.has-melon .pdm-login-form { gap: 7px; padding: 20px; }
-  .pdm-login-shell.has-melon .pdm-login-heading { margin-bottom: 8px; }
-  .pdm-login-shell.has-melon .pdm-login-heading h1 { font-size: 18px; margin-bottom: 6px; }
-  .pdm-login-shell.has-melon .pdm-login-field { gap: 5px; }
-  .pdm-login-shell.has-melon .pdm-login-input-frame { height: 40px; min-height: 40px; }
-  .pdm-login-shell.has-melon .pdm-login-options { gap: 8px; }
-  .pdm-login-shell.has-melon .pdm-login-submit { height: 40px; line-height: 40px; margin: 10px 0 4px; }
+.pdm-login-shell.has-upton .pdm-login-layout {
+  position: relative; width: 100%; height: 100%; min-height: 620px; margin: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) clamp(380px, 31vw, 480px);
 }
-@media (max-height: 560px) {
-  .pdm-login-shell.has-melon .pdm-login-content { padding-block: 10px; }
-  .pdm-login-shell.has-melon .pdm-login-compact-brand { display: none; }
-  .pdm-login-shell.has-melon .pdm-login-form { gap: 5px; padding: 16px 20px; }
-  .pdm-login-shell.has-melon .pdm-login-heading { margin-bottom: 4px; }
-  .pdm-login-shell.has-melon .pdm-login-heading h1 { font-size: 17px; margin-bottom: 4px; }
-  .pdm-login-shell.has-melon .pdm-login-field { font-size: 13px; line-height: 18px; gap: 4px; }
-  .pdm-login-shell.has-melon .pdm-login-input-frame { height: 34px; min-height: 34px; }
-  .pdm-login-shell.has-melon .pdm-login-options { flex-direction: row; align-items: center; gap: 6px; }
-  .pdm-login-shell.has-melon .pdm-login-forgot, .pdm-login-shell.has-melon .pdm-login-remember { font-size: 12px; }
-  .pdm-login-shell.has-melon .pdm-login-submit { height: 34px; line-height: 34px; margin: 6px 0 2px; }
+.pdm-login-artwork { position: relative; min-width: 0; overflow: hidden; color: #fff; background: #0a203b; }
+.pdm-login-artwork__image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 50% 65%; }
+.pdm-login-artwork__shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(4, 18, 39, .18), transparent 55%, rgba(4, 18, 39, .5)); }
+.pdm-login-artwork__brand { position: relative; padding: clamp(28px, 4vw, 72px); text-shadow: 0 2px 18px rgba(1, 14, 31, .2); }
+.pdm-login-artwork__footer { position: absolute; bottom: 30px; left: clamp(28px, 4vw, 72px); display: flex; align-items: center; gap: 18px; font-size: 12px; letter-spacing: .18em; color: #e5f2ff; }
+.pdm-login-artwork__footer i { width: 3px; height: 3px; border-radius: 50%; background: #8fe4fa; }
+.pdm-login-shell.has-upton .pdm-login-content { min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 32px; padding: 32px 28px; background: var(--pdm-bg); }
+.pdm-login-shell.has-upton .pdm-login-compact-brand { display: flex; margin: 0; }
+.pdm-login-shell.has-upton .pdm-login-brand__logo { width: 210px; filter: brightness(0); }
+.pdm-login-shell.has-upton .pdm-login-form { width: min(100%, 400px); margin: 0; padding: 28px 24px; transform: none; border: 0; border-radius: var(--pdm-stat-card-radius, 20px); background: var(--pdm-surface); box-shadow: var(--pdm-stat-card-shadow, 0 8px 32px rgba(19, 51, 77, .08)); }
+.pdm-login-shell.has-upton .pdm-login-heading { display: block; }
+.pdm-login-shell.has-upton .pdm-login-heading h1 { font-size: 20px; }
+.pdm-login-shell.has-upton .pdm-login-input-frame, .pdm-login-shell.has-upton .pdm-login-submit { border-radius: 999px; }
+.pdm-login-shell.has-upton .pdm-login-options { align-items: center; flex-direction: row; justify-content: space-between; gap: 8px; }
+.pdm-login-shell.has-upton .pdm-login-remember { margin-left: auto; white-space: nowrap; font-size: 12px; }
+@media (max-height: 760px) and (min-width: 761px) {
+  .pdm-login-shell.has-upton .pdm-login-layout { min-height: 540px; }
+  .pdm-login-shell.has-upton .pdm-login-content { gap: 20px; padding-block: 20px; }
+  .pdm-login-shell.has-upton .pdm-login-form { gap: 7px; padding: 22px; }
+  .pdm-login-shell.has-upton .pdm-login-heading { margin-bottom: 8px; }
+  .pdm-login-shell.has-upton .pdm-login-input-frame { height: 50px; min-height: 50px; }
+  .pdm-login-shell.has-upton .pdm-login-submit { height: 50px; line-height: 50px; margin: 10px 0 4px; }
 }
-@media (max-height: 440px) {
-  .pdm-login-shell.has-melon .pdm-login-form { gap: 4px; padding-block: 8px; }
-  .pdm-login-shell.has-melon .pdm-login-heading p, .pdm-login-shell.has-melon .pdm-login-form > small { display: none; }
-  .pdm-login-shell.has-melon .pdm-login-input-frame { height: 32px; min-height: 32px; }
-  .pdm-login-shell.has-melon .pdm-login-submit { margin-top: 4px; }
-  .pdm-login-shell.has-melon .pdm-login-error, .pdm-login-shell.has-melon .pdm-login-warning { padding: 5px 8px; font-size: 11px; line-height: 14px; }
+@media (max-width: 760px) {
+  .pdm-login-shell.has-upton .pdm-login-layout { height: auto; min-height: 100%; grid-template-columns: minmax(0, 1fr); grid-template-rows: 440px auto; }
+  .pdm-login-artwork__image { object-position: 65% 63%; }
+  .pdm-login-artwork__shade { background: linear-gradient(90deg, rgba(4, 18, 39, .82), rgba(4, 18, 39, .1)); }
+  .pdm-login-artwork__brand { padding: 22px; }
+  .pdm-login-artwork__footer { display: none; }
+  .pdm-login-shell.has-upton .pdm-login-content { height: auto; padding: 24px 16px; gap: 0; }
+  .pdm-login-shell.has-upton .pdm-login-compact-brand { display: none; }
+  .pdm-login-shell.has-upton .pdm-login-form { padding: 26px 22px; }
+  .pdm-login-shell.has-upton .pdm-login-heading h1 { font-size: 19px; }
+}
+</style>
+
+
+
+
+
+
+<style>
+.pdm-login-shell.has-upton .pdm-login-artwork__logo {
+  display: block; width: auto; max-width: 100%; height: 36px;
+  object-fit: contain; object-position: left center;
+}
+.pdm-login-shell.has-upton .pdm-login-input:is(:autofill, :-webkit-autofill) {
+  -webkit-text-fill-color: var(--pdm-text);
+  caret-color: var(--pdm-text);
+  box-shadow: inset 0 0 0 100px var(--pdm-surface) !important;
+}
+
+@layer pdm-button-sizing {
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-input-frame,
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-submit {
+    box-sizing: border-box !important;
+    height: 50px !important; min-height: 50px !important; max-height: 50px !important;
+    border-radius: 999px !important;
+  }
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-submit {
+    width: 100% !important; line-height: 50px !important;
+    background: #000 !important; color: #fff !important; font-size: 14px !important;
+  }
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-submit:hover:not(:disabled) {
+    background: #222 !important;
+  }
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-submit:not(:focus-visible) {
+    outline: none !important;
+  }
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-input-frame:not(:focus-within) {
+    border-color: color-mix(in srgb, var(--pdm-container-border, var(--pdm-border)) 75%, var(--pdm-text)) !important;
+  }
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-input-frame:hover:not(:focus-within) {
+    border-color: color-mix(in srgb, var(--pdm-container-border, var(--pdm-border)) 60%, var(--pdm-text)) !important;
+  }
+  :root body .pdm-login-shell.has-upton .pdm-login-form .pdm-login-input-frame:focus-within {
+    border-color: var(--shell-accent) !important;
+  }
 }
 </style>

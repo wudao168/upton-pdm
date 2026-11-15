@@ -235,13 +235,23 @@ internal static partial class Program
             host.Controls.Add(pane); pane.CreateControl();
             var plugin = New("PdmAddin");
             var appType = Type("PdmAddin").GetField("application", Flags).FieldType;
+            var activePath = Path.Combine(Path.GetTempPath(), "archive-entry.SLDPRT");
+            var active = new Proxy(appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call =>
+            {
+                if (call.MethodName == "GetPathName") return activePath;
+                throw new Exception("入口读取权限前不应操作原生图档：" + call.MethodName);
+            }).GetTransparentProxy();
             SetField(plugin, "application", new Proxy(appType, call =>
             {
+                if (call.MethodName == "get_ActiveDoc") return active;
                 if (call.MethodName != "GetRunningCommandInfo") throw new Exception("入口读取权限前不应访问原生图档：" + call.MethodName);
                 call.Args[0] = 0; call.Args[1] = ""; call.Args[2] = false; return null;
             }).GetTransparentProxy());
-            var root = New("CadTreeNode"); Set(root, "FullPath", Path.Combine(Path.GetTempPath(), "archive-entry.SLDPRT"));
+            var root = New("CadTreeNode"); Set(root, "FullPath", activePath);
             Set(root, "FileName", "archive-entry.SLDPRT"); Set(root, "Kind", Enum.Parse(Type("CadDocumentKind"), "Part"));
+            var drawing = New("CadTreeNode"); Set(drawing, "FullPath", Path.Combine(Path.GetTempPath(), "archive-entry.SLDDRW"));
+            Set(drawing, "FileName", "archive-entry.SLDDRW"); Set(drawing, "Kind", Enum.Parse(Type("CadDocumentKind"), "Drawing"));
+            ((System.Collections.IList)Get(root, "Children")).Add(drawing);
             SetField(plugin, "taskPaneControl", pane); SetField(plugin, "currentTree", root); SetField(plugin, "lifetime", lifetime);
             ((HttpClient)Field(client, "httpClient")).Dispose();
             var http = new HttpClient(handler) { BaseAddress = new Uri("http://archive-fixture.invalid/") };
@@ -252,7 +262,9 @@ internal static partial class Program
             projects.Add(project); SetField(plugin, "availableProjects", projects);
             TreeCheck(!(bool)TreeCall(plugin, "IsSolidWorksCommandActive"), "入口测试应先模拟空闲的SolidWorks命令状态");
             var timer = Stopwatch.StartNew();
-            var args = New("CadTreeNodeEventArgs", root);
+            // The toolbar can submit a selected drawing while its model is active.
+            // Any attempt to open or activate the drawing fails the native proxy above.
+            var args = New("CadTreeNodeEventArgs", drawing);
             TreeCall(plugin, "OnCheckInRequested", null, args);
             var started = ArchiveCurrent;
             if (started != null) await (Task)Get(started, "Ready");
@@ -263,6 +275,7 @@ internal static partial class Program
             await (Task)Get(session, "Ready");
             TreeCheck(timer.ElapsedMilliseconds < 1500, "存档窗口首帧等待过长：" + timer.ElapsedMilliseconds);
             await TreeWait(() => handler.Started, "读取权限请求未进入慢网络边界");
+            TreeCheck(ReferenceEquals(root, Field(plugin, "currentTree")), "工程图作为提交候选时切换了原3D上下文");
             var docked = Type("ArchiveSession").GetProperty("IsDocked", Flags)?.GetValue(session) as bool? == true;
             TreeCheck(IsWindowEnabled(host.Handle) == docked, "存档视图所属窗口状态不符合当前展示方式");
             var presentation = ArchiveWindow(session);

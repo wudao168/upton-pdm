@@ -75,10 +75,12 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         first = first with { ReleasePackageId = draft.Id, StepOrder = 2 };
         last = last with { ReleasePackageId = draft.Id, StepOrder = 3 };
         await repository.UpdateDraftReleasePackageAsync(draft with { ApprovalTasks = [draft.ApprovalTasks[0], first, last] }, default);
-        await workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default);
+        var groupSubmitted = await workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default);
+        await ConfirmMergedDrawingsAsync(repository, groupSubmitted, group.Members[1]);
         var partial = await workflow.DecideAsync(first.Id, group.Members[1], UserRole.Approver, ApprovalDecision.Approved, "同意", default, false, "已核对");
         Assert.Null(partial.ApprovalTasks.Single(task => task.Id == first.Id).Decision);
         Assert.DoesNotContain(await repository.ListUserNotificationsAsync(group.Members[0], 200, default), notice => notice.Category == "ApprovalNodeCopy");
+        await ConfirmMergedDrawingsAsync(repository, partial, group.Members[0]);
         await workflow.DecideAsync(first.Id, group.Members[0], UserRole.Approver, ApprovalDecision.Approved, "同意", default, false);
         var messages = await repository.ListUserNotificationsAsync(group.Members[0], 200, default);
         Assert.Equal("复核完成", Assert.Single(messages, notice => notice.Category == "ApprovalNodeCopy").Content);
@@ -270,7 +272,10 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.Equal(dependencyVersions, (await repository.ListDocumentVersionsAsync(dependency.Id, default)).Count);
         Assert.Contains(await repository.ListReleaseReferenceSourcesAsync(package.Id, default), source => source.SourceVersionId == binding.VersionId);
         foreach (var task in submitted.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
+        {
+            await ConfirmMergedDrawingsAsync(repository, submitted);
             submitted = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "测试图纸发布", default);
+        }
         Assert.Equal(ReleasePackageState.Published, submitted.State);
         Assert.DoesNotContain(await repository.ListDocumentVersionsAsync(modelId, default), version => version.ReleasePackageId == submitted.Id);
     }
@@ -2933,9 +2938,11 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         async Task<ReleasePackage> Complete(ReleasePackage package)
         {
             package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+            await ConfirmMergedDrawingsAsync(repository, package);
             for (var step = 0; step < 10 && package.State != ReleasePackageState.Published; step++)
             {
                 var task = package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder).First();
+                await ConfirmMergedDrawingsAsync(repository, package);
                 package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Administrator, ApprovalDecision.Approved, "数量变更审批通过", default);
             }
             Assert.Equal(ReleasePackageState.Published, package.State);
@@ -3550,7 +3557,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             UnitCodeMappings: new Dictionary<string, string>()), default);
 
     private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow, bool completePropertyWriteback = true,
-        IReadOnlyList<DocumentReferenceNode>? modelChildren = null)
+        IReadOnlyList<DocumentReferenceNode>? modelChildren = null, bool independentReview = true)
     {
         await PermissionTestUsers.Ensure(repository, ("submitter", UserRole.Administrator), ("designer", UserRole.Administrator), ("drawing-reviewer", UserRole.Administrator), ("cad-client", UserRole.Administrator));
         foreach (var held in await repository.ListCheckedOutDocumentsAsync(default))
@@ -3566,7 +3573,8 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         var model = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Assembly);
         var drawing = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Drawing);
         await CheckInAsync(repository, model.Id, "designer", new Dictionary<string, string?>(), 'A', children: modelChildren);
-        await CheckInAsync(repository, drawing.Id, "designer", new Dictionary<string, string?>(), 'B');
+        var frozenModel = (await repository.ListDocumentVersionsAsync(model.Id, default)).First();
+        await CheckInAsync(repository, drawing.Id, "designer", new Dictionary<string, string?>(), 'B', children: [frozenModel.ReferenceSnapshot with { Revision = frozenModel.Revision }]);
         // The fixture's design tree must pin the version actually archived above,
         // just as a real complete assembly archive does (the seed tree predates versions).
         var currentSnapshot = (await repository.GetLatestReferenceSnapshotAsync(ProjectId, default))!;
@@ -3588,6 +3596,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             }
         ], default);
 
+        if (!independentReview) return;
         var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
         var item = Assert.Single(review.Items);
         review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
@@ -3608,7 +3617,8 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         var request = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
         Assert.Equal(drawing.Id, request.SourceDocumentId);
         await workflow.StartCadPropertyWritebackAsync(request.Id, "cad-client", UserRole.Administrator, default);
-        var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties, 'D', request.Id);
+        var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties, 'D', request.Id,
+            children: [frozenModel.ReferenceSnapshot with { Revision = frozenModel.Revision }]);
         await workflow.CompleteCadPropertyWritebackAsync(request.Id, Assert.IsType<DocumentVersion>(result.Version).Id,
             "cad-client", UserRole.Administrator, default);
 
@@ -3992,11 +4002,14 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         }
     }
 
-    private static async Task<ReleasePackage> PublishThroughAllStepsAsync(PdmWorkflowService workflow, ReleasePackage package)
+    private static async Task<ReleasePackage> PublishThroughAllStepsAsync(PdmWorkflowService workflow, ReleasePackage package, InMemoryPdmRepository? repository = null)
     {
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
         foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
+        {
+            if (repository is not null) await ConfirmMergedDrawingsAsync(repository, package);
             package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Approver, ApprovalDecision.Approved, "同意", default);
+        }
         return package;
     }
 

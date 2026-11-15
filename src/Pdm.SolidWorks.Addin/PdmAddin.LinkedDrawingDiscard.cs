@@ -59,6 +59,12 @@ public sealed partial class PdmAddin
                             && binding.DocumentId == id && binding.ProjectId == project.Key).ToArray();
                         if (local.Length != 1) throw new InvalidOperationException("当前工作区的工程图路径无法唯一核对，已保留权限");
                         var path = local[0];
+                        if (DrawingAssociationDisproved(path, selected.Where(model => related.Contains(model.DocumentId.Value))
+                            .Select(model => model.FullPath), true))
+                        {
+                            LogOperation("工程图实际引用不包含本次放弃的模型，保留其独立编辑权限：" + name);
+                            continue;
+                        }
                         var latest = (await apiClient.GetVersionsAsync(id, lifetime.Token, 1)).FirstOrDefault();
                         if (latest == null || !PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata) || metadata.VersionId != latest.Id)
                             throw new InvalidOperationException("当前工程图版本需要核对，已保留权限");

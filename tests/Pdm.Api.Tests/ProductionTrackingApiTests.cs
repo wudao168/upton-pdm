@@ -88,6 +88,9 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
         { Scope = ReleaseScope.NonStandardWithDrawing, NonStandardBomSnapshot = [item], SelectedBomItemIds = [item.Id] };
         await repository.CreateReleasePackageAsync(release, default);
 
+        var pending = (await client.GetFromJsonAsync<ProductionTrackingProject[]>("/api/production-tracking/projects?selfOnly=true"))!;
+        Assert.True(pending.SelectMany(entry => entry.Packages).Single(entry => entry.ReleasePackageId == release.Id).HasUnscheduledProduction);
+
         var received = await client.PostAsJsonAsync($"/api/production-tracking/releases/{release.Id}/receive",
             new { requestId = Guid.NewGuid() });
         Assert.Equal(HttpStatusCode.OK, received.StatusCode);
@@ -144,6 +147,8 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
         await repository.CreateUserAsync(new(Guid.NewGuid(), blockedUser, "无项目内容", "unused", UserRole.Engineer, true, CompanyId: company, RoleCode: blockedRole.Role), default);
         await repository.SetUserCompanyScopeAsync(blockedUser, company, false, [], "admin", default);
         Authorize(client, blockedUser, "Engineer");
+        var visibleToBlockedUser = (await client.GetFromJsonAsync<ProductionTrackingProject[]>("/api/production-tracking/projects?selfOnly=true"))!;
+        Assert.DoesNotContain(visibleToBlockedUser, entry => entry.Id == project.Id);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/production-tracking/releases/{release.Id}/external-suppliers")).StatusCode);
         Authorize(client, "admin", "Administrator");
         var update = new UpdateProductionLotAllocation(lot.Id, "Self", 2, null, "机加", null, "改为内部加工", Guid.NewGuid(), allocationRecord.RowVersion);

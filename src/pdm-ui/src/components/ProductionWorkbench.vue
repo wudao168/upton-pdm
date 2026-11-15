@@ -61,6 +61,7 @@ const capacity = ref<ProductionCapacityView | null>(null)
 const rememberedLines = new Map<string, string>()
 const selectedProjectId = ref(''), selectedReleaseId = ref(''), selectedLineId = ref(''), selectedLotId = ref('')
 const expandedProjectIds = ref<string[]>([])
+const packageOrder = ref<'published' | 'project'>('published')
 const projectSearch = ref(''), lineSearch = ref(''), lineFilter = ref<'all' | 'open' | 'urgent'>('all')
 const externalSupplier = ref(''), externalCategory = ref(''), externalStage = ref('')
 const externalDateType = ref<'required' | 'promised' | 'published'>('required'), externalStart = ref(''), externalEnd = ref('')
@@ -187,8 +188,10 @@ function matchesTrackingLine(line: ProductionLine, source = record.value?.state)
 }
 const state = computed(() => {
   if (!record.value) return null
-  if (tab.value === 'schedule') return selfBase.value && (selfProductionState(selfBase.value, matchesSelfLot)
-    ?? { ...selfBase.value, lots: [], lines: [], movements: [] })
+  if (tab.value === 'schedule') {
+    const empty = { ...record.value.state, lots: [], lines: [], movements: [] }
+    return selfBase.value ? selfProductionState(selfBase.value, matchesSelfLot) ?? empty : empty
+  }
   if (tab.value !== 'external') return record.value.state
   return externalBase.value && (externalProductionState(externalBase.value, matchesExternalLot)
     ?? { ...externalBase.value, lots: [], lines: [], movements: [] })
@@ -230,11 +233,29 @@ const canAdjustDelivery = computed(() => canAssign.value || can('production.draw
 const canSchedule = computed(() => can('production.schedule'))
 const canManageCapacity = computed(() => can('production.capacity.manage'))
 const movementLabels = productionMovementLabels
-const visibleProjects = computed(() => projects.value.map(project => ({ ...project, packages: project.packages.filter(item => {
-  if (!matchesProductionStatus(item.status, statusFilter.value, includeComplete.value)) return false
+const projectNumberOrder = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+function comparePublished(left: ProductionReleaseSummary, right: ProductionReleaseSummary) {
+  const leftTime = Date.parse(left.publishedAt) || 0
+  const rightTime = Date.parse(right.publishedAt) || 0
+  return rightTime - leftTime || projectNumberOrder.compare(left.packageNumber, right.packageNumber)
+    || left.releasePackageId.localeCompare(right.releasePackageId)
+}
+const visibleProjects = computed(() => {
   const query = projectSearch.value.trim().toLowerCase()
-  return !query || `${project.code} ${project.name} ${item.packageNumber}`.toLowerCase().includes(query)
-}) })).filter(project => project.packages.length > 0))
+  return projects.value.map(project => ({
+    ...project,
+    packages: project.packages.filter(item => matchesProductionStatus(item.status, statusFilter.value, includeComplete.value)
+      && (!query || `${project.code} ${project.name} ${item.packageNumber}`.toLowerCase().includes(query))).sort(comparePublished),
+  })).filter(project => project.packages.length > 0)
+    .sort((left, right) => projectNumberOrder.compare(left.code, right.code) || left.id.localeCompare(right.id))
+})
+const packageGroups = computed(() => packageOrder.value === 'project'
+  ? visibleProjects.value.map(project => ({ id: project.id, project, packages: project.packages }))
+  : [{ id: 'published', project: undefined, packages: visibleProjects.value.flatMap(project => project.packages).sort(comparePublished) }])
+function packageNumberLabel(item: ProductionReleaseSummary) {
+  const number = item.packageNumber.replace(/^RP-.+-(\d{8}-[^-]+)$/, '$1')
+  return packageOrder.value === 'published' ? `${item.projectCode} · ${number}` : number
+}
 function projectAttention(project: ProductionProject): 'error' | 'new' | '' {
   if (listAttention.reasons(project.id, undefined, true).length) return 'error'
   const tones = (projects.value.find(item => item.id === project.id)?.packages ?? project.packages).map(packageAttention)
@@ -481,11 +502,12 @@ async function refresh() {
       if (activeTab === 'schedule') await loadCapacity()
       return
     }
-    if (!values.some(item => item.id === selectedProjectId.value)) selectedProjectId.value = values[0]?.id ?? ''
-    const project = values.find(item => item.id === selectedProjectId.value)
-    const id = project?.packages.some(item => item.releasePackageId === selectedReleaseId.value)
-      ? selectedReleaseId.value : project?.packages[0]?.releasePackageId ?? ''
-    await loadRelease(id)
+    const packages = values.flatMap(project => project.packages)
+    const firstVisible = packageGroups.value.flatMap(group => group.packages)[0]
+    const first = firstVisible ?? [...packages].sort(comparePublished)[0]
+    const selection = packages.find(item => item.releasePackageId === selectedReleaseId.value) ?? first
+    selectedProjectId.value = selection?.projectId ?? ''
+    await loadRelease(selection?.releasePackageId ?? '')
     if (activeTab === 'schedule') await loadCapacity()
   } catch (cause) { if (current === refreshGeneration && tab.value === activeTab) reportError(cause instanceof Error ? cause.message : '') }
   finally { if (current === refreshGeneration) pending.value = false }
@@ -748,34 +770,38 @@ function printLotCard() {
             <SearchField><input v-model="projectSearch" type="search" placeholder="项目号、名称或发布包" aria-label="搜索生产发布包"></SearchField>
           </div>
           <div class="production-workbench__tree-actions">
-            <button type="button" class="production-workbench__toggle-projects" :aria-label="hasExpandedProjects ? '折叠全部项目发布包' : '展开全部项目发布包'" :aria-expanded="hasExpandedProjects" :disabled="!visibleProjects.length" @click="toggleAllProjects">{{ hasExpandedProjects ? '折叠' : '展开' }}</button>
+            <select v-model="packageOrder" aria-label="发布包排序">
+              <option value="published">按发布顺序</option>
+              <option value="project">按项目号</option>
+            </select>
+            <button v-if="packageOrder === 'project'" type="button" class="production-workbench__toggle-projects" :aria-label="hasExpandedProjects ? '折叠全部项目发布包' : '展开全部项目发布包'" :aria-expanded="hasExpandedProjects" :disabled="!visibleProjects.length" @click="toggleAllProjects">{{ hasExpandedProjects ? '折叠' : '展开' }}</button>
           </div>
-          <div v-for="project in visibleProjects" :key="project.id" class="production-workbench__tree-project">
-            <button type="button" class="production-workbench__project" :class="{ selected: selectedProjectId === project.id, 'is-release-attention': Boolean(projectAttention(project)) }" :data-release-attention="projectAttention(project) || undefined" :title="listAttention.reasons(project.id, undefined, true).join('；') || attentionTitle(projectAttention(project))" :aria-expanded="expandedProjectIds.includes(project.id)" :aria-controls="`production-project-packages-${project.id}`" :aria-label="`${expandedProjectIds.includes(project.id) ? '折叠' : '展开'}项目 ${project.code} 的发布包`" @click="toggleProject(project.id, $event)">
+          <div v-for="{ id, project, packages } in packageGroups" :key="id" class="production-workbench__tree-project">
+            <button v-if="project" type="button" class="production-workbench__project" :class="{ selected: selectedProjectId === project.id, 'is-release-attention': Boolean(projectAttention(project)) }" :data-release-attention="projectAttention(project) || undefined" :title="listAttention.reasons(project.id, undefined, true).join('；') || attentionTitle(projectAttention(project))" :aria-expanded="expandedProjectIds.includes(project.id)" :aria-controls="`production-project-packages-${project.id}`" :aria-label="`${expandedProjectIds.includes(project.id) ? '折叠' : '展开'}项目 ${project.code} 的发布包`" @click="toggleProject(project.id, $event)">
               <ReleaseAttentionBorder v-if="projectAttention(project)" :tone="projectAttention(project) as 'error' | 'new'" />
               <Tag :filled="selectedProjectId === project.id" class="production-workbench__category-icon" :size="14" aria-hidden="true" />
               <span class="production-workbench__project-identity" :title="`${project.code} · ${project.name}`"><strong>{{ project.code }}</strong><span>{{ project.name }}</span></span>
               <small>{{ project.packages.length }} 包</small>
             </button>
-            <Transition name="production-packages"><div v-show="expandedProjectIds.includes(project.id)" :id="`production-project-packages-${project.id}`" class="production-workbench__project-packages" role="group" :aria-label="`${project.code}的发布包`">
-            <button v-for="item in project.packages" :key="item.releasePackageId" type="button" class="production-workbench__package" :class="{ selected: selectedReleaseId === item.releasePackageId, 'is-release-attention': Boolean(packageAttention(item)) }" :data-release-attention="packageAttention(item) || undefined" :title="packageWarnings(item).join('；') || attentionTitle(packageAttention(item))" @click="chooseRelease(project.id, item.releasePackageId, $event)">
+            <Transition name="production-packages"><div v-show="!project || expandedProjectIds.includes(project.id)" :id="project && `production-project-packages-${project.id}`" class="production-workbench__project-packages" role="group" :aria-label="project ? `${project.code}的发布包` : '按发布顺序排列的发布包'">
+            <button v-for="item in packages" :key="item.releasePackageId" type="button" class="production-workbench__package" :class="{ selected: selectedReleaseId === item.releasePackageId, 'is-unscheduled': item.hasUnscheduledProduction, 'is-release-attention': Boolean(packageAttention(item)) }" :data-release-attention="packageAttention(item) || undefined" :title="packageWarnings(item).join('；') || attentionTitle(packageAttention(item))" @click="chooseRelease(item.projectId, item.releasePackageId, $event)">
               <ReleaseAttentionBorder v-if="packageAttention(item)" :tone="packageAttention(item) as 'error' | 'new'" />
               <Package :filled="selectedReleaseId === item.releasePackageId" class="production-workbench__package-icon" :size="16" aria-hidden="true" />
               <span class="production-workbench__package-content">
-                <strong class="production-workbench__package-number" :title="item.packageNumber">{{ item.packageNumber.replace(/^RP-.+-(\d{8}-[^-]+)$/, '$1') }}</strong>
-                <span class="production-workbench__package-status"><em :title="item.status">{{ item.status }}</em><small v-if="item.urgentLines || item.atRiskLines" class="production-workbench__package-alerts"><b v-if="item.urgentLines">紧急 {{ item.urgentLines }} 项</b><b v-if="item.atRiskLines">交期风险 {{ item.atRiskLines }} 项</b></small></span>
+                <strong class="production-workbench__package-number" :title="`${item.projectCode} · ${item.projectName} · ${item.packageNumber}`">{{ packageNumberLabel(item) }}</strong>
+                <span class="production-workbench__package-status"><em :title="item.status">{{ item.status }}</em><small v-if="item.hasUnscheduledProduction && item.status !== '待排产'" class="production-workbench__package-unscheduled">未排产</small><small v-if="item.urgentLines || item.atRiskLines" class="production-workbench__package-alerts"><b v-if="item.urgentLines">紧急 {{ item.urgentLines }} 项</b><b v-if="item.atRiskLines">交期风险 {{ item.atRiskLines }} 项</b></small></span>
                 <span class="production-workbench__package-meta"><small class="production-workbench__package-counts"><span>质检 {{ item.qualifiedLines }}/{{ item.totalLines }}</span><span>领用 {{ item.issuedLines }}/{{ item.totalLines }}</span></small><small class="production-workbench__package-required">需 {{ dateLabel(item.firstRequiredOn) }}</small></span>
               </span>
             </button>
             </div></Transition>
           </div>
-          <p v-if="!visibleProjects.length" class="production-workbench__empty">{{ pending ? '正在读取生产发布包…' : tab === 'schedule' ? '暂无已分配自制批次的发布包' : tab === 'external' ? '暂无已分配外协批次的发布包' : '暂无符合条件的生产发布包' }}</p>
+          <p v-if="!visibleProjects.length" class="production-workbench__empty">{{ pending ? '正在读取生产发布包…' : tab === 'schedule' ? '暂无自制或待分配的发布包' : tab === 'external' ? '暂无已分配外协批次的发布包' : '暂无符合条件的生产发布包' }}</p>
         </aside>
         <template v-if="tab === 'tracking' || tab === 'external'">
         <main class="production-workbench__lines pdm-panel" :aria-label="tab === 'external' ? '外协物料明细' : '发布包物料明细'">
           <template v-if="state">
             <header v-if="allCategories"><div><h2>全部发布包</h2><p>所有项目与发布包 · {{ allRecords.length }} 个发布包 · {{ lineRows.length }} 项物料</p></div></header>
-            <header v-else><div><h2>{{ state.packageNumber }} <span class="production-workbench__state">{{ selectedSummary?.status }}</span></h2><p>{{ state.projectCode }} · {{ state.projectName }} · 发布 {{ dateLabel(state.publishedAt) }}</p></div><button v-if="tab === 'tracking' && canAssign && !state.receivedAt" type="button" class="pdm-primary-action" :disabled="pending" @click="receive">供应链接收</button></header>
+            <header v-else><div><h2>{{ state.packageNumber }} <span class="production-workbench__state">{{ selectedSummary?.status }}</span></h2><p>{{ state.projectCode }} · {{ state.projectName }} · 发布 {{ dateLabel(state.publishedAt) }}</p></div><button v-if="tab === 'tracking' && canAssign && !state.receivedAt" type="button" class="pdm-primary-action" data-pdm-primary :disabled="pending" @click="receive">供应链接收</button></header>
 
             <div v-if="tab === 'tracking'" class="production-workbench__trace-filters pdm-toolbar" aria-label="发布跟踪筛选" title="筛选当前发布包的自制或外协物料，日期包含起止当天">
               <label><SearchField><input v-model="lineSearch" type="search" :placeholder="allCategories ? '搜索项目、发布包、图号或名称' : '搜索图号、名称或材质'" aria-label="搜索本包物料"></SearchField></label>
@@ -1076,7 +1102,8 @@ function printLotCard() {
 .production-workbench__tree>.production-workbench__toolbar>button{grid-column:3}
 
 }
-.production-workbench__tree-actions{display:grid;grid-column:1/-1;grid-template-columns:80px;justify-content:end;gap:5px;min-width:0;margin-bottom:5px}
+.production-workbench__tree-actions{display:grid;grid-column:1/-1;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:5px;min-width:0;margin-bottom:5px}
+.production-workbench__tree-actions>select{width:100%;min-width:0;height:28px}
 .production-workbench__pda { display: flex; flex-direction: column; min-height: 0; }
 .production-pda__stage { display: flex; flex: 1 1 auto; min-height: 0; padding: 18px 8px; overflow: auto; }
 .production-pda__body {

@@ -50,6 +50,7 @@ describe('PreviewWorkspace', () => {
       window.dispatchEvent(new CustomEvent('pdm-preview-component', { detail: { documentId, name, configuration: 'Default' } }))
       await nextTick()
     }
+    await wrapper.findAll('button').find(b=>b.text()==='加载交互预览')!.trigger('click')
     window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready' } }))
     await select('shf20-20211227114217544-3~Default', 'previous-doc')
     expect(properties()).toContain('ROOT')
@@ -58,7 +59,7 @@ describe('PreviewWorkspace', () => {
     await select('ROOT/Default/left-1~Default/shf20-20211227114217544-3~Default')
     expect(properties()).toContain('导向轴支座')
     expect(properties()).toContain('V4')
-    expect(wrapper.emitted('preview')).toBeUndefined()
+    expect(wrapper.emitted('preview')).toHaveLength(1)
     expect(wrapper.props('selected')).toEqual(assembly)
     await wrapper.setProps({ readableDocumentIds: new Set<string>() })
     expect(wrapper.text()).toContain('所选零件暂无可查看的关联图档')
@@ -130,7 +131,7 @@ describe('PreviewWorkspace', () => {
     expect(wrapper.find('.pdm-preview-properties-toggle').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档属性"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档信息卡"]').exists()).toBe(false)
-    expect(wrapper.get('.pdm-preview-properties-bar__title').text()).toBe('图档属性')
+    expect(wrapper.find('.pdm-preview-properties-bar__title').exists()).toBe(false)
     expect(wrapper.get('.pdm-preview-properties').attributes('style') ?? '').not.toContain('display: none')
     await wrapper.setProps({ selected: { ...selected, documentId: 'other' } })
     expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(10)
@@ -162,7 +163,7 @@ describe('PreviewWorkspace', () => {
     const host = row.get('#drawing-review-decision-host')
     // 行内顺序：批注工具 → 保存批注 → 审核结论栏。
     expect(row.find('.pdm-markup-toolbar').exists()).toBe(true)
-    expect(host.element.previousElementSibling?.getAttribute('aria-label')).toBe('保存批注')
+    expect(host.element.previousElementSibling?.querySelector('button[aria-label="保存批注"]')?.getAttribute('aria-label')).toBe('保存批注')
     expect(host.get('.stub-decision').text()).toBe('审核结论')
     expect(row.find('button[aria-label="更多"]').exists()).toBe(false)
   })
@@ -390,4 +391,7 @@ describe('PreviewWorkspace', () => {
 
     wrapper.unmount()
   })
+  it('原图审核发送冻结版本且隔离错误预览状态',async()=>{const w=mount(PreviewWorkspace,{props:{selected,related:[],nativeOnlyReview:true,inlineReviewPanel:true,desktopAvailable:true,reviewVersionId:'frozen-id',reviewRevision:'W1',reviewPanelCollapsed:false},slots:{default:'<aside class="drawing-review-panel">审核边栏</aside>'}});expect(w.get('.pdm-preview-content').classes()).toContain('is-release-review');expect(w.find('iframe').exists()).toBe(false);await w.findAll('button').find(b=>b.text()==='加载交互预览')!.trigger('click');expect(w.emitted('preview')?.at(-1)).toEqual([selected,'frozen-id','W1']);window.dispatchEvent(new CustomEvent('pdm-preview-status',{detail:{state:'ready',documentId:'wrong',versionId:'frozen-id'}}));await nextTick();expect(w.emitted('previewReady')?.at(-1)?.[0]).toMatchObject({ready:false});window.dispatchEvent(new CustomEvent('pdm-preview-status',{detail:{state:'ready',fileName:selected.fileName}}));await nextTick();expect(w.emitted('previewReady')?.at(-1)?.[0]).toMatchObject({documentId:selected.documentId,versionId:'frozen-id',ready:true});await w.setProps({reviewVersionId:'different-id'});expect(w.emitted('previewReady')?.at(-1)?.[0]).toMatchObject({ready:false});w.unmount()});
+  it('浏览器原图审核不回退PDF',()=>{const w=mount(PreviewWorkspace,{props:{selected,related:[],nativeOnlyReview:true,inlineReviewPanel:true,desktopAvailable:false}});expect(w.text()).toContain('Windows 客户端使用 eDrawings');expect(w.find('iframe').exists()).toBe(false);w.unmount()});
+
 })

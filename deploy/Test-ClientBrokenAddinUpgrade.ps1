@@ -42,10 +42,13 @@ if (-not $blocked) { throw '替代注销失败时必须停止安装，保留旧�
 if (-not (Get-ChildItem -LiteralPath (Join-Path $fixture 'logs') -File | Where-Object {(Get-Content -LiteralPath $_.FullName -Raw).Contains('RA0000')})) { throw '未保留原始诊断日志。' }
 Write-Output 'PASS：完整旧版正常注销；缺失依赖时替代注销；双重失败时停止并保留旧安装；原始异常仅写诊断日志。'
 
-foreach ($name in @('Stop-PreviousDesktopClient', 'Test-UplmInstallRoot', 'Resolve-UplmProgramPath', 'Backup-PreviousUplmPrograms', 'Restore-PreviousUplmPrograms')) {
+foreach ($name in @('Stop-PreviousDesktopClient', 'Test-UplmInstallRoot', 'Resolve-UplmProgramPath', 'Backup-PreviousUplmPrograms', 'Restore-PreviousUplmPrograms',
+        'Get-UplmServerSettingsPlan', 'Write-UplmSettingsAtomically', 'Apply-UplmServerSettings', 'Restore-UplmServerSettings')) {
     $definition = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     Invoke-Expression $definition.Extent.Text
 }
+function Write-InstallDiagnostic([string]$Message) { $script:installDiagnostics.Add($Message) }
+$script:installDiagnostics = New-Object System.Collections.Generic.List[string]
 function New-UpgradeFixture([string]$Name) {
     $install = Join-Path $fixture ($Name + '\UPLM')
     foreach ($folder in @('client', 'solidworks-addin', 'Diagnostics', '用户图纸')) { New-Item -ItemType Directory -Path (Join-Path $install $folder) -Force | Out-Null }
@@ -112,13 +115,62 @@ Remove-Item -LiteralPath (Join-Path $fixture 'deny') -Force
 $serverSettingsPath = Join-Path $install 'server-settings.json'
 Set-Content -LiteralPath $serverSettingsPath -Value '{"ServerAddress":"http://old-server","CustomValue":"retained","Nested":{"More":{"Value":"unchanged"}}}'
 $serverUri = [Uri]'http://new-server:5173'
-$scriptText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Install-UPLMClient.ps1'))
-$settingsStart = $scriptText.IndexOf('$serverSettingsValues = @{}')
-$settingsEnd = $scriptText.IndexOf('[IO.File]::WriteAllText((Join-Path $serverSettingsRoot', $settingsStart)
-Invoke-Expression $scriptText.Substring($settingsStart, $settingsEnd - $settingsStart)
-$settingsResult = $serverSettings | ConvertFrom-Json
+$plan = Get-UplmServerSettingsPlan $install $serverUri
+Apply-UplmServerSettings $plan
+$settingsResult = Get-Content -LiteralPath $serverSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($settingsResult.ServerAddress -ne 'http://new-server:5173' -or $settingsResult.CustomValue -ne 'retained' -or $settingsResult.Nested.More.Value -ne 'unchanged') { throw '安装选择服务器地址时未保留其他设置。' }
 Write-Output 'PASS：注册恢复失败单独报告且保留程序；服务器地址采用安装参数并保留其他嵌套设置。'
+
+$utf8 = [Text.UTF8Encoding]::new($false)
+$goodSettings = '{"ServerAddress":"http://old-server","Nested":{"More":{"Value":"保留"}}}'
+foreach ($text in @($goodSettings, ([string][char]0xFEFF + [string][char]0xFEFF + $goodSettings))) {
+    [IO.File]::WriteAllBytes($serverSettingsPath, $utf8.GetBytes($text))
+    $plan = Get-UplmServerSettingsPlan $install $serverUri
+    if ($plan.InvalidBackup) { throw '有效配置被判为损坏。' }
+    Apply-UplmServerSettings $plan
+    $saved = [IO.File]::ReadAllText($serverSettingsPath) | ConvertFrom-Json
+    if ($saved.Nested.More.Value -ne '保留') { throw '中文嵌套字段未保留。' }
+}
+
+$invalidCases = @(
+    @{ Name='zero-byte'; Content=[byte[]]@() },
+    @{ Name='whitespace'; Content=$utf8.GetBytes(" `t`r`n") },
+    @{ Name='non-json'; Content=$utf8.GetBytes([string][char]0x3002) },
+    @{ Name='truncated'; Content=$utf8.GetBytes('{"ServerAddress":') },
+    @{ Name='array'; Content=$utf8.GetBytes('[{"ServerAddress":"http://old-server"}]') },
+    @{ Name='bad-encoding'; Content=[byte[]]@(0xC3, 0x28) }
+)
+foreach ($case in $invalidCases) {
+    [IO.File]::WriteAllBytes($serverSettingsPath, $case.Content)
+    $before = (Get-FileHash -LiteralPath $serverSettingsPath).Hash
+    $plan = Get-UplmServerSettingsPlan $install $serverUri
+    if (!$plan.InvalidBackup -or (Test-Path -LiteralPath $plan.InvalidBackup) -or
+        (Get-FileHash -LiteralPath $serverSettingsPath).Hash -ne $before) { throw "预检修改了原配置：$($case.Name)" }
+    Apply-UplmServerSettings $plan
+    $saved = [IO.File]::ReadAllText($serverSettingsPath) | ConvertFrom-Json
+    if ($saved.ServerAddress -ne 'http://new-server:5173' -or (Get-FileHash -LiteralPath $plan.InvalidBackup).Hash -ne $before) {
+        throw "损坏配置未按字节保留，或所选地址未写入：$($case.Name)"
+    }
+    Restore-UplmServerSettings $plan
+    if ((Get-FileHash -LiteralPath $serverSettingsPath).Hash -ne $before) { throw "后续失败未恢复原配置：$($case.Name)" }
+}
+Write-Output 'PASS：重复 BOM 可读，空文件、乱码、截断和非对象配置逐字节备份，后续失败可恢复。'
+
+[IO.File]::Delete($serverSettingsPath)
+$plan = Get-UplmServerSettingsPlan $install $serverUri
+Apply-UplmServerSettings $plan
+Restore-UplmServerSettings $plan
+if ([IO.File]::Exists($serverSettingsPath)) { throw '原先不存在配置时回滚留下了新文件。' }
+[IO.File]::WriteAllText($serverSettingsPath, $goodSettings)
+$plan = Get-UplmServerSettingsPlan $install $serverUri
+[IO.File]::WriteAllText($serverSettingsPath, '{"ServerAddress":"http://another-server"}')
+$blocked = $false
+try { Apply-UplmServerSettings $plan }
+catch { $blocked = $_.Exception.Message.Contains('安装期间已变化') }
+if (!$blocked -or ([IO.File]::ReadAllText($serverSettingsPath) | ConvertFrom-Json).ServerAddress -ne 'http://another-server') {
+    throw '安装覆盖了预检后的并发配置修改。'
+}
+Write-Output 'PASS：首次安装失败恢复为未配置，并发配置变更保留。'
 
 $script:swRunning = $false
 $script:desktopCloseCalled = $false

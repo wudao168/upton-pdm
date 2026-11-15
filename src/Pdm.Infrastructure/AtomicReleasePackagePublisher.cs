@@ -175,6 +175,8 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             throw new PdmRuleException($"发布暂存目录不存在：{stagingDirectory}");
         }
 
+        if (repository is not null)
+            package = await PdfTitleBlockSnapshotBuilder.RestoreMissingLongLeadSnapshotAsync(repository, package, project, cancellationToken);
         var publishedAt = package.PublishedAt ?? timeProvider.GetUtcNow();
         var conversionPackage = package with { PublishedAt = publishedAt };
         // Refresh legacy in-review packages as well; the approved full BOM snapshot is unchanged.
@@ -184,8 +186,8 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         {
             // 长交期发布须先全部完成，数量才能与本次发布BOM一同冻结。
             package = await repository.SaveReleasePdfTitleBlockAsync(package.Id,
-                PdfTitleBlockSnapshotBuilder.FreezeQuantities(conversionPackage,
-                    await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken)), cancellationToken);
+                await PdfTitleBlockSnapshotBuilder.FreezeForPublicationAsync(repository, conversionPackage,
+                    await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken), cancellationToken), cancellationToken);
             conversionPackage = package with { PublishedAt = publishedAt };
         }
 
@@ -194,7 +196,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         ReleasePublishingProgress.Set(package.Id, "核对审批冻结工程图");
         try
         {
-            var workSources = previewSources.Where(source => !source.AlreadyReleased).ToArray();
+            var workSources = previewSources.Where(source => package.LocksDocuments && !source.AlreadyReleased).ToArray();
             formalDrawings = workSources.Length == 0
                 ? new Dictionary<Guid, FormalDrawingSource>()
                 : new Dictionary<Guid, FormalDrawingSource>(await previewConverter.FinalizeDrawingsAsync(
@@ -234,6 +236,10 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             if (pendingSources.Length > 0)
                 foreach (var preview in await previewConverter.GenerateAsync(conversionPackage, project, pendingSources, stagingDirectory, cancellationToken)) previews[preview.Key] = preview.Value;
         }
+        catch (PreviewServerUnavailableException exception) when (package.DrawingReview is not null && !cancellationToken.IsCancellationRequested)
+        {
+            throw new ReleaseConversionPendingException(exception.Message, exception);
+        }
         catch (PartialPreviewConversionException exception) when (!cancellationToken.IsCancellationRequested)
         {
             previewError = exception.Message;
@@ -243,6 +249,10 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         {
             previewError = exception.Message;
         }
+        if (package.DrawingReview is not null && conversionSources.Any(source => source.Kind == DocumentKind.Drawing)
+            && (previewError is not null || conversionSources.Where(source => source.Kind == DocumentKind.Drawing).Any(source => !previews.ContainsKey(source.DocumentId))))
+            throw new ReleaseConversionPendingException("审批已通过，正式PDF尚未全部生成，BOM与图纸暂未发布。请检查转图服务后重试；已通过的审批记录保留。"
+                , new PdmRuleException(previewError ?? "缺少正式PDF。"));
         var activePreviewFiles = previews.Values.Select(preview =>
         {
             var path = ReleaseDeliveryFiles.PreviewPath(stagingDirectory, preview);
@@ -352,7 +362,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                     if (delivery.Preview is not null) previews[source.DocumentId] = delivery.Preview;
                 }
             }
-            if (source.Kind == DocumentKind.Drawing && !source.AlreadyReleased && !formal.ContainsKey(source.DocumentId))
+            if (package.LocksDocuments && source.Kind == DocumentKind.Drawing && !source.AlreadyReleased && !formal.ContainsKey(source.DocumentId))
             {
                 var formalManifest = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-formal", package.Id.ToString("N"), $"{source.DocumentId:N}.slddrw.json"));
                 if (!File.Exists(formalManifest)) throw new PdmConflictException($"工程图{source.DrawingNumber}缺少正式源图清单，不能安全恢复发布。");
@@ -373,6 +383,8 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             }
         }
         var error = sources.Any(source => !previews.ContainsKey(source.DocumentId)) ? "发布资料尚未齐套，等待后台补齐预览。" : null;
+        if (package.DrawingReview is not null && sources.Any(source => source.Kind == DocumentKind.Drawing && !previews.ContainsKey(source.DocumentId)))
+            throw new PdmConflictException("发布目录缺少已审批工程图的PDF，请核对发布文件后重试。");
         return new ReleasePublication(directory, previews, error, formal)
         {
             PublishedAt = manifest.TryGetProperty("publishedAt", out var publishedAt) && publishedAt.TryGetDateTimeOffset(out var value) ? value : null

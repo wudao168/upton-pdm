@@ -9,11 +9,14 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
 import type { BomItem, DocumentNode, DocumentVersionSummary, PreviewMode, SolidWorksOpenMode } from '../types'
 import SquareLoader from './SquareLoader.vue'
+import PreviewMarkupTools from './PreviewMarkupTools.vue'
 
 const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
 const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer.vue'))
 
 const props = withDefaults(defineProps<{
+  nativeOnlyReview?: boolean
+  inlineReviewPanel?: boolean
   selected: DocumentNode
   emptyProject?: boolean
   related: DocumentNode[]
@@ -23,6 +26,7 @@ const props = withDefaults(defineProps<{
   currentUsername?: string
   canManageLifecycle?: boolean
   canEditDocuments?: boolean
+  canAnnotate?: boolean
   desktopAvailable?: boolean
   obscured?: boolean
   reviewPanelCollapsed?: boolean
@@ -34,10 +38,13 @@ const props = withDefaults(defineProps<{
   projectId?: string
   active?: boolean
 }>(), {
+  nativeOnlyReview: false,
+  inlineReviewPanel: false,
   currentUsername: '',
   emptyProject: false,
   canManageLifecycle: false,
   canEditDocuments: false,
+  canAnnotate: true,
   desktopAvailable: false,
   obscured: false,
   reviewPanelCollapsed: true,
@@ -52,6 +59,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]
   preview: [node: DocumentNode, versionId?: string, revision?: string]
+  previewReady: [state: {documentId?:string;versionId?:string;ready:boolean}]
   related: [node: DocumentNode]
   more: []
   whereUsed: []
@@ -139,18 +147,22 @@ const previewProperties = computed(() => [
   { label: '表面处理', value: previewPropertyValue(propertyBomItem.value?.surfaceTreatment) },
   { label: '热处理', value: previewPropertyValue(propertyBomItem.value?.heatTreatment) },
   { label: '图纸版本', value: documentDrawingVersion(activeVersionMetadata.value) },
-  { label: '发布版本', value: documentPublishedVersion(activeVersionMetadata.value) },
-  { label: '最近存档', value: formatArchiveDate(lastArchivedAt.value) },
+  ...(props.nativeOnlyReview ? [] : [
+    { label: '发布版本', value: documentPublishedVersion(activeVersionMetadata.value) },
+    { label: '最近存档', value: formatArchiveDate(lastArchivedAt.value) },
+  ]),
 ])
 
 async function loadLastArchivedAt() {
   const request = ++archiveDateRequest
-  lastArchivedAt.value = ''
+  lastArchivedAt.value = ''; versionMetadata.value = []
   const documentId = propertyNode.value?.documentId
   if (!documentId || !props.accessToken) return
   try {
     const versions = await listDocumentVersions(documentId, props.accessToken)
     if (request !== archiveDateRequest) return
+    versionMetadata.value = versions
+    if (props.reviewVersionId) { lastArchivedAt.value = versions.find(v=>v.id===props.reviewVersionId)?.createdAt ?? ''; return }
     lastArchivedAt.value = versions.reduce((latest, version) => {
       if (!version.createdAt) return latest
       if (!latest) return version.createdAt
@@ -162,7 +174,7 @@ async function loadLastArchivedAt() {
 }
 
 function activateMarkup(command: string) {
-  if (!props.selected.documentId) return
+  if (!props.selected.documentId || !projectWritable.value || !props.canAnnotate) return
   if (!props.desktopAvailable) {
     ElMessage.info('图形批注工具仅在Windows客户端的eDrawings预览中可用。')
     return
@@ -171,7 +183,7 @@ function activateMarkup(command: string) {
 }
 
 function saveMarkup() {
-  if (!props.selected.documentId || markupSaving.value) return
+  if (!props.selected.documentId || markupSaving.value || !projectWritable.value || !props.canAnnotate) return
   if (!props.desktopAvailable) {
     ElMessage.info('图形批注仅支持在Windows客户端中保存。')
     return
@@ -224,6 +236,7 @@ function reportPreviewBounds() {
   const reviewTop = Math.max(top, Math.min(bottom, actionsBottom))
   // 收起时只留窄条，展开时固定 300px（预览区更窄时按可用宽度收窄）。
   const reviewWidth = props.reviewPanelCollapsed ? 34 : Math.min(Math.max(0, right - left), 300)
+  if (props.inlineReviewPanel) { postDesktopMessage('review-overlay-hide'); return }
   postDesktopMessage('review-overlay-bounds', {
     left: right - reviewWidth,
     top: reviewTop,
@@ -295,6 +308,7 @@ async function startPreview() {
   previewSessionActivated.value = true
   if (!props.desktopAvailable) {
     clearWebPreview()
+    if (props.nativeOnlyReview) { previewState.value='unavailable'; previewError.value='请在 Windows 客户端使用 eDrawings 审核送审原图。'; return }
     previewError.value = ''
     if (!props.accessToken) {
       previewState.value = 'unavailable'
@@ -366,8 +380,9 @@ function onWebStepError(message: string) {
 }
 
 function onPreviewStatus(event: Event) {
-  const detail = (event as CustomEvent<{ state?: string; message?: string }>).detail
-  if (!detail?.state) return
+  const detail = (event as CustomEvent<{ state?: string; message?: string; fileName?:string; documentId?:string; versionId?:string }>).detail
+  if (!detail?.state || !props.active || !props.desktopAvailable || !previewSessionActivated.value) return
+  if (detail.documentId && detail.documentId!==props.selected.documentId || detail.versionId && detail.versionId!==props.reviewVersionId || detail.state==='ready' && detail.fileName && detail.fileName.toLowerCase()!==props.selected.fileName.toLowerCase()) return
   if (detail.state === 'loading' || detail.state === 'ready' || detail.state === 'error') {
     previewState.value = detail.state
     previewError.value = detail.message ?? ''
@@ -428,6 +443,8 @@ function onSolidWorksStatus(event: Event) {
   solidWorksMessage.value = detail.message ?? ''
 }
 
+watch(() => props.nativeOnlyReview, () => { hidePreview(); clearWebPreview(); previewSessionActivated.value=false; previewState.value='idle' }, { flush:'sync' })
+watch([previewState, () => props.selected.documentId, () => props.reviewVersionId, () => props.active], () => emit('previewReady',{documentId:props.selected.documentId,versionId:props.reviewVersionId,ready:props.active && props.desktopAvailable && previewSessionActivated.value && previewState.value==='ready'}), {immediate:true,flush:'post'})
 watch(() => props.obscured, obscured => {
   if (obscured) {
     suspendPreview()
@@ -440,7 +457,7 @@ watch(() => props.reviewPanelCollapsed, () => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
 
-watch([() => propertyNode.value?.documentId, () => propertyNode.value?.version, () => props.accessToken], () => {
+watch([() => propertyNode.value?.documentId, () => propertyNode.value?.version, () => props.reviewVersionId, () => props.accessToken], () => {
   void loadLastArchivedAt()
 }, { immediate: true })
 
@@ -555,7 +572,7 @@ onBeforeUnmount(() => {
     <section class="pdm-panel pdm-preview-control-panel" aria-label="图档查看与操作">
       <header class="pdm-preview-toolbar">
         <section class="pdm-preview-properties-bar" aria-label="图档信息">
-          <span class="pdm-preview-properties-bar__title">{{ componentSelection ? '选中零件属性' : '图档属性' }}</span>
+          <span v-if="componentSelection" class="pdm-preview-properties-bar__title">选中零件属性</span>
           <span v-if="selected.kind === 'Drawing' && /(?:^|-)W\d+$/i.test(displayedRevision)" class="pdm-preview-work-badge">设计工作版 · 不供生产</span>
           <span v-if="componentSelection && !componentNode" class="pdm-preview-component-unavailable">所选零件暂无可查看的关联图档</span>
           <dl v-else class="pdm-preview-properties" aria-label="图档属性">
@@ -587,33 +604,11 @@ onBeforeUnmount(() => {
           ><Rotate3D :size="15" />回写审核标记</button>
         </div>
       </header>
-      <div class="pdm-preview-toolbar pdm-preview-markup-row">
-        <div class="pdm-preview-actions">
-          <!-- 批注工具在左、审核结论栏紧随其后；网页端由审核栏 Teleport 注入结论栏，客户端直接把结论栏放进同一容器。 -->
-          <div v-if="projectWritable" class="pdm-markup-toolbar" aria-label="图形批注工具">
-            <span>批注</span>
-            <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
-            <button type="button" aria-label="云线批注" title="修订云线" :disabled="!selected.documentId" @click="activateMarkup('markup-cloud')"><Cloud :size="14" /></button>
-            <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
-            <button type="button" aria-label="手绘批注" title="自由曲线" :disabled="!selected.documentId" @click="activateMarkup('markup-spline')"><RotateCcw :size="14" /></button>
-          </div>
-        </div>
-        <button
-          type="button"
-          v-if="projectWritable" class="pdm-solidworks-edit pdm-preview-command pdm-markup-save"
-          :class="{ 'is-markup-dirty': markupDirty }"
-          aria-label="保存批注"
-          title="保存当前版本批注"
-          :disabled="!selected.documentId || markupSaving"
-          @click="saveMarkup"
-        >{{ markupSaving ? '保存中…' : '保存批注' }}</button>
-        <!-- 审核结论栏位于保存批注右侧；网页端与客户端都由页面把结论栏渲染进这个容器。 -->
-        <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论"><slot name="decision-bar" /></div>
-      </div>
+      <div v-if="!inlineReviewPanel" class="pdm-preview-toolbar pdm-preview-markup-row"><PreviewMarkupTools v-if="projectWritable && canAnnotate" :disabled="!selected.documentId" :saving="markupSaving" :dirty="markupDirty" @command="activateMarkup" @save="saveMarkup"/><div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论"><slot name="decision-bar"/></div></div>
       <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
     </section>
 
-    <div class="pdm-panel pdm-preview-content">
+    <div class="pdm-panel pdm-preview-content" :class="{ 'is-release-review': inlineReviewPanel, 'is-review-collapsed': reviewPanelCollapsed }">
       <div
         ref="previewSlot"
         class="pdm-real-preview pdm-embedded-preview-slot"
@@ -640,6 +635,7 @@ onBeforeUnmount(() => {
           <h3>项目尚未关联CAD图纸</h3>
           <small>存档后可在左侧选择图档，查看模型和工程图预览。</small>
         </div>
+        <template v-else-if="nativeOnlyReview && !desktopAvailable"><div class="pdm-preview-state-content"><FileSearch :size="52" /><h3>请在 Windows 客户端使用 eDrawings 审核原图</h3><p>审核读取本次送审的原图版本。</p></div></template>
         <template v-else-if="previewState === 'unavailable'">
           <div class="pdm-preview-state-content">
             <FileSearch :size="52" />
@@ -683,12 +679,16 @@ onBeforeUnmount(() => {
           </div>
         </template>
       </div>
-      <slot />
+      <slot :markup="{visible:projectWritable && canAnnotate,disabled:!selected.documentId || !desktopAvailable || previewState!=='ready',saving:markupSaving,dirty:markupDirty,command:activateMarkup,save:saveMarkup}" />
     </div>
   </section>
 </template>
 
 <style scoped>
+.pdm-preview-content.is-release-review>.pdm-embedded-preview-slot{margin-right:300px;width:calc(100% - 300px);padding:0}
+.pdm-preview-content.is-release-review.is-review-collapsed>.pdm-embedded-preview-slot{margin-right:34px;width:calc(100% - 34px)}
+@media(max-width:700px){.pdm-preview-content.is-release-review{height:auto;overflow:auto;min-height:480px}.pdm-preview-content.is-release-review>.pdm-embedded-preview-slot{margin-right:0;width:100%;min-height:400px}.pdm-preview-content.is-release-review :deep(.drawing-review-panel:not(.is-collapsed)){position:relative;inset:auto;width:100%;height:auto;flex:none}.pdm-preview-content.is-release-review.is-review-collapsed>.pdm-embedded-preview-slot{margin-right:34px;width:calc(100% - 34px)}}
+
 :global(.pdm-document-workspace > .pdm-workspace:has(.pdm-preview-panel.is-maximized)){
   position:fixed;inset:0;z-index:1500;grid-template-columns:min(250px,33vw) minmax(0,1fr);
   grid-template-rows:minmax(0,1fr);background:var(--pdm-surface);

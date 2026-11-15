@@ -119,7 +119,8 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
     expect(wrapper.get('tbody tr').text()).toContain('紧急')
     expect(wrapper.get('tbody tr').text()).toContain('2026-10-01')
     await wrapper.get('.production-drawings__selection button.pdm-secondary-action').trigger('click')
-    await wrapper.get('.production-drawings__column-options input[value="brand"]').setValue(true)
+    await wrapper.get('.pdm-column-settings-list input[value="brand"]').setValue(true)
+    await wrapper.get('button[aria-label="上移名称"]').trigger('click')
     await wrapper.get('.production-drawings__column-dialog footer .pdm-primary-action').trigger('click')
     expect(wrapper.findAll('thead th').map(cell => cell.text())).toContain('品牌')
     wrapper.unmount()
@@ -127,6 +128,7 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
     await flushPromises()
     await restored.get('.production-drawings__project').trigger('click')
     expect(restored.findAll('thead th').map(cell => cell.text())).toContain('品牌')
+    expect(restored.findAll('thead th').slice(0, 3).map(cell => cell.text())).toEqual(['选择', '名称', '物料编码'])
     restored.unmount()
   })
 

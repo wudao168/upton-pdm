@@ -8,12 +8,12 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class PdfTitleBlockSnapshotTests
 {
     [Fact]
-    public async Task CapturesAll19SelectedFieldsFromFrozenVersionsAndActualReview()
+    public async Task CapturesAll19FieldsFromPlmArchiveBomAndActualReview()
     {
         var f = new Fixture();
         var snapshot = await PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package, f.Project, f.Settings, default);
         var values = Assert.Single(snapshot.Drawings).Value.Values;
-        Assert.Equal("原设计者", values["designer"]);
+        Assert.Equal("存档工程师", values["designer"]);
         Assert.Equal(values["designer"], values["drafter"]);
         Assert.Equal("2026-10-01", values["designedOn"]);
         Assert.Equal("实际审核员", values["reviewer"]);
@@ -50,29 +50,71 @@ public sealed class PdfTitleBlockSnapshotTests
         Assert.Empty(empty.Drawings);
     }
 
-    [Theory]
-    [InlineData("designer", "设计人")]
-    [InlineData("designedOn", "设计日期")]
-    public async Task DoesNotInferDesignerOrDateFromReviewWritebackSubmitter(string key, string label)
+    [Fact]
+    public async Task EmptyCadPropertiesUseOriginalArchiveEngineerAndDateInsteadOfWritebackOrSubmitter()
     {
         var f = new Fixture();
         f.State.Versions[f.DrawingVersionId] = f.State.Versions[f.DrawingVersionId] with { PropertySnapshot = new Dictionary<string, string?>() };
-        var error = await Assert.ThrowsAsync<PdmRuleException>(() => PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package,
-            f.Project, f.Settings with { PdfTitleBlockFill = new() { EnabledFields = [key] } }, default));
-        Assert.Contains(label, error.Message);
+        var snapshot = await PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package,
+            f.Project, f.Settings, default);
+        Assert.Equal("存档工程师", snapshot.Drawings[f.DrawingId].Values["designer"]);
+        Assert.Equal("2026-10-01", snapshot.Drawings[f.DrawingId].Values["designedOn"]);
     }
 
     [Fact]
-    public async Task MaterialConflictOnlyBlocksTheSelectedField()
+    public async Task CadMaterialConflictDoesNotOverrideOrBlockPlmBomValues()
     {
         var f = new Fixture();
         f.State.Versions[f.ModelVersionId] = f.State.Versions[f.ModelVersionId] with
         { PropertySnapshot = new Dictionary<string, string?> { ["材质"] = "铝" } };
         var settings = f.Settings with { PdfTitleBlockFill = new() { EnabledFields = ["material"] } };
-        await Assert.ThrowsAsync<PdmConflictException>(() => PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package, f.Project, settings, default));
+        f.State.Versions[f.DrawingVersionId] = f.State.Versions[f.DrawingVersionId] with
+        { PropertySnapshot = new Dictionary<string, string?> { ["材质"] = "铜", ["设计"] = "CAD设计者", ["设计日期"] = "无效日期" } };
+        var material = await PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package, f.Project, settings, default);
+        Assert.Equal("钢", material.Drawings[f.DrawingId].Values["material"]);
         var result = await PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package, f.Project,
             settings with { PdfTitleBlockFill = new() { EnabledFields = ["name"] } }, default);
         Assert.Equal("零件名称", result.Drawings[f.DrawingId].Values["name"]);
+    }
+
+    [Fact]
+    public async Task MissingPlmMaterialIsNotFilledFromCadAndNamesNeverExposeAccounts()
+    {
+        var f = new Fixture();
+        f.Package = f.Package with { NonStandardBomSnapshot = [f.Item with { Material = "" }] };
+        f.State.Versions[f.DrawingVersionId] = f.State.Versions[f.DrawingVersionId] with
+        { PropertySnapshot = new Dictionary<string, string?> { ["材质"] = "CAD材质" } };
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package,
+            f.Project, f.Settings with { PdfTitleBlockFill = new() { EnabledFields = ["material"] } }, default));
+        Assert.Contains("PLM中的发布BOM物料信息", error.Message);
+        f.State.EngineerName = "original";
+        var snapshot = await PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package, f.Project,
+            f.Settings with { PdfTitleBlockFill = new() { EnabledFields = ["designer"] } }, default);
+        Assert.Equal("姓名待补充", snapshot.Drawings[f.DrawingId].Values["designer"]);
+    }
+
+    [Fact]
+    public async Task OtherDrawingVersionsReviewsAreNotUsedAndDisabledFieldsRemainOptional()
+    {
+        var f = new Fixture();
+        f.State.Reviews = f.State.Reviews.Select(r => r with { Items = r.Items.Select(i => i with
+            { DrawingResultVersionId = Guid.NewGuid() }).ToArray() }).ToArray();
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package,
+            f.Project, f.Settings with { PdfTitleBlockFill = new() { EnabledFields = ["reviewer"] } }, default));
+        Assert.Contains("PLM中的图纸实际审核记录", error.Message);
+        var result = await PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package, f.Project,
+            f.Settings with { PdfTitleBlockFill = new() { EnabledFields = ["name"] } }, default);
+        Assert.Equal("零件名称", result.Drawings[f.DrawingId].Values["name"]);
+    }
+
+    [Fact]
+    public async Task MultipleDifferentPlmBomValuesStillRequireCorrection()
+    {
+        var f = new Fixture();
+        f.Package = f.Package with { NonStandardBomSnapshot = [f.Item, f.Item with { Id = Guid.NewGuid(), Material = "铝" }] };
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => PdfTitleBlockSnapshotBuilder.BuildAsync(f.Repository, f.Package,
+            f.Project, f.Settings with { PdfTitleBlockFill = new() { EnabledFields = ["material"] } }, default));
+        Assert.Contains("不唯一", error.Message);
     }
 
     [Fact]
@@ -158,6 +200,10 @@ public sealed class PdfTitleBlockSnapshotTests
                 "D.SLDDRW", 10, Sha, "writeback-user", now, "", new Dictionary<string, string?> { ["设计"] = "原设计者", ["设计日期"] = "2026/10/01" }, drawing, [], [], null, null, null, null);
             State.Versions[ModelVersionId] = State.Versions[DrawingVersionId] with { Id = ModelVersionId, DocumentId = modelId,
                 PropertySnapshot = new Dictionary<string, string?>(), ReferenceSnapshot = model };
+            var originalDrawingVersionId = Guid.NewGuid();
+            State.Versions[originalDrawingVersionId] = State.Versions[DrawingVersionId] with
+            { Id = originalDrawingVersionId, CreatedBy = "original", CreatedAt = DateTimeOffset.Parse("2026-09-30T20:00:00Z"),
+                PropertySnapshot = new Dictionary<string, string?>() };
             Item = new(Guid.NewGuid(), Project.Id, BomKind.NonStandard, 1, "0204-001", "零件名称", 2, "001", "钢", "X-123", "B", true)
             { SourceDocumentId = modelId, SourceConfiguration = "默认", SurfaceTreatment = "喷漆", HeatTreatment = "无", Weight = "2.5 kg", IsWearPart = true };
             Package = new(Guid.NewGuid(), Project.Id, "RP-1", ReleasePackageState.Draft, null, "", "", [], now, now, null)
@@ -169,7 +215,7 @@ public sealed class PdfTitleBlockSnapshotTests
                 SupervisorReviewedAt = DateTimeOffset.Parse("2026-10-20T20:00:00Z"), ApprovedAt = now,
                 Items = [new() { Id = Guid.NewGuid(), PackageId = reviewId, BomItemId = Item.Id, DrawingNumber = Item.DrawingNumber, Name = Item.Name,
                     ModelDocumentId = modelId, ModelVersionId = ModelVersionId, ModelRevision = "A-W1", ModelSha256 = Sha, ModelCreatedBy = "original",
-                    DrawingDocumentId = DrawingId, DrawingVersionId = DrawingVersionId, DrawingRevision = "A-W1", DrawingSha256 = Sha, DrawingCreatedBy = "original",
+                    DrawingDocumentId = DrawingId, DrawingVersionId = originalDrawingVersionId, DrawingResultVersionId = DrawingVersionId, DrawingRevision = "A-W1", DrawingSha256 = Sha, DrawingCreatedBy = "original",
                     DrawingReviewerName = "实际审核员", DrawingReviewedAt = DateTimeOffset.Parse("2026-10-20T10:00:00+08:00") }] }];
             Settings = new(Project.VaultLocation, Project.ReleaseLocation) { PdfTitleBlockFill = new() { EnabledFields = PdfTitleBlockFields.All.Select(f => f.Key).ToArray() } };
         }
@@ -180,6 +226,7 @@ public sealed class PdfTitleBlockSnapshotTests
         public Dictionary<Guid, DocumentVersion> Versions = new();
         public IReadOnlyList<DrawingReviewPackage> Reviews = [];
         public IReadOnlyList<ReleasePackage> History = [];
+        public string EngineerName = "存档工程师";
         protected override object? Invoke(MethodInfo? method, object?[]? args) => method!.Name switch
         {
             nameof(IPdmRepository.FindDocumentAsync) => Task.FromResult<PdmDocument?>(new((Guid)args![0]!, Guid.Empty, "D", "图纸", "D.SLDDRW",
@@ -188,6 +235,8 @@ public sealed class PdfTitleBlockSnapshotTests
             nameof(IPdmRepository.FindDocumentVersionAsync) => Task.FromResult(Versions.GetValueOrDefault((Guid)args![1]!)),
             nameof(IPdmRepository.ListNativeReferenceIndexesAsync) => Task.FromResult<IReadOnlyList<DocumentReferenceNode>>([]),
             nameof(IPdmRepository.ListDrawingReviewPackagesAsync) => Task.FromResult(Reviews),
+            nameof(IPdmRepository.FindUserAsync) => Task.FromResult<UserAccount?>(new(Guid.NewGuid(), (string)args![0]!,
+                (string)args[0]! == "original" ? EngineerName : "其他人员", "", UserRole.Engineer, true)),
             nameof(IPdmRepository.ListReleasePackagesAsync) => Task.FromResult(History),
             _ => throw new InvalidOperationException("不应读取非冻结数据：" + method.Name)
         };

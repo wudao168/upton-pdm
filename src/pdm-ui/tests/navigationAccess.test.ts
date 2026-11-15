@@ -15,8 +15,9 @@ describe('导航查看权限', () => {
     expect(canViewNavigation('standard-library', can('standard-library.view'))).toBe(true)
     expect(canViewNavigation('projects', can('project.view'))).toBe(true)
     expect(canViewNavigation('admin', can('system.role.view'))).toBe(true)
-    expect(systemManagementTabs(can('system.role.view'))).toEqual(['users'])
-    expect(systemManagementTabs(can('system.login-policy.manage'))).toEqual(['login-security'])
+    expect(systemManagementTabs(can('system.role.view'))).toEqual(['users', 'system-info'])
+    expect(systemManagementTabs(can('system.login-policy.manage'))).toEqual(['login-security', 'system-info'])
+    expect(systemManagementTabs(can('project.view'))).toEqual([])
   })
   it('新版项目中心配置至少有一个可查看页签才显示入口', () => {
     expect(canViewNavigation('project-center', can('project.view', 'system.project-center-permissions.v1'))).toBe(false)

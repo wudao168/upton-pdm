@@ -100,6 +100,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="pdm-panel pdm-tree-panel" aria-label="项目设计树">
+    <slot name="scope" />
     <div class="pdm-tree-search-row">
       <form class="pdm-tree-search" @submit.prevent="submitSearch">
         <SearchField>

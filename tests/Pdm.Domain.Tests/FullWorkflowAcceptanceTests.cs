@@ -75,8 +75,12 @@ public sealed class FullWorkflowAcceptanceTests
         plan = await planning.DecideApprovalAsync(child.Id, plan.RowVersion, true, "事业部批准首版计划", "qa_bu_manager", UserRole.BusinessUnitManager, default);
         plan = await planning.SetBaselineAsync(child.Id, plan.RowVersion, "qa_pm", UserRole.Engineer, default);
         var engineerTask = plan.Tasks.First(item => item.Assignee == "qa_engineer" && !item.IsMilestone);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => planning.UpdateProgressAsync(child.Id, engineerTask.Id,
+            new(50, new DateOnly(2026, 9, 13), null, plan.RowVersion), "qa_engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => planning.UpdateProgressAsync(sibling.Id, engineerTask.Id,
+            new(50, new DateOnly(2026, 9, 13), null, plan.RowVersion), "qa_viewer", UserRole.ProductionViewer, default));
         plan = await planning.UpdateProgressAsync(child.Id, engineerTask.Id,
-            new(50, new DateOnly(2026, 9, 13), null, plan.RowVersion), "qa_engineer", UserRole.Engineer, default);
+            new(50, new DateOnly(2026, 9, 13), null, plan.RowVersion), "qa_pm", UserRole.Engineer, default);
         Assert.Equal(50, plan.Tasks.Single(item => item.Id == engineerTask.Id).CompletionPercent);
 
         var rootHash = new string('0', 64);

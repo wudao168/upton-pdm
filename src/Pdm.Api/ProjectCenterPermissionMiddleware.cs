@@ -35,7 +35,8 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
 
         var read = HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method);
         // 查看标记与版本校验仅记录查阅状态，不修改业务内容。
-        var readPost = HttpMethods.IsPost(context.Request.Method) && (Regex.IsMatch(resource, @"^opl/[0-9a-f-]{36}/view$") || path == "/api/documents/version-verifications");
+        var readPost = HttpMethods.IsPost(context.Request.Method) && (Regex.IsMatch(resource, @"^opl/[0-9a-f-]{36}/view$") || path == "/api/documents/version-verifications"
+            || Regex.IsMatch(path, @"^/api/release-packages/[0-9a-f-]{36}/drawing-review/[0-9a-f-]{36}/preview$"));
         var archive = resource == "release-preview-items/archive";
         var preview = context.Request.Query["preview"] == "true";
         var inlinePreview = preview && (resource.StartsWith("bom-files/") || resource.StartsWith("procurement-files/")
@@ -62,7 +63,7 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
             "files" => "files",
             "plan" => "project-plan", "opl" => "opl", "budget" => "budget",
             "validation-plan" or "quality-acceptance" or "quality-inspections" or "quality-upload-access" or "quality-inspection-uploads" => "validation-plan",
-            "documents" or "folder-documents" or "document-relations" or "reference-tree" or "drawing-reviews" => "documents",
+            "documents" or "folder-documents" or "document-relations" or "reference-tree" or "drawing-reviews" or "release-drawing-reviews" => "documents",
             "boms" or "bom-files" or "bom-source-data" or "bom-versions" or "bom-headers" => "bom",
             "release-packages" or "release-preview-items" or "manufacturing-bom-baselines" => "release",
             "procurement-tracking" or "procurement-files" => "procurement",
@@ -73,6 +74,7 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
 
     private static string? TabForGlobal(string path)
     {
+        if (Regex.IsMatch(path, @"^/api/release-packages/[0-9a-f-]{36}/drawing-review(?:/|$)")) return "documents";
         if (path.StartsWith("/api/documents/") || path.StartsWith("/api/drawing-reviews/")) return "documents";
         if (path.StartsWith("/api/release-packages/") || path.StartsWith("/api/approval-tasks/") && !path.EndsWith("/mine")) return "release";
         if (path.StartsWith("/api/validation-plan") || path.StartsWith("/api/quality-inspections/") || path.StartsWith("/api/quality-acceptance")) return "validation-plan";

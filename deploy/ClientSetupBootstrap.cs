@@ -94,7 +94,13 @@ internal sealed class ClientSetupForm : Form
             if (request.Mode != "Uninstall") arguments += " -ServerBaseUrl \"" + request.ServerBaseUrl + "\"";
             using (var process = new Process { StartInfo = new ProcessStartInfo { FileName = "powershell.exe", Arguments = arguments, UseShellExecute = false, WorkingDirectory = temporaryRoot, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true } })
             {
-                var lines = new StringBuilder(); DataReceivedEventHandler receive = (_, line) => { if (string.IsNullOrWhiteSpace(line.Data)) return; lock (lines) lines.AppendLine(line.Data); Report(line.Data); };
+                var lines = new StringBuilder();
+                DataReceivedEventHandler receive = (_, line) =>
+                {
+                    if (string.IsNullOrWhiteSpace(line.Data)) return;
+                    lock (lines) lines.AppendLine(line.Data);
+                    if (!line.Data.StartsWith("[UPLM_DIAGNOSTIC] ", StringComparison.Ordinal)) Report(line.Data);
+                };
                 process.OutputDataReceived += receive; process.ErrorDataReceived += receive; process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); process.WaitForExit(); File.WriteAllText(logPath, lines.ToString(), Encoding.UTF8);
                 if (process.ExitCode != 0) throw new InvalidOperationException("操作失败，退出码：" + process.ExitCode + "。详细日志：" + logPath);
             }

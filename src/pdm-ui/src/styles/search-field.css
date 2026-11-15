@@ -140,7 +140,7 @@
 :root body .pdm-project-switcher__display.pdm-search-field { --pdm-search-height: var(--pdm-tab-primary, 34px); width: 100%; margin: 0; padding: 4px; border: 0; background: #fff; }
 :root body .pdm-project-switcher__display.pdm-search-field::before,
 :root body .pdm-project-switcher__display.pdm-search-field::after { display: none; }
-:root body .pdm-command-dialog .pdm-search-field { width: 100%; --pdm-search-height: 38px; }
+:root body .pdm-command-drawer .pdm-search-field { width: 100%; --pdm-search-height: 38px; }
 .mobile-office .pdm-search-field { --pdm-search-height: 44px; --pdm-search-font-size: 16px; }
 @media (max-width: 900px) { :root body .user-directory-actions .pdm-search-field { width: 100%; } }
 @media (prefers-reduced-motion: reduce) {
