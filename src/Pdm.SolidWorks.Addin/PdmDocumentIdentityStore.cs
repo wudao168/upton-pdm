@@ -105,10 +105,7 @@ internal static class PdmDocumentIdentityStore
         if (string.IsNullOrWhiteSpace(filePath)) return false;
         try
         {
-            var fullPath = Path.GetFullPath(filePath);
-            return ManagedWorkspaceRoots(workspaceRootResolver()).Any(root => fullPath.StartsWith(
-                root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar,
-                StringComparison.OrdinalIgnoreCase));
+            return FindManagedWorkspaceRoot(workspaceRootResolver(), filePath) != null;
         }
         catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException || e is NotSupportedException)
         {
@@ -118,9 +115,67 @@ internal static class PdmDocumentIdentityStore
 
     internal static string[] ManagedWorkspaceRoots(string configuredRoot) =>
         (isolatedReadScope ? new[] { configuredRoot } : new[] { configuredRoot,
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON PDM", "Workspace"),
-            Path.Combine(Path.GetTempPath(), "UPLM", "ManagedWorkspace") })
+            WorkspaceSettingsStore.DefaultWorkspaceRoot,
+            Path.Combine(Path.GetTempPath(), "UPLM", "ManagedWorkspace"),
+            ManagedCadPaths.CompactWorkspaceRoot })
         .Where(root => !string.IsNullOrWhiteSpace(root)).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+    internal static string FindManagedWorkspaceRoot(string configuredRoot, string path)
+    {
+        var roots = ManagedWorkspaceRoots(configuredRoot);
+        var compact = roots.FirstOrDefault(IsMachineCompactRoot);
+        if (compact != null && ManagedCadPaths.IsWithin(path, compact))
+            return IsInCompactProjectEntry(compact, path) ? compact : null;
+        return roots.FirstOrDefault(root => ManagedCadPaths.IsWithin(path, root));
+    }
+
+    internal static bool IsProjectWorkspacePath(string configuredRoot, string projectCode, string path)
+    {
+        if (string.IsNullOrWhiteSpace(projectCode) || string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            var root = FindManagedWorkspaceRoot(configuredRoot, path);
+            if (root == null) return false;
+            if (!IsMachineCompactRoot(root) && ManagedCadPaths.IsWithin(path, WorkspaceLocalStateReader.ProjectDirectory(root, projectCode)))
+                return true;
+            return ManagedCadPaths.IsWithin(path, ManagedCadPaths.CompactProjectDirectory(root, projectCode))
+                && IsInCompactProjectEntry(root, path, workingOnly: true);
+        }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is ArgumentException || error is NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool IsMachineCompactRoot(string root) =>
+        string.Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            ManagedCadPaths.CompactWorkspaceRoot, StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IncludeMachineCompactCache(string root) => !isolatedReadScope
+        && string.Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            WorkspaceSettingsStore.GetWorkspaceRoot(), StringComparison.OrdinalIgnoreCase)
+        && !IsMachineCompactRoot(root);
+
+    internal static string[] CurrentManagedWorkspaceRoots() => ManagedWorkspaceRoots(workspaceRootResolver());
+
+    internal static char? CompactProjectPathKind(string path, IEnumerable<string> roots = null)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        foreach (var root in roots ?? CurrentManagedWorkspaceRoots())
+            if (GetCompactProjectPathKind(root, path) is char kind) return kind;
+        return null;
+    }
+
+    private static bool IsInCompactProjectEntry(string root, string path, bool workingOnly = false) =>
+        GetCompactProjectPathKind(root, path) is char kind && (!workingOnly || kind is 'w' or 'b');
+
+    private static char? GetCompactProjectPathKind(string root, string path)
+    {
+        var container = ManagedCadPaths.CompactContainer(root);
+        for (var current = Path.GetFullPath(path); ManagedCadPaths.IsWithin(current, container); current = Path.GetDirectoryName(current))
+            if (ManagedCadPaths.IsCompactProjectEntry(root, current)) return Path.GetFileName(current)[0];
+        return null;
+    }
 
     // A stream may travel with a copied/packed CAD file. It is provenance only, not a binding.
     public static bool TryReadUnverifiedIdentity(string filePath, out Guid documentId)

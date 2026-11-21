@@ -50,7 +50,12 @@ internal static partial class Program
       default:throw new Exception("Drawing was saved, closed, reopened or activated: "+call.MethodName);
      }
     }).GetTransparentProxy();
-    SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?new[]{parent,native}:throw new Exception("Native open/close or activation: "+call.MethodName)).GetTransparentProxy());
+    SetField(plugin,"application",new Proxy(appType,call=>{
+     if(call.MethodName=="GetDocuments")return new[]{parent,native};
+     if(call.MethodName=="GetRunningCommandInfo"&&mode=="native-unlock-failed")
+      return new System.Runtime.Remoting.Messaging.ReturnMessage(null,new object[]{0,"",false},3,call.LogicalCallContext,call);
+     throw new Exception("Native open/close or activation: "+call.MethodName);
+    }).GetTransparentProxy());
     SetField(plugin,"authenticatedUsername","tester");SetField(plugin,"currentProjectId",project);SetField(plugin,"currentTree",mode=="drawing-active"?drawing:root);
     using(var lifetime=new CancellationTokenSource())
     using(var client=(IDisposable)New("PdmApiClient","http://paired-drawing.invalid/"))
@@ -147,7 +152,8 @@ internal static partial class Program
    var nativePart=new SheetReferenceModelProxy(modelType,false,call=>call.MethodName=="GetPathName"?Get(model,"FullPath"):call.MethodName=="GetSaveFlag"?false:call.MethodName=="IsOpenedReadOnly"?false:throw new Exception("Unrequested model save: "+call.MethodName)).GetTransparentProxy();
    var nativeParent=new Proxy(modelType,call=>call.MethodName=="GetPathName"?Get(parent,"FullPath"):throw new Exception("Unselected parent access: "+call.MethodName)).GetTransparentProxy();
    var view=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.View",true),call=>call.MethodName=="get_ReferencedDocument"?nativePart:call.MethodName=="get_ReferencedConfiguration"?"Default":throw new Exception("Unexpected view mutation "+call.MethodName)).GetTransparentProxy();
-   var sheet=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Sheet",true),call=>call.MethodName=="GetName"?"SHEET1":throw new Exception(call.MethodName)).GetTransparentProxy();
+   var currentSheet="SHEET1";
+   var sheet=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Sheet",true),call=>call.MethodName=="GetName"?currentSheet:throw new Exception(call.MethodName)).GetTransparentProxy();
    var saves=0;var sheets=new List<string>();var dirty=false;var drawingSha=WorkingReuseHash((string)Get(drawing,"FullPath"));
    var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>{
     if(call.MethodName!="SaveAs3")throw new Exception("Unexpected drawing extension call "+call.MethodName);
@@ -161,18 +167,19 @@ internal static partial class Program
      case "GetUpdateStamp":return 1;case "get_Extension":return extension;case "get_SelectionManager":return null;case "SetSaveFlag":dirty=true;return null;
      case "add_ModifyNotify":case "remove_ModifyNotify":case "add_DestroyNotify2":case "remove_DestroyNotify2":case "add_FileReloadNotify":case "remove_FileReloadNotify":return null;
      case "GetViews":return new object[]{new object[]{null,view}};case "GetCurrentSheet":return sheet;case "GetSheetNames":return new[]{"SHEET1","SHEET2"};
-     case "ActivateSheet":sheets.Add((string)call.Args[0]);return true;
+     case "ActivateSheet":currentSheet=(string)call.Args[0];sheets.Add(currentSheet);return true;
      case "ForceRebuild3":dirty=true;return mode!="view-rebuild-failed";
      default:throw new Exception("Unexpected native drawing mutation "+call.MethodName);
     }
    },true).GetTransparentProxy();
+   object activeDocument=nativeParent;
    var app=new Proxy(appType,call=>{
     switch(call.MethodName)
     {
      case "GetType":return appType;
-     case "GetDocuments":return new[]{nativeParent,nativePart,nativeDrawing};case "get_ActiveDoc":return nativeParent;
+     case "GetDocuments":return new[]{nativeParent,nativePart,nativeDrawing};case "get_ActiveDoc":return activeDocument;
      case "GetCurrentWorkingDirectory":return folder;case "SetCurrentWorkingDirectory":return true;
-     case "ActivateDoc3":call.Args[3]=0;return (string)call.Args[0]=="PART.SLDDRW"?nativeDrawing:nativeParent;
+     case "ActivateDoc3":call.Args[3]=0;activeDocument=Path.GetFileName((string)call.Args[0])=="PART.SLDDRW"?nativeDrawing:nativeParent;return activeDocument;
      default:throw new Exception("Unexpected native window operation "+call.MethodName);
     }
    }).GetTransparentProxy();
@@ -220,6 +227,7 @@ internal static partial class Program
     }
    }
    else if(path.EndsWith("/discard-checkout")){Discards++;Set(document,"CheckedOutBy",null);Set(document,"CheckoutSessionId",null);body=document;}
+   else if(path.EndsWith("/"+Get(document,"Id"))&&request.Method==HttpMethod.Get&&mode=="native-unlock-failed")body=document;
    else{OtherRequests.Add(path);throw new Exception("Unexpected target acquire request "+path);}
    return Task.FromResult(new HttpResponseMessage(status){Content=new StringContent(new JavaScriptSerializer().Serialize(body))});
   }

@@ -843,15 +843,19 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction? transaction,
         Guid projectId, CancellationToken cancellationToken)
     {
-        // Rank only the small metadata in managed memory. A MySQL window filesort can
-        // retain the large JSON payload and exhaust sort_buffer_size during batch commit.
+        // Rank only metadata in managed memory to keep large JSON out of filesorts.
+        // Most rows are covered by the index; long legacy keys retain their full values.
         var indexes = await connection.QueryAsync<NativeReferenceIndexRow>(new CommandDefinition(
             """
             SELECT id, root_document_id, captured_at,
+                native_inventory_configuration AS configuration,
+                native_inventory_revision AS revision
+            FROM reference_snapshot WHERE project_id=@ProjectId AND native_inventory_scan_class=1
+            UNION ALL
+            SELECT id, root_document_id, captured_at,
                 JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.configuration')) AS configuration,
                 JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.revision.display')) AS revision
-            FROM reference_snapshot WHERE project_id=@ProjectId
-                AND JSON_EXTRACT(root_json,'$.usesNativeFileInventory')=TRUE
+            FROM reference_snapshot WHERE project_id=@ProjectId AND native_inventory_scan_class=2
             """, new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         var ids = indexes.GroupBy(index => (index.RootDocumentId, index.Configuration, index.Revision))
             .Select(group => group.OrderByDescending(index => index.CapturedAt).ThenByDescending(index => index.Id).First().Id).ToArray();
@@ -887,6 +891,23 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        var rows = await ReadBomItemsAsync(connection, projectId, kind, cancellationToken);
+        if (rows.Length == 0) return rows;
+        var confirmations = await connection.QueryAsync<(Guid BomItemId, string ConfirmationJson)>(new CommandDefinition(
+            "SELECT bom_item_id AS BomItemId, confirmation_json AS ConfirmationJson FROM bom_release_confirmation WHERE project_id=@ProjectId",
+            new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        return await BomReleaseReviewReader.AttachAsync(this, projectId, rows,
+            confirmations.ToDictionary(row => row.BomItemId, row => JsonSerializer.Deserialize<BomReleaseConfirmation>(row.ConfirmationJson, jsonOptions)!), cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<BomItem>> GetBomItemsForUpdateAsync(Guid projectId, BomKind kind, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        return await ReadBomItemsAsync(connection, projectId, kind, ct);
+    }
+
+    private static async Task<BomItem[]> ReadBomItemsAsync(DbConnection connection, Guid projectId, BomKind kind, CancellationToken cancellationToken)
+    {
         var rows = await connection.QueryAsync<BomRow>(new CommandDefinition(
             """
             SELECT id, project_id, bom_kind, sequence_no, drawing_number, name, quantity, unit, material, specification, remark, brand, surface_treatment, heat_treatment, weight, is_wear_part, impact_stage, inventory_replacement_material_code, revision_label, is_complete,
@@ -904,15 +925,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """,
             new { ProjectId = projectId, Kind = kind.ToString() },
             cancellationToken: cancellationToken));
-        var confirmations = await connection.QueryAsync<(Guid BomItemId, string ConfirmationJson)>(new CommandDefinition(
-            "SELECT bom_item_id AS BomItemId, confirmation_json AS ConfirmationJson FROM bom_release_confirmation WHERE project_id=@ProjectId",
-            new { ProjectId = projectId }, cancellationToken: cancellationToken));
-        return await BomReleaseReviewReader.AttachAsync(this, projectId, rows.Select(MapBomItem).ToArray(),
-            confirmations.ToDictionary(row => row.BomItemId, row => JsonSerializer.Deserialize<BomReleaseConfirmation>(row.ConfirmationJson, jsonOptions)!), cancellationToken);
+        return rows.Select(MapBomItem).ToArray();
     }
 
     public async Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
     {
+        using var projectGate = await BomMaterialCodeApplicationRules.EnterProjectAsync(projectId, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
@@ -1006,12 +1024,16 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                     + " ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),bom_kind=VALUES(bom_kind),sequence_no=VALUES(sequence_no),drawing_number=VALUES(drawing_number),name=VALUES(name),quantity=VALUES(quantity),unit=VALUES(unit),material=VALUES(material),specification=VALUES(specification),remark=VALUES(remark),brand=VALUES(brand),surface_treatment=VALUES(surface_treatment),heat_treatment=VALUES(heat_treatment),weight=VALUES(weight),is_wear_part=VALUES(is_wear_part),impact_stage=VALUES(impact_stage),inventory_replacement_material_code=VALUES(inventory_replacement_material_code),revision_label=VALUES(revision_label),is_complete=VALUES(is_complete),source_document_id=VALUES(source_document_id),source_configuration=VALUES(source_configuration),source_instance_path=VALUES(source_instance_path),parent_drawing_number=VALUES(parent_drawing_number),engineering_kit_reference_id=VALUES(engineering_kit_reference_id),engineering_kit_id=VALUES(engineering_kit_id),engineering_kit_revision_id=VALUES(engineering_kit_revision_id),engineering_kit_code=VALUES(engineering_kit_code),engineering_kit_version_no=VALUES(engineering_kit_version_no),engineering_kit_component_id=VALUES(engineering_kit_component_id),engineering_kit_component_optional=VALUES(engineering_kit_component_optional),relation_allocations_json=VALUES(relation_allocations_json),engineering_kit_relation_allocations_json=VALUES(engineering_kit_relation_allocations_json),is_summary_quantity=VALUES(is_summary_quantity),item_source=VALUES(item_source),is_manually_overridden=VALUES(is_manually_overridden),is_pending_removal=VALUES(is_pending_removal),is_pending_classification=VALUES(is_pending_classification),is_manual_unmatched=VALUES(is_manual_unmatched),is_manually_retained=VALUES(is_manually_retained),is_manually_excluded=VALUES(is_manually_excluded),is_release_excluded=VALUES(is_release_excluded),release_exclusion_reason=VALUES(release_exclusion_reason),reconciliation_status=VALUES(reconciliation_status),reconciliation_note=VALUES(reconciliation_note),reconciliation_updated_by=VALUES(reconciliation_updated_by),reconciliation_updated_at=VALUES(reconciliation_updated_at),deleted_at=VALUES(deleted_at),deleted_by=VALUES(deleted_by),delete_reason=VALUES(delete_reason),property_writeback_status=VALUES(property_writeback_status),row_version=row_version+1,updated_at=VALUES(updated_at)",
                 parameters, transaction, cancellationToken: cancellationToken));
         }
+        var recycled = changed.Where(item => BomMaterialCodeApplicationRules.IsRemoved(item)
+            && existing.TryGetValue(item.Id, out var previous) && !BomMaterialCodeApplicationRules.IsRemoved(previous));
+        await WithdrawRemovedBomApplicationsAsync(connection, transaction, projectId, recycled.Select(item => item.Id), now, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return items.OrderBy(item => item.Sequence).ToArray();
     }
 
-    public async Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
+    public async Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken, IReadOnlySet<Guid>? explicitlyRemovedItems = null)
     {
+        using var projectGate = await BomMaterialCodeApplicationRules.EnterProjectAsync(projectId, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
@@ -1060,7 +1082,30 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 new { entry.Id, OccurredAt = entry.OccurredAt.UtcDateTime, entry.Actor, entry.Action, entry.EntityType, entry.EntityId, DetailJson = JsonSerializer.Serialize(new { detail = entry.Detail }, jsonOptions) },
                 transaction, cancellationToken: cancellationToken));
         }
+        if (explicitlyRemovedItems is not null)
+        {
+            var recycled = allItems.Where(item => explicitlyRemovedItems.Contains(item.Id) && BomMaterialCodeApplicationRules.IsRemoved(item));
+            await WithdrawRemovedBomApplicationsAsync(connection, transaction, projectId, recycled.Select(item => item.Id), now, cancellationToken);
+        }
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static async Task WithdrawRemovedBomApplicationsAsync(DbConnection connection, DbTransaction transaction,
+        Guid projectId, IEnumerable<Guid> bomItemIds, DateTime now, CancellationToken cancellationToken)
+    {
+        foreach (var ids in bomItemIds.Chunk(500))
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE material_code_application
+                SET status='Withdrawn', decided_by='system', decided_at=@Now, decision_comment=@Reason,
+                    row_version=row_version+1
+                WHERE project_id=@ProjectId AND bom_item_id IN @Ids AND bom_header_kind IS NULL
+                    AND status='Pending' AND material_id IS NULL AND material_code IS NULL
+                """,
+                new { ProjectId = projectId, Ids = ids, Now = now, Reason = BomMaterialCodeApplicationRules.RemovedSourceReason },
+                transaction, cancellationToken: cancellationToken));
+        }
     }
 
     public async Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken)
@@ -1235,7 +1280,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
                    drawing_priority, drawing_required_on, drawing_delivery_overrides_json, bom_item_delivery_overrides_json,
-                   published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at
+                   published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at, row_version
             FROM release_package
             WHERE project_id = @ProjectId
             """,
@@ -1553,7 +1598,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
                    drawing_priority, drawing_required_on, drawing_delivery_overrides_json, bom_item_delivery_overrides_json,
-                   published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at
+                   published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at, row_version
             FROM release_package WHERE id = @PackageId
             """,
             new { PackageId = packageId },
@@ -2049,6 +2094,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             row.PublishedAt is null ? null : new DateTimeOffset(DateTime.SpecifyKind(row.PublishedAt.Value, DateTimeKind.Utc)),
             row.PublishedPath)
         {
+            RowVersion = row.RowVersion,
             RootDocumentId = row.ScopeRootDocumentId,
             StandardBomVersionId = row.StandardBomVersionId,
             NonStandardBomVersionId = row.NonStandardBomVersionId,
@@ -2343,6 +2389,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
     private sealed class ReleasePackageRow
     {
+        public long RowVersion { get; init; }
         public Guid Id { get; init; }
         public Guid ProjectId { get; init; }
         public string PackageNumber { get; init; } = string.Empty;

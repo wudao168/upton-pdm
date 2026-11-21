@@ -17,7 +17,7 @@ internal static partial class Program
   Type("DocumentRuleGate").GetMethod("Configure",Flags).Invoke(null,new object[]{Array.Empty<string>()});
   try
   {
-   foreach(var mode in new[]{"multiple-sheets","empty-sheets","real-outside-model","real-missing-model"})
+   foreach(var mode in new[]{"multiple-sheets","empty-sheets","real-outside-model","real-missing-model","linked-drawing"})
    {
     var folder=Path.Combine(directory,mode);Directory.CreateDirectory(folder);Directory.CreateDirectory(Path.Combine(folder,"old"));
     var root=LinkedNode(folder,"DRAWING.SLDDRW","Drawing");var a=LinkedNode(folder,"A.SLDPRT","Part");var b=LinkedNode(folder,"B.SLDPRT","Part");
@@ -56,9 +56,24 @@ internal static partial class Program
      :call.MethodName=="GetDocuments"?new[]{drawing,partA,partB,other}:throw new Exception("Sheet reference validation must not operate native windows: "+call.MethodName)).GetTransparentProxy();
     ((IList)Get(root,"ReferencedModels")).Add(a);((IList)Get(root,"ReferencedModels")).Add(b);
     var inventory=mode=="real-missing-model"?new[]{drawingPath,aPath,bPath,actualMissing}:new[]{drawingPath,aPath,bPath};
-    Type("NativeArchiveManifest").GetMethod("ConfirmFileScope",Flags).Invoke(null,new object[]{root,inventory});
+    var inherited=new HashSet<string>(new[]{aPath,bPath},StringComparer.OrdinalIgnoreCase);
+    if(mode=="linked-drawing")Set(root,"NativeFileScopePaths",inherited);
+    else Type("NativeArchiveManifest").GetMethod("ConfirmFileScope",Flags).Invoke(null,new object[]{root,inventory});
     var scanner=Type("SolidWorksReferenceTreeScanner").GetConstructor(Flags,null,new[]{appType},null).Invoke(new[]{app});
+    if(mode=="linked-drawing")
+    {
+     var wrongPath=Path.Combine(folder,"old",Path.GetFileName(drawingPath));
+     File.WriteAllText(wrongPath,"another drawing");
+     var wrong=new SheetReferenceModelProxy(modelType,true,call=>call.MethodName=="GetType"?3
+      :call.MethodName=="GetPathName"?wrongPath:throw new Exception("异路径工程图应在读取视图前被拒绝")).GetTransparentProxy();
+     var refused=false;
+     try{TreeCall(scanner,"UpdateDrawingReferences",wrong,root);}
+     catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){refused=true;}
+     if(!refused||inherited.Contains(drawingPath))throw new Exception("异路径同名工程图不能补全当前清单");
+    }
     Type("SolidWorksReferenceTreeScanner").GetMethod("UpdateDrawingReferences",Flags).Invoke(scanner,new[]{drawing,root});
+    if(mode=="linked-drawing"&&(!((ISet<string>)Get(root,"NativeFileScopePaths")).Contains(drawingPath)||inherited.Contains(drawingPath)))
+     throw new Exception("已打开的配套工程图应确认独立根文件，不能扩展模型原清单。");
     if(!(bool)Get(root,"DrawingViewsRead"))throw new Exception("Completed native view read was not recorded: "+mode);
     if(mode=="real-missing-model"&&!(bool)Get(root,"StructureIndexPending"))throw new Exception("A missing real view model was mistaken for a complete drawing index");
     var expected=mode=="empty-sheets"?Array.Empty<string>():new[]{aPath,mode=="real-outside-model"?unrelatedPath:mode=="real-missing-model"?actualMissing:bPath};

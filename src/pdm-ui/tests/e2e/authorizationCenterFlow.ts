@@ -49,6 +49,19 @@ export async function exerciseAuthorizationCenter(page: Page, testInfo: TestInfo
   const panel = page.getByRole('region', { name: '权限中心', exact: true })
   await expect(panel).toContainText('查看新增模块')
   const checkbox = panel.getByRole('checkbox', { name: `授权${target.name}`, exact: true })
+  if (mode === 'directory') {
+    const categoryPanel = panel.getByRole('region', { name: '权限模块' })
+    const search = categoryPanel.getByRole('searchbox', { name: '搜索权限' })
+    await expect(panel.getByRole('searchbox', { name: '搜索权限' })).toHaveCount(1)
+    await search.fill(target.name)
+    await expect(checkbox).toBeVisible()
+    await expect(panel.getByRole('checkbox', { name: '授权查看新增模块' })).toHaveCount(0)
+    await search.fill('找不到的权限')
+    await expect(panel.getByText('没有符合条件的权限。')).toBeVisible()
+    await search.fill('')
+    await expect(panel.getByRole('checkbox', { name: '授权查看新增模块' })).toBeVisible()
+    await expect(panel.getByRole('button', { name: '保存生效', exact: true })).toBeDisabled()
+  }
   await expect(checkbox).not.toBeChecked()
   await checkbox.check()
   if (mode === 'directory') {

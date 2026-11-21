@@ -13,7 +13,9 @@ public sealed partial class InMemoryPdmRepository
         lock (gate)
         {
             if (authorizationSettings is not null) return authorizationSettings;
-            var unified = AuthorizationPolicy.BindRoles(AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(migrated)));
+            var defaults = AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(migrated));
+            var unified = AuthorizationPolicy.BindRoles(
+                AuthorizationMigration.EnableDocumentReleaseDefaults(AuthorizationMigration.EnableUserManagementDefaults(defaults)));
             SyncAuthorizationRoles(migrated, unified);
             return authorizationSettings = unified;
         }
@@ -23,12 +25,18 @@ public sealed partial class InMemoryPdmRepository
         lock (gate)
         {
             if (authorizationSettings?.Revision != expectedRevision) throw new PdmConflictException("权限配置已被其他人修改，请刷新后重新核对。");
+            var existingSubjects = authorizationSettings.Assignments.Select(assignment => assignment.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var availableUsers = users.Values.Select(user => user.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (settings.Assignments.Any(assignment => !existingSubjects.Contains(assignment.Username) && !availableUsers.Contains(assignment.Username)))
+                throw new PdmConflictException("授权人员已发生变化，请刷新人员列表后重新选择。");
             var next = (updateRoles ? AuthorizationPolicy.BindRoles(settings) : settings) with
             {
                 Revision = expectedRevision + 1,
                 RolesUnified = authorizationSettings.RolesUnified || updateRoles,
                 DingTalkSelfBindingDefaultsApplied = authorizationSettings.DingTalkSelfBindingDefaultsApplied,
-                AiWebDefaultsApplied = authorizationSettings.AiWebDefaultsApplied
+                AiWebDefaultsApplied = authorizationSettings.AiWebDefaultsApplied,
+                UserManagementDefaultsApplied = authorizationSettings.UserManagementDefaultsApplied,
+                DocumentReleaseDefaultsApplied = authorizationSettings.DocumentReleaseDefaultsApplied
             };
             if (updateRoles) SyncAuthorizationRoles(authorizationSettings, next);
             authorizationSettings = next;

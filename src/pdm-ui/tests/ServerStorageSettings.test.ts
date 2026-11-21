@@ -17,7 +17,11 @@ describe('集中存储设置', () => {
     vi.mocked(saveServerStorage).mockImplementation(async settings => ({ ...view, settings }))
     const wrapper = mount(ServerStorageSettings, { props: { token: 'admin' } })
     await flushPromises()
-    expect(wrapper.text()).toContain('所有历史文件保留')
+    const backupRow = wrapper.get('table[aria-label="集中存储目录"]').findAll('tbody tr')
+      .find(row => row.get('th').text() === '当前数据库备份位置')!
+    expect(backupRow.get('td').text()).toBe('待确认')
+    expect(wrapper.get('table[aria-label="历史位置与待迁移目录"]').text()).toContain(view.previewAgentUrl)
+    expect(wrapper.findAll('small, input[placeholder]')).toHaveLength(0)
     expect(wrapper.get<HTMLInputElement>('[aria-label="备份目标根目录"]').element.value).toBe('')
     await wrapper.get('[aria-label="程序模板根目录"]').setValue('E:\\ProgramTemplates')
     await wrapper.get('[aria-label="数据库数据迁移目标"]').setValue('E:\\Database')

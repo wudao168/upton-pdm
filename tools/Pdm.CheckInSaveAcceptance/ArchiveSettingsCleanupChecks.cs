@@ -17,8 +17,11 @@ internal static partial class Program
   void Check(bool ok,string text){if(!ok)throw new Exception(text);Console.WriteLine("PASS: "+text);}
   var cleaner=Type("ArchiveTemporaryCopyCleaner");var rootField=cleaner.GetField("directory",Flags);var previous=rootField.GetValue(null);
   object Clean(Func<bool> busy)=>cleaner.GetMethod("Clean",Flags).Invoke(null,new object[]{busy,null});
-  string Copy(string root,string name="PART.SLDPRT"){
-   var path=Path.Combine(root,Guid.NewGuid().ToString("N"),Guid.NewGuid().ToString("N"),name);Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllBytes(path,new byte[8192]);return path;
+  string Copy(string root,string name="PART.SLDPRT",bool compact=false){
+   var id=Guid.NewGuid().ToString("N");
+   var directory=compact?Path.Combine(root,"c-"+id):Path.Combine(root,Guid.NewGuid().ToString("N"),id);
+   Directory.CreateDirectory(directory);
+   var path=Path.Combine(directory,name);File.WriteAllBytes(path,new byte[8192]);return path;
   }
   try
   {
@@ -57,6 +60,28 @@ internal static partial class Program
    Check(!File.Exists(leased)&&File.Exists(legacy)&&(int)Get(released,"DeletedFiles")==1&&(int)Get(released,"UnconfirmedCopies")==1,
     "未知旧实例运行时仍清理已释放锁的新副本，并保留无法确认的旧副本");
    Check(((string)Get(released,"Message")).Contains("1 个旧上传副本"),"返回待确认副本数量，避免误报全部清理成功");
+   var compactRoot=Path.Combine(output,"compact-"+Guid.NewGuid().ToString("N"));rootField.SetValue(null,compactRoot);
+   var compactCopy=Copy(compactRoot,compact:true);
+   var compactDirectory=Path.GetDirectoryName(compactCopy);
+   leaseType.GetMethod("Start",Flags).Invoke(null,new object[]{compactDirectory});
+   try
+   {
+    var active=Clean(()=>false);
+    Check(File.Exists(compactCopy)&&(int)Get(active,"SkippedItems")==1,"短路径副本在持有生命周期锁时保留");
+   }
+   finally{leaseType.GetMethod("Release",Flags).Invoke(null,new object[]{compactDirectory});}
+   var compactReleased=Clean(()=>false);
+   Check(!File.Exists(compactCopy)&&Directory.Exists(compactRoot)&&(int)Get(compactReleased,"DeletedFiles")==1
+    &&(long)Get(compactReleased,"FreedBytes")==8192,"已释放锁的短路径副本按实际字节清理并保留临时根目录");
+   var unleasedCompact=Copy(compactRoot,compact:true);
+   var unrelatedCompact=Path.Combine(compactRoot,"c-"+new string('A',32),"important.txt");
+   Directory.CreateDirectory(Path.GetDirectoryName(unrelatedCompact));File.WriteAllText(unrelatedCompact,"keep");
+   leaseType.GetMethod("Start",Flags).Invoke(null,new object[]{Path.GetDirectoryName(unrelatedCompact)});
+   leaseType.GetMethod("Release",Flags).Invoke(null,new object[]{Path.GetDirectoryName(unrelatedCompact)});
+   var unknownCompact=Clean(()=>false);
+   Check(File.Exists(unleasedCompact)&&File.ReadAllText(unrelatedCompact)=="keep"
+    &&(int)Get(unknownCompact,"DeletedFiles")==0&&(int)Get(unknownCompact,"SkippedItems")==2,
+    "无标记或不符合短路径目录命名的文件保留");
    var missing=Path.Combine(output,"missing-"+Guid.NewGuid().ToString("N"));rootField.SetValue(null,missing);var empty=Clean(()=>false);
    Check((int)Get(empty,"DeletedFiles")==0&&!Directory.Exists(missing),"目录不存在时不创建或删除其他位置");
    var activeRoot=Path.Combine(output,"active-plugin-"+Guid.NewGuid().ToString("N"));rootField.SetValue(null,activeRoot);var activeCopy=Copy(activeRoot);

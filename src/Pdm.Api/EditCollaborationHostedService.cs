@@ -16,7 +16,7 @@ public sealed class EditCollaborationHostedService(IServiceScopeFactory scopes, 
                 using var scope = scopes.CreateScope();
                 var released = await scope.ServiceProvider.GetRequiredService<PdmWorkflowService>().MaintainEditCollaborationAsync(stoppingToken);
                 recovering = false;
-                if (released > 0) logger.LogInformation("已自动回收长期离线图档 {Count} 项。", released);
+                if (released > 0) logger.LogInformation("已自动释放超时图档 {Count} 项。", released);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
             catch (Exception error) { recovering = true; logger.LogWarning(error, "编辑交接维护未完成，恢复连接后保留5分钟缓冲再重试。"); }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import CompanyName from './CompanyName.vue'
-import { Bell, Check, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut, Monitor, Moon, Sun } from '@lucide/vue'
+import { Bell, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut, Moon, Sun } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import ClientSettings from './ClientSettings.vue'
@@ -8,7 +8,7 @@ import DingTalkSelfBinding from './DingTalkSelfBinding.vue'
 import type { PdmUserProfile } from '../types'
 import GlobalStatusBar from './GlobalStatusBar.vue'
 import type { ProjectActivity } from '../projectActivity'
-import { isPdmTheme, pdmThemes, type PdmTheme } from '../themes'
+import { isPdmTheme, pdmThemes, resolvePdmColorScheme, type PdmTheme } from '../themes'
 
 
 const props = withDefaults(defineProps<{
@@ -113,8 +113,12 @@ const headerDateTime = computed(() => {
   return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${weekday} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())} 第${week}周`
 })
 
-function selectTheme(command: string) {
-  if (isPdmTheme(command)) emit('theme', command)
+function selectTheme(value: unknown) {
+  if (isPdmTheme(value)) emit('theme', value)
+}
+
+function toggleTheme() {
+  selectTheme(resolvePdmColorScheme(props.theme) === 'dark' ? 'g' : 'c')
 }
 
 function openPersonalSettings() {
@@ -216,23 +220,10 @@ onUnmounted(() => {
           <span>消息</span>
           <em>{{ props.notificationCount }}</em>
         </button>
-        <el-dropdown trigger="click" @command="selectTheme">
-          <button type="button" class="pdm-header-control pdm-theme-trigger">
-            <svg class="pdm-theme-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3a9 9 0 0 0 0 18h1.3a1.7 1.7 0 0 0 1.2-2.9 1.7 1.7 0 0 1 1.2-2.9H17a4 4 0 0 0 4-4A8.2 8.2 0 0 0 12 3Z" />
-              <circle cx="7.5" cy="10.5" r="1" />
-              <circle cx="10" cy="7" r="1" />
-              <circle cx="14" cy="7" r="1" />
-              <circle cx="16.5" cy="10.5" r="1" />
-            </svg>
-            <span>主题</span>
-          </button>
-          <template #dropdown>
-            <el-dropdown-menu class="pdm-theme-menu">
-              <el-dropdown-item v-for="item in pdmThemes" :key="item.value" :command="item.value"><component :is="item.value === 'a' ? Monitor : item.value === 'c' ? Moon : Sun" :size="16" aria-hidden="true" /><span>{{ item.label }}</span><Check v-if="props.theme === item.value" :size="14" aria-label="当前主题" /></el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <button type="button" class="pdm-header-control pdm-theme-trigger" aria-label="切换深浅色主题" title="切换深浅色主题" @click="toggleTheme">
+          <Sun class="pdm-theme-icon--light" :size="17" aria-hidden="true" />
+          <Moon class="pdm-theme-icon--dark" :size="17" aria-hidden="true" />
+        </button>
         <button type="button" class="pdm-user-profile-trigger" @click="openPersonalSettings">{{ props.userName }}</button>
         <button type="button" class="pdm-logout-button" @click="emit('logout')"><LogOut :size="16" aria-hidden="true" /><span>退出</span></button>
       </template>
@@ -274,10 +265,10 @@ onUnmounted(() => {
           <div class="personal-settings-actions"><el-button type="primary" :loading="personalSettingsPending" @click="submitPassword">修改密码</el-button></div>
         </el-tab-pane>
         <el-tab-pane label="界面主题" name="theme">
-          <el-radio-group :model-value="props.theme" class="personal-theme-group" @change="(value: string | number | boolean | undefined) => emit('theme', value as PdmTheme)">
+          <el-radio-group :model-value="props.theme" class="personal-theme-group" @change="selectTheme">
             <el-radio v-for="item in pdmThemes" :key="item.value" :value="item.value">{{ item.label }}</el-radio>
           </el-radio-group>
-          <p class="personal-settings-hint">主题与账号同步，换电脑登录后同样是这个主题；顶栏「主题」按钮仍可快速切换。</p>
+          <p class="personal-settings-hint">主题与账号同步，换电脑登录后同样是这个主题。点击顶栏的太阳或月亮可直接切换深浅色。</p>
         </el-tab-pane>
         <el-tab-pane v-if="props.desktopAvailable" label="客户端设置" name="client">
           <ClientSettings />

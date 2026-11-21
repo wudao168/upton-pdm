@@ -497,7 +497,7 @@ internal sealed class ArchiveSessionWindow : Form
         stageTip.SetToolTip(stage, stage.Text + Environment.NewLine + ArchiveStepInfo.Hint(phase));
         if (!string.IsNullOrWhiteSpace(fileName) && file.Text != fileName) { file.Text = fileName; fileClock.Restart(); }
         progress.Report(completed, total);
-        progressSummary = total > 0 ? "已处理 " + Math.Min(completed, total) + "/" + total + (phase == 9 ? " 批" : " 项")
+        progressSummary = total > 0 ? "已处理 " + progress.Text + (phase == 9 ? " 批" : " 项")
             : completed > 0 ? "已处理 " + completed + " 项，总数统计中" : "总数尚在统计中";
         if (!string.IsNullOrWhiteSpace(activity))
             progressSummary = activity + "　" + progressSummary;

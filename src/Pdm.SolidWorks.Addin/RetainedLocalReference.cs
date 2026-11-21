@@ -10,7 +10,7 @@ internal sealed class RetainedLocalReference
 {
     internal string SourcePath, WorkspacePath, Sha256;
     internal long FileLength;
-    internal bool Managed, Editable;
+    internal bool Managed, Editable, RequireExactDeferredPath;
     internal string FileName => Path.GetFileName(SourcePath);
     internal IEnumerable<string> Paths => new[] { SourcePath, WorkspacePath }.Where(path => !string.IsNullOrWhiteSpace(path));
     internal bool Allows(string path) => Paths.Any(candidate => string.Equals(Path.GetFullPath(path), candidate, StringComparison.OrdinalIgnoreCase));

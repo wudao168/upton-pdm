@@ -128,7 +128,7 @@ internal static partial class Program
     using(var http=new HttpClient(handler){BaseAddress=new Uri("http://network-fixture.invalid/")})
     {
      SetField(client,"httpClient",http);FastRetry(client,(delay,token)=>{delays.Add(delay.TotalSeconds);return Task.CompletedTask;});
-     Check((TimeSpan)Field(client,"archiveRecoveryWindow")==TimeSpan.FromMinutes(5),"默认临时故障等待窗口为5分钟："+mode);
+     Check((TimeSpan)Field(client,"archiveRecoveryWindow")==TimeSpan.FromSeconds(600),"默认临时故障等待窗口为600秒（10分钟）： "+mode);
      var requestType=Type("PdmApiClient").GetNestedType("ArchiveRequest",Flags);var request=Activator.CreateInstance(requestType,true);
      requestType.GetField("Path",Flags).SetValue(request,"api/fixture");requestType.GetField("FileName",Flags).SetValue(request,"零件.SLDPRT");
      if(mode=="registration-reply-lost"||mode=="unsafe-write")requestType.GetField("Json",Flags).SetValue(request,"{\"batchId\":\"fixed\"}");

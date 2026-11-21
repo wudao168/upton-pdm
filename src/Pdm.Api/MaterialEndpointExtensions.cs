@@ -820,6 +820,7 @@ public static class MaterialEndpointExtensions
         task.U9ItemId,
         task.U9ItemCode,
         task.MaterialCode,
+        MaterialKind = task.MaterialKind?.ToString(),
         task.MaterialName,
         task.Specification,
         task.Brand,

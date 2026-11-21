@@ -51,39 +51,116 @@ public sealed class MergedReleaseDrawingReviewTests
         await Assert.ThrowsAsync<PdmConflictException>(()=>f.Decide("Pending","审批后不能改"));
     }
 
-    [Fact]
-    public async Task ReturnedDrawingIsReboundOnArchiveAndCanFinishOriginalFlow()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReturnedDrawingIsReboundOnArchiveAndNotifiesCurrentApprover(bool supervisorReturns)
     {
         var f = await Fixture.Create(false);
+        await PermissionTestUsers.Grant(f.Repo, "Administrator", AuthorizationActions.BusinessNotifications);
         await f.Start();
-        var returned = await f.Decide("Issue", "孔距需调整");
+        if (supervisorReturns)
+        {
+            await f.Decide("Confirmed", "");
+            await f.Repo.DecideApprovalAsync(f.First.Id, "admin", ApprovalDecision.Approved, "", false, null, default);
+        }
+        var returnTask = supervisorReturns ? f.Last : f.First;
+        var returned = await f.Decide("Issue", "孔距需调整", returnTask.Assignee);
+        await ReleaseDrawingReworkNotifications.SyncAsync(f.Repo, default);
+        await ReleaseDrawingReworkNotifications.SyncAsync(f.Repo, default);
+        var notice = Assert.Single(await f.Repo.ListUserNotificationsAsync("engineer", 100, default), item => item.Category == ReleaseDrawingReworkNotifications.Category);
+        Assert.Contains(f.Drawing.FileName, notice.Content);
+        Assert.Equal(f.Package.Id, notice.ReleasePackageId);
+        Assert.True(ReleaseDrawingReworkNotifications.IsPending(notice, returned));
+        Assert.DoesNotContain(await f.Repo.ListUserNotificationsAsync("supervisor", 100, default),
+            item => item.Category == ReleaseDrawingReworkNotifications.Category);
         var oldToken = returned.DrawingReview!.Items[0].Token;
         var session = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
         await f.Repo.CheckoutAsync(f.Drawing.Id, "engineer", session, "TEST", now.AddMinutes(15), default);
-        await Assert.ThrowsAsync<PdmConflictException>(() => f.Decide("Pending", ""));
+        await Assert.ThrowsAsync<PdmConflictException>(() => f.Decide("Pending", "", returnTask.Assignee));
         var source = f.Version;
         var commit = new DocumentVersionCommit(new("merged/revised.slddrw", 12, new string('B', 64), now),
             "修改孔距", source.PropertySnapshot,
             new(Guid.NewGuid(), f.Package.ProjectId, f.Drawing.Id, now, "engineer", source.ReferenceSnapshot, "new-root"), [], []);
         var saved = await f.Repo.CheckInVersionAsync(f.Drawing.Id, "engineer", session, commit, default);
         var updated = (await f.Repo.FindReleasePackageAsync(f.Package.Id, default))!;
-        Assert.Equal(returned.State, updated.State);
+        Assert.Equal(ReleasePackageState.ProcessReview, updated.State);
+        Assert.Equal(f.First.Id, ReleaseDrawingRevision.CurrentTask(updated)?.Id);
         Assert.Equal(returned.DrawingReview.RoundId, updated.DrawingReview!.RoundId);
         Assert.Equal(saved.Version!.Id, updated.DrawingReview.Items[0].VersionId);
         Assert.Equal(saved.Version.Id, updated.VersionBindings!.Single().VersionId);
+        Assert.False(ReleaseDrawingReworkNotifications.IsPending(notice, updated));
+        await ReleaseDrawingReworkNotifications.SyncAsync(f.Repo, default);
+        await ReleaseDrawingReworkNotifications.SyncAsync(f.Repo, default);
+        var resubmitted = Assert.Single(await f.Repo.ListUserNotificationsAsync(f.First.Assignee, 100, default),
+            item => item.Category == ReleaseDrawingReworkNotifications.ResubmittedCategory);
+        Assert.Contains(f.Drawing.FileName, resubmitted.Content);
+        Assert.Equal(saved.Version.CreatedAt, resubmitted.CreatedAt);
+        Assert.True(ReleaseDrawingReworkNotifications.IsPending(resubmitted, updated));
+        Assert.DoesNotContain(await f.Repo.ListUserNotificationsAsync(f.Last.Assignee, 100, default),
+            item => item.Category == ReleaseDrawingReworkNotifications.ResubmittedCategory);
         Assert.Equal("Pending", updated.DrawingReview.Items[0].Status);
-        Assert.Equal("孔距需调整", Assert.Single(updated.DrawingReview.Items[0].Notes).Comment);
+        Assert.Equal("孔距需调整", Assert.Single(updated.DrawingReview.Items[0].Notes, note => note.Status == "Issue").Comment);
         Assert.Equal(DocumentLifecycleState.InReview, saved.Document.State);
         await Assert.ThrowsAsync<PdmConflictException>(() => new ReleaseDrawingReviewService(f.Repo, TimeProvider.System).DecideAsync(
             f.Package.Id, new(f.Drawing.Id, oldToken, "Confirmed", "") { ApprovalTaskId=f.First.Id, RoundId=updated.DrawingReview.RoundId },
-            "admin", UserRole.Administrator, default));
-        await f.Decide("Confirmed", "");
-        var next = await f.Repo.DecideApprovalAsync(f.First.Id, "admin", ApprovalDecision.Approved, "同意", false, null, default);
+            f.First.Assignee, UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => f.Repo.DecideApprovalAsync(f.Last.Id, f.Last.Assignee,
+            ApprovalDecision.Approved, "", false, null, default));
+        await f.Repo.MarkUserNotificationReadAsync(resubmitted.Id, f.First.Assignee, now, default);
+        var confirmed = await f.Decide("Confirmed", "", f.First.Assignee);
+        Assert.False(ReleaseDrawingReworkNotifications.IsPending(resubmitted, confirmed));
+        var next = await f.Repo.DecideApprovalAsync(f.First.Id, f.First.Assignee, ApprovalDecision.Approved, "同意", false, null, default);
         Assert.Equal(ReleasePackageState.Approval, next.State);
-        await f.Decide("Confirmed", "", "supervisor");
+        await ReleaseDrawingReworkNotifications.SyncAsync(f.Repo, default);
+        var supervisorNotices = (await f.Repo.ListUserNotificationsAsync(f.Last.Assignee, 100, default))
+            .Count(item => item.Category == ReleaseDrawingReworkNotifications.ResubmittedCategory);
+        Assert.Equal(supervisorReturns ? 1 : 0, supervisorNotices);
+        await f.Decide("Confirmed", "", f.Last.Assignee);
         var finished = await f.Repo.DecideApprovalAsync(f.Last.Id, "supervisor", ApprovalDecision.Approved, "同意", false, null, default);
         Assert.Equal(ReleasePackageState.Publishing, finished.State);
+    }
+
+    [Fact]
+    public async Task SupervisorReturnsMultipleDrawingsAndUnchangedVersionKeepsItsConfirmation()
+    {
+        var f = await Fixture.Create(false);
+        var firstReturn = f.Drawing.Id;
+        var another = await f.AddDrawingAsync("MERGED-SECOND.SLDDRW");
+        var unchanged = await f.AddDrawingAsync("MERGED-UNCHANGED.SLDDRW");
+        await f.Start();
+        foreach (var id in new[] { firstReturn, another.Id, unchanged.Id })
+            await f.Decide("Confirmed", "", documentId: id);
+        await f.Repo.DecideApprovalAsync(f.First.Id, f.First.Assignee, ApprovalDecision.Approved, "", false, null, default);
+        await f.Decide("Confirmed", "", f.Last.Assignee, unchanged.Id);
+        await f.Decide("Issue", "需修订一", f.Last.Assignee, firstReturn);
+        var old = await f.Decide("Issue", "需修订二", f.Last.Assignee, another.Id);
+
+        await f.RearchiveAsync(f.Drawing, f.Version, "B");
+        var first = (await f.Repo.FindReleasePackageAsync(f.Package.Id, default))!;
+        Assert.Equal(f.First.Id, ReleaseDrawingRevision.CurrentTask(first)?.Id);
+        Assert.NotNull(ReleaseDrawingRevision.ActiveReturn(first, first.DrawingReview!.Items.Single(item => item.DocumentId == another.Id)));
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Decide("Confirmed", "", documentId: another.Id));
+        await f.RearchiveAsync(another.Document, another.Version, "C");
+        var updated = (await f.Repo.FindReleasePackageAsync(f.Package.Id, default))!;
+        Assert.Equal(f.First.Id, ReleaseDrawingRevision.CurrentTask(updated)?.Id);
+        var unchangedItem = updated.DrawingReview!.Items.Single(item => item.DocumentId == unchanged.Id);
+        Assert.Equal(old.DrawingReview!.Items.Single(item => item.DocumentId == unchanged.Id).Token, unchangedItem.Token);
+        Assert.True(updated.DrawingReview.HasPreservedConfirmation(f.First.Id, unchangedItem.Token));
+        Assert.DoesNotContain(updated.DrawingReview.Items.Where(item => item.DocumentId != unchanged.Id),
+            item => updated.DrawingReview.HasPreservedConfirmation(f.First.Id, item.Token));
+        Assert.NotNull(updated.DrawingReview.Items.Single(item => item.DocumentId == another.Id).Notes
+            .LastOrDefault(note => note.Status == "Issue"));
+        await f.Decide("Confirmed", "", documentId: firstReturn);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Repo.DecideApprovalAsync(f.First.Id, f.First.Assignee,
+            ApprovalDecision.Approved, "", false, null, default));
+        await f.Decide("Confirmed", "", documentId: another.Id);
+        await f.Repo.DecideApprovalAsync(f.First.Id, f.First.Assignee, ApprovalDecision.Approved, "", false, null, default);
+        await f.Decide("Confirmed", "", f.Last.Assignee, firstReturn);
+        await f.Decide("Confirmed", "", f.Last.Assignee, another.Id);
+        var published = await f.Repo.DecideApprovalAsync(f.Last.Id, f.Last.Assignee, ApprovalDecision.Approved, "", false, null, default);
+        Assert.Equal(ReleasePackageState.Publishing, published.State);
     }
 
     [Fact]
@@ -192,11 +269,43 @@ public sealed class MergedReleaseDrawingReviewTests
             var review=await ReleaseDrawingReviewService.CaptureAsync(Repo,Package,default);
             await Repo.CreateReleasePackageAsync(Package with {State=ReleasePackageState.ProcessReview,DrawingReview=review},default);
         }
-        public async Task<ReleasePackage> Decide(string status,string comment,string actor="admin")
+        public async Task<(Guid Id, PdmDocument Document, DocumentVersion Version)> AddDrawingAsync(string fileName)
+        {
+            var modelId = Package.VersionBindings!.First().DrawingModelDocumentId;
+            var drawing = await Repo.RegisterDocumentAsync(new(Package.ProjectId, fileName, fileName, fileName, DocumentKind.Drawing,
+                RelatedModelDocumentId: modelId), "engineer", default);
+            var now = DateTimeOffset.UtcNow;
+            var session = Guid.NewGuid();
+            await Repo.CheckoutAsync(drawing.Id, "engineer", session, "TEST", now.AddMinutes(15), default);
+            var saved = await Repo.CheckInVersionAsync(drawing.Id, "engineer", session, new(
+                new("merged/" + fileName, 10, new string('A', 64), now), "存档", Version.PropertySnapshot,
+                new(Guid.NewGuid(), Package.ProjectId, drawing.Id, now, "engineer",
+                    Version.ReferenceSnapshot with { DocumentId = drawing.Id, FileName = fileName }, "root"), [], []), default);
+            var version = saved.Version!;
+            Package = Package with
+            {
+                VersionBindings = [..Package.VersionBindings!, new(drawing.Id, version.Id, version.Revision.Display, version.Sha256,
+                    true, drawing.FileName, true, DrawingModelDocumentId: modelId)]
+            };
+            return (drawing.Id, drawing, version);
+        }
+
+        public async Task RearchiveAsync(PdmDocument drawing, DocumentVersion source, string sha)
+        {
+            var session = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            await Repo.CheckoutAsync(drawing.Id, "engineer", session, "TEST", now.AddMinutes(15), default);
+            await Repo.CheckInVersionAsync(drawing.Id, "engineer", session, new(
+                new("merged/revised-" + drawing.FileName, 12, new string(sha[0], 64), now), "修订", source.PropertySnapshot,
+                new(Guid.NewGuid(), Package.ProjectId, drawing.Id, now, "engineer", source.ReferenceSnapshot, "root"), [], []), default);
+        }
+
+        public async Task<ReleasePackage> Decide(string status, string comment, string actor = "admin", Guid? documentId = null)
         {
             var p=(await Repo.FindReleasePackageAsync(Package.Id,default))!;
+            var item = p.DrawingReview!.Items.Single(it => it.DocumentId == (documentId ?? Drawing.Id));
             return await new ReleaseDrawingReviewService(Repo,TimeProvider.System).DecideAsync(Package.Id,
-                new(Drawing.Id,p.DrawingReview!.Items[0].Token,status,comment) { RoundId=p.DrawingReview.RoundId, ApprovalTaskId=p.ApprovalTasks.OrderBy(t=>t.StepOrder).FirstOrDefault(t=>t.Decision is null)?.Id },actor,UserRole.Administrator,default);
+                new(item.DocumentId,item.Token,status,comment) { RoundId=p.DrawingReview.RoundId, ApprovalTaskId=p.ApprovalTasks.OrderBy(t=>t.StepOrder).FirstOrDefault(t=>t.Decision is null)?.Id },actor,UserRole.Administrator,default);
         }
         public static async Task<Fixture> Create(bool preview=true)
         {

@@ -39,6 +39,8 @@ public sealed partial class PdmAddin
 
     private int OnAssemblyCommandOpening(int command, int userCommand)
     {
+        nativeCommandSequence++;
+        if (assemblyReferenceLoad?.Completed == false) assemblyReferenceLoad = null;
         try { if (TryQueueManagedSave(command)) return 1; }
         catch (Exception error)
         {

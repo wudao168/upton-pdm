@@ -3,6 +3,7 @@ import { ElMessage } from '../src/statusMessage'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import MaterialManagement from '../src/components/MaterialManagement.vue'
+import { PdmApiError } from '../src/api'
 import type { PdmMaterial } from '../src/types'
 
 const api = vi.hoisted(() => ({
@@ -63,7 +64,10 @@ const api = vi.hoisted(() => ({
   importMaterials: vi.fn(),
 }))
 
-vi.mock('../src/api', () => api)
+vi.mock('../src/api', async importOriginal => ({
+  ...api,
+  PdmApiError: (await importOriginal<typeof import('../src/api')>()).PdmApiError,
+}))
 
 describe('MaterialManagement', () => {
   it('隐藏无查看权限页签，并阻止记忆或外部请求打开它们', async () => {
@@ -1237,8 +1241,8 @@ describe('MaterialManagement', () => {
     const historyPaginators = wrapper.findAllComponents({ name: 'ElPagination' })
     expect(historyPaginators.find(pagination => pagination.classes().includes('material-history-workflow-pagination'))?.props('total')).toBe(3)
 
-    const nestedTabs = wrapper.findAll('[role="tab"]').filter(tab => ['当前处理 1', '审批/同步历史 3'].includes(tab.text().trim()))
-    expect(nestedTabs.map(tab => tab.text().trim())).toEqual(['当前处理 1', '审批/同步历史 3'])
+    const nestedTabs = wrapper.findAll('[role="tab"]').filter(tab => ['当前处理 1', '非标件审批 0', '审批/同步历史 3'].includes(tab.text().trim()))
+    expect(nestedTabs.map(tab => tab.text().trim())).toEqual(['当前处理 1', '非标件审批 0', '审批/同步历史 3'])
     expect(wrapper.find('.material-workflow-result').exists()).toBe(false)
     expect(wrapper.get('.material-approval-feedback').text()).toContain('运行状态空闲')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('批准或退回后，结果将在此显示。')
@@ -1422,6 +1426,44 @@ describe('MaterialManagement', () => {
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(1, 'application-1', 3, true, '', 'token', '0201')
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(2, 'application-2', 5, true, '', 'token', '0201')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('失败：P700003：料品型号和品牌与现有主档重复')
+    confirm.mockRestore()
+  })
+
+  it.each(['批准', '批量批准'])('%s遇到来源BOM删除时刷新待办并显示撤回原因', async buttonLabel => {
+    const application = {
+      id: 'removed-bom-application', applicationType: 'StandardBomItem' as const, bomItemId: 'removed-item', bomHeaderKind: 'Standard' as const,
+      projectId: 'project-1', projectCode: 'P700003', categoryCode: '0201', applicationName: '已删除来源物料',
+      status: 'Pending' as const, requestedBy: 'engineer', requestedAt: '2026-08-23T14:47:51Z', rowVersion: 3,
+    }
+    const reason = '来源 BOM 物料已删除，系统自动取消申请。'
+    api.listMaterialCodeApplications
+      .mockResolvedValueOnce([application])
+      .mockResolvedValue([{ ...application, status: 'Withdrawn', workflowState: 'Withdrawn', decisionComment: reason, rowVersion: 4 }])
+    api.decideMaterialCodeApplication.mockRejectedValueOnce(new PdmApiError(reason, 409))
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, requestedTab: 'code-approvals' },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const pendingTable = wrapper.findAllComponents({ name: 'ElTable' }).find(table => table.classes().includes('material-code-approval-table--pending'))!
+    expect(pendingTable.text()).toContain('已删除来源物料')
+    if (buttonLabel === '批量批准') {
+      pendingTable.vm.$emit('selection-change', [{ id: application.id, approval: application }])
+      await flushPromises()
+    }
+    const actions = buttonLabel === '批量批准' ? wrapper.get('.material-code-approval-toolbar') : pendingTable
+    await actions.findAll('button').find(button => button.text() === buttonLabel)!.trigger('click')
+    await flushPromises()
+
+    expect(api.listMaterialCodeApplications).toHaveBeenCalledTimes(2)
+    expect(pendingTable.text()).not.toContain('已删除来源物料')
+    expect(wrapper.get('.material-approval-feedback').text()).toContain(reason)
+    const history = wrapper.get('.material-code-approval-table--history')
+    expect(history.text()).toContain('已删除来源物料')
+    expect(history.text()).toContain('已撤回')
+    expect(history.text()).toContain(reason)
     confirm.mockRestore()
   })
 

@@ -167,34 +167,97 @@ public sealed class EditCollaborationTests
     }
 
     [Fact]
-    public async Task AutomaticOfflineReleaseWaitsFortyEightHoursAndHonorsDisableSwitch()
+    public async Task ScopedOfflineReleaseRequiresTheSelectedCheckoutGeneration()
+    {
+        var item = await Editing();
+        clock.Advance(TimeSpan.FromMinutes(31));
+        var selected = Assert.Single(await workflow.ListEditLocksAsync("helper", UserRole.Administrator, default, item.Document.Id));
+        Assert.True(selected.CanForceRelease);
+        var requestOnly = Assert.Single(await workflow.ListEditLocksAsync("engineer", UserRole.Engineer, default, item.Document.Id));
+        Assert.True(requestOnly.CanRequestRelease);
+        Assert.False(requestOnly.CanForceRelease);
+        Assert.False(requestOnly.CanEmergencyRelease);
+        Assert.Empty(await workflow.ListEditLocksAsync("helper", UserRole.Administrator, default, Guid.NewGuid()));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.ForceReleaseEditLockAsync(item.Document.Id, "engineer", UserRole.Engineer, "协助", default, selected.SessionId, selected.CheckedOutAt));
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ForceReleaseEditLockAsync(item.Document.Id, "helper", UserRole.Administrator, "协助", default, selected.SessionId));
+        await workflow.ForceReleaseEditLockAsync(item.Document.Id, "helper", UserRole.Administrator, "协助", default, selected.SessionId, selected.CheckedOutAt);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var next = await repository.CheckoutAsync(item.Document.Id, "admin", session, "设计电脑A", clock.GetUtcNow().AddMinutes(5), default);
+        clock.Advance(TimeSpan.FromMinutes(31));
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.ForceReleaseEditLockAsync(item.Document.Id, "helper", UserRole.Administrator, "协助", default, selected.SessionId, selected.CheckedOutAt));
+        Assert.Equal(next.CheckedOutAt, (await repository.FindDocumentAsync(item.Document.Id, default))!.CheckedOutAt);
+    }
+
+    [Fact]
+    public async Task AutomaticReleaseWaitsForHolderReminderAndHonorsDisableSwitch()
     {
         var first = await Editing();
-        clock.Advance(TimeSpan.FromHours(47));
+        clock.Advance(TimeSpan.FromHours(24) - TimeSpan.FromMinutes(1));
         Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
-        clock.Advance(TimeSpan.FromHours(1) + TimeSpan.FromSeconds(1));
+        Assert.Empty(await repository.ListUserNotificationsAsync("admin", 100, default));
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        var reminder = Assert.Single(await repository.ListUserNotificationsAsync("admin", 100, default));
+        Assert.Equal("EditLockOverdue", reminder.Category);
+        Assert.Empty(await repository.ListUserNotificationsAsync("helper", 100, default));
+        await repository.MarkUserNotificationReadAsync(reminder.Id, "admin", clock.GetUtcNow(), default);
+        clock.Advance(TimeSpan.FromHours(12) - TimeSpan.FromMinutes(1));
+        Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        Assert.Single(await repository.ListUserNotificationsAsync("admin", 100, default));
+        clock.Advance(TimeSpan.FromMinutes(1));
         Assert.Equal(1, await workflow.MaintainEditCollaborationAsync(default));
         Assert.Null((await repository.FindDocumentAsync(first.Document.Id, default))!.CheckoutSessionId);
         var audit = await repository.ListAuditAsync("admin", UserRole.Administrator, 100, default);
-        Assert.Contains(audit, entry => entry.Action == "document.checkout.auto-offline-release");
+        Assert.Contains(audit, entry => entry.Action == "document.checkout.auto-overdue-release");
+        Assert.NotNull(Assert.Single(await repository.ListUserNotificationsAsync("admin", 100, default)).ResolvedAt);
         Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
 
         var second = await Editing("关闭自动回收");
         await repository.UpdateSystemSettingsAsync((await repository.GetSystemSettingsAsync(default)) with { CheckoutAutoReleaseEnabled = false }, default);
         clock.Advance(TimeSpan.FromHours(72));
         Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        Assert.Equal(2, (await repository.ListUserNotificationsAsync("admin", 100, default)).Count(n => n.Category == "EditLockOverdue"));
+        clock.Advance(TimeSpan.FromHours(12));
+        Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
         Assert.Equal(session, (await repository.FindDocumentAsync(second.Document.Id, default))!.CheckoutSessionId);
     }
 
     [Fact]
-    public async Task RestoredHeartbeatPreventsOfflineReclaimEvenForLongHeldDocument()
+    public async Task RestoredHeartbeatPreventsOfflineReclaimButNotTimedReleaseAfterNewReminder()
     {
         var item = await Editing();
-        clock.Advance(TimeSpan.FromHours(72));
+        clock.Advance(TimeSpan.FromHours(24));
+        await repository.CreateUserNotificationsAsync([
+            new(Guid.NewGuid(), "admin", "EditLockOverdue", "旧占用通知", "这是旧规则的提醒。", item.Project.Id, null,
+                $"edit-long-held:{item.Document.Id:N}:{session:N}:{item.Document.CheckedOutAt?.UtcTicks}", clock.GetUtcNow(), null)
+        ], default);
+        clock.Advance(TimeSpan.FromHours(48));
         var cutoff = clock.GetUtcNow().AddHours(-48);
         await repository.HeartbeatCheckoutSessionAsync(session, "admin", "设计电脑A", [item.Document.Id], clock.GetUtcNow().AddMinutes(5), default);
         await Assert.ThrowsAsync<PdmConflictException>(() => repository.ReclaimCheckoutAsync(item.Document.Id, session, item.Document.CheckedOutAt!.Value, cutoff, clock.GetUtcNow(), default));
         Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        clock.Advance(TimeSpan.FromHours(12));
+        await repository.HeartbeatCheckoutSessionAsync(session, "admin", "设计电脑A", [item.Document.Id], clock.GetUtcNow().AddMinutes(5), default);
+        Assert.Equal(1, await workflow.MaintainEditCollaborationAsync(default));
+    }
+
+    [Fact]
+    public async Task AutomaticReleaseRequiresAReminderAcceptedByNotificationPolicy()
+    {
+        var item = await Editing();
+        await PermissionTestUsers.Revoke(repository, "Administrator", AuthorizationActions.BusinessNotifications);
+        clock.Advance(TimeSpan.FromHours(48));
+        Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        clock.Advance(TimeSpan.FromHours(24));
+        Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        Assert.Empty(await repository.ListUserNotificationsAsync("admin", 100, default));
+        Assert.Equal(session, (await repository.FindDocumentAsync(item.Document.Id, default))!.CheckoutSessionId);
+
+        await PermissionTestUsers.Grant(repository, "Administrator", AuthorizationActions.BusinessNotifications);
+        Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        Assert.Equal("EditLockOverdue", Assert.Single(await repository.ListUserNotificationsAsync("admin", 100, default)).Category);
+        clock.Advance(TimeSpan.FromHours(12));
+        Assert.Equal(1, await workflow.MaintainEditCollaborationAsync(default));
     }
 
     [Fact]
@@ -204,7 +267,9 @@ public sealed class EditCollaborationTests
         await repository.RegisterArchiveUploadAsync(new(Guid.NewGuid(), item.Project.Id, item.Document.FileName, 128, 128, new string('A', 64), 0, clock.GetUtcNow().AddHours(100), "admin")
             { ArchiveContext = new(Guid.NewGuid(), item.Document.Id, session), TargetRelativePath = "pending/upload" }, default);
         await Assert.ThrowsAsync<PdmConflictException>(() => workflow.EmergencyReleaseEditLockAsync(item.Document.Id, session, item.Document.CheckedOutAt!.Value, "admin", UserRole.Administrator, "紧急", default));
-        clock.Advance(TimeSpan.FromHours(49));
+        clock.Advance(TimeSpan.FromHours(24));
+        Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
+        clock.Advance(TimeSpan.FromHours(12));
         Assert.Equal(0, await workflow.MaintainEditCollaborationAsync(default));
         Assert.Equal(session, (await repository.FindDocumentAsync(item.Document.Id, default))!.CheckoutSessionId);
     }
@@ -248,24 +313,25 @@ public sealed class EditCollaborationTests
         Assert.Equal("helper", second.CheckoutReleaseRequestedBy);
         clock.Advance(TimeSpan.FromMinutes(2));
         await workflow.MaintainEditCollaborationAsync(default);
-        Assert.Single(await repository.ListUserNotificationsAsync("admin", 100, default), n => n.Category == "EditLockReminder");
+        Assert.Equal(2, (await repository.ListUserNotificationsAsync("admin", 100, default)).Count(n => n.Category == "EditLockRequested"));
+        Assert.DoesNotContain(await repository.ListUserNotificationsAsync("admin", 100, default), n => n.Category is "EditLockReminder" or "EditLockEscalated");
         var saved = await repository.CheckInVersionAsync(item.Document.Id, "admin", session, Commit(item.Project, second) with { KeepEditing = true }, default);
         await workflow.MaintainEditCollaborationAsync(default);
-        Assert.Single(await repository.ListUserNotificationsAsync("admin", 100, default), n => n.Category == "EditLockReminder");
+        Assert.DoesNotContain(await repository.ListUserNotificationsAsync("admin", 100, default), n => n.Category is "EditLockReminder" or "EditLockEscalated");
         await workflow.CloseEditAsync(item.Document.Id, "admin", UserRole.Administrator, session, saved.Document.CheckedOutAt!.Value, saved.Version!.Sha256, false, default);
         foreach (var name in new[] { "helper", "another" })
-            Assert.Single(await repository.ListUserNotificationsAsync(name, 100, default), n => n.Category == "EditLockAvailable");
+            Assert.DoesNotContain(await repository.ListUserNotificationsAsync(name, 100, default), n => n.Category is "EditLockAvailable" or "EditLockReleased");
 
         clock.Advance(TimeSpan.FromMinutes(1));
         var next = await repository.CheckoutAsync(item.Document.Id, "admin", session, "设计电脑A", clock.GetUtcNow().AddMinutes(5), default);
         await workflow.RequestEditLockReleaseAsync(item.Document.Id, "third", UserRole.Administrator, "下一轮协助", default);
         await workflow.CloseEditAsync(item.Document.Id, "admin", UserRole.Administrator, session, next.CheckedOutAt!.Value, saved.Version.Sha256, false, default);
-        Assert.Single(await repository.ListUserNotificationsAsync("helper", 100, default), n => n.Category == "EditLockAvailable");
-        Assert.Single(await repository.ListUserNotificationsAsync("third", 100, default), n => n.Category == "EditLockAvailable");
+        Assert.DoesNotContain(await repository.ListUserNotificationsAsync("helper", 100, default), n => n.Category is "EditLockAvailable" or "EditLockReleased");
+        Assert.DoesNotContain(await repository.ListUserNotificationsAsync("third", 100, default), n => n.Category is "EditLockAvailable" or "EditLockReleased");
     }
 
     [Fact]
-    public async Task ExpiredHandoffNotifiesWaitingCollaboratorsOnce()
+    public async Task ExpiredHandoffReleasesReservationSilently()
     {
         var item = await Editing();
         await workflow.RequestEditLockReleaseAsync(item.Document.Id, "waiting", UserRole.Administrator, "协助", default);
@@ -275,7 +341,7 @@ public sealed class EditCollaborationTests
         await workflow.MaintainEditCollaborationAsync(default);
         Assert.Empty(await repository.ListEditHandoffsAsync(default));
         foreach (var name in new[] { "admin", "helper", "waiting" })
-            Assert.Single(await repository.ListUserNotificationsAsync(name, 100, default), n => n.Title == "图档交接预留已到期");
+            Assert.DoesNotContain(await repository.ListUserNotificationsAsync(name, 100, default), n => n.Title == "图档交接预留已到期");
     }
 
     private sealed class Clock : TimeProvider

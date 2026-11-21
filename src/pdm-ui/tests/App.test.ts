@@ -1462,7 +1462,7 @@ describe('PLM client workspace', () => {
     expect(wrapper.text()).not.toContain('PRJ-2026-018')
   })
 
-  it('shows active edit permissions in my tasks', async () => {
+  it('shows active edit permissions only in the edit permissions tab', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
@@ -1471,6 +1471,11 @@ describe('PLM client workspace', () => {
 
     await vi.waitFor(() => expect(document.body.querySelector('[aria-label="消息中心"]')).not.toBeNull())
     const taskCenter = document.body.querySelector('[aria-label="消息中心"]')!
+    expect(taskCenter.textContent).not.toContain('LOCK-001')
+    const tabs = taskCenter.closest('[aria-label="我的待办"]')!.querySelectorAll<HTMLButtonElement>('button[role="tab"]')
+    const editPermissionsTab = [...tabs].find(tab => tab.textContent?.startsWith('编辑权限'))!
+    editPermissionsTab.click()
+    await flushPromises()
     expect(taskCenter.textContent).toContain('LOCK-001')
     expect(taskCenter.textContent).toContain('DESIGN-WS')
     expect(taskCenter.textContent).toContain('请及时存档')
@@ -1681,7 +1686,8 @@ describe('PLM client workspace', () => {
     await wrapper.get('.el-tabs__item#tab-checkout-policy').trigger('click')
     await flushPromises()
     expect(wrapper.get('[aria-label="系统设置"]').text()).toContain('建议60秒')
-    expect(wrapper.get('[aria-label="系统设置"]').text()).toContain('在线有未提交修改时由负责人处理')
+    expect(wrapper.get('[aria-label="系统设置"]').text()).toContain('默认24小时，从获取编辑权限时起算。')
+    expect(wrapper.get('[aria-label="系统设置"]').text()).toContain('默认12小时，从发出提醒时起算。')
     await wrapper.get('.el-tabs__item#tab-equipment').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('设备类型设置')

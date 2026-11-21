@@ -2076,6 +2076,7 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         Utc(row.CreatedAt)!.Value, Utc(row.UpdatedAt)!.Value)
         {
             MaterialCode = row.MaterialCode,
+            MaterialKind = row.MaterialKind is null ? null : Enum.Parse<MaterialKind>(row.MaterialKind),
             MaterialName = row.MaterialName,
             Specification = row.Specification,
             Brand = row.Brand,
@@ -2272,6 +2273,7 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         SELECT id,material_id,operation,status,correlation_id,payload_json,payload_sha256,attempt_count,next_attempt_at,last_error,
                response_preview,u9_item_id,u9_item_code,created_at,updated_at,
                (SELECT material_code FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) material_code,
+               (SELECT material_kind FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) material_kind,
                (SELECT name FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) material_name,
                (SELECT specification FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) specification,
                (SELECT brand FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) brand,
@@ -2432,6 +2434,7 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         public DateTime CreatedAt { get; init; }
         public DateTime UpdatedAt { get; init; }
         public string? MaterialCode { get; init; }
+        public string? MaterialKind { get; init; }
         public string? MaterialName { get; init; }
         public string? Specification { get; init; }
         public string? Brand { get; init; }

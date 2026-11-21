@@ -82,7 +82,7 @@ public sealed class AssemblyPreviewTests
         public async Task InitializeAsync()
         {
             var settings = await Repository.GetSystemSettingsAsync(default);
-            await Repository.UpdateSystemSettingsAsync(settings with { PreviewConversion = new() { Mode = PreviewConversionMode.Remote, AgentUrl = "http://agent:5199" } }, default);
+            await Repository.UpdateSystemSettingsAsync(settings with { PreviewConversion = new() { Mode = PreviewConversionMode.Remote, AgentUrl = $"http://agent-{Guid.NewGuid():N}:5199" } }, default);
             Project = await Repository.CreateProjectAsync(new("ASSEMBLY-TEST", "装配预览", "admin", directory, Path.Combine(directory, "release")), "admin", default);
             Child = await Repository.RegisterDocumentAsync(new(Project.Id, "CHILD", "零件", "CHILD.SLDPRT", DocumentKind.Part), "admin", default);
             var childVersion = await SaveChildAsync("old");
@@ -142,6 +142,8 @@ public sealed class AssemblyPreviewTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.Method == HttpMethod.Get)
+                return new(HttpStatusCode.OK) { Content = new StringContent("{\"workerExists\":true}") };
             Requests++;
             using var input = new ZipArchive(new MemoryStream(await request.Content!.ReadAsByteArrayAsync(cancellationToken)), ZipArchiveMode.Read);
             using var manifest = JsonDocument.Parse(input.GetEntry("manifest.json")!.Open());

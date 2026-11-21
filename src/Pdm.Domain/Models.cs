@@ -154,11 +154,21 @@ public sealed record PreviewConversionSettings
     public bool? LocalExecutionAllowed { get; init; }
 
     public string NormalizedAgentUrl => AgentUrl.Trim().TrimEnd('/');
+
+    public IReadOnlyList<PreviewAgentServer> GetConfiguredServers() => Servers.Count > 0 ? Servers
+        : Mode == PreviewConversionMode.Remote && !string.IsNullOrWhiteSpace(AgentUrl)
+            ? [new(NormalizedAgentUrl, NormalizedAgentUrl, AgentToken, TimeoutMinutes)]
+            : [];
+
+    public IReadOnlyList<PreviewAgentServer> GetEnabledServers(Guid? companyId) => GetConfiguredServers()
+        .Where(server => !server.Disabled && server.IsAvailableForCompany(companyId)).ToArray();
 }
 
 public sealed record PreviewAgentServer(string Name, string AgentUrl, string AgentToken, int TimeoutMinutes = 30, Guid? CompanyId = null)
 {
     public bool Disabled { get; init; }
+
+    public bool IsAvailableForCompany(Guid? companyId) => !CompanyId.HasValue || CompanyId == companyId;
 }
 
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
@@ -188,6 +198,9 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public int CheckoutStrongReminderHours { get; init; } = 8;
 
     public int CheckoutOverdueHours { get; init; } = 24;
+
+    public const int DefaultCheckoutOverdueReleaseGraceHours = 12;
+    public int CheckoutOverdueReleaseGraceHours { get; init; } = DefaultCheckoutOverdueReleaseGraceHours;
 
     public int CheckoutForceReleaseHours { get; init; } = 48;
     public bool CheckoutAutoReleaseEnabled { get; init; } = true;
@@ -892,6 +905,10 @@ public sealed record ReleasePackage(
     DateTimeOffset? PublishedAt,
     string? PublishedPath)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long RowVersion { get; init; }
+    public bool CanResumePreviewRetry => ReleasePreviewPolicy.CanResumeFailedPackage(this);
+
     public PdfTitleBlockSnapshot? PdfTitleBlockSnapshot { get; init; }
     public ReleaseDrawingReview? DrawingReview { get; init; }
 

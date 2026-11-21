@@ -8,9 +8,12 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { matchesUserSearch } from '../userSearch'
 import { ElMessageBox } from 'element-plus'
+import { listUserAccountOperations } from '../api'
+import { userAccountPermissions } from '../navigationAccess'
+import { userErrorMessage } from '../userErrorMessage'
 import OrganizationSettings from './OrganizationSettings.vue'
 
-import type { CreateRoleInput, OrganizationDirectory, OrganizationUnit, PdmUser, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, ProjectOrganization } from '../types'
+import type { CreateRoleInput, ManagedPdmUser, OrganizationDirectory, OrganizationUnit, PdmUser, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, ProjectOrganization } from '../types'
 
 const props = defineProps<{
   directory: OrganizationDirectory
@@ -23,6 +26,8 @@ const props = defineProps<{
   pending: boolean
   onSaveUser: (input: SavePdmUserInput, creating: boolean) => Promise<PdmUser>
   onResetPassword: (username: string) => Promise<PdmUser>
+  onDeactivateUser: (username: string) => Promise<void>
+  onDeleteUser: (username: string) => Promise<void>
   onSaveRolePermissions: (role: string, permissions: string[]) => Promise<RolePermissionDirectory>
   onCreateRole: (input: CreateRoleInput) => Promise<RolePermissionDirectory>
   onDeleteRole: (role: string) => Promise<RolePermissionDirectory>
@@ -43,16 +48,30 @@ const selectedUser = ref<PdmUser | null>(null)
 const membershipUnits = ref<string[]>([])
 const primaryUnitId = ref('')
 const userForm = reactive<SavePdmUserInput>({ username: '', displayName: '', role: '', roles: [], isActive: true, companyId: '', crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
+const userCapabilities = ref(new Map<string, ManagedPdmUser>())
+const statusActionPending = ref(false)
+const statusRefresh = ref(0)
+const deleteReferencesPending = ref(false)
+const deactivateLoadError = ref('')
+const deleteLoadError = ref('')
+const statusLoadError = computed(() => [deactivateLoadError.value, deleteLoadError.value].filter(Boolean).join(' '))
 
 const canManageOrganization = computed(() => props.permissions.includes('settings.organization.manage'))
 const canViewRoles = computed(() => props.permissions.includes('system.role.view'))
 const canEditRoles = computed(() => props.permissions.includes('system.role.edit'))
 const canManageUsers = computed(() => canManageOrganization.value && canEditRoles.value)
+const hasDeactivatePermission = computed(() => props.permissions.includes(userAccountPermissions.deactivate))
+const hasDeletePermission = computed(() => props.permissions.includes(userAccountPermissions.delete))
+const showStatusActions = computed(() => hasDeactivatePermission.value || hasDeletePermission.value)
 const activeCompany = computed(() => props.directory.organizations.find(item => item.id === props.activeOrganizationId))
 const activeCompanyUnits = computed(() => props.directory.units.filter(unit => unit.organizationId === props.activeOrganizationId))
 const activeCompanyUnitIds = computed(() => new Set(activeCompanyUnits.value.map(unit => unit.id)))
 const platformManagedRoles = new Set(['platform_admin', 'developer'])
-const scopedUsers = computed(() => props.directory.users.filter(user => userCompanyId(user) === props.activeOrganizationId && (props.platformAdministrator || !(user.roles ?? [user.role]).some(role => platformManagedRoles.has(role)))))
+const scopedUsers = computed(() => props.directory.users.filter(user => {
+  if (userCompanyId(user) !== props.activeOrganizationId) return false
+  const capability = userCapabilities.value.get(user.username)
+  return canUseLegacyUserActions(user) || (hasDeactivatePermission.value && capability?.canDeactivate) || (hasDeletePermission.value && capability?.canDelete)
+}))
 const activeCompanies = computed(() => props.directory.organizations.filter(item => item.isActive !== false))
 const assignableRoles = computed(() => props.platformAdministrator ? props.roleDirectory.roles : props.roleDirectory.roles.filter(item => !platformManagedRoles.has(item.role)))
 const accessibleCompanyOptions = computed(() => activeCompanies.value.filter(item => item.id !== userForm.companyId))
@@ -68,12 +87,69 @@ const filteredUsers = computed(() => {
   return scopedUsers.value.filter(user => matchesUserSearch(user.displayName, normalized, user.username)
     || `${user.username} ${user.displayName} ${roleNames(user)} ${primaryUnitName(user.username)}`.toLocaleLowerCase('zh-CN').includes(normalized))
 })
+const filteredUserRows = computed(() => filteredUsers.value.map(user => ({
+  user, capability: userCapabilities.value.get(user.username), legacyActions: canUseLegacyUserActions(user),
+})))
 const activeUnits = computed(() => activeCompanyUnits.value.filter(unit => unit.isActive))
+const canToggleUserActive = computed(() => {
+  const editedUser = scopedUsers.value.find(user => user.username === editingUsername.value)
+  return !editedUser?.isActive || hasDeactivatePermission.value && userCapabilities.value.get(editedUser.username)?.canDeactivate === true
+})
 
 watch(availableSections, sections => { if (!sections.includes(activeSection.value)) activeSection.value = sections[0] ?? 'users' }, { immediate: true })
 watch(() => userForm.companyId, companyId => {
   userForm.accessibleCompanyIds = userForm.accessibleCompanyIds.filter(id => id !== companyId)
 })
+watch([activeSection, () => props.token, () => props.activeOrganizationId, hasDeactivatePermission, hasDeletePermission,
+  () => props.directory.users, statusRefresh], ([section, token, companyId, canDeactivate, canDelete], previous, onCleanup) => {
+  if (section !== previous[0] || token !== previous[1] || companyId !== previous[2] || canDeactivate !== previous[3] || canDelete !== previous[4]) {
+    userCapabilities.value = new Map()
+  }
+  deactivateLoadError.value = ''
+  deleteLoadError.value = ''
+  deleteReferencesPending.value = false
+  if (section !== 'users' || !token || !companyId || (!canDeactivate && !canDelete)) return
+
+  const controller = new AbortController()
+  const { signal } = controller
+  onCleanup(() => controller.abort())
+  deleteReferencesPending.value = canDelete
+  let fullResultReceived = false
+
+  async function load(checkDeleteReferences: boolean, accessToken: string) {
+    try {
+      const accounts = await listUserAccountOperations(accessToken, checkDeleteReferences, signal)
+      if (signal.aborted || (!checkDeleteReferences && fullResultReceived)) return
+      const scoped = accounts.filter(account => account.companyId === companyId)
+      if (checkDeleteReferences) {
+        fullResultReceived = true
+        deactivateLoadError.value = ''
+        userCapabilities.value = new Map(scoped.map(account => [account.username, account]))
+      } else {
+        const confirmed = userCapabilities.value
+        userCapabilities.value = new Map(scoped.map(account => {
+          const previous = account.deleteReason ? undefined : confirmed.get(account.username)
+          return [account.username, { ...account, canDelete: previous?.canDelete === true, deleteReason: account.deleteReason ?? previous?.deleteReason }]
+        }))
+      }
+    } catch (error) {
+      if (signal.aborted || (!checkDeleteReferences && fullResultReceived)) return
+      const reason = error instanceof Error ? userErrorMessage(error.message) : '请重新打开用户设置后重试。'
+      if (checkDeleteReferences) {
+        deleteLoadError.value = `无法检查账号的删除引用。${reason}`
+        for (const [username, account] of userCapabilities.value) userCapabilities.value.set(username, { ...account, canDelete: false })
+      } else {
+        deactivateLoadError.value = `无法读取账号的停用状态。${reason}`
+        for (const [username, account] of userCapabilities.value) userCapabilities.value.set(username, { ...account, canDeactivate: false })
+      }
+    } finally {
+      if (!signal.aborted && checkDeleteReferences) deleteReferencesPending.value = false
+    }
+  }
+
+  if (canDeactivate) void load(false, token)
+  if (canDelete) void load(true, token)
+}, { immediate: true })
 
 function roleName(role: string) { return props.roleDirectory.roles.find(item => item.role === role)?.name ?? role }
 function roleNames(user: PdmUser) { return (user.roles ?? [user.role]).map(roleName).join('、') }
@@ -91,6 +167,8 @@ function primaryMembership(username: string) { return memberships(username).find
 function userCompanyId(user: PdmUser) { return user.companyId ?? unitById(primaryMembership(user.username)?.unitId)?.organizationId }
 function primaryUnitName(username: string) { const item = primaryMembership(username); return item ? unitPath(item.unitId) : '未分配' }
 function otherMemberships(username: string) { return memberships(username).filter(item => !item.isPrimary) }
+function isCurrentUser(user: PdmUser) { return user.username.toLocaleLowerCase('zh-CN') === props.currentUsername.toLocaleLowerCase('zh-CN') }
+function canUseLegacyUserActions(user: PdmUser) { return props.platformAdministrator || !(user.roles ?? [user.role]).some(role => platformManagedRoles.has(role)) }
 
 function openUser(user?: PdmUser) {
   editingUsername.value = user?.username ?? ''
@@ -144,6 +222,33 @@ async function resetPassword(user: PdmUser) {
     ElMessage.error(error instanceof Error ? error.message : '密码重置失败')
   }
 }
+
+async function changeUserStatus(user: PdmUser, action: 'deactivate' | 'delete') {
+  const isDelete = action === 'delete'
+  const capability = userCapabilities.value.get(user.username)
+  if (props.pending || statusActionPending.value || isCurrentUser(user) ||
+    !(isDelete ? hasDeletePermission.value && capability?.canDelete : hasDeactivatePermission.value && capability?.canDeactivate)) return
+  const actionName = isDelete ? '删除' : '停用'
+  const name = user.displayName || '姓名待补充'
+  const explanation = isDelete
+    ? '该账号及其角色分配、账号偏好将一并删除，无法恢复。'
+    : '该账号将无法登录，已登录的会话将失效，角色和授权配置将保留。'
+  statusActionPending.value = true
+  try {
+    await ElMessageBox.confirm(`确认${actionName}“${name}”的账号？${explanation}`, `${actionName}用户`, {
+      type: 'warning', confirmButtonText: `确认${actionName}`, cancelButtonText: '取消', confirmButtonClass: 'pdm-danger-confirm',
+    })
+    const apply = isDelete ? props.onDeleteUser : props.onDeactivateUser
+    await apply(user.username)
+    ElMessage.success(`用户已${actionName}`)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    statusRefresh.value++
+    ElMessage.error(error instanceof Error ? userErrorMessage(error.message) : `用户${actionName}失败，请刷新后重试。`)
+  } finally {
+    statusActionPending.value = false
+  }
+}
 </script>
 
 <template>
@@ -169,13 +274,46 @@ async function resetPassword(user: PdmUser) {
         <div class="user-directory-actions"><SearchField><input v-model="query" type="search" placeholder="搜索账号、姓名、角色或部门" aria-label="搜索用户"></SearchField><button v-if="canManageUsers" type="button" class="pdm-primary-action" @click="openUser()">新建用户</button></div>
       </header>
       <div class="user-table-scroll">
-        <table class="pdm-project-table" data-pdm-min-width="820">
-          <colgroup><col v-for="column in (canManageUsers ? 7 : 6)" :key="column"><col class="user-actions-column"></colgroup>
-          <thead><tr><th v-if="canManageUsers">账号</th><th>姓名</th><th>角色</th><th>公司</th><th>主部门</th><th>兼任部门</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody><tr v-for="user in filteredUsers" :key="user.username"><td v-if="canManageUsers" :title="user.username">{{ user.username }}</td><td><PersonName :name="user.displayName || '姓名待补充'" /></td><td :title="roleNames(user)">{{ roleNames(user) }}</td><td :title="companyName(user.companyId ?? undefined)"><CompanyName :name="companyName(user.companyId ?? undefined)" /></td><td :title="primaryUnitName(user.username)"><DepartmentName :names="unitPathNames(primaryMembership(user.username)?.unitId ?? '')" separator=" / " fallback="未分配" /></td><td :title="otherMemberships(user.username).map(item => unitPath(item.unitId)).join('、')"><template v-for="(item, index) in otherMemberships(user.username)" :key="item.unitId"><template v-if="index">、</template><DepartmentName :names="unitPathNames(item.unitId)" separator=" / " /></template><template v-if="!otherMemberships(user.username).length">—</template></td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><div class="user-row-actions"><button v-if="canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button><button v-if="canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button><button v-if="canManageUsers && user.username.toLocaleLowerCase('zh-CN') !== currentUsername.toLocaleLowerCase('zh-CN')" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button></div></td></tr></tbody>
+        <table class="pdm-project-table" :class="{ 'user-table--status-actions': showStatusActions }" :data-pdm-min-width="showStatusActions ? 920 : 820">
+          <colgroup><col v-for="column in (canManageUsers ? 6 : 5)" :key="column"><col class="user-status-column"><col class="user-actions-column"></colgroup>
+          <thead><tr><th v-if="canManageUsers">账号</th><th>姓名</th><th>角色</th><th>公司</th><th>主部门</th><th>兼任部门</th><th aria-label="状态">状态<small v-if="deleteReferencesPending" class="user-delete-check" role="status">检查删除引用…</small></th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="{ user, capability, legacyActions } in filteredUserRows" :key="user.username">
+              <td v-if="canManageUsers" :title="user.username">{{ user.username }}</td>
+              <td><PersonName :name="user.displayName || '姓名待补充'" /></td>
+              <td :title="roleNames(user)">{{ roleNames(user) }}</td>
+              <td :title="companyName(user.companyId ?? undefined)"><CompanyName :name="companyName(user.companyId ?? undefined)" /></td>
+              <td :title="primaryUnitName(user.username)"><DepartmentName :names="unitPathNames(primaryMembership(user.username)?.unitId ?? '')" separator=" / " fallback="未分配" /></td>
+              <td :title="otherMemberships(user.username).map(item => unitPath(item.unitId)).join('、')">
+                <template v-for="(item, index) in otherMemberships(user.username)" :key="item.unitId"><template v-if="index">、</template><DepartmentName :names="unitPathNames(item.unitId)" separator=" / " /></template>
+                <template v-if="!otherMemberships(user.username).length">—</template>
+              </td>
+              <td>
+                <div class="user-row-actions user-status-actions">
+                  <span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span>
+                  <template v-if="!isCurrentUser(user)">
+                    <button v-if="hasDeactivatePermission && user.isActive && capability?.canDeactivate" type="button" class="pdm-text-action" :disabled="pending || statusActionPending" @click="changeUserStatus(user, 'deactivate')">停用</button>
+                    <span v-else-if="hasDeactivatePermission && user.isActive && capability?.deactivateReason" :title="capability.deactivateReason">
+                      <button type="button" class="pdm-text-action" disabled :aria-label="`停用不可用。${capability.deactivateReason}`">停用</button>
+                    </span>
+                    <button v-if="hasDeletePermission && capability?.canDelete" type="button" class="pdm-text-action pdm-danger-action" :disabled="pending || statusActionPending" @click="changeUserStatus(user, 'delete')">删除</button>
+                    <span v-else-if="hasDeletePermission && capability?.deleteReason" :title="capability.deleteReason">
+                      <button type="button" class="pdm-text-action pdm-danger-action" disabled :aria-label="`删除不可用。${capability.deleteReason}`">删除</button>
+                    </span>
+                  </template>
+                </div>
+              </td>
+              <td><div class="user-row-actions">
+                <button v-if="legacyActions && canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button>
+                <button v-if="legacyActions && canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button>
+                <button v-if="legacyActions && canManageUsers && !isCurrentUser(user)" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button>
+              </div></td>
+            </tr>
+          </tbody>
         </table>
       </div>
       <p v-if="!filteredUsers.length" class="pdm-empty-info">没有符合条件的用户。</p>
+      <p v-if="statusLoadError" class="user-permission-note" role="status">{{ statusLoadError }}</p>
       <p v-if="!canManageUsers" class="user-permission-note">当前账号可查看用户；新建、编辑及角色分配需要同时拥有组织维护和角色修改权限。</p>
     </section>
 
@@ -196,7 +334,7 @@ async function resetPassword(user: PdmUser) {
           <small v-if="userForm.crossCompanyView">主公司始终可访问；此处只授权额外公司。平台管理员和开发者可直接访问全部启用公司。</small>
         </template>
         <label v-if="!editingUsername">初始密码<input v-model="userForm.password" type="password" minlength="8" autocomplete="new-password"></label>
-        <label class="user-checkbox"><input v-model="userForm.isActive" type="checkbox"> 启用账号</label>
+        <label class="user-checkbox"><input v-model="userForm.isActive" type="checkbox" :disabled="!canToggleUserActive"> 启用账号</label>
         <small v-if="!editingUsername">建议保留默认初始密码 11111111，并通知用户首次登录后立即修改。</small>
       </div>
       <template #footer><button type="button" class="pdm-secondary-action" @click="userDialog=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveUser">{{ pending ? '保存中…' : '保存' }}</button></template>
@@ -220,7 +358,11 @@ async function resetPassword(user: PdmUser) {
 .user-directory-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }.user-directory-heading h2 { margin: 0 0 4px; font-size: var(--pdm-font-size-heading); }.user-directory-heading p { margin: 0; color: var(--pdm-muted); font-size: 11px; }
 .user-directory-actions { display: flex; align-items: center; gap: 8px; }.user-directory-actions input { width: 280px; min-height: 36px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 11px; background: var(--pdm-surface); color: var(--pdm-text); }
 .user-table-scroll { width: 100%; min-height: 0; flex: 1 1 auto; overflow: auto; }.user-table-scroll table { width: 100%; min-width: 820px; table-layout: fixed; }.user-table-scroll table:not(.pdm-columns-resized) > colgroup > col.user-actions-column { width: 200px !important; }.user-table-scroll td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-table-scroll .user-table--status-actions { min-width: 920px; }
+.user-table-scroll .user-table--status-actions:not(.pdm-columns-resized) > colgroup > .user-status-column { width: 152px !important; }
 .user-row-actions { display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }.user-row-actions > button { flex: none; }.user-permission-note { margin: 12px 0 0; color: var(--pdm-muted); font-size: 11px; }
+.user-status-actions { gap: 4px; flex-wrap: wrap; }
+.user-delete-check { margin-inline-start: 6px; color: var(--pdm-muted); font-weight: normal; white-space: nowrap; }
 .user-form { display: grid; gap: 14px; }.user-form label { display: grid; gap: 7px; color: var(--pdm-text-soft); font-size: 12px; }.user-form input:not([type='checkbox']), .user-form select { min-height: 38px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 10px; background: var(--pdm-surface); }.user-form input:disabled { background: var(--pdm-surface-muted); color: var(--pdm-muted); }.user-form small { color: var(--pdm-muted); line-height: 1.4; }.user-form .user-checkbox { display: flex; align-items: center; gap: 8px; }
 @media (max-width: 900px) { .user-company-context { grid-template-columns: 1fr; }.user-company-context > span { text-align: left; }.user-directory-heading { align-items: stretch; flex-direction: column; }.user-directory-actions input { width: 100%; }.user-directory-actions { align-items: stretch; }.user-settings-tabs button { min-width: 0; flex: 1; } }
 </style>

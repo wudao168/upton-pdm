@@ -47,6 +47,11 @@ internal static partial class Program
                 StandardPreviewFailureScenario();
                 return 0;
             }
+            if (args.Length > 1 && args[1] == "--close-regression")
+            {
+                CloseRegression();
+                return 0;
+            }
             var excludeStandardModules = args.Contains("--exclude-standard-modules");
             if (args.Length > 1 && !excludeStandardModules) { SourceWriteLock(args[1] == "--expect-file-lock"); return 0; }
             PlmBackupFailureScenario();
@@ -54,16 +59,21 @@ internal static partial class Program
             DiscardRestoreScenario().GetAwaiter().GetResult();
             DiscardRestoreScenario(true).GetAwaiter().GetResult();
             if (!excludeStandardModules) StandardPreviewFailureScenario();
-            Scenario(false, false).GetAwaiter().GetResult();
-            Scenario(true, false).GetAwaiter().GetResult();
-            Scenario(true, true).GetAwaiter().GetResult();
-            MissingSourceRecovery();
-            BatchCloseRecovery().GetAwaiter().GetResult();
+            CloseRegression();
             FirstArchiveFailureRemainsEditable().GetAwaiter().GetResult();
             EquivalentDraftBase();
             return 0;
         }
         catch (Exception exception) { Console.WriteLine(exception); return 1; }
+    }
+
+    static void CloseRegression()
+    {
+        Scenario(false, false).GetAwaiter().GetResult();
+        Scenario(true, false).GetAwaiter().GetResult();
+        Scenario(true, true).GetAwaiter().GetResult();
+        MissingSourceRecovery();
+        BatchCloseRecovery().GetAwaiter().GetResult();
     }
 
     static void EquivalentDraftBase()

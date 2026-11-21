@@ -58,14 +58,17 @@ public sealed partial class PdmAddin
                     }
                     throw new InvalidOperationException("上次编辑新增的本地引用尚未入库，原文件缺失，草稿已保留。请恢复该原文件后重试：" + source);
                 }
-                ControlledCacheMaintenance.RequireOrdinaryPath(source, Path.GetPathRoot(source));
+                if (manifest.RequireWorkspaceRetainedReferences && !IsPathWithinDirectory(source, directory))
+                    throw new InvalidOperationException("已保存的装配引用位于当前受控工作区之外，请核对后重新打开：" + source);
+                ControlledCacheMaintenance.RequireOrdinaryPath(source, manifest.RequireWorkspaceRetainedReferences ? directory : Path.GetPathRoot(source));
                 if (PdmDocumentIdentityStore.TryReadLocalMetadata(source, out var binding))
                 {
                     if (binding.ProjectId != manifest.ProjectId || binding.VersionId.HasValue && !IsPathWithinDirectory(source, directory))
                         throw new InvalidOperationException("上次编辑引用了已登记但不在当前服务器清单中的图档，请从PLM获取并核对其版本，未将其当作新增文件：" + Path.GetFileName(source));
                     identities[Path.GetFileName(source)] = binding;
                 }
-                var record = new RetainedLocalReference { SourcePath = Path.GetFullPath(source), Sha256 = ComputeFileHash(source), FileLength = new FileInfo(source).Length };
+                var record = new RetainedLocalReference { SourcePath = Path.GetFullPath(source), Sha256 = ComputeFileHash(source), FileLength = new FileInfo(source).Length,
+                    RequireExactDeferredPath = manifest.RequireWorkspaceRetainedReferences };
                 if (pending.TryGetValue(record.FileName, out var prior))
                 {
                     if (!PathsEqual(prior.SourcePath, record.SourcePath))
@@ -124,15 +127,29 @@ public sealed partial class PdmAddin
 
     private async Task<HashSet<string>> ReadArchivedDirectReferencesAsync(ControlledOpenFileDto file)
     {
-        var staging = Path.Combine(Path.GetTempPath(), "UPLM", "reference-baseline", Guid.NewGuid().ToString("N"));
+        var canonical = await DownloadArchivedReferenceBaselineAsync(file);
+        return ReadArchivedDirectReferencePaths(canonical, file.FileName);
+    }
+
+    private HashSet<string> ReadArchivedDirectReferencePaths(string canonical, string fileName)
+    {
+        var dependencies = application.GetDocumentDependencies2(canonical, false, false, false) as Array;
+        if (dependencies == null)
+            throw new InvalidOperationException("尚未读到存档基准的引用清单，无法确认缺件是否为本次新增；工作文件与草稿均保留：" + fileName);
+        return new HashSet<string>(PdmDependencyEntries(dependencies, canonical)
+            .SelectMany(entry => entry.Value), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private async Task<string> DownloadArchivedReferenceBaselineAsync(ControlledOpenFileDto file)
+    {
+        var stagingId = Guid.NewGuid().ToString("N");
+        var staging = ManagedCadPaths.ChooseStagingDirectory(
+            Path.Combine(Path.GetTempPath(), "UPLM", "reference-baseline", stagingId),
+            stagingId, new[] { file.RelativePath ?? file.FileName });
         var canonical = await apiClient.DownloadControlledOpenFileAsync(file, staging, lifetime.Token);
         if (!ControlledReferenceMaterializer.Matches(canonical, file))
             throw new InvalidOperationException("缺失引用的存档基准尚未核对，工作文件与草稿均保留：" + file.FileName);
-        var dependencies = application.GetDocumentDependencies2(canonical, false, false, false) as Array;
-        if (dependencies == null)
-            throw new InvalidOperationException("尚未读到存档基准的引用清单，无法确认缺件是否为本次新增；工作文件与草稿均保留：" + file.FileName);
-        return new HashSet<string>(PdmDependencyEntries(dependencies, canonical)
-            .SelectMany(entry => entry.Value), StringComparer.OrdinalIgnoreCase);
+        return canonical;
     }
 
     private void RecordArchivedMissingReference(ControlledOpenManifestDto manifest, string owner, string source)

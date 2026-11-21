@@ -26,8 +26,30 @@ internal static partial class Program
  [STAThread] static void Main(string[] args)
  {
   if(args.Length>0&&args[0]=="--archive-status-proxy-host") { RunArchiveStatusProxyHost(args); return; }
+  if(args.Length>1&&args[1]=="--controlled-long-path-regression")
+  {
+   AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling",true);
+   AppContext.SetSwitch("Switch.System.IO.BlockLongPaths",true);
+  }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>=7&&args[1]=="--native-archived-missing-acquisition")
+  {
+   try{var captured=NativeMissingAcquisition.FromCapturedFile(args[2],args[3],args[4],args[5],args[6]);AcquireAssemblyEditScenario(args.Length>7?args[7]:null,captured).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
+  if(args.Length>1&&args[1]=="--assembly-context-scope-metadata-replay")
+  {try{AssemblyContextScopeMetadataReplay(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--context-scope-metadata-replay")
+  {try{ContextScopeMetadataReplay(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--context-scoped-checkout-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ContextScopedCheckoutScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--loaded-source-context-regression")
+  {try{LoadedSourceContextScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--archive-drawing-batch-sources")
+  {try{ArchiveDrawingBatchSourceScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--archived-missing-occurrences")
+  {try{ArchivedMissingOccurrenceScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--drawing-association-safety")
   {try{DrawingAssociationSafetyScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--maintenance-flow-regression")
@@ -55,9 +77,19 @@ internal static partial class Program
   if(args.Length>1&&args[1]=="--committed-child-checkout-regression")
   {try{CommittedChildCheckoutScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--postcheckin-reacquire-regression")
-  {try{PostCheckinReacquireScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  {
+   using(var host=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    host.Shown+=async(_,__)=>{try{await PostCheckinReacquireScenario(args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};
+    Application.Run(host);
+   }
+   return;
+  }
   if(args.Length>1&&args[1]=="--assembly-root-reacquire-regression")
   {try{AssemblyRootReacquireScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--assembly-root-lock-recovery-regression")
+  {try{AssemblyRootReacquireScenario(args[2], lockRecoveryOnly: true).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--open-context-metadata-replay")
   {try{OpenContextMetadataReplay(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--registration-wording-regression")
@@ -82,6 +114,12 @@ internal static partial class Program
   {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await VirtualAncestorReferenceScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
   if(args.Length>1&&args[1]=="--version-timeout-progress-regression")
   {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await VersionTimeoutProgressScenario(host);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if (args.Length > 1 && args[1] == "--archive-early-metadata-regression")
+  {
+   try { ArchiveEarlyMetadataScenario(); }
+   catch (Exception error) { Console.WriteLine("FAIL: " + error); Environment.ExitCode = 1; }
+   return;
+  }
   if(args.Length>1&&args[1]=="--archive-payload-size-regression")
   {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchivePayloadSizeScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
   if(args.Length>1&&args[1]=="--archive-network-recovery-regression")
@@ -104,8 +142,12 @@ internal static partial class Program
   {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveStatusProxyScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
   if(args.Length>1&&args[1]=="--native-save-scope-regression")
   {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await NativeSaveScopeScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--drawing-archive-save-regression")
+  {try{DrawingArchiveSaveScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--selected-part-checkout-regression")
+  {try{SelectedPartCheckoutScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--archive-memory-batch-regression")
-  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveUploadGateScenario(host,args[2],true);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveUploadGateScenario(host,args[2],true,args.Length>3?args[3]:null);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
   if(args.Length>1&&args[1]=="--archive-save-state-regression")
   {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await Scenario(false,false);await Scenario(true,false);await Scenario(true,true);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
   if(args.Length>1&&(args[1]=="--reference-pass-performance-regression"||args[1]=="--reference-pass-performance-baseline"))
@@ -246,7 +288,7 @@ internal static partial class Program
   }
   if(args.Length>1&&args[1]=="--retained-local-reference-regression")
   {
-   try{RetainedLocalReferenceScenario(args[2]).GetAwaiter().GetResult();}
+   try{RetainedLocalReferenceScenario(args[2]).GetAwaiter().GetResult();LoadedWorkingReferenceScenario(args[2]).GetAwaiter().GetResult();}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
@@ -265,6 +307,12 @@ internal static partial class Program
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
+  if(args.Length>1&&args[1]=="--recursive-acquisition-regression")
+  {
+   try{RecursiveAcquisitionScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   if(args.Length>1&&args[1]=="--selected-scope-regression")
   {
    try{SelectedScopeScenario(args[2]);}
@@ -280,6 +328,12 @@ internal static partial class Program
   if(args.Length>1&&(args[1]=="--controlled-cache-regression"||args[1]=="--cache-cleanup-regression"))
   {
    try{ControlledCacheScenario(args[2],args[1]=="--cache-cleanup-regression").GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--controlled-long-path-regression")
+  {
+   try{ControlledLongPathScenario(args[2]).GetAwaiter().GetResult();}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
@@ -433,6 +487,11 @@ internal static partial class Program
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
+  if(args.Length>1&&args[1]=="--last-document-reopen-regression")
+  {
+   try{LastDocumentReopenScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
   if(args.Length>1&&args[1]=="--native-file-open-safety-regression")
   {
    try{NativeFileOpenSafetyScenario(args[2]);}
@@ -441,6 +500,11 @@ internal static partial class Program
   if(args.Length>1&&args[1]=="--checkout-consistency-regression")
   {
    try{CheckoutConsistencyScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
+  if(args.Length>1&&args[1]=="--managed-save-reference-load-regression")
+  {
+   try{ManagedSaveReferenceLoadScenario(args[2]);}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
   }
   if(args.Length>1&&args[1]=="--saved-insertion-completion-regression")
@@ -632,6 +696,16 @@ internal static partial class Program
    }
    return;
   }
+  if (args.Length > 1 && args[1] == "--unchanged-part-discard-regression")
+  {
+   try { UnchangedPartDiscardScenario().GetAwaiter().GetResult(); }
+   catch (Exception error)
+   {
+    Console.WriteLine("FAIL: " + error.GetType().Name + " " + error.Message);
+    Environment.ExitCode = 1;
+   }
+   return;
+  }
   if(args.Length>1&&args[1]=="--archive-auto-scope-regression")
   {
    using(var scopeHost=new Form{Opacity=0,ShowInTaskbar=false})
@@ -687,11 +761,11 @@ internal static partial class Program
    }
    return;
   }
-  if(args.Length>1&&args[1]=="--paired-drawing-workflow-regression")
+  if(args.Length>1&&(args[1]=="--paired-drawing-workflow-regression"||args[1]=="--paired-drawing-sheet-regression"))
   {
    using(var pairedHost=new Form{Opacity=0,ShowInTaskbar=false})
    {
-    pairedHost.Shown+=async(_,__)=>{try{await PairedDrawingWorkflowScenario();}
+    pairedHost.Shown+=async(_,__)=>{try{if(args[1]=="--paired-drawing-sheet-regression")await DrawingSheetBatchScenario(args[2]);else await PairedDrawingWorkflowScenario();}
      catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{pairedHost.Close();}};
     Application.Run(pairedHost);
    }
@@ -2237,6 +2311,8 @@ internal static partial class Program
  sealed class Model:RealProxy,IRemotingTypeInfo
  {
   public string Path;public bool Dirty;public Action OnSave,OnConfigurationNames,OnPropertyRead;bool readOnly=true;readonly List<string> events;
+  public Func<int> OnForceReleaseLocks;
+  public Func<bool,string,bool,int> OnReloadOrReplace;
   public bool ReadOnly=>readOnly;
   readonly System.Type nativeType;readonly List<Delegate> modifyHandlers=new List<Delegate>();readonly List<Delegate> destroyHandlers=new List<Delegate>();readonly List<Delegate> reloadHandlers=new List<Delegate>();
   public int UpdateStamp=1,CopyError,SelectionCount=2;int heldSelection;public string MemoryPayload="current memory"; public string ActiveConfiguration="Default";
@@ -2285,7 +2361,9 @@ internal static partial class Program
     case "GetUpdateStamp":value=UpdateStamp;break;
     case "GetComponents":value=Array.Empty<object>();break;
     case "get_Visible":value=true;break;
-    case "ForceReleaseLocks":value=0;break;
+    case "ForceReleaseLocks":value=OnForceReleaseLocks?.Invoke()??0;break;
+    case "ReloadOrReplace" when OnReloadOrReplace!=null:
+     value=OnReloadOrReplace((bool)call.Args[0],(string)call.Args[1],(bool)call.Args[2]);break;
     case "GetConfigurationNames":var configRead=OnConfigurationNames;OnConfigurationNames=null;configRead?.Invoke();value=new[]{"Default"};break;
     case "GetEquationMgr":case "GetDesignTable":case "FirstFeature":value=null;break;
     case "SetSaveFlag":Dirty=true;value=null;break;

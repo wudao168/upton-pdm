@@ -52,7 +52,8 @@ public sealed partial class PdmAddin
         ISet<Guid> selectedModels = null)
     {
         if (string.IsNullOrWhiteSpace(directory)) return relations;
-        var files = controlledOpenManifests.Where(pair => PathsEqual(pair.Key, directory))
+        var normalizedDirectory = NormalizeDirectory(directory);
+        var files = controlledOpenManifests.Where(pair => PathsEqual(NormalizeDirectory(pair.Key), normalizedDirectory))
             .SelectMany(pair => pair.Value.Files).GroupBy(file => file.DocumentId).ToDictionary(group => group.Key, group => group.First());
         var result = new List<DocumentModelDrawingRelationDto>();
         var inspected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -61,8 +62,8 @@ public sealed partial class PdmAddin
             if (selectedModels != null && !selectedModels.Contains(relation.ModelDocumentId)
                 || !files.TryGetValue(relation.DrawingDocumentId, out var drawing)
                 || !files.TryGetValue(relation.ModelDocumentId, out var model)) { result.Add(relation); continue; }
-            var drawingPath = Path.GetFullPath(Path.Combine(directory, drawing.RelativePath ?? drawing.FileName));
-            var modelPath = Path.GetFullPath(Path.Combine(directory, model.RelativePath ?? model.FileName));
+            var drawingPath = ControlledReferenceMaterializer.ManifestPath(directory, drawing);
+            var modelPath = ControlledReferenceMaterializer.ManifestPath(directory, model);
             if (!IsPathWithinDirectory(drawingPath, directory) || !IsPathWithinDirectory(modelPath, directory)
                 || !DrawingAssociationDisproved(drawingPath, new[] { modelPath }, readNative && inspected.Add(drawingPath))) result.Add(relation);
             else if (readNative) LogOperation("已排除与实际直接引用不符的配套工程图：" + model.FileName + " -> " + drawing.FileName);

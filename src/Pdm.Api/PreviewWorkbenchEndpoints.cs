@@ -17,10 +17,9 @@ internal static class PreviewWorkbenchEndpoints
             var projects = (await repository.ListProjectNavigationForUserAsync(actor, role, ct)).Where(p => p.CanReadContent).ToDictionary(p => p.Id);
             var headers = await repository.ListPreviewPackageHeadersAsync(projects.Keys.ToArray(), ct);
             var conversion = (await repository.GetSystemSettingsAsync(ct)).PreviewConversion;
-            var configured = conversion.Servers.Count > 0 ? conversion.Servers : string.IsNullOrWhiteSpace(conversion.AgentUrl) ? []
-                : new[] { new PreviewAgentServer("转图服务器", conversion.AgentUrl, conversion.AgentToken) };
+            var configured = conversion.GetConfiguredServers();
             using var http = clients.CreateClient("preview-workbench");
-            var servers = await Task.WhenAll(configured.Where(s => !s.CompanyId.HasValue || s.CompanyId == TenantContext.CompanyId)
+            var servers = await Task.WhenAll(configured.Where(s => s.IsAvailableForCompany(TenantContext.CompanyId))
                 .Select(s => ReadServerAsync(http, s, ct)));
             return Results.Ok(new { servers, canRetry = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ReleaseManage, ct),
                 packages = headers.Select(p => new { p.Id, p.ProjectId, p.Number, p.State, p.PreviewState, p.DrawingCount, projectCode = projects[p.ProjectId].Code }) });
@@ -36,7 +35,7 @@ internal static class PreviewWorkbenchEndpoints
             if (active is not null)
             {
                 var conversion = (await repository.GetSystemSettingsAsync(ct)).PreviewConversion;
-                var host = conversion.Servers.FirstOrDefault(s => s.Name == active.Server && (s.CompanyId == null || s.CompanyId == TenantContext.CompanyId));
+                var host = conversion.GetConfiguredServers().FirstOrDefault(s => s.Name == active.Server && s.IsAvailableForCompany(TenantContext.CompanyId));
                 if (host is not null && !string.IsNullOrWhiteSpace(host.AgentToken))
                 {
                     try
@@ -81,11 +80,12 @@ internal static class PreviewWorkbenchEndpoints
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
             var data = json.RootElement;
             bool Flag(string key, bool fallback = false) => data.TryGetProperty(key, out var value) ? value.ValueKind == JsonValueKind.True : fallback;
-            state = PreviewAgentPool.IsCooling(server.AgentUrl) ? "故障隔离" : !Flag("workerExists") ? "缺少转换程序" :
+            state = Flag("processing") ? "处理中" : server.Disabled ? "已停用" :
+                PreviewAgentPool.IsCooling(server.AgentUrl) ? "故障隔离" : !Flag("workerExists") ? "缺少转换程序" :
                 !Flag("accepting", true) ? "暂停接单" : Flag("busy") ? "处理中" : "空闲";
         }
         catch (Exception e) when (!ct.IsCancellationRequested && e is HttpRequestException or OperationCanceledException or JsonException or InvalidOperationException)
-        { state = "离线"; }
+        { state = server.Disabled ? "已停用" : "离线"; }
         return new { name, state };
     }
 }

@@ -6,6 +6,8 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -13,52 +15,84 @@ using System.Windows.Forms;
 
 internal static partial class Program
 {
- static async Task ArchiveUploadGateScenario(Form host,string output,bool memoryOnly=false)
+ const string LaterPropertyMemoryName="后读取触发的当前内存属性";
+ const string LaterPropertyMemoryPayload="current child contents after owner property read";
+
+ static async Task ArchiveUploadGateScenario(Form host,string output,bool memoryOnly=false,string caseName=null)
  {
   output=Path.Combine(Path.GetFullPath(output),Guid.NewGuid().ToString("N"));
-  foreach(var mode in new[]{"early-other-editor","early-missing-file","early-review-locked","confirm","cancel","recheck","changed-during-preflight","server-denied-late","missing-references","missing-references-cache","strict-missing-references","payload-too-large","background-upload","cancel-upload","upload-failure","cycle-after-initial-check","changed-after-commit","cancel-after-commit","chunked-final-sync","memory-snapshot","memory-late-properties","memory-during-index","memory-copy-recheck"})
+  var modes=new[]{"early-other-editor","early-missing-file","early-review-locked","confirm","long-upload-staging-name","cancel","recheck","changed-during-preflight","server-denied-late","missing-references","missing-references-cache","strict-missing-references","payload-too-large","background-upload","cancel-upload","upload-failure","cycle-after-initial-check","pending-model-saves-during-history","pending-model-save-from-later-properties","changed-after-commit","cancel-after-commit","chunked-final-sync","memory-snapshot","memory-late-properties","memory-during-index","memory-copy-recheck"};
+  if(caseName!=null&&!modes.Contains(caseName,StringComparer.Ordinal))throw new ArgumentException("未知存档回归场景："+caseName);
+  foreach(var mode in modes)
   {
-   if(memoryOnly&&!mode.StartsWith("memory-"))continue;
-   var folder=Path.Combine(Path.GetFullPath(output),mode,"View");Directory.CreateDirectory(folder);
+   var pendingFromLaterProperties=mode=="pending-model-save-from-later-properties";
+   var pendingModelSaves=pendingFromLaterProperties||mode=="pending-model-saves-during-history";
+   if(caseName!=null?mode!=caseName:memoryOnly&&!mode.StartsWith("memory-")&&!pendingModelSaves)continue;
+   var longStagingName=mode=="long-upload-staging-name";
+   var shortJournal=Path.Combine(Path.GetTempPath(),"pdm-gate-"+Guid.NewGuid().ToString("N"));
+   var folder=longStagingName?Path.Combine(shortJournal,"V"):
+    Path.Combine(Path.GetFullPath(output),pendingFromLaterProperties?"later-properties":mode,"View");
+   Directory.CreateDirectory(folder);
    var identity=Type("PdmDocumentIdentityStore");var bindings=identity.GetField("bindingDirectory",Flags);var resolver=identity.GetField("workspaceRootResolver",Flags);var oldBindings=bindings.GetValue(null);var oldRoot=resolver.GetValue(null);
    var batchFolder=Type("ArchiveBatchJournal").GetField("directory",Flags);var oldBatch=batchFolder.GetValue(null);
    var uploadFolder=Type("ArchiveUploadJournal").GetField("directory",Flags);var oldUpload=uploadFolder?.GetValue(null);
-   var shortJournal=Path.Combine(Path.GetTempPath(),"pdm-gate-"+Guid.NewGuid().ToString("N"));
-   bindings.SetValue(null,Path.Combine(folder,"bindings"));resolver.SetValue(null,new Func<string>(()=>Path.GetDirectoryName(folder)));batchFolder.SetValue(null,Path.Combine(folder,"batch-journal"));uploadFolder?.SetValue(null,shortJournal);
+   var workspaceRoot=longStagingName?Path.Combine(shortJournal,"controlled"):Path.GetDirectoryName(folder);
+   bindings.SetValue(null,Path.Combine(folder,"bindings"));resolver.SetValue(null,new Func<string>(()=>workspaceRoot));batchFolder.SetValue(null,Path.Combine(folder,"batch-journal"));uploadFolder?.SetValue(null,shortJournal);
    object session=null,plugin=null;
    try
    {
     plugin=New("PdmAddin");var project=Guid.NewGuid();var checkout=(Guid)Field(plugin,"checkoutSessionId");
     var warningMode=mode.Contains("missing-references");var memoryMode=mode.StartsWith("memory-");
-    var nodes=new[]{LinkedNode(folder,warningMode||memoryMode?"SOURCE-A.SLDASM":"SOURCE-A.SLDPRT",warningMode||memoryMode?"Assembly":"Part"),LinkedNode(folder,"SOURCE-B.SLDPRT","Part")};
+    var assemblyRoot=warningMode||memoryMode||pendingModelSaves;
+    var childFolder=pendingFromLaterProperties?Path.Combine(folder,"controlled-child"):folder;
+    if(pendingFromLaterProperties)
+    {
+     Directory.CreateDirectory(childFolder);
+     resolver.SetValue(null,new Func<string>(()=>childFolder));
+    }
+    var childName=pendingModelSaves?"SOURCE-B.SLDASM":"SOURCE-B.SLDPRT";
+    if(longStagingName)
+    {
+     const string extension=".SLDPRT";
+     var compactDirectory=Path.Combine(Path.GetTempPath(),"UPTON-PDM","checkin","c-"+new string('0',32));
+     childName=new string('长',259-compactDirectory.Length-extension.Length)+extension;
+     if(Path.Combine(compactDirectory,childName).Length!=260||Path.Combine(childFolder,childName).Length>=260)
+      throw new Exception("用例必须使源路径可读，而保留原名的最短临时路径超出长度上限");
+    }
+    var nodes=new[]{LinkedNode(folder,assemblyRoot?"SOURCE-A.SLDASM":"SOURCE-A.SLDPRT",assemblyRoot?"Assembly":"Part"),
+     LinkedNode(childFolder,childName,pendingModelSaves?"Assembly":"Part")};
     if(mode=="chunked-final-sync")nodes=nodes.Concat(Enumerable.Range(2,15).Select(i=>LinkedNode(folder,"SOURCE-"+i+".SLDPRT","Part"))).ToArray();
     var absentPaths=Enumerable.Range(0,3).Select(i=>Path.Combine(folder,"old-user","MISSING-"+i+".SLDPRT")).ToArray();
     if(mode=="missing-references-cache")absentPaths=Enumerable.Range(0,3).Select(i=>Path.Combine(Path.GetTempPath(),"swx-fixture-"+Guid.NewGuid().ToString("N"),i==2?"VC~~":"IC~~","MISSING-"+i+".stp.SLDASM")).ToArray();
     var versions=new Dictionary<Guid,object>();
     foreach(var node in nodes)
     {
-     Set(node,"Role",Enum.Parse(Type("CadReferenceRole"),memoryMode?"Component":"ExternalFileDependency"));Set(node,"CheckedOutBy","tester");Set(node,"CheckoutSessionId",checkout);Set(node,"DrawingVersion","V1");Set(node,"Revision","A");Set(node,"OpenedRevision","A");
+     Set(node,"Role",Enum.Parse(Type("CadReferenceRole"),memoryMode||pendingModelSaves?"Component":"ExternalFileDependency"));Set(node,"CheckedOutBy","tester");Set(node,"CheckoutSessionId",checkout);Set(node,"DrawingVersion","V1");Set(node,"Revision","A");Set(node,"OpenedRevision","A");
      Set(node,"StoredVersionStateKnown",true);Set(node,"HasStoredVersion",true);Set(node,"NativeFileScopeVerified",true);Set(node,"LatestStructureIndexPending",false);
-     var snapshot=LinkedSnapshot(node);Set(snapshot,"Role",memoryMode?0:1);var version=LinkedVersion(node,snapshot);Set(version,"DrawingVersion","V1");Set(version,"StorageRelativePath","qa/"+Get(node,"FileName"));Set(version,"PropertySnapshot",new Dictionary<string,string>());versions[(Guid)Get(node,"DocumentId")]=version;
+     var snapshot=LinkedSnapshot(node);Set(snapshot,"Role",memoryMode||pendingModelSaves?0:1);var version=LinkedVersion(node,snapshot);Set(version,"DrawingVersion","V1");Set(version,"StorageRelativePath","qa/"+Get(node,"FileName"));Set(version,"PropertySnapshot",new Dictionary<string,string>());versions[(Guid)Get(node,"DocumentId")]=version;
      Set(node,"LatestStoredSha256",Get(version,"Sha256"));Set(node,"LatestVersionSha256",Get(version,"Sha256"));Set(node,"OpenedVersionId",Get(version,"Id"));
-     if(memoryMode||mode=="confirm")Set(version,"PropertySnapshot",new Dictionary<string,string>{{"SourceFileSha256",(string)Get(version,"Sha256")}});
-     identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{Get(node,"FullPath"),Get(node,"DocumentId"),project,Get(version,"Id"),"A",Get(version,"Sha256"),Get(version,"FileLength")});
+     if(memoryMode||pendingModelSaves||mode=="confirm")Set(version,"PropertySnapshot",new Dictionary<string,string>{{"SourceFileSha256",(string)Get(version,"Sha256")}});
+     var bindingRecorded=(bool)identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{Get(node,"FullPath"),Get(node,"DocumentId"),project,Get(version,"Id"),"A",Get(version,"Sha256"),Get(version,"FileLength")});
+     if(pendingFromLaterProperties&&ReferenceEquals(node,nodes[1])&&!bindingRecorded)
+      throw new Exception("未能建立可写受控子装配体的版本基线");
      File.AppendAllText((string)Get(node,"FullPath")," changed saved source");
     }
     foreach(var child in nodes.Skip(1))((IList)Get(nodes[0],"Children")).Add(child);archiveRuleVersions=versions.ToDictionary(p=>p.Key,p=>new[]{p.Value});
     var ownerThread=Thread.CurrentThread.ManagedThreadId;
     var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var nativeWrites=0;
     var memoryEvents=new List<string>();
-    var memoryModels=memoryMode?nodes.Select(n=>new Model(appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),(string)Get(n,"FullPath"),true,memoryEvents,true){MemoryPayload="native current state "+Get(n,"FileName")}).ToArray():new Model[0];
+    var memoryModels=memoryMode||pendingModelSaves?nodes.Select(n=>new Model(appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),
+     (string)Get(n,"FullPath"),memoryMode,memoryEvents,memoryMode){MemoryPayload="native current state "+Get(n,"FileName")}).ToArray():new Model[0];
     if(mode=="memory-late-properties")foreach(var model in memoryModels){model.Dirty=false;model.OnConfigurationNames=()=>model.Modify(false);}
     if(mode=="memory-during-index")foreach(var model in memoryModels){model.Dirty=false;model.OnPropertyRead=()=>model.Modify(false);}
     var diskBefore=nodes.ToDictionary(n=>(string)Get(n,"FullPath"),n=>File.ReadAllBytes((string)Get(n,"FullPath")));
+    var attributesBefore=pendingFromLaterProperties?diskBefore.Keys.ToDictionary(path=>path,File.GetAttributes):null;
     if(memoryMode)foreach(var node in nodes)File.SetAttributes((string)Get(node,"FullPath"),FileAttributes.ReadOnly);
     SetField(plugin,"application",ArchiveNativeMock(appType,call=>{
      if(Thread.CurrentThread.ManagedThreadId!=ownerThread)throw new Exception("后台上传访问了 SolidWorks 接口 "+call.MethodName);
      if(call.MethodName=="GetDocuments")return memoryModels.Select(m=>m.GetTransparentProxy()).ToArray();if(call.MethodName=="get_ActiveDoc")return null;if(call.MethodName=="GetUserPreferenceStringValue")return "";
      if(call.MethodName=="GetDocumentDependencies2")return warningMode&&(string)call.Args[0]==(string)Get(nodes[0],"FullPath")?absentPaths.SelectMany(path=>new[]{Path.GetFileName(path),path}).ToArray():new string[0];
-     if((warningMode||memoryMode)&&call.MethodName=="GetCurrentWorkingDirectory")return folder;
+     if((warningMode||memoryMode||pendingFromLaterProperties)&&call.MethodName=="GetCurrentWorkingDirectory")return folder;
      if(warningMode&&call.MethodName=="GetOpenDocumentByName")return null;
      if(warningMode&&call.MethodName=="SetCurrentWorkingDirectory")return true;
      nativeWrites++;throw new Exception("Unexpected native mutation "+call.MethodName);
@@ -128,39 +162,98 @@ internal static partial class Program
       if(mode=="changed-during-preflight"&&handler.Preflights==2)File.AppendAllText((string)Get(nodes[0],"FullPath")," external edit during preparation");
      };
      var cycleInjected=0;
+     var pendingModelSavesInjectedAt=0;
+     var earlierModelInspected=false;
+     if(pendingFromLaterProperties)memoryModels[0].OnPropertyRead=()=>{
+      // The child is inspected first. Reading the owner's properties can dirty it.
+      earlierModelInspected=Get(nodes[1],"ArchiveInspectedProperties")!=null;
+      pendingModelSavesInjectedAt=Convert.ToInt32(Get(session,"DisplayStep"));
+      memoryModels[1].MemoryPayload=LaterPropertyMemoryPayload;
+      memoryModels[1].MemoryProperties["物料名称"]=LaterPropertyMemoryName;
+      memoryModels[1].Modify(false);
+     };
      handler.OnHistoryRead=()=>{
-      if(mode!="cycle-after-initial-check"||Convert.ToInt32(Get(session,"DisplayStep"))!=6||Interlocked.CompareExchange(ref cycleInjected,1,0)!=0)return;
+      if(Convert.ToInt32(Get(session,"DisplayStep"))!=6)return;
+      if(pendingModelSaves&&!pendingFromLaterProperties&&Interlocked.CompareExchange(ref pendingModelSavesInjectedAt,6,0)==0)
+       foreach(var model in memoryModels)model.Dirty=true;
+      if(mode!="cycle-after-initial-check"||Interlocked.CompareExchange(ref cycleInjected,1,0)!=0)return;
       var back=New("CadTreeNode");foreach(var name in new[]{"DocumentId","FullPath","FileName","DisplayName","Kind","Revision","CurrentRevision","InstancePath"})Set(back,name,Get(nodes[0],name));
       Set(back,"Role",Enum.Parse(Type("CadReferenceRole"),"ExternalFileDependency"));Set(back,"ReferenceTypeVerified",true);Set(back,"NativeFileScopeVerified",true);((IList)Get(nodes[1],"Children")).Add(back);
      };
      var priorContext=SynchronizationContext.Current;
      var uploadContext=new ArchiveUploadHoldContext(priorContext);
      handler.OwnerThread=ownerThread;
-     handler.OnUploadStart=()=>{if(mode=="background-upload")uploadContext.Hold=true;};
+     handler.OnUploadStart=()=>
+     {
+      if(mode=="background-upload")uploadContext.Hold=true;
+      if(!longStagingName||handler.Uploads!=1)return;
+      var leaseType=Type("ArchiveTemporaryCopyLease");
+      var active=(IDictionary)leaseType.GetField("Active",Flags).GetValue(null);
+      var aliasPath=active.Keys.Cast<string>().Where(path=>Path.GetFileName(path).StartsWith("c-",StringComparison.Ordinal))
+       .Select(path=>Path.Combine(path,"upload.SLDPRT")).SingleOrDefault(File.Exists);
+      if(aliasPath==null||!File.ReadAllBytes(aliasPath).SequenceEqual(diskBefore[(string)Get(nodes[1],"FullPath")]))
+       throw new Exception("未在持有租约的短路径中生成用于上传的原始字节副本");
+     };
      handler.OnUploadCompleted=()=>{
       if(mode=="background-upload"&&handler.CompletedUploads==2)uploadContext.Release();
       if(mode=="cancel-upload")TreeCall(session,"RequestCancellation");
      };
      Exception failure=null;object result=null;
+     var copyPreparationReports=0;
+     var localPreflightStarts=0;
      try{
       Task task;
       SynchronizationContext.SetSynchronizationContext(uploadContext);
       Action<int,int,string,string> syncProgress=mode=="cancel-after-commit" ? (Action<int,int,string,string>)((done,total,name,status)=>{if(Convert.ToInt32(Get(session,"DisplayStep"))==10)TreeCall(session,"RequestCancellation");}) : null;
+      if(pendingModelSaves)syncProgress=(done,total,name,status)=>{
+       if(status.Contains("正在核对副本准备方式"))copyPreparationReports++;
+       if(done==0&&status.Contains("正在核对文件、引用结构和属性"))localPreflightStarts++;
+      };
       if(mode=="memory-copy-recheck") { var injected=false; syncProgress=(done,total,name,status)=>{if(!injected && status.Contains("正在核对副本准备方式")){injected=true;foreach(var model in memoryModels)model.Modify();}}; }
       try{task=(Task)Type("PdmAddin").GetMethod("CheckInBatchAsync",Flags).Invoke(plugin,new object[]{LinkedItems(nodes),project,"isolated automatic archive test",syncProgress,(CancellationToken)Get(session,"Token"),null,null,null,null,false,null});}
       finally{SynchronizationContext.SetSynchronizationContext(priorContext);}
       if(await Task.WhenAny(task,Task.Delay(15000))!=task){uploadContext.Release();TreeCall(session,"RequestCancellation");throw new Exception("上传依赖了主线程逐文件回调，或出现额外人工等待");}
       await task;result=Get(task,"Result");
      }catch(Exception error){failure=error;}finally{uploadContext.Release();driverStop.Cancel();}
-     var succeeds=mode=="confirm"||mode=="recheck"||mode=="missing-references"||mode=="missing-references-cache"||mode=="background-upload"||mode=="changed-after-commit"||mode=="cancel-after-commit"||mode=="chunked-final-sync"||memoryMode;
+     var succeeds=mode=="confirm"||longStagingName||mode=="recheck"||mode=="missing-references"||mode=="missing-references-cache"||mode=="background-upload"||mode=="changed-after-commit"||mode=="cancel-after-commit"||mode=="chunked-final-sync"||memoryMode||pendingFromLaterProperties;
      if(succeeds&&(failure!=null||result==null))throw new Exception("正常确认存档验证失败 "+mode,failure);
      if(!succeeds&&failure==null)throw new Exception("应停止的批次未停止 "+mode);
      if(mode=="payload-too-large"&&(failure==null||!failure.ToString().Contains("本次尚未上传文件")||handler.Uploads!=0||handler.Commits!=0))throw new Exception("提交容量超限未在上传前停止",failure);
      if(mode=="cycle-after-initial-check"&&(cycleInjected!=1||failure==null||!failure.ToString().Contains("最终提交快照")))throw new Exception("未在冻结最终快照后阻止新增的循环",failure);
+     if(pendingModelSaves)
+     {
+      var sourceChanged=diskBefore.Any(source=>!source.Value.SequenceEqual(File.ReadAllBytes(source.Key)));
+      if(pendingFromLaterProperties)
+      {
+       var lateBytes=Encoding.UTF8.GetBytes(LaterPropertyMemoryPayload);
+       if(pendingModelSavesInjectedAt!=4||!earlierModelInspected||localPreflightStarts!=2
+          ||copyPreparationReports!=2||handler.Preflights!=2||handler.CompletedUploads!=2
+          ||!memoryEvents.SequenceEqual(new[]{"copy:SOURCE-B.SLDASM"})||sourceChanged
+          ||attributesBefore.Any(source=>File.GetAttributes(source.Key)!=source.Value)
+          ||memoryModels.Any(model=>model.ReadOnly)||memoryModels[0].Dirty||!memoryModels[1].Dirty)
+        throw new Exception("阶段4中新出现的待保存状态没有只重试一次并只生成子装配体副本，或原图档发生变化");
+       if(handler.UploadedChunks.Count!=2||!handler.UploadedChunks.Any(chunk=>chunk.SequenceEqual(lateBytes))
+          ||!handler.UploadedChunks.Any(chunk=>chunk.SequenceEqual(diskBefore[memoryModels[0].Path])))
+        throw new Exception("上传内容不是重新固定的子装配体和原始已保存的总装");
+       SavedDrawingPreflightCacheScenario(folder);
+      }
+      else if(pendingModelSavesInjectedAt!=6||Convert.ToInt32(Get(session,"DisplayStep"))!=6
+         ||copyPreparationReports!=0||handler.Preflights!=0||memoryEvents.Count!=0||sourceChanged
+         ||!failure.Message.Contains("尚未上传")||!failure.Message.Contains("检查期间模型变为未保存状态")
+         ||nodes.Any(n=>!failure.Message.Contains((string)Get(n,"FileName")))||memoryModels.Any(model=>!model.Dirty))
+       throw new Exception("检查期间出现的待保存状态未在阶段6汇总拦截，或原图档发生变化",failure);
+     }
      var expectedUploads=succeeds||mode=="upload-failure"?nodes.Length:mode=="cancel-upload"?1:0;
      if(handler.Uploads!=expectedUploads||handler.Commits!=(succeeds?1:0)||nativeWrites!=0)throw new Exception("上传边界、整批提交或原生调用异常 "+mode+" "+handler.Uploads+"/"+handler.Commits+" native="+nativeWrites,failure);
      if(mode=="recheck"&&(!rechecked||handler.Preflights!=2))throw new Exception("可选检查或每个提交文件的一次最终服务器预检未执行，或出现重复预检");
      if(succeeds&&(int)Get(result,"CreatedVersions")!=nodes.Length)throw new Exception("未得到全部所选图档的实际服务端回执");
+     if(longStagingName)
+     {
+      if(handler.UploadedChunks.Count!=nodes.Length||diskBefore.Any(source=>
+        !source.Value.SequenceEqual(File.ReadAllBytes(source.Key))||!handler.UploadedChunks.Any(chunk=>chunk.SequenceEqual(source.Value))))
+       throw new Exception("长文件名图档的源文件或实际上传内容发生变化");
+      Console.WriteLine("PASS: leased short staging name preserves the original uploaded filename and bytes");
+     }
      if(mode=="chunked-final-sync"&&(nodes.Any(n=>(string)Get(n,"DrawingVersion")!="V2"||!string.IsNullOrWhiteSpace((string)Get(n,"CheckedOutBy")))
         || Get(nodes.Last(),"WorkState").ToString()!="PendingCheckIn"||!File.ReadAllText((string)Get(nodes.Last(),"FullPath")).EndsWith(" later-after-commit")
         || ((IEnumerable)Get(result,"BomWarnings")).Cast<string>().Any(w=>w.Contains("本机状态同步失败"))))
@@ -212,6 +305,7 @@ internal static partial class Program
  sealed class ArchiveGateHandler:HttpMessageHandler
  {
   readonly object[] nodes;readonly Dictionary<Guid,object> versions;readonly Guid project,checkout;readonly string mode;readonly Dictionary<Guid,Dictionary<string,object>> transfers=new Dictionary<Guid,Dictionary<string,object>>();
+  public readonly List<byte[]> UploadedChunks=new List<byte[]>();
   public volatile bool Confirmed;public int Uploads,Commits,Preflights,CompletedUploads,OwnerThread;public Action OnPreflight,OnUploadStart,OnUploadCompleted,OnHistoryRead;public bool WarningSnapshotCommitted;
   public ArchiveGateHandler(object[] nodes,Dictionary<Guid,object> versions,Guid project,Guid checkout,string mode){this.nodes=nodes;this.versions=versions;this.project=project;this.checkout=checkout;this.mode=mode;}
   object Document(object node,bool committed=false)=>new{id=Get(node,"DocumentId"),projectId=project,fileName=Get(node,"FileName"),kind=Convert.ToInt32(Get(node,"Kind")),checkedOutBy=committed?null:mode=="early-other-editor"?"other-editor":"tester",checkoutSessionId=committed?(Guid?)null:checkout,drawingReviewLocked=mode=="early-review-locked",drawingVersion=committed?"V2":"V1",publishedVersion="未发布",revision=new{display=committed?"W2":"A"}};
@@ -224,6 +318,7 @@ internal static partial class Program
    else if(route.EndsWith("/archive-capabilities"))value=new{referenceWarnings=true,contextReferences=true,unverifiedReferences=true};
    else if(route.EndsWith("/version-verifications")){var payload=json.Deserialize<Dictionary<string,object>>(await request.Content.ReadAsStringAsync());value=((IEnumerable)payload["Documents"]).Cast<Dictionary<string,object>>().Select(row=>{var id=Guid.Parse((string)row["DocumentId"]);return new{documentId=id,accessible=true,latest=new{id=Get(versions[id],"Id")}};}).ToArray();}
    else if(route.EndsWith("/documents"))value=nodes.Select(n=>Document(n)).ToArray();
+   else if(request.Method==HttpMethod.Get && route.StartsWith("/api/documents/",StringComparison.Ordinal) && Guid.TryParse(route.Substring("/api/documents/".Length),out var documentId))value=Document(nodes.Single(n=>(Guid)Get(n,"DocumentId")==documentId));
    else if(route.EndsWith("/reference-tree")){status=HttpStatusCode.NotFound;value=new{message="无根结构"};}
    else if(route.EndsWith("/versions")){OnHistoryRead?.Invoke();var id=versions.Keys.Single(k=>route.Contains(k.ToString()));value=new[]{versions[id]};}
    else if(route.EndsWith("/checkin/preflight")){Preflights++;OnPreflight?.Invoke();if(mode=="server-denied-late"&&Preflights==2){status=HttpStatusCode.Conflict;value=new{message="权限在准备后发生变化，已停止上传"};}else value=new{};}
@@ -233,24 +328,69 @@ internal static partial class Program
     if(Uploads!=CompletedUploads)throw new Exception("上传并发或次序改变");
     if(!Confirmed)throw new Exception("未确认即开始上传");Uploads++;OnUploadStart?.Invoke();
     var payload=json.Deserialize<Dictionary<string,object>>(await request.Content.ReadAsStringAsync());var id=Guid.NewGuid();transfers[id]=payload;
-    value=new{id,projectId=project,totalLength=payload["totalLength"],expectedSha256=payload["sha256"],receivedLength=0,chunkSize=65536,expiresAt=DateTime.UtcNow.AddHours(1),targetRelativePath="qa/"+id};
+    if(mode=="long-upload-staging-name")
+    {
+     var uploadDocumentId=Guid.Parse((string)payload["documentId"]);
+     var original=nodes.Single(node=>(Guid)Get(node,"DocumentId")==uploadDocumentId);
+     if((string)payload["fileName"]!=(string)Get(original,"FileName"))
+      throw new Exception("创建上传会话使用了本机临时名称，原图档名称未提交");
+    }
+    value=new{id,projectId=project,totalLength=payload["totalLength"],expectedSha256=payload["sha256"],receivedLength=0,chunkSize=65536,expiresAt=DateTime.UtcNow.AddHours(1),targetRelativePath=mode=="long-upload-staging-name"?string.Empty:"qa/"+id};
    }
-   else if(route.Contains("/chunks/"))value=new{};
+   else if(route.Contains("/chunks/"))
+   {
+    if(mode=="pending-model-save-from-later-properties"||mode=="long-upload-staging-name")
+     UploadedChunks.Add(await request.Content.ReadAsByteArrayAsync().ConfigureAwait(false));
+    value=new{};
+   }
    else if(route.EndsWith("/complete")){
     await Task.Delay(5).ConfigureAwait(false);
     if(mode=="upload-failure"&&Uploads==2)throw new HttpRequestException("fixture upload failure");
-    var pair=transfers.Single(t=>route.Contains(t.Key.ToString()));value=new{relativePath="qa/"+pair.Key,length=pair.Value["totalLength"],sha256=pair.Value["sha256"]};CompletedUploads++;OnUploadCompleted?.Invoke();
+    var pair=transfers.Single(t=>route.Contains(t.Key.ToString()));
+    var relativePath="qa/"+pair.Key;
+    if(mode=="long-upload-staging-name")
+    {
+     var payload=json.Deserialize<Dictionary<string,object>>(await request.Content.ReadAsStringAsync());
+     relativePath=(string)payload["relativeTargetPath"];
+     if(Path.GetFileName(relativePath)!=(string)pair.Value["fileName"])
+      throw new Exception("服务端未提供路径时，提交目标未沿用原图档名称");
+    }
+    value=new{relativePath,length=pair.Value["totalLength"],sha256=pair.Value["sha256"]};CompletedUploads++;OnUploadCompleted?.Invoke();
    }
    else if(route.EndsWith("/archive-batches"))
    {
     if(!Confirmed)throw new Exception("未确认即提交");Commits++;var body=await request.Content.ReadAsStringAsync();var missingExtension=mode=="missing-references-cache"?".stp.SLDASM":".SLDPRT";WarningSnapshotCommitted=Enumerable.Range(0,3).All(i=>body.Contains("MISSING-"+i+missingExtension));var payload=json.Deserialize<Dictionary<string,object>>(body);
     var submitted=((IEnumerable)payload["files"]).Cast<Dictionary<string,object>>().ToDictionary(row=>Guid.Parse((string)row["documentId"]),row=>(Dictionary<string,object>)row["request"]);
+    if(mode=="long-upload-staging-name")foreach(var node in nodes)
+    {
+     var row=submitted[(Guid)Get(node,"DocumentId")];
+     var properties=(Dictionary<string,object>)row["properties"];
+     var originalName=(string)Get(node,"FileName");
+     using(var sha=SHA256.Create())
+     {
+      var sourceSha=BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes((string)Get(node,"FullPath")))).Replace("-","");
+      if((string)row["fileName"]!=originalName||(string)properties["FileName"]!=originalName||Path.GetFileName((string)row["storageRelativePath"])!=originalName
+        ||(string)row["sha256"]!=sourceSha||(string)properties["SourceFileSha256"]!=sourceSha)
+       throw new Exception("整批提交未保留原图档名称、内容或源文件校验值");
+     }
+    }
     if(mode=="confirm")foreach(var item in submitted)
     {
      var properties=(Dictionary<string,object>)item.Value["properties"];
      if((string)properties["SourceFileSha256"]!=(string)item.Value["sha256"]
       ||(string)properties["SourceFileSha256"]==(string)Get(versions[item.Key],"Sha256"))
       throw new Exception("变更的3D文件提交时，旧版本属性覆盖了本次源文件哈希");
+    }
+    if(mode=="pending-model-save-from-later-properties")
+    {
+     string expectedHash;
+     using(var sha=SHA256.Create())expectedHash=BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(LaterPropertyMemoryPayload))).Replace("-","");
+     var row=submitted[(Guid)Get(nodes[1],"DocumentId")];
+     var properties=(Dictionary<string,object>)row["properties"];
+     if(!string.Equals((string)row["sha256"],expectedHash,StringComparison.OrdinalIgnoreCase)
+        ||!string.Equals((string)properties["SourceFileSha256"],expectedHash,StringComparison.OrdinalIgnoreCase)
+        ||(string)properties["全局/物料名称"]!=LaterPropertyMemoryName)
+      throw new Exception("子装配体版本仍使用检查期间变化之前的内容或属性");
     }
     if(mode.StartsWith("memory-"))foreach(var row in submitted.Values){var props=(Dictionary<string,object>)row["properties"];if((string)props["SourceFileSha256"]!=(string)row["sha256"])throw new Exception("旧源文件被误标为已提交的当前内容");if((string)props["全局/物料名称"]!="当前内存属性"||(string)props["UPLM.CustomPropertiesRead"]!="1")throw new Exception("未保存的内存属性未随当前副本完整提交");}
     value=new{batchId=payload["batchId"],results=nodes.Select(n=>{var requestData=submitted[(Guid)Get(n,"DocumentId")];return new{document=Document(n,true),version=new{id=Guid.NewGuid(),drawingVersion="V2",revision=new{display="W2"},sha256=requestData["sha256"],fileLength=requestData["fileLength"],storageRelativePath=requestData["storageRelativePath"],propertySnapshot=requestData["properties"]},versionCreated=true};}).ToArray()};

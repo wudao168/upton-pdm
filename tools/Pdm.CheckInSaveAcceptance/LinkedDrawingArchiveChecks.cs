@@ -84,8 +84,10 @@ internal static partial class Program
    SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?Array.Empty<object>():call.MethodName=="get_ActiveDoc"?null:throw new Exception("Unexpected CAD mutation "+call.MethodName)).GetTransparentProxy());
    using(var handler=new LinkedArchiveHandler(new[]{model,drawing},versions,project,session,new List<string>(),mode=="other-editor",histories))
    using(var client=(IDisposable)New("PdmApiClient","http://linked-qa.invalid/"))
+   using(var pane=(System.Windows.Forms.Control)New("PdmTaskPaneControl","配套工程图验证"))
    {
     LinkedClient(plugin,client,handler);
+    SetField(plugin,"taskPaneControl",pane);
     var candidates=LinkedItems(model,drawing);
     if(mode=="changed-model")
     {
@@ -135,7 +137,7 @@ internal static partial class Program
  }
  static object LinkedVersion(object node,object snapshot)
  {
-  var version=New("DocumentVersionDto");Set(version,"Id",Guid.NewGuid());Set(version,"Revision",LinkedRevision("A"));Set(version,"ReferenceSnapshot",snapshot);
+  var version=New("DocumentVersionDto");Set(version,"Id",Guid.NewGuid());Set(version,"DocumentId",Get(node,"DocumentId"));Set(version,"Revision",LinkedRevision("A"));Set(version,"ReferenceSnapshot",snapshot);
   Set(version,"Sha256",Type("PdmAddin").GetMethod("ComputeFileHash",Flags).Invoke(null,new[]{Get(node,"FullPath")}));Set(version,"FileLength",new FileInfo((string)Get(node,"FullPath")).Length);return version;
  }
  static Array LinkedItems(params object[] nodes){var items=Array.CreateInstance(Type("BatchOperationItem"),nodes.Length);for(var i=0;i<nodes.Length;i++)items.SetValue(New("BatchOperationItem",nodes[i],i),i);return items;}
@@ -147,12 +149,14 @@ internal static partial class Program
  {
   readonly object[] nodes;readonly Dictionary<Guid,object> versions;readonly Guid project,session;readonly List<string> events;readonly bool denied;readonly Dictionary<Guid,object[]> histories;
   public LinkedArchiveHandler(object[] nodes,Dictionary<Guid,object> versions,Guid project,Guid session,List<string> events,bool denied,Dictionary<Guid,object[]> histories=null){this.nodes=nodes;this.versions=versions;this.project=project;this.session=session;this.events=events;this.denied=denied;this.histories=histories;}
+  object Document(object node)=>new{id=Get(node,"DocumentId"),projectId=project,fileName=Get(node,"FileName"),kind=Convert.ToInt32(Get(node,"Kind")),checkedOutBy=Get(node,"CheckedOutBy"),checkoutSessionId=Get(node,"CheckoutSessionId")};
   protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
   {
    if(request.RequestUri.AbsolutePath.EndsWith("/document-relations"))return Reply(new[]{new{modelDocumentId=Get(nodes[0],"DocumentId"),drawingDocumentId=Get(nodes[1],"DocumentId")}});
-   if(request.RequestUri.AbsolutePath.EndsWith("/documents"))return Reply(nodes.Select(node=>new{id=Get(node,"DocumentId"),fileName=Get(node,"FileName"),kind=Convert.ToInt32(Get(node,"Kind"))}).ToArray());
+   if(request.RequestUri.AbsolutePath.EndsWith("/documents"))return Reply(nodes.Select(Document).ToArray());
    var node=nodes.Single(n=>request.RequestUri.AbsolutePath.Contains(((Guid)Get(n,"DocumentId")).ToString()));object body;var status=HttpStatusCode.OK;
    if(request.RequestUri.AbsolutePath.EndsWith("/versions"))body=histories!=null&&histories.TryGetValue((Guid)Get(node,"DocumentId"),out var history)?history:new[]{versions[(Guid)Get(node,"DocumentId")]};
+   else if(request.Method==HttpMethod.Get && request.RequestUri.AbsolutePath=="/api/documents/"+Get(node,"DocumentId"))body=Document(node);
    else if(request.RequestUri.AbsolutePath.EndsWith("/checkout")){events.Add("checkout:"+Get(node,"FileName"));if(denied){body=new{message="图档正在由其他人编辑"};status=HttpStatusCode.Conflict;}else body=new{id=Get(node,"DocumentId"),projectId=project,fileName=Get(node,"FileName"),checkedOutBy="tester",checkoutSessionId=session,revision=new{display="A"}};}
    else throw new Exception("Unexpected request "+request.RequestUri.AbsolutePath);
    return Task.FromResult(new HttpResponseMessage(status){Content=new StringContent(new JavaScriptSerializer().Serialize(body))});

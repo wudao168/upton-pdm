@@ -7,10 +7,13 @@ const props = withDefaults(defineProps<{
   selected: DocumentNode
   localState?: WorkspaceLocalFileState
   desktopAvailable?: boolean
+  canReleaseEditPermission?: boolean
+  releasePending?: boolean
 }>(), { desktopAvailable: false })
 
 const emit = defineEmits<{
   openFolder: [node: DocumentNode]
+  releaseEditPermission: []
 }>()
 </script>
 
@@ -31,6 +34,7 @@ const emit = defineEmits<{
         <FolderOpen :size="15" /><span>打开文件夹</span>
       </button>
       <span class="pdm-workspace-explorer__trust"><FolderLock :size="14" /><span>PLM受控工作区</span></span>
+      <button v-if="desktopAvailable && canReleaseEditPermission" type="button" class="pdm-danger-action" :disabled="releasePending" @click="emit('releaseEditPermission')">释放权限</button>
     </div>
   </header>
 </template>

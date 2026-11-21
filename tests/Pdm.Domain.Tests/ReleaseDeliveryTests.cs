@@ -6,6 +6,43 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class ReleaseDeliveryTests
 {
+    [Fact]
+    public async Task TechnicalAssistantStillReceivesConfiguredDeliveryAfterAllActionsAreComplete()
+    {
+        var f = await Fixture.CreateAsync();
+        await f.Repository.UpdateUserAsync("admin", "技术助理", UserRole.Administrator, "developer", ["developer", "TechnicalAssistant"], true, default);
+        await f.Service.PublishedAsync(f.Package.Id, default);
+        var record = (await f.Store.FindAsync(f.Package.Id, default))!;
+        Assert.True(await f.Store.SaveAsync(record with { State = record.State with
+        {
+            U9 = new() { ["Standard"] = new("Succeeded", "同步完成") },
+            Departments = record.State.Departments.Select(item => item with { ReceivedAt = f.Clock.Now, ExecutedAt = f.Clock.Now }).ToArray()
+        } }, record.RowVersion, default));
+        await f.RunAsync();
+        var notice = Assert.Single(await f.Repository.ListUserNotificationsAsync("admin", 100, default), item => item.Category == "ReleaseDepartment");
+        Assert.Null(notice.ReadAt);
+        f.Clock.Advance(); await f.RunAsync();
+        Assert.Single(await f.Repository.ListUserNotificationsAsync("admin", 100, default), item => item.Category == "ReleaseDepartment");
+    }
+
+    [Theory]
+    [InlineData("content")]
+    [InlineData("business")]
+    [InlineData("inactive")]
+    public async Task TechnicalAssistantDeliveryStillRechecksPermissionAndActiveAccount(string restriction)
+    {
+        var f = await Fixture.CreateAsync();
+        await f.Repository.UpdateUserAsync("admin", "技术助理", UserRole.Administrator, "developer", ["developer", "TechnicalAssistant"], true, default);
+        await f.Service.PublishedAsync(f.Package.Id, default);
+        if (restriction == "inactive")
+            await f.Repository.UpdateUserAsync("admin", "技术助理", UserRole.Administrator, "developer", ["developer", "TechnicalAssistant"], false, default);
+        else
+            foreach (var role in new[] { "developer", "TechnicalAssistant" })
+                await PermissionTestUsers.Revoke(f.Repository, role, restriction == "content" ? PermissionCodes.ProjectContentView : AuthorizationActions.BusinessNotifications);
+        await f.RunAsync();
+        Assert.Empty(await f.Repository.ListNotificationRecipientsAsync(WorkflowNotificationFlows.ReleaseSourceKey(f.Package.Id, "Published"), default));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

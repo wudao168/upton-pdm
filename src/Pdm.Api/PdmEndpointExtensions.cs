@@ -277,17 +277,28 @@ public static class PdmEndpointExtensions
             return Results.Ok(await service.SyncCustomersAsync(actor, role, cancellationToken));
         });
 
-        api.MapGet("/users", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/users", async (bool? includeAccountOperations, bool? checkDeleteReferences, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.OrganizationSettingsManage, cancellationToken)
-                && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.RoleSettingsView, cancellationToken)) return Results.Forbid();
             var companyId = TenantContext.Current?.IsPlatformAdministrator == true ? TenantContext.CompanyId : TenantContext.Current?.PrimaryCompanyId;
-            var users = (await repository.ListUsersAsync(cancellationToken)).Where(user => companyId is null || user.CompanyId == companyId);
+            var operationCompanyId = UserAccountAdministration.ManagedCompanyId;
+            var accounts = await repository.ListUsersAsync(cancellationToken);
+            var actorAccount = accounts.FirstOrDefault(user => string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase));
+            if (actorAccount is null) return Results.Forbid();
+            var settings = await repository.GetAuthorizationSettingsAsync(cancellationToken);
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.OrganizationSettingsManage, cancellationToken)
+                && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.RoleSettingsView, cancellationToken)
+                && !UserAccountAdministration.Allows(settings, actorAccount, operationCompanyId, PermissionCodes.UserDeactivate)
+                && !UserAccountAdministration.Allows(settings, actorAccount, operationCompanyId, PermissionCodes.UserDelete)) return Results.Forbid();
+            var users = accounts.Where(user => companyId is null || user.CompanyId == companyId);
+            var operations = includeAccountOperations == true
+                ? await UserAccountAdministration.ListOperationsAsync(repository, settings, accounts, actorAccount,
+                    operationCompanyId, checkDeleteReferences != false, cancellationToken)
+                : null;
             var mapped = new List<object>();
             foreach (var user in users)
             {
-                mapped.Add(MapManagedUser(user, await repository.GetUserCompanyScopeAsync(user.Username, cancellationToken)));
+                mapped.Add(MapManagedUser(user, await repository.GetUserCompanyScopeAsync(user.Username, cancellationToken), operations?.GetValueOrDefault(user.Username)));
             }
             return Results.Ok(mapped);
         });
@@ -316,6 +327,21 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             var saved = await workflow.ResetManagedUserPasswordAsync(username, passwords.Hash("11111111"), actor, role, cancellationToken);
             return Results.Ok(MapManagedUser(saved));
+        });
+
+        api.MapPut("/users/{username}/deactivate", async (string username, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            var saved = await repository.DeactivateManagedUserAsync(username, actor, UserAccountAdministration.ManagedCompanyId, cancellationToken);
+            var scope = await repository.GetUserCompanyScopeAsync(saved.Username, cancellationToken);
+            return Results.Ok(MapManagedUser(saved, scope));
+        });
+
+        api.MapDelete("/users/{username}", async (string username, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            await repository.DeleteUnreferencedUserAsync(username, actor, UserAccountAdministration.ManagedCompanyId, cancellationToken);
+            return Results.NoContent();
         });
 
         api.MapGet("/role-permissions", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -444,7 +470,7 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken)) return Results.Forbid();
             var settings = await repository.GetSystemSettingsAsync(cancellationToken);
-            return Results.Ok(settings with { PreviewConversion = settings.PreviewConversion with { LocalExecutionAllowed = worker.Value.AllowLocalExecution } });
+            return Results.Ok(PreviewServerEndpoints.RedactSettings(settings, worker.Value.AllowLocalExecution));
         });
 
         api.MapPut("/system-settings", async (UpdateSystemSettingsRequest request, HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, IOptions<PdmPreviewWorkerOptions> worker, CancellationToken cancellationToken) =>
@@ -461,6 +487,7 @@ public static class PdmEndpointExtensions
                 CheckoutReminderHours = request.CheckoutReminderHours,
                 CheckoutStrongReminderHours = request.CheckoutStrongReminderHours,
                 CheckoutOverdueHours = request.CheckoutOverdueHours,
+                CheckoutOverdueReleaseGraceHours = request.CheckoutOverdueReleaseGraceHours ?? currentSettings.CheckoutOverdueReleaseGraceHours,
                 CheckoutForceReleaseHours = request.CheckoutForceReleaseHours,
                 CheckoutAutoReleaseEnabled = request.CheckoutAutoReleaseEnabled ?? currentSettings.CheckoutAutoReleaseEnabled,
                 CheckoutIdleReleaseMinutes = request.CheckoutIdleReleaseMinutes ?? currentSettings.CheckoutIdleReleaseMinutes,
@@ -481,21 +508,19 @@ public static class PdmEndpointExtensions
                 ReleaseChangeReasonTypes = request.ReleaseChangeReasonTypes ?? currentSettings.ReleaseChangeReasonTypes,
                 ReleaseChangeReasonLabels = request.ReleaseChangeReasonLabels ?? currentSettings.ReleaseChangeReasonLabels,
                 FormalSupplementPolicies = request.FormalSupplementPolicies ?? currentSettings.FormalSupplementPolicies,
-                PdfTitleBlockFill = request.PdfTitleBlockFill ?? currentSettings.PdfTitleBlockFill,
-                PreviewConversion = request.PreviewConversion ?? currentSettings.PreviewConversion
+                PdfTitleBlockFill = request.PdfTitleBlockFill ?? currentSettings.PdfTitleBlockFill
             };
-            if (request.PreviewConversion?.Mode == PreviewConversionMode.Local && currentSettings.PreviewConversion.Mode == PreviewConversionMode.Remote && !worker.Value.AllowLocalExecution)
-                throw new PdmRuleException("本机禁止转图，请选择远程转图服务器。");
-            var saved = await workflow.UpdateSystemSettingsAsync(settings, actor, role, cancellationToken);
-            return Results.Ok(saved with { PreviewConversion = saved.PreviewConversion with { LocalExecutionAllowed = worker.Value.AllowLocalExecution } });
+            var saved = await workflow.UpdateSystemSettingsAsync(settings, actor, role, cancellationToken, preservePreviewConversion: true);
+            return Results.Ok(PreviewServerEndpoints.RedactSettings(saved, worker.Value.AllowLocalExecution));
         });
 
         api.MapPost("/system-settings/preview-agent/register", async (PreviewAgentRegisterRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var settings = await workflow.RegisterPreviewAgentAsync(request.AgentUrl, request.AgentToken, request.TimeoutMinutes, actor, role, cancellationToken, request.Name);
-            return Results.Ok(new PreviewAgentRegisterResult(true, settings.PreviewConversion.NormalizedAgentUrl, settings.PreviewConversion.TimeoutMinutes,
-                $"已登记为转图服务器：{settings.PreviewConversion.NormalizedAgentUrl}"));
+            await workflow.RegisterPreviewAgentAsync(request.AgentUrl, request.AgentToken, request.TimeoutMinutes, actor, role, cancellationToken, request.Name);
+            var url = PdmWorkflowService.NormalizePreviewServerAddress(request.AgentUrl);
+            return Results.Ok(new PreviewAgentRegisterResult(true, url, request.TimeoutMinutes,
+                $"已登记为转图服务器：{url}"));
         });
 
         api.MapGet("/system-settings/preview-agent/queue", async (HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -515,67 +540,13 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             var settings = await workflow.ClearPreviewAgentAsync(actor, role, cancellationToken, request?.AgentUrl);
-            return Results.Ok(new PreviewAgentRegisterResult(true, settings.PreviewConversion.AgentUrl, settings.PreviewConversion.TimeoutMinutes,
-                settings.PreviewConversion.Servers.Count == 0 ? "当前没有已登记的转图服务器。" : "已移除本机，其余转图服务器继续使用。"));
+            var remaining = settings.PreviewConversion.GetConfiguredServers().FirstOrDefault(server => server.IsAvailableForCompany(TenantContext.CompanyId));
+            return Results.Ok(new PreviewAgentRegisterResult(true, remaining?.AgentUrl ?? string.Empty,
+                remaining?.TimeoutMinutes ?? PreviewConversionSettings.Default.TimeoutMinutes,
+                remaining is null ? "当前没有已登记的转图服务器。" : "已移除本机，其余转图服务器继续使用。"));
         });
 
-        api.MapPost("/system-settings/preview-agent/test", async (PreviewAgentProbeRequest? request, HttpContext context, IPdmRepository repository, IHttpClientFactory httpClientFactory, CancellationToken cancellationToken) =>
-        {
-            var (actor, role) = CurrentUser(context.User);
-            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken)) return Results.Forbid();
-            var saved = (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion;
-            // 前端可能只提交地址/令牌；填了地址就按"远程"测试，未填地址则沿用已保存的方式。
-            var requestedMode = request?.Mode
-                ?? (string.IsNullOrWhiteSpace(request?.AgentUrl) ? saved.Mode : PreviewConversionMode.Remote);
-            var conversion = request is null ? saved : saved with
-            {
-                Mode = requestedMode,
-                AgentUrl = string.IsNullOrWhiteSpace(request.AgentUrl) ? saved.AgentUrl : request.AgentUrl.Trim(),
-                AgentToken = request.AgentToken ?? saved.AgentToken,
-                TimeoutMinutes = request.TimeoutMinutes is > 0 ? request.TimeoutMinutes.Value : saved.TimeoutMinutes
-            };
-            if (conversion.Mode != PreviewConversionMode.Remote)
-                return Results.Ok(new PreviewAgentProbeResult(true, "当前为本机转换（API服务器调用SolidWorks），无需转图服务器。", null, null, null));
-            var url = conversion.NormalizedAgentUrl;
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var target) || target.Scheme is not ("http" or "https"))
-                return Results.Ok(new PreviewAgentProbeResult(false, "转图服务器地址未配置或格式不正确，请填写如 http://192.168.2.50:5199 的地址。", null, null, null));
-            try
-            {
-                using var client = httpClientFactory.CreateClient();
-                client.Timeout = TimeSpan.FromSeconds(20);
-                using var probeRequest = new HttpRequestMessage(HttpMethod.Get, url + PreviewAgentProtocol.HealthPath);
-                if (!string.IsNullOrWhiteSpace(conversion.AgentToken))
-                    probeRequest.Headers.Add(PreviewAgentProtocol.TokenHeader, conversion.AgentToken);
-                using var response = await client.SendAsync(probeRequest, cancellationToken);
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                if (!response.IsSuccessStatusCode)
-                {
-                    var advice = (int)response.StatusCode is 401 or 403 ? "请核对两端的访问令牌。" : "请检查该端口是否运行转图代理。";
-                    return Results.Ok(new PreviewAgentProbeResult(false, $"无法连接转图服务器 {target.Authority}（HTTP {(int)response.StatusCode}）。{advice}", null, null, null));
-                }
-                var payload = JsonSerializer.Deserialize<JsonElement>(body);
-                var machine = payload.TryGetProperty("machine", out var machineElement) ? machineElement.GetString() : null;
-                var workerPath = payload.TryGetProperty("workerPath", out var workerElement) ? workerElement.GetString() : null;
-                var workerExists = payload.TryGetProperty("workerExists", out var existsElement) && existsElement.ValueKind == JsonValueKind.True;
-                var message = workerExists
-                    ? $"已连接转图服务器{machine}，SolidWorks转换程序就绪。"
-                    : $"已连接{machine}，但该电脑上未找到SolidWorks转换程序，请检查转图代理配置。";
-                return Results.Ok(new PreviewAgentProbeResult(workerExists, message, machine, workerExists, workerPath));
-            }
-            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
-            {
-                app.Logger.LogWarning(exception, "转图代理健康检查超时 {AgentHost}", target.Authority);
-                return Results.Ok(new PreviewAgentProbeResult(false, $"无法连接转图服务器 {target.Authority}，20 秒内未收到健康检查响应。请在转图电脑确认代理正在监听，并检查 PLM 到该端口的网络连接。", null, null, null));
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                app.Logger.LogWarning(exception, "转图代理健康检查失败 {AgentHost}", target.Authority);
-                var advice = exception is JsonException or InvalidOperationException
-                    ? "该端口未返回有效的转图代理状态，请核对端口对应的程序。"
-                    : "请核对代理地址、监听端口和防火墙后重试。";
-                return Results.Ok(new PreviewAgentProbeResult(false, $"无法连接转图服务器 {target.Authority}。{advice}", null, null, null));
-            }
-        });
+        api.MapPreviewServerSettings(app.Logger);
 
         api.MapGet("/bom-validation-rules", async (IPdmRepository repository, CancellationToken cancellationToken) =>
             Results.Ok((await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules));
@@ -1293,7 +1264,7 @@ public static class PdmEndpointExtensions
             return tree is null ? Results.NoContent() : Results.Ok(tree);
         });
 
-        api.MapGet("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? summary, HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? summary, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind))
@@ -1302,8 +1273,6 @@ public static class PdmEndpointExtensions
             }
 
             var items = await workflow.GetBomAsync(projectId, bomKind, actor, role, cancellationToken);
-            if (bomKind is BomKind.Standard or BomKind.Electrical)
-                items = await BomDrawingRevision.CurrentAsync(repository, items, cancellationToken);
             return Results.Ok(summary == true && bomKind is (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical) ? BomSummaryProjection.Group(items) : items);
         });
 
@@ -1330,7 +1299,8 @@ public static class PdmEndpointExtensions
                 confirmedQuantityPreview=await relations.ChangeQuantitiesAsync(projectId, request.ConfigurationQuantities, actor, role, cancellationToken, previewOnly: true,validateConfirmation:true);
             }
             var inputs = request.SummaryRows is null ? request.Items : BomSummaryProjection.Expand(
-                await workflow.GetBomAsync(projectId, bomKind, actor, role, cancellationToken), request.SummaryRows, request.Items, request.SummaryOrder,
+                await workflow.GetBomAsync(projectId, bomKind, actor, role, cancellationToken, includeFiles: false),
+                request.SummaryRows, request.Items, request.SummaryOrder,
                 request.ConfigurationQuantities?.SelectMany(change => change.Members.Select(member => member.MainBomItemId)).ToHashSet());
             var saved = await workflow.ReplaceBomAsync(projectId, bomKind, inputs, actor, role, cancellationToken,
                 pendingQuantitySources:confirmedQuantityPreview?.Changes.Where(change=>change.BomItemId.HasValue).Select(change=>change.BomItemId!.Value).ToHashSet());
@@ -1703,11 +1673,20 @@ public static class PdmEndpointExtensions
                 : Results.Ok(await repository.ListManufacturingBomBaselinesAsync(projectId, cancellationToken));
         });
 
-        api.MapGet("/edit-locks", async (HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/edit-locks", async (string? documentId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (TenantContext.Current?.HasPermission(AuthorizationActions.BusinessNotifications) != true) return Results.Ok(Array.Empty<EditLockSummary>());
-            var locks = await workflow.ListEditLocksAsync(actor, role, cancellationToken);
+            Guid? selectedId = null;
+            if (documentId is not null)
+            {
+                if (!Guid.TryParse(documentId, out var id) || id == Guid.Empty) return Results.Ok(Array.Empty<EditLockSummary>());
+                selectedId = id;
+            }
+            else if (TenantContext.Current?.HasPermission(AuthorizationActions.BusinessNotifications) != true)
+            {
+                return Results.Ok(Array.Empty<EditLockSummary>());
+            }
+            var locks = await workflow.ListEditLocksAsync(actor, role, cancellationToken, selectedId);
             return Results.Ok(locks);
         });
 
@@ -1747,10 +1726,10 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.RequestEditLockReleaseAsync(documentId, actor, role, request.Reason, cancellationToken));
         });
 
-        api.MapPost("/documents/{documentId:guid}/force-release", async (Guid documentId, EditLockActionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/documents/{documentId:guid}/force-release", async (Guid documentId, ForceEditReleaseRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.ForceReleaseEditLockAsync(documentId, actor, role, request.Reason, cancellationToken));
+            return Results.Ok(await workflow.ForceReleaseEditLockAsync(documentId, actor, role, request.Reason, cancellationToken, request.SessionId, request.CheckedOutAt));
         });
         api.MapPost("/documents/{documentId:guid}/emergency-release", async (Guid documentId, EmergencyEditReleaseRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken ct) =>
         {
@@ -2104,8 +2083,6 @@ public static class PdmEndpointExtensions
         api.MapPost("/release-packages/{releasePackageId:guid}/drawing-review/emergency", async (Guid releasePackageId, ReleaseDrawingReviewDecision request, HttpContext context, ReleaseDrawingReviewService service, PdmWorkflowService workflow, ReleasePublishingCoordinator publishingCoordinator, CancellationToken ct) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (request.Status == "Issue" && string.IsNullOrWhiteSpace(request.EmergencyReason))
-                throw new PdmRuleException("请填写代批原因。");
             var result = await service.DecideAndAdvanceAsync(releasePackageId,request,actor,role,workflow,ct,emergencySubstitute:true);
             if (result.State == ReleasePackageState.Publishing) publishingCoordinator.TryStart("DrawingNodeApproval");
             return Results.Ok(result);
@@ -2223,16 +2200,23 @@ public static class PdmEndpointExtensions
 
         api.MapGet("/notifications/mine", async (int? take, HttpContext context, IPdmRepository repository, NotificationInboxService inbox, QualityReviewService quality, CancellationToken cancellationToken) =>
         {
-            var (actor, _) = CurrentUser(context.User);
+            var (actor, role) = CurrentUser(context.User);
             await inbox.ReconcileAsync(actor, cancellationToken);
             var notifications = await repository.ListUserNotificationsAsync(actor, take ?? 100, cancellationToken);
             notifications = await quality.FilterNotificationsAsync(notifications, actor, cancellationToken);
+            var reworkProjects = new HashSet<Guid>();
+            foreach (var projectId in notifications.Where(item => ReleaseDrawingReworkNotifications.IsDrawingReworkCategory(item.Category))
+                .Select(item => item.ProjectId).OfType<Guid>().Distinct())
+                if (await ReleaseDrawingReworkNotifications.CanReadAsync(repository, projectId, actor, cancellationToken)) reworkProjects.Add(projectId);
+            notifications = notifications.Where(item => !ReleaseDrawingReworkNotifications.IsDrawingReworkCategory(item.Category)
+                || item.ProjectId is Guid projectId && reworkProjects.Contains(projectId)).ToArray();
             var oplProjects = new HashSet<Guid>();
             foreach (var projectId in notifications.Where(item => item.Category == ProjectOplService.AssignmentCategory)
                 .Select(item => item.ProjectId).OfType<Guid>().Distinct())
                 if (await ProjectOplService.CanRespondAsync(repository, projectId, actor, cancellationToken)) oplProjects.Add(projectId);
-            return Results.Ok(notifications.Where(item => item.Category != ProjectOplService.AssignmentCategory
-                || item.ProjectId is Guid projectId && oplProjects.Contains(projectId)).Select(item => item.Category is "ExpenseApprovalPending" or "ExpenseApprovalResult" or "ExpenseApprovalCopy"
+            notifications = await ApprovalCopyPresentation.EnrichAsync(repository, notifications.Where(item => item.Category != ProjectOplService.AssignmentCategory
+                || item.ProjectId is Guid projectId && oplProjects.Contains(projectId)).ToArray(), actor, role, cancellationToken);
+            return Results.Ok(notifications.Select(item => item.Category is "ExpenseApprovalPending" or "ExpenseApprovalResult" or "ExpenseApprovalCopy"
                 ? item with { Content = "费用申请状态已更新，请进入费用申请查看并处理。金额按当前权限显示。" } : item));
         });
 
@@ -2456,7 +2440,7 @@ public static class PdmEndpointExtensions
         new(item.ReleasePackageId, item.ReleasePackageNumber, item.DocumentId, item.DrawingNumber, item.FileName,
             item.Kind.ToString(), item.Format.ToString(), item.Succeeded, item.FileLength, item.Error);
 
-    private static object MapManagedUser(UserAccount user, UserCompanyScope? scope = null) => new
+    private static object MapManagedUser(UserAccount user, UserCompanyScope? scope = null, UserAccountOperations? operations = null) => new
     {
         user.Username,
         user.DisplayName,
@@ -2465,7 +2449,11 @@ public static class PdmEndpointExtensions
         user.IsActive,
         CompanyId = scope?.PrimaryCompanyId ?? user.CompanyId,
         CrossCompanyView = scope?.CrossCompanyView ?? user.CrossCompanyView,
-        AccessibleCompanyIds = scope?.AccessibleCompanyIds ?? Array.Empty<Guid>()
+        AccessibleCompanyIds = scope?.AccessibleCompanyIds ?? Array.Empty<Guid>(),
+        CanDeactivate = operations?.CanDeactivate ?? false,
+        DeactivateReason = operations?.DeactivateReason,
+        CanDelete = operations?.CanDelete ?? false,
+        DeleteReason = operations?.DeleteReason
     };
 
     private static object MapRolePermissionDirectory(RolePermissionDirectory directory) => new

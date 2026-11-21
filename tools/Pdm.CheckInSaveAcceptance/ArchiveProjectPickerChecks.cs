@@ -47,10 +47,30 @@ internal static partial class Program
   {
    var driver=Task.Run(async()=>{
     await TreeWait(()=>ArchiveUi(session,()=>((Panel)Field(ArchiveWindow(session),"selection")).Controls.OfType<Form>().Any()),"存档图档区域没有显示");
-    ArchiveUi(session,()=>{var window=ArchiveWindow(session);window.TopMost=false;var frame=window.Height-window.ClientSize.Height;Check(window.ClientSize.Height==Math.Min(960,Screen.FromHandle(window.Handle).WorkingArea.Height-frame),"默认存档窗口加高100像素，并受所属显示器工作区约束");OpenPicker();return true;});
+    var defaultSize=Size.Empty;
+    ArchiveUi(session,()=>{
+     var window=ArchiveWindow(session);window.TopMost=false;var frame=window.Height-window.ClientSize.Height;
+     Check(window.ClientSize.Height==Math.Min(960,Screen.FromHandle(window.Handle).WorkingArea.Height-frame),"默认存档窗口加高100像素，并受所属显示器工作区约束");
+     defaultSize=window.Size;window.Size=window.MinimumSize;
+     var batch=Batch();batch.Font=new Font("Microsoft YaHei UI",12F);batch.Scale(new SizeF(1.5F,1.5F));
+     window.PerformLayout();batch.PerformLayout();
+     var selector=(Control)Field(batch,"projectSelector");var browse=(Button)Field(selector,"browse");var selected=(TextBox)Field(selector,"selectedProject");
+     var measured=TextRenderer.MeasureText(selected.Text,selected.Font).Width;
+     var header=(TableLayoutPanel)selector.Parent;
+     Console.WriteLine("项目区域 " + Outer(selector) + "；浏览 " + Outer(browse) + "；项目文本 " + Outer(selected)
+      + "，内容=" + selected.Text + "，需要宽度=" + measured + "，网格列宽=" + string.Join(",",header.GetColumnWidths())
+      + "，合并列=" + header.GetColumnSpan(selector));
+     Save(window,"archive-project-entry-minimum-150");
+     Check(browse.Visible&&browse.Enabled&&Outer(selector).Contains(Outer(browse))&&browse.Height>0
+      &&browse.ClientSize.Width>=TextRenderer.MeasureText(browse.Text,browse.Font).Width,"150% 最小存档窗口：有可选项目时浏览按钮完整可操作");
+     Check(Outer(selector).Contains(Outer(selected))&&!Outer(selected).IntersectsWith(Outer(browse))
+      &&selected.Text.Contains((string)Get(initial,"Code"))&&selected.Text.Contains((string)Get(initial,"Name"))
+      &&selected.ClientSize.Width>=measured,"150% 最小存档窗口：完整显示当前项目号和名称");
+     OpenPicker();return true;
+    });
     await WaitPicker();
     ArchiveUi(session,()=>{
-     var window=ArchiveWindow(session);var picker=Picker();var panel=(Panel)Field(window,"confirmation");var history=(TextBox)Field(window,"history");
+     var window=ArchiveWindow(session);window.Size=defaultSize;var picker=Picker();var panel=(Panel)Field(window,"confirmation");var history=(TextBox)Field(window,"history");
      var search=(TextBox)Field(picker,"search");var main=(ListBox)Field(picker,"mainProjects");var children=(ListView)Field(picker,"childProjects");
      var confirm=(Button)Field(picker,"confirm");var cancel=(Button)picker.CancelButton;
      void LayoutCheck(string label)

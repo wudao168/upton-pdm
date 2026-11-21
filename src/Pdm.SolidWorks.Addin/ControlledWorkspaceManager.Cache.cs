@@ -12,8 +12,9 @@ internal sealed partial class ControlledWorkspaceManager
     internal static string PlannedFilePath(string directory, ControlledOpenFileDto file) => ManifestPath(directory, file);
     internal string UseRecoveryWorkingDirectory(ControlledOpenManifestDto manifest)
     {
-        var directory = Path.Combine(ProjectViewDirectory(workspaceRoot, manifest.ProjectCode), "装配工作区",
+        var preferred = Path.Combine(ProjectViewDirectory(workspaceRoot, manifest.ProjectCode), "装配工作区",
             "plm-" + manifest.RootDocumentId.ToString("N"));
+        var directory = ChooseManifestDirectory(manifest, preferred, "w", "recovery|" + manifest.ProjectId + "|" + manifest.RootDocumentId);
         serverWorkingDirectories[manifest.RootDocumentId] = directory;
         return directory;
     }
@@ -29,7 +30,7 @@ internal sealed partial class ControlledWorkspaceManager
         var editable = editableIds ?? Array.Empty<Guid>();
         if (manifest.RetainedWorkingHashes.Count > 0)
         {
-            using (var retained = new ControlledWorkingCopyScope(Path.Combine(target, manifest.RootRelativePath), manifest))
+            using (var retained = new ControlledWorkingCopyScope(ManagedCadPaths.Resolve(target, manifest.RootRelativePath), manifest))
                 if (manifest.Files.Any(file => manifest.RetainedWorkingHashes.ContainsKey(file.DocumentId)
                     && !ControlledReferenceMaterializer.Matches(ManifestPath(target, file), file)))
                     throw new InvalidDataException("上次编辑文件在续接期间发生变化，原文件及恢复记录已保留，未覆盖或继续打开。");
@@ -38,7 +39,7 @@ internal sealed partial class ControlledWorkspaceManager
                 foreach (var file in manifest.Files) BindWorkspaceFile(target, target, manifest, file);
                 SetWorkspaceAttributes(target, manifest, editable);
                 LocalCacheNotice = "已恢复本机上次编辑，未提交的修改已保留；尚未生成新的存档版本。";
-                ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "working");
+                RecordWorkspace(target, manifest, "working");
                 return ResolveRootPath(target, manifest);
             }
         }
@@ -54,14 +55,14 @@ internal sealed partial class ControlledWorkspaceManager
         var conflict = changed.FirstOrDefault(file => ProtectedPaths.Any(path =>
             string.Equals(Path.GetFullPath(path), ManifestPath(target, file), StringComparison.OrdinalIgnoreCase)));
         if (conflict != null) throw new InvalidDataException("需要更新的图档正在使用或编辑中，已保留窗口及文件，请关闭相关图档后重试：" + conflict.FileName);
-        var staging = Path.Combine(workspaceRoot, ".uplm", "Staging", "working-" + Guid.NewGuid().ToString("N"));
+        var staging = OperationDirectory(target, "Staging", "working-" + Guid.NewGuid().ToString("N"), ManifestPaths(changed));
         var previousHashes = changed.ToDictionary(file => file.DocumentId, file =>
             File.Exists(ManifestPath(target, file)) ? ComputeSha256(ManifestPath(target, file)) : null);
         try
         {
             var needed = changed.Sum(file => file.NativeIsolation?.Length ?? file.FileLength)
                 + changed.Where(file => File.Exists(ManifestPath(target, file))).Sum(file => new FileInfo(ManifestPath(target, file)).Length);
-            var drive = new DriveInfo(Path.GetPathRoot(workspaceRoot));
+            var drive = new DriveInfo(Path.GetPathRoot(target));
             if (drive.IsReady && drive.AvailableFreeSpace < needed + 64L * 1024 * 1024)
                 throw new IOException("工作区所在磁盘空间不足，未更新图档。请先在插件设置中清理缓存或释放磁盘空间。");
             RegisterLegacySnapshotsOnce(manifest);
@@ -80,7 +81,7 @@ internal sealed partial class ControlledWorkspaceManager
             if (!ValidateWorkingWorkspace(target, manifest)) throw new InvalidDataException("工作区更新校验失败，未打开图档；原有修改及恢复副本已保留。");
             foreach (var file in manifest.Files) BindWorkspaceFile(target, target, manifest, file);
             SetWorkspaceAttributes(target, manifest, editable);
-            ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "working");
+            RecordWorkspace(target, manifest, "working");
             PreparationProgress?.Invoke("本地文件已就绪：复用" + (manifest.Files.Count - changed.Length) + "个，更新" + changed.Length + "个", manifest.Files.Count, manifest.Files.Count);
             return ResolveRootPath(target, manifest);
         }

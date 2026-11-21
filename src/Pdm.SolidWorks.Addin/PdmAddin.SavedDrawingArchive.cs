@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 
@@ -18,7 +20,10 @@ public sealed partial class PdmAddin
         => ReadSavedNativeProperties(node, sourceHash, latest);
 
     private IReadOnlyDictionary<string, string> ReadSavedNativeProperties(CadTreeNode node, string sourceHash = null,
-        DocumentVersionDto latest = null)
+        DocumentVersionDto latest = null) => ReadSavedNativePropertiesCore(node, sourceHash, latest, requireExactPath: false);
+
+    private IReadOnlyDictionary<string, string> ReadSavedNativePropertiesCore(CadTreeNode node, string sourceHash,
+        DocumentVersionDto latest, bool requireExactPath)
     {
         if (latest == null)
             lock (metadataCacheSync)
@@ -35,7 +40,7 @@ public sealed partial class PdmAddin
             || latest.ReferenceSnapshot?.ReferenceWarnings?.Any(value => value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal)) == true
             || !VersionMatchesLocalFile(latest, node.FullPath, sourceHash ?? ComputeRegistrationFileHash(node)))
             ReadAvailableSavedPropertyIndex(node, properties,
-                MemoryCopy(node)?.SourceHash ?? sourceHash ?? ComputeRegistrationFileHash(node));
+                MemoryCopy(node)?.SourceHash ?? sourceHash ?? ComputeRegistrationFileHash(node), requireExactPath);
         node.ReferenceWarnings.RemoveAll(value => value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal));
         properties["FileName"] = node.FileName;
         properties["Extension"] = Path.GetExtension(node.FullPath);
@@ -66,7 +71,74 @@ public sealed partial class PdmAddin
         return configurations;
     }
 
-    private bool ReadAvailableSavedPropertyIndex(CadTreeNode node, IDictionary<string, string> properties, string sourceHash)
+    private async Task<IReadOnlyDictionary<string, string>> ReadBatchArchivePreflightPropertiesAsync(CadTreeNode node,
+        IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> nativePropertyCards,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> referenceConfigurations, DocumentVersionDto latest,
+        string sourceHash, CancellationToken token)
+    {
+        try
+        {
+            return ReadArchivePreflightPropertiesCore(node, nativePropertyCards, referenceConfigurations, latest, sourceHash);
+        }
+        catch (ArchiveSavedPropertyPathConflictException conflict) when (MemoryCopy(node) == null
+            && node.Status != CadReferenceStatus.Virtual
+            && (CanArchiveSavedModelBytes(node, false) || CanArchiveSavedDrawingBytes(node, false, sourceHash)))
+        {
+            ArchiveSession.Current?.ReportFile(0, 0, node.FileName, "发现不同路径的同名图档，正在独立会话中读取所选文件的属性…");
+            try
+            {
+                var properties = await ArchiveNativeProcessWorkspace.ReadSavedPropertiesAsync(application, node.FullPath,
+                    (int)node.Kind, SavedPropertyConfigurations(node).ToArray(), sourceHash, null, token);
+                if (!HasReadCustomProperties(properties, node))
+                    throw new InvalidOperationException("独立会话未返回完整的图档属性。");
+                node.ReferenceWarnings.RemoveAll(value => value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal));
+                return properties;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error)
+            {
+                LogDiagnostic("独立读取所选图档的属性：" + node.FullPath, error);
+                throw new InvalidOperationException(conflict.Message + " 独立读取未完成：" + ArchivePreflightError(error), error);
+            }
+        }
+    }
+
+    // Called by the archive worker after it verifies the isolated native process.
+    public static IReadOnlyDictionary<string, string> ReadNativeArchiveSavedProperties(ISldWorks app, string source,
+        int documentKind, string[] configurations, string sourceHash)
+    {
+        var kind = (CadDocumentKind)documentKind;
+        var expectedExtension = kind switch
+        {
+            CadDocumentKind.Assembly => ".SLDASM",
+            CadDocumentKind.Part => ".SLDPRT",
+            CadDocumentKind.Drawing => ".SLDDRW",
+            _ => null
+        };
+        if (string.IsNullOrWhiteSpace(source) || !Path.IsPathRooted(source) || expectedExtension == null
+            || !string.Equals(Path.GetExtension(source), expectedExtension, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("独立读取的图档路径或类型无效，尚未上传。");
+
+        var path = Path.GetFullPath(source);
+        CheckInUploadHashes.VerifySource(path, sourceHash, CancellationToken.None);
+        if (app.GetDocumentCount() != 0)
+            throw new InvalidOperationException("独立读取会话已有其他图档，无法保证读取所选路径，尚未上传。");
+        if (!app.SetCurrentWorkingDirectory(Path.GetDirectoryName(path)))
+            throw new InvalidOperationException("无法设置独立读取会话的引用查找目录，尚未上传。");
+
+        var node = new CadTreeNode { FullPath = path, FileName = Path.GetFileName(path), Kind = kind };
+        var addin = new PdmAddin { application = app };
+        addin.archiveCurrentInstances = new Dictionary<string, CadTreeNode[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            [path] = (configurations ?? Array.Empty<string>()).Select(configuration => new CadTreeNode { Configuration = configuration }).ToArray()
+        };
+        var properties = addin.ReadSavedNativePropertiesCore(node, sourceHash, null, requireExactPath: true);
+        CheckInUploadHashes.VerifySource(path, sourceHash, CancellationToken.None);
+        return properties;
+    }
+
+    private bool ReadAvailableSavedPropertyIndex(CadTreeNode node, IDictionary<string, string> properties, string sourceHash,
+        bool requireExactPath)
     {
         IModelDoc2 document = null;
         var opened = false;
@@ -81,13 +153,17 @@ public sealed partial class PdmAddin
                 ValidateCurrentMemoryCopy(node);
                 document = memory.Model;
             }
-            else document = FindArchiveReadDocument(node);
-            if (document == null)
+            else if (!requireExactPath) document = FindArchiveReadDocument(node);
+            if (document == null && !requireExactPath)
             {
                 // An archive's document index can precede a native load event. Never
                 // mistake an existing user window for a temporary window we own.
                 document = application.GetOpenDocumentByName(node.FullPath) as IModelDoc2;
-                if (document != null && !PathsEqual(document.GetPathName(), node.FullPath)) ValidateArchiveReadAlias(node, document);
+                if (document != null && !PathsEqual(document.GetPathName(), node.FullPath))
+                {
+                    if (node.Kind != CadDocumentKind.Part) ValidateSavedPropertyOpenPath(node, document);
+                    ValidateArchiveReadAlias(node, document);
+                }
             }
             if (document == null)
             {
@@ -106,9 +182,7 @@ public sealed partial class PdmAddin
                     var errors = 0; var warnings = 0;
                     document = application.OpenDoc6(node.FullPath, type, (int)options, string.Empty, ref errors, ref warnings);
                     PluginDiagnosticLog.Record("图档属性读取", "只读打开；图档=" + node.FullPath + "；错误码=" + errors + "；警告码=" + warnings);
-                    if (document == null) throw new InvalidOperationException("无法只读加载图档的自定义属性。");
-                    if (!PathsEqual(document.GetPathName(), node.FullPath))
-                        throw new InvalidOperationException("SolidWorks返回了其他路径的同名图档，未读取或关闭该窗口。");
+                    ValidateSavedPropertyOpenPath(node, document, errors);
                     opened = true;
                     archiveBatchReads?.Invalidate();
                     if (!document.IsOpenedReadOnly()) throw new InvalidOperationException("属性读取窗口未处于只读状态。");
@@ -171,6 +245,7 @@ public sealed partial class PdmAddin
         catch (Exception error)
         {
             LogDiagnostic("自定义属性读取失败，未提交原生文件：" + node.FullPath, error);
+            if (error is ArchiveSavedPropertyPathConflictException) throw;
             if (error is ArchiveUnsavedPropertySourceException)
                 throw new InvalidOperationException("图档存在尚未固定到提交副本的内存修改：" + node.FileName
                     + "。本批尚未上传，当前窗口和修改已保留。请结束当前编辑后重新检查；只读文件无需强行保存回原目录，"
@@ -187,16 +262,38 @@ public sealed partial class PdmAddin
         }
     }
 
+    private static void ValidateSavedPropertyOpenPath(CadTreeNode node, IModelDoc2 document, int errors = 0)
+    {
+        var actual = document?.GetPathName();
+        if (PathsEqual(actual, node.FullPath)) return;
+        if ((errors & (int)swFileLoadError_e.swFileWithSameTitleAlreadyOpen) != 0
+            || !string.IsNullOrWhiteSpace(actual) && string.Equals(Path.GetFileName(actual), node.FileName, StringComparison.OrdinalIgnoreCase))
+            throw new ArchiveSavedPropertyPathConflictException(node.FullPath, actual);
+        throw new InvalidOperationException(document == null
+            ? "无法只读加载图档的自定义属性。"
+            : "SolidWorks 返回了不同路径的图档，已保留其窗口，尚未上传。");
+    }
+
+    private sealed class ArchiveSavedPropertyPathConflictException : InvalidOperationException
+    {
+        internal ArchiveSavedPropertyPathConflictException(string expected, string actual)
+            : base("当前会话存在不同路径的同名图档。所选文件：" + expected
+                + (string.IsNullOrWhiteSpace(actual) ? "。" : "；SolidWorks 返回的文件：" + actual + "。"))
+        {
+        }
+    }
+
     private sealed class ArchiveUnsavedPropertySourceException : InvalidOperationException
     {
         internal ArchiveUnsavedPropertySourceException()
             : base("当前内存内容与提交文件尚未核对，未用内存属性代替已保存文件属性。") { }
     }
 
-    private bool CanArchiveSavedDrawingBytes(CadTreeNode node, bool hasUnsavedChanges) =>
-        node.Kind == CadDocumentKind.Drawing && !hasUnsavedChanges && !node.RequiresModelUpdate
+    private bool CanArchiveSavedDrawingBytes(CadTreeNode node, bool hasUnsavedChanges, string localHash) =>
+        node.Kind == CadDocumentKind.Drawing && !hasUnsavedChanges
         && node.Role != CadReferenceRole.ExternalFileDependency && node.HistoricalRepair == null
-        && !preloadedOwnedDrawings.Contains(node.FullPath);
+        && ((!node.RequiresModelUpdate && !preloadedOwnedDrawings.Contains(node.FullPath))
+            || SavedArchiveSourceMatches(node, localHash));
 
     private static bool CanArchiveSavedModelBytes(CadTreeNode node, bool hasUnsavedChanges) =>
         (node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly)

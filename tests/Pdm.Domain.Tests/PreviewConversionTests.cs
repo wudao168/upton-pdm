@@ -523,6 +523,7 @@ public sealed class PreviewConversionTests
 
     [Theory]
     [InlineData("断线", 2)]
+    [InlineData("令牌错误", 2)]
     [InlineData("启动失败", 2)]
     [InlineData("图纸错误", 1)]
     [InlineData("旧派单", 1)]
@@ -534,7 +535,8 @@ public sealed class PreviewConversionTests
             var first = "http://a-" + Guid.NewGuid().ToString("N");
             var second = "http://b-" + Guid.NewGuid().ToString("N");
             var (repository, project, sources, package, stage) = await PrepareAsync(root, new PreviewConversionSettings {
-                Mode = PreviewConversionMode.Remote, AgentUrl = first, Servers = [new("A",first,""),new("B",second,"")] });
+                Mode = PreviewConversionMode.Remote, AgentUrl = first, AgentToken = "旧全局令牌",
+                Servers = [new("A", first, "server-a"), new("B", second, "server-b", 42)] });
             var agent = new FailoverHandler(fault);
             var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository,
                 new HttpClient(agent), storageOptions: Options.Create(new PdmStorageOptions { ConversionWorkRoot = root }));
@@ -552,7 +554,7 @@ public sealed class PreviewConversionTests
             Assert.Equal(postCount, agent.Targets.Count);
             if (postCount == 2)
             {
-                Assert.Equal(fault == "断线" ? 2 : 1, agent.Targets[1].Length);
+                Assert.Equal(fault is "断线" or "令牌错误" ? 2 : 1, agent.Targets[1].Length);
                 Assert.NotEqual(agent.Hosts[0],agent.Hosts[1]);
             }
             Assert.Equal(postCount, PreviewDispatchHistory.Read(root,package.Id).Select(a=>a.Id).Distinct().Count());
@@ -573,7 +575,11 @@ public sealed class PreviewConversionTests
             using var manifest = await JsonDocument.ParseAsync(input.GetEntry("manifest.json")!.Open(), cancellationToken:ct);
             var jobs = manifest.RootElement.GetProperty("jobs").EnumerateArray().Where(j=>j.GetProperty("convert").GetBoolean()).ToArray();
             Targets.Add(jobs.Select(j=>j.GetProperty("documentId").GetGuid()).ToArray()); Hosts.Add(request.RequestUri!.Host);
+            var expectedToken = Targets.Count == 1 ? "server-a" : "server-b";
+            Assert.Equal(expectedToken, request.Headers.GetValues(PreviewAgentProtocol.TokenHeader).Single());
             if (Targets.Count == 1 && fault == "断线") throw new HttpRequestException("test connection lost");
+            if (Targets.Count == 1 && fault == "令牌错误")
+                return new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = new StringContent("测试令牌错误") };
             using var data = new MemoryStream();
             using (var zip = new ZipArchive(data,ZipArchiveMode.Create,true))
             {

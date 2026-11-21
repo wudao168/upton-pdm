@@ -27,7 +27,7 @@ internal sealed class ControlledOpenBoundary : IDisposable
     internal static Dictionary<string, string> Paths(string directory, ControlledOpenManifestDto manifest)
     {
         var paths = manifest.Files.ToDictionary(file => file.FileName,
-            file => Path.GetFullPath(Path.Combine(directory, file.RelativePath ?? file.FileName)), StringComparer.OrdinalIgnoreCase);
+            file => ControlledReferenceMaterializer.ManifestPath(directory, file), StringComparer.OrdinalIgnoreCase);
         foreach (var record in manifest.RetainedLocalReferences.Values)
         {
             if (paths.ContainsKey(record.FileName) || record.Paths.Any(path => !record.Matches(path)))

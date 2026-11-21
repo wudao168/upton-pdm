@@ -29,7 +29,7 @@ public sealed partial class PdmWorkflowService(
     WorkflowNotificationService? workflowNotifications = null,
     BomFileService? bomFiles = null)
 {
-    private static readonly SemaphoreSlim PreviewAgentRegistrationGate = new(1, 1);
+
     private const string ReconcileAutoAdded = "AutoAdded";
     private const string ReconcileClassificationChanged = "ClassificationChanged";
     private const string ReconcilePendingClassification = "PendingClassification";
@@ -156,7 +156,8 @@ public sealed partial class PdmWorkflowService(
         return equipmentType;
     }
 
-    public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings input, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings input, string actor, UserRole role, CancellationToken cancellationToken,
+        bool preservePreviewConversion = false)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken);
         var current = await repository.GetSystemSettingsAsync(cancellationToken);
@@ -192,14 +193,14 @@ public sealed partial class PdmWorkflowService(
             FormalSupplementPolicies = NormalizeFormalSupplementPolicies(input.FormalSupplementPolicies),
             PdfTitleBlockFill = new() { EnabledFields = pdfFields, DrawingLabels = pdfLabels },
             DrawingQrPolicy = DrawingQrPolicy.Default,
-            PreviewConversion = NormalizePreviewConversion(input.PreviewConversion)
+            PreviewConversion = preservePreviewConversion ? current.PreviewConversion : NormalizePreviewConversion(input.PreviewConversion)
         });
         await ValidateApprovalWorkflowTargetsAsync(settingsInput.ApprovalWorkflows, cancellationToken);
         ValidateCheckoutSettings(settingsInput);
         ValidateBomPropertyMappings(settingsInput);
-        var settings = await repository.UpdateSystemSettingsAsync(settingsInput, cancellationToken);
+        var settings = await repository.UpdateSystemSettingsAsync(settingsInput, cancellationToken, preservePreviewConversion);
         await AuditAsync(actor, "system.storage.update", nameof(PdmSystemSettings), "storage", $"图档根目录：{settings.VaultRoot}；发包根目录：{settings.ReleaseRoot}；料品资料根目录：{settings.MaterialAttachmentRoot}", cancellationToken);
-        await AuditAsync(actor, "system.checkout-policy.update", nameof(PdmSystemSettings), "checkout-policy", $"心跳{settings.CheckoutHeartbeatSeconds}秒；离线宽限{settings.CheckoutOfflineGraceMinutes}分钟；超时提醒{settings.CheckoutOverdueHours}小时；离线保护期结束后允许本人或授权人员处理异常占用", cancellationToken);
+        await AuditAsync(actor, "system.checkout-policy.update", nameof(PdmSystemSettings), "checkout-policy", $"心跳{settings.CheckoutHeartbeatSeconds}秒；离线宽限{settings.CheckoutOfflineGraceMinutes}分钟；超时提醒{settings.CheckoutOverdueHours}小时；提醒后自动释放等待{settings.CheckoutOverdueReleaseGraceHours}小时；自动释放{(settings.CheckoutAutoReleaseEnabled ? "启用" : "停用")}", cancellationToken);
         await AuditAsync(actor, "system.bom-property-mapping.update", nameof(PdmSystemSettings), "bom-property-mapping", $"PLM属性{settings.BomPropertyMappings.Count}项；SolidWorks映射{settings.BomPropertyMappings.Count(item => item.MappingEditable)}项", cancellationToken);
         await AuditAsync(actor, "system.bom-validation.update", nameof(PdmSystemSettings), "bom-validation", $"标准件{settings.ValidationRules.Standard.Count}项；非标件{settings.ValidationRules.NonStandard.Count}项；电气件{settings.ValidationRules.Electrical.Count}项", cancellationToken);
         await AuditAsync(actor, "system.approval-workflows.update", nameof(PdmSystemSettings), "approval-workflows", $"标准件模板v{settings.ApprovalWorkflows.Standard!.Version}；非标件模板v{settings.ApprovalWorkflows.NonStandard!.Version}；电气模板v{settings.ApprovalWorkflows.Electrical.Version}；验证计划模板v{settings.ApprovalWorkflows.ValidationPlan?.Version ?? 1}；紧急代批角色{settings.ApprovalWorkflows.EmergencySubstituteRoleCode}", cancellationToken);
@@ -209,7 +210,8 @@ public sealed partial class PdmWorkflowService(
         if (pdfSettingsChanged)
             await AuditAsync(actor, "system.pdf-title-block.update", nameof(PdmSystemSettings), "pdf-title-block",
                                 $"PDF自动填写：{string.Join("、", pdfFields.Select(key => PdfTitleBlockFields.Get(key).Name))}；图框映射：{string.Join("、", pdfLabels.Select(pair => $"{PdfTitleBlockFields.Get(pair.Key).Name} → {pair.Value}"))}", cancellationToken);
-        await AuditAsync(actor, "system.preview-conversion.update", nameof(PdmSystemSettings), "preview-conversion", $"{PreviewConversionSummary(settings.PreviewConversion)}", cancellationToken);
+        if (!preservePreviewConversion)
+            await AuditAsync(actor, "system.preview-conversion.update", nameof(PdmSystemSettings), "preview-conversion", PreviewConversionSummary(settings.PreviewConversion), cancellationToken);
         return settings;
     }
 
@@ -246,67 +248,6 @@ public sealed partial class PdmWorkflowService(
         settings.Mode == PreviewConversionMode.Remote
             ? $"远程转图服务器{settings.NormalizedAgentUrl}；超时{settings.TimeoutMinutes}分钟"
             : $"本机转换（API服务器调用SolidWorks转换程序）；超时{settings.TimeoutMinutes}分钟";
-
-    /// <summary>
-    /// 转图电脑上的安装程序调用：把本机登记为系统的转图服务器（自动切换为远程转换并保存地址、令牌与超时）。
-    /// </summary>
-    public async Task<PdmSystemSettings> RegisterPreviewAgentAsync(string agentUrl, string agentToken, int timeoutMinutes, string actor, UserRole role, CancellationToken cancellationToken, string? name = null)
-    {
-        await PreviewAgentRegistrationGate.WaitAsync(cancellationToken);
-        try
-        {
-        var current = await repository.GetSystemSettingsAsync(cancellationToken);
-        var servers = current.PreviewConversion.Servers.ToList();
-        if (servers.Count == 0 && current.PreviewConversion.Mode == PreviewConversionMode.Remote
-            && !string.IsNullOrWhiteSpace(current.PreviewConversion.AgentUrl))
-            servers.Add(new(current.PreviewConversion.AgentUrl, current.PreviewConversion.AgentUrl, current.PreviewConversion.AgentToken, current.PreviewConversion.TimeoutMinutes));
-        var normalizedUrl = agentUrl.Trim().TrimEnd('/');
-        var previous = servers.FirstOrDefault(server => string.Equals(server.AgentUrl.Trim().TrimEnd('/'), normalizedUrl, StringComparison.OrdinalIgnoreCase));
-        if (previous is not null) servers.Remove(previous);
-        servers.Add(new(string.IsNullOrWhiteSpace(name) ? normalizedUrl : name.Trim(), normalizedUrl, agentToken, timeoutMinutes, TenantContext.CompanyId) { Disabled = previous?.Disabled ?? false });
-        var saved = await UpdateSystemSettingsAsync(current with
-        {
-            PreviewConversion = new PreviewConversionSettings
-            {
-                Mode = PreviewConversionMode.Remote,
-                AgentUrl = agentUrl,
-                AgentToken = agentToken,
-                TimeoutMinutes = timeoutMinutes,
-                Servers = servers
-            }
-        }, actor, role, cancellationToken);
-        await AuditAsync(actor, "system.preview-agent.register", nameof(PdmSystemSettings), "preview-conversion",
-            $"转图电脑登记：{saved.PreviewConversion.NormalizedAgentUrl}", cancellationToken);
-        return saved;
-        }
-        finally { PreviewAgentRegistrationGate.Release(); }
-    }
-
-    /// <summary>移除指定代理，最后一台移除后等待新的远程代理登记。</summary>
-    public async Task<PdmSystemSettings> ClearPreviewAgentAsync(string actor, UserRole role, CancellationToken cancellationToken, string? agentUrl = null)
-    {
-        await PreviewAgentRegistrationGate.WaitAsync(cancellationToken);
-        try
-        {
-        var current = await repository.GetSystemSettingsAsync(cancellationToken);
-        if (current.PreviewConversion.Mode == PreviewConversionMode.Local) return current;
-        if (!string.IsNullOrWhiteSpace(agentUrl) && current.PreviewConversion.Servers.Count == 0
-            && !string.Equals(current.PreviewConversion.NormalizedAgentUrl, agentUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)) return current;
-        var remaining = current.PreviewConversion.Servers.Where(server => !string.Equals(server.AgentUrl.TrimEnd('/'), agentUrl?.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (string.IsNullOrWhiteSpace(agentUrl)) remaining = [];
-        var replacement = remaining.FirstOrDefault();
-        var saved = await UpdateSystemSettingsAsync(current with
-        {
-            PreviewConversion = current.PreviewConversion with { Mode = PreviewConversionMode.Remote,
-                AwaitingRegistration = replacement is null, Servers = remaining, AgentUrl = replacement?.AgentUrl ?? string.Empty,
-                AgentToken = replacement?.AgentToken ?? string.Empty }
-        }, actor, role, cancellationToken);
-        await AuditAsync(actor, "system.preview-agent.unregister", nameof(PdmSystemSettings), "preview-conversion",
-            $"转图代理已移除；剩余转图服务器 {remaining.Length} 台", cancellationToken);
-        return saved;
-        }
-        finally { PreviewAgentRegistrationGate.Release(); }
-    }
 
     private static IReadOnlyDictionary<string, string> NormalizeReleaseChangeReasonLabels(IReadOnlyDictionary<string, string>? labels, IReadOnlyList<string> types)
     {
@@ -699,7 +640,11 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("只有平台管理员可以配置跨公司权限。");
         var crossCompanyView = command.CrossCompanyView && accessibleCompanyIds.Length > 0;
         var roleCodes = targetRoles.Select(role => role.Role).ToArray();
-        var user = new UserAccount(Guid.NewGuid(), username, displayName, command.PasswordHash, targetRole.BaseRole, command.IsActive, RoleCode: targetRole.Role, CompanyId: companyId, CrossCompanyView: crossCompanyView, RoleCodes: roleCodes);
+        var userId = Guid.NewGuid();
+        // 同名账号重新创建时，既有设备的旧登录票据必须保持失效。
+        var initialTokenVersion = ((BitConverter.ToInt64(userId.ToByteArray()) & long.MaxValue) >> 1) | 1L;
+        var user = new UserAccount(userId, username, displayName, command.PasswordHash, targetRole.BaseRole, command.IsActive,
+            TokenVersion: initialTokenVersion, RoleCode: targetRole.Role, CompanyId: companyId, CrossCompanyView: crossCompanyView, RoleCodes: roleCodes);
         await repository.CreateUserAsync(user, cancellationToken);
         await repository.SetUserCompanyScopeAsync(username, companyId, crossCompanyView, accessibleCompanyIds, actor, cancellationToken);
         await AuditAsync(actor, "user.create", nameof(UserAccount), username, $"{displayName} · {string.Join('、', targetRoles.Select(role => role.Name))} · {(command.IsActive ? "启用" : "停用")}", cancellationToken);
@@ -718,17 +663,14 @@ public sealed partial class PdmWorkflowService(
         var roleCodes = targetRoles.Select(role => role.Role).ToArray();
         if (string.Equals(actor, username, StringComparison.OrdinalIgnoreCase) && (!command.IsActive || !RoleSetsEqual(roleCodes, current.EffectiveRoleCodes)))
             throw new PdmRuleException("不能停用当前登录账号或修改其系统角色。");
-        var authorization = await repository.GetAuthorizationSettingsAsync(cancellationToken);
-        var candidate = current with { Role = targetRole.BaseRole, RoleCode = targetRole.Role, RoleCodes = roleCodes, IsActive = command.IsActive };
-        if (!(await repository.ListUsersAsync(cancellationToken)).Select(u => u.Id == current.Id ? candidate : u).Any(u => AuthorizationPolicy.GlobalAllows(authorization, u, u.CompanyId, PermissionCodes.RoleSettingsEdit) && AuthorizationPolicy.GlobalAllows(authorization, u, u.CompanyId, PermissionCodes.RoleSettingsView)))
-            throw new PdmRuleException("至少保留一位启用且能管理权限的人员。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
         var companyId = ResolveManagedCompany(command.CompanyId == Guid.Empty ? current.CompanyId ?? Guid.Empty : command.CompanyId, directory);
         var accessibleCompanyIds = NormalizeAccessibleCompanies(command.AccessibleCompanyIds, companyId, directory);
         if ((command.CrossCompanyView || accessibleCompanyIds.Length > 0) && TenantContext.Current?.IsPlatformAdministrator != true)
             throw new UnauthorizedAccessException("只有平台管理员可以配置跨公司权限。");
         var crossCompanyView = command.CrossCompanyView && accessibleCompanyIds.Length > 0;
-        var saved = await repository.UpdateUserAsync(username, displayName, targetRole.BaseRole, targetRole.Role, roleCodes, command.IsActive, cancellationToken);
+        var saved = await repository.UpdateUserAsync(username, displayName, targetRole.BaseRole, targetRole.Role, roleCodes,
+            command.IsActive, cancellationToken, new ManagedUserEditActor(actor, UserAccountAdministration.ManagedCompanyId));
         await repository.SetUserCompanyScopeAsync(username, companyId, crossCompanyView, accessibleCompanyIds, actor, cancellationToken);
         saved = await repository.FindUserAsync(username, cancellationToken) ?? saved;
         await AuditAsync(actor, "user.update", nameof(UserAccount), username, $"{displayName} · {string.Join('、', targetRoles.Select(role => role.Name))} · {(command.IsActive ? "启用" : "停用")}", cancellationToken);
@@ -1177,6 +1119,11 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("图号、名称和文件名不能为空。");
         }
 
+        var drawingNumber = command.DrawingNumber.Trim();
+        var name = command.Name.Trim();
+        var fileName = Path.GetFileName(command.FileName.Trim());
+        ValidateDocumentMetadataLengths(drawingNumber, name, fileName, archiveContext is not null);
+
         var designDependency = archiveContext is not null && command.Kind == DocumentKind.Other
             && new[] { ".stp", ".step", ".txt", ".xls", ".xlsx", ".xlsm", ".iges", ".igs", ".x_t", ".x_b",
                 ".sat", ".stl", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".slddrt" }
@@ -1228,9 +1175,9 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有向该目录登记图档的权限。");
         var normalized = command with
         {
-            DrawingNumber = command.DrawingNumber.Trim(),
-            Name = command.Name.Trim(),
-            FileName = Path.GetFileName(command.FileName.Trim()),
+            DrawingNumber = drawingNumber,
+            Name = name,
+            FileName = fileName,
             FolderId = targetFolder.Id,
             SourceSha256 = sourceSha256,
             DuplicateReason = duplicateReason
@@ -1307,7 +1254,12 @@ public sealed partial class PdmWorkflowService(
         var requested = (await repository.ListCheckedOutDocumentsAsync(cancellationToken))
             .Where(document => activeSet.Contains(document.Id) && document.CheckoutReleaseRequestedBy is not null)
             .Select(document => document.Id).ToArray();
-        return new(sessionId, now, leaseExpiresAt, active, ids.Where(id => !activeSet.Contains(id)).ToArray(), settings)
+        var clientSettings = settings with
+        {
+            CheckoutReminderHours = settings.CheckoutOverdueHours,
+            CheckoutStrongReminderHours = settings.CheckoutOverdueHours + settings.CheckoutOverdueReleaseGraceHours
+        };
+        return new(sessionId, now, leaseExpiresAt, active, ids.Where(id => !activeSet.Contains(id)).ToArray(), clientSettings)
         { ReleaseRequestedDocumentIds = requested };
     }
 
@@ -1502,7 +1454,7 @@ public sealed partial class PdmWorkflowService(
                 string.Concat(document.DrawingNumber, " / ", document.Name, " -> ", result.Document.DrawingNumber, " / ", result.Document.Name),
                 cancellationToken);
         }
-        if (result.Document.CheckedOutBy is null) await NotifyEditReleasedAsync(document, cancellationToken, result.HandoffTo);
+        if (result.Document.CheckedOutBy is null) await NotifyEditHandoffAsync(document, result.HandoffTo, cancellationToken);
         result = result with { BomRefreshDeferred = deferBomRefresh && !isProjectRoot };
         if (result.VersionCreated && !result.BomRefreshDeferred)
         {
@@ -1607,8 +1559,8 @@ public sealed partial class PdmWorkflowService(
                 .Concat(await repository.GetBomAsync(validation.Project.Id, BomKind.Mechanical, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
             electrical ??= await repository.GetBomAsync(validation.Project.Id, BomKind.Electrical, cancellationToken);
             var commit = new DocumentVersionCommit(input.File, input.Comment.Trim(), properties, snapshot, mechanical, electrical,
-                IsProjectRoot: input.IsProjectRoot, DrawingNumber: latest is null ? input.DrawingNumber : null,
-                Name: latest is null ? input.Name : null, FileName: input.FileName)
+                IsProjectRoot: input.IsProjectRoot, DrawingNumber: latest is null ? validation.DrawingNumber : null,
+                Name: latest is null ? validation.Name : null, FileName: validation.FileName)
             { ExpectedVersionId = input.ExpectedVersionId, RequireBaseVersion = true, KeepEditing = input.KeepEditing, HandoffTo = string.IsNullOrWhiteSpace(input.HandoffTo) ? null : input.HandoffTo.Trim() };
             await ValidateEditDispositionAsync(input.DocumentId, actor, input.KeepEditing, input.HandoffTo, input.DrawingReviewWritebackId, cancellationToken);
             commits.Add(new ArchiveBatchFile(input.DocumentId, commit, input.DrawingReviewWritebackId));
@@ -1625,7 +1577,7 @@ public sealed partial class PdmWorkflowService(
         foreach (var document in followup.PreviousDocuments)
         {
             var result = followup.Receipt.Results.Single(item => item.Document.Id == document.Id);
-            if (result.Document.CheckedOutBy is null) await NotifyEditReleasedAsync(document, cancellationToken, result.HandoffTo);
+            if (result.Document.CheckedOutBy is null) await NotifyEditHandoffAsync(document, result.HandoffTo, cancellationToken);
         }
         var snapshot = await repository.GetLatestReferenceSnapshotAsync(followup.Receipt.ProjectId, cancellationToken);
         if (snapshot is not null)
@@ -1779,9 +1731,6 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("引用树快照必须属于当前项目和当前图档。");
         if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || document.CheckoutSessionId != checkoutSessionId)
             throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。 ");
-        await EnsureDrawingReviewEditAllowedAsync(documentId, drawingReviewWritebackId, "提交存档", cancellationToken);
-        await ValidateArchiveReferenceWarningsAsync(snapshot.Root, cancellationToken);
-
         var normalizedDrawingNumber = drawingNumber?.Trim();
         var normalizedName = name?.Trim();
         var normalizedFileName = fileName?.Trim();
@@ -1789,13 +1738,15 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("图号不能为空。");
         if (name is not null && string.IsNullOrWhiteSpace(normalizedName))
             throw new PdmRuleException("图档名称不能为空。");
-        if (normalizedDrawingNumber?.Length > 160 || normalizedName?.Length > 300)
-            throw new PdmRuleException("图号或图档名称超过允许长度。");
+        ValidateDocumentMetadataLengths(normalizedDrawingNumber, normalizedName, normalizedFileName ?? document.FileName,
+            checkArchiveFileName: normalizedFileName is not null);
         if (fileName is not null
             && (string.IsNullOrWhiteSpace(normalizedFileName)
-                || normalizedFileName.Length > 260
                 || !string.Equals(Path.GetFileName(normalizedFileName), normalizedFileName, StringComparison.Ordinal)))
             throw new PdmRuleException("文件名无效。");
+
+        await EnsureDrawingReviewEditAllowedAsync(documentId, drawingReviewWritebackId, "提交存档", cancellationToken);
+        await ValidateArchiveReferenceWarningsAsync(snapshot.Root, cancellationToken);
         if (snapshot.Root.HasBlockingIssue)
             throw new PdmRuleException("设计树存在缺失引用，不能提交存档。 ");
 
@@ -1803,6 +1754,14 @@ public sealed partial class PdmWorkflowService(
             ?? throw new PdmNotFoundException("项目不存在。");
 
         return new CheckInValidationContext(document, project, normalizedDrawingNumber, normalizedName, normalizedFileName);
+    }
+
+    private static void ValidateDocumentMetadataLengths(string? drawingNumber, string? name, string fileName, bool checkArchiveFileName)
+    {
+        var issue = DocumentMetadataLimits.GetIssue(drawingNumber, name);
+        if (checkArchiveFileName) issue += DocumentMetadataLimits.GetArchiveFileNameIssue(fileName);
+        if (!string.IsNullOrEmpty(issue))
+            throw new PdmRuleException($"{issue}请检查文件「{fileName}」。");
     }
 
     private sealed record CheckInValidationContext(
@@ -1842,10 +1801,8 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("文件指纹不能为空。");
         }
 
-        var prior = await RequireDocumentAsync(documentId, cancellationToken);
         var document = await repository.CompleteEditWithoutChangesAsync(documentId, actor, sessionId, sha256.Trim(), cancellationToken);
         await AuditAsync(actor, "document.edit.complete-unchanged", nameof(PdmDocument), documentId.ToString(), document.Revision.Display, cancellationToken);
-        await NotifyEditReleasedAsync(prior, cancellationToken);
         return document;
     }
 
@@ -1860,22 +1817,33 @@ public sealed partial class PdmWorkflowService(
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
         await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
-        var prior = await RequireDocumentAsync(documentId, cancellationToken);
         var document = await repository.DiscardCheckoutAsync(documentId, actor, sessionId, cancellationToken);
         await AuditAsync(actor, "document.checkout.discard", nameof(PdmDocument), documentId.ToString(), document.Revision.Display, cancellationToken);
-        await NotifyEditReleasedAsync(prior, cancellationToken);
         return document;
     }
 
-    public async Task<IReadOnlyList<EditLockSummary>> ListEditLocksAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<EditLockSummary>> ListEditLocksAsync(string actor, UserRole role, CancellationToken cancellationToken, Guid? documentId = null)
     {
+        IReadOnlyList<PdmDocument> documents;
+        if (documentId is Guid selectedId)
+        {
+            var selected = await repository.FindDocumentAsync(selectedId, cancellationToken);
+            if (selected is null || string.IsNullOrWhiteSpace(selected.CheckedOutBy)) return [];
+            if (!await repository.HasDocumentAccessAsync(selectedId, actor, role, FolderAccess.View, cancellationToken)) return [];
+            documents = [selected];
+        }
+        else
+        {
+            documents = await repository.ListCheckedOutDocumentsAsync(cancellationToken);
+        }
+        if (documents.Count == 0) return [];
         var canRequestPermission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentLockRequestRelease, cancellationToken);
         var canForcePermission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentLockForceRelease, cancellationToken);
         var canEmergencyPermission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentLockEmergencyRelease, cancellationToken);
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var now = timeProvider.GetUtcNow();
         var result = new List<EditLockSummary>();
-        foreach (var document in await repository.ListCheckedOutDocumentsAsync(cancellationToken))
+        foreach (var document in documents)
         {
             if (string.IsNullOrWhiteSpace(document.CheckedOutBy)) continue;
             var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
@@ -1883,8 +1851,12 @@ public sealed partial class PdmWorkflowService(
             var owned = string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase);
             var canEditDocument = !owned && canRequestPermission
                 && await repository.HasDocumentAccessAsync(document.Id, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
-            var lockManager = canForcePermission && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockForceRelease, cancellationToken);
-            var emergencyManager = canEmergencyPermission && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, cancellationToken);
+            var canManageDocument = (canForcePermission || canEmergencyPermission)
+                && await repository.HasDocumentAccessAsync(document.Id, actor, role, FolderAccess.View, cancellationToken);
+            var lockManager = !owned && canManageDocument && canForcePermission
+                && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockForceRelease, cancellationToken);
+            var emergencyManager = canManageDocument && canEmergencyPermission
+                && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, cancellationToken);
             var canReleaseOwn = owned && await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken)
                 && await repository.HasDocumentAccessAsync(document.Id, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
             if (!owned && !canEditDocument && !lockManager && !emergencyManager) continue;
@@ -1899,13 +1871,13 @@ public sealed partial class PdmWorkflowService(
                     : EditLockConnectionState.Offline;
             var attention = connectionState == EditLockConnectionState.Offline ? EditLockAttentionLevel.Reclaimable
                 : AttentionLevel(now - checkedOutAt, settings);
+            var canReclaim = document.State is not (DocumentLifecycleState.InReview or DocumentLifecycleState.Obsolete) && !document.DrawingReviewLocked;
             result.Add(new(
                 document.Id, document.ProjectId, project.Code, project.Name, document.DrawingNumber, document.Name, document.FileName,
                 document.CheckedOutBy, checkedOutAt, document.CheckoutMachine, heartbeatAt, leaseExpiresAt, connectionState, attention,
                 document.CheckoutReleaseRequestedBy, document.CheckoutReleaseRequestedAt, document.CheckoutReleaseRequestReason,
-                owned, canEditDocument, (lockManager || canReleaseOwn) && connectionState == EditLockConnectionState.Offline)
-            { SessionId = document.CheckoutSessionId, CanEmergencyRelease = canEmergencyPermission && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, cancellationToken)
-                && document.State is not (DocumentLifecycleState.InReview or DocumentLifecycleState.Obsolete) && !document.DrawingReviewLocked });
+                owned, canEditDocument, (lockManager || canReleaseOwn) && canReclaim && connectionState == EditLockConnectionState.Offline)
+            { SessionId = document.CheckoutSessionId, CanEmergencyRelease = emergencyManager && canReclaim && document.CheckoutSessionId.HasValue && document.CheckedOutAt.HasValue });
         }
         return result.OrderByDescending(item => item.AttentionLevel).ThenBy(item => item.CheckedOutAt).ToArray();
     }
@@ -1920,31 +1892,36 @@ public sealed partial class PdmWorkflowService(
         reason = RequiredReason(reason);
         current = await repository.RequestCheckoutReleaseAsync(documentId, actor, reason, cancellationToken);
         var sourceKey = EditHandoff.WaitingKey(current);
+        var actorName = (await repository.FindUserAsync(actor, cancellationToken))?.DisplayName;
         await repository.CreateUserNotificationsAsync([
-            new(Guid.NewGuid(), actor, "EditLockWaiting", "已申请编辑图档", $"{current.FileName}：系统将在本次编辑结束后通知您。", current.ProjectId, null, sourceKey, timeProvider.GetUtcNow(), timeProvider.GetUtcNow(), IsSenderReceipt: true),
-            new(Guid.NewGuid(), current.CheckedOutBy!, "EditLockRequested", "有人需要编辑图档", $"{actor}需要编辑{current.FileName}。请存档交接或说明继续编辑原因。申请说明：{reason}", current.ProjectId, null, $"edit-request:{sourceKey}:{actor}", timeProvider.GetUtcNow(), null)
+            new(Guid.NewGuid(), actor, "EditLockWaiting", "已申请编辑图档", $"{current.FileName}。请在图档页查看当前编辑状态。", current.ProjectId, null, sourceKey, timeProvider.GetUtcNow(), timeProvider.GetUtcNow(), IsSenderReceipt: true),
+            new(Guid.NewGuid(), current.CheckedOutBy!, "EditLockRequested", "有人需要编辑图档", $"{(string.IsNullOrWhiteSpace(actorName) ? "姓名待补充" : actorName)}需要编辑{current.FileName}。请存档交接或说明继续编辑原因。申请说明：{reason}", current.ProjectId, null, $"edit-request:{sourceKey}:{actor}", timeProvider.GetUtcNow(), null)
         ], cancellationToken);
         await AuditAsync(actor, "document.checkout.release-request", nameof(PdmDocument), documentId.ToString(), $"当前编辑人：{current.CheckedOutBy}；原因：{reason}", cancellationToken);
-        var summary = (await ListEditLocksAsync(actor, role, cancellationToken)).FirstOrDefault(item => item.DocumentId == documentId);
+        var summary = (await ListEditLocksAsync(actor, role, cancellationToken, documentId)).FirstOrDefault();
         if (summary is null) throw new PdmConflictException("该图档已结束编辑，请刷新后直接点击编辑。");
         return summary;
     }
 
-    public async Task<PdmDocument> ForceReleaseEditLockAsync(Guid documentId, string actor, UserRole role, string reason, CancellationToken cancellationToken)
+    public async Task<PdmDocument> ForceReleaseEditLockAsync(Guid documentId, string actor, UserRole role, string reason, CancellationToken cancellationToken, Guid? sessionId = null, DateTimeOffset? checkedOutAt = null)
     {
         var current = await repository.FindDocumentAsync(documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
         if (string.IsNullOrWhiteSpace(current.CheckedOutBy)) throw new PdmConflictException("图档当前没有编辑权限可释放。");
         var owned = string.Equals(current.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase);
         await RequirePermissionAsync(actor, role, owned ? PermissionCodes.DocumentEdit : PermissionCodes.DocumentLockForceRelease, cancellationToken);
-        if (owned) await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
+        await RequireDocumentAccessAsync(documentId, actor, role, owned ? FolderAccess.View | FolderAccess.Edit : FolderAccess.View, cancellationToken);
         var project = await repository.FindProjectAsync(current.ProjectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         if (!owned && !await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockForceRelease, cancellationToken)) throw new UnauthorizedAccessException("当前账号没有结束其他人员异常占用的权限。");
+        if (sessionId.HasValue != checkedOutAt.HasValue || sessionId == Guid.Empty)
+            throw new PdmRuleException("请刷新图档列表后重新选择要释放的编辑权限。");
+        if (sessionId.HasValue && (current.CheckoutSessionId != sessionId || current.CheckedOutAt != checkedOutAt))
+            throw new PdmConflictException("编辑会话已经变化，原释放请求已取消，请刷新后重试。");
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var now = timeProvider.GetUtcNow();
         var heartbeatBefore = now.AddMinutes(-Math.Max(settings.CheckoutOfflineGraceMinutes, settings.CheckoutLeaseMinutes));
         if ((current.CheckoutLastHeartbeatAt ?? current.CheckedOutAt ?? current.UpdatedAt) >= heartbeatBefore
             || current.CheckoutLeaseExpiresAt >= now)
-            throw new PdmRuleException("编辑人员仍在线或处于离线保护期，请先点击“我需要编辑”；系统将在对方结束编辑后通知您。");
+            throw new PdmRuleException("编辑人员仍在线或处于离线保护期，请先点击“我需要编辑”。");
         reason = RequiredReason(reason);
         var priorOwner = current.CheckedOutBy;
         var priorSession = current.CheckoutSessionId;
@@ -1952,8 +1929,6 @@ public sealed partial class PdmWorkflowService(
             ? await repository.ReclaimCheckoutAsync(documentId, activeSession, started, heartbeatBefore, now, cancellationToken)
             : await repository.ForceReleaseOfflineCheckoutAsync(documentId, priorSession, heartbeatBefore, now, cancellationToken);
         await AuditAsync(actor, "document.checkout.force-release", nameof(PdmDocument), documentId.ToString(), $"原编辑人：{priorOwner}；原会话：{priorSession}；电脑：{current.CheckoutMachine ?? "未知"}；原因：{reason}", cancellationToken);
-        await NotifyEditReleasedAsync(current, cancellationToken);
-        await repository.CreateUserNotificationsAsync([new(Guid.NewGuid(), priorOwner!, "EditLockReleased", "离线图档已结束占用", $"{current.FileName}的离线占用已由{actor}处理。本地修改仍可保留，再次编辑时请核对服务器版本。", current.ProjectId, null, $"edit-reclaimed:{documentId:N}:{priorSession:N}", now, null)], cancellationToken);
         return updated;
     }
 
@@ -1962,32 +1937,23 @@ public sealed partial class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
         await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
         var current = await RequireDocumentAsync(documentId, cancellationToken);
-        if (current.CheckedOutBy is null)
-        {
-            await NotifyEditReleasedAsync(current with { CheckoutSessionId = sessionId }, cancellationToken);
-            return current; // Response loss: ending an already closed edit is safe.
-        }
+        if (current.CheckedOutBy is null) return current; // Response loss: ending an already closed edit is safe.
         if (current.CheckoutSessionId != sessionId || !string.Equals(current.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase))
             throw new PdmConflictException("编辑会话已变化，本地草稿已保留，请重新打开图档核对版本。");
         if (string.IsNullOrWhiteSpace(sha256)) throw new PdmRuleException("无法校验本地图档，已保留编辑状态。请保存文件后重试。");
         var updated = await repository.CloseCheckoutAsync(documentId, actor, sessionId, checkedOutAt, sha256, draftPreserved, cancellationToken);
         await AuditAsync(actor, "document.edit.auto-close", nameof(PdmDocument), documentId.ToString(), draftPreserved ? "已校验本机恢复草稿，自动结束编辑" : "文件无变化，自动结束编辑", cancellationToken);
-        await NotifyEditReleasedAsync(current, cancellationToken);
         return updated;
     }
 
-    private async Task NotifyEditReleasedAsync(PdmDocument prior, CancellationToken cancellationToken, string? handoffTo = null)
+    private async Task NotifyEditHandoffAsync(PdmDocument prior, string? handoffTo, CancellationToken cancellationToken)
     {
-        var recipients = await repository.ListNotificationRecipientsAsync(EditHandoff.WaitingKey(prior), cancellationToken);
-        await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(
-            Guid.NewGuid(), recipient, "EditLockAvailable", handoffTo is null ? "图档已结束编辑" : "图档已定向交接",
-            handoffTo is null ? $"{prior.FileName}的原编辑会话已结束，可打开图档尝试编辑。" : $"{prior.FileName}已存档并交接给{handoffTo}，为其预留5分钟接手时间。", prior.ProjectId, null,
-            $"edit-available:{EditHandoff.WaitingKey(prior)}", timeProvider.GetUtcNow(), null)).ToArray(), cancellationToken);
-        if (handoffTo is not null)
-        {
-            await EditNoticeAsync([handoffTo], "EditLockHandoff", "请接收图档交接", $"{prior.CheckedOutBy}已将{prior.FileName}存档并交接给您，请在5分钟内从PLM获取最新版本并编辑。", prior.ProjectId, $"edit-handoff:{prior.Id:N}:{prior.CheckoutSessionId:N}:{prior.CheckedOutAt?.UtcTicks}", cancellationToken);
-            await AuditAsync(prior.CheckedOutBy ?? "system", "document.checkout.handoff", nameof(PdmDocument), prior.Id.ToString(), "存档后定向交接给" + handoffTo + "；预留5分钟", cancellationToken);
-        }
+        if (string.IsNullOrWhiteSpace(handoffTo)) return;
+        var senderName = prior.CheckedOutBy is { } owner
+            ? (await repository.FindUserAsync(owner, cancellationToken))?.DisplayName
+            : null;
+        await EditNoticeAsync([handoffTo], "EditLockHandoff", "请接收图档交接", $"{(string.IsNullOrWhiteSpace(senderName) ? "姓名待补充" : senderName)}已将{prior.FileName}存档并交接给您，请在5分钟内从PLM获取最新版本并编辑。", prior.ProjectId, $"edit-handoff:{prior.Id:N}:{prior.CheckoutSessionId:N}:{prior.CheckedOutAt?.UtcTicks}", cancellationToken);
+        await AuditAsync(prior.CheckedOutBy ?? "system", "document.checkout.handoff", nameof(PdmDocument), prior.Id.ToString(), "存档后定向交接给" + handoffTo + "；预留5分钟", cancellationToken);
     }
 
     public async Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(
@@ -3178,13 +3144,15 @@ public sealed partial class PdmWorkflowService(
         return new(package.Id, package.Number, generated, automation);
     }
 
-    public async Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, string actor, UserRole role, CancellationToken cancellationToken,
+        bool includeFiles = true)
     {
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
         var items = await BomDrawingRevision.CurrentAsync(repository,
             await ReadCurrentBomAsync(projectId, kind, cancellationToken), cancellationToken);
-        if (kind == BomKind.Standard && bomFiles is not null) items = await bomFiles.CaptureAsync(items, cancellationToken, refreshCurrent: true);
+        if (includeFiles && kind == BomKind.Standard && bomFiles is not null)
+            items = await bomFiles.CaptureAsync(items, cancellationToken, refreshCurrent: true);
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
             return items.Select(item => item with { IsComplete = false }).ToArray();
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
@@ -3300,7 +3268,7 @@ public sealed partial class PdmWorkflowService(
             }).Distinct().Count() > 1);
         if (inconsistentKitReference is not null) throw new PdmRuleException("同一套件引用必须固定为同一个已发布版本。");
 
-        var existing = await repository.GetBomAsync(projectId, kind, cancellationToken);
+        var existing = await repository.GetBomItemsForUpdateAsync(projectId, kind, cancellationToken);
         var existingById = existing.ToDictionary(item => item.Id);
         var consolidatedSourceIds = new HashSet<Guid>();
         var consolidatedQuantities = new Dictionary<Guid,decimal>();
@@ -3508,7 +3476,8 @@ public sealed partial class PdmWorkflowService(
             : null;
         if (latestSnapshot is not null)
         {
-            var latestSource = await GenerateMechanicalBomFromSnapshotAsync(projectId, latestSnapshot, actor, cancellationToken, false, false);
+            var latestSource = await GenerateMechanicalBomFromSnapshotCoreAsync(projectId, latestSnapshot, actor, cancellationToken,
+                apply: false, preserveManualOverrides: false, batchReadSourceProperties: true);
             items = MarkManualSourceDuplicates(
                 items,
                 latestSource.StandardItems.Concat(latestSource.NonStandardItems).Concat(latestSource.UnclassifiedItems).ToArray(),
@@ -4300,7 +4269,7 @@ public sealed partial class PdmWorkflowService(
         var manualCount = selected.Length - sourceCount;
         var removedDetails = string.Join('、', selected.Select(item => item.DrawingNumber));
         var audit = new AuditEntry(Guid.NewGuid(), deletedAt, actor, "bom.batch-delete", nameof(BomItem), projectId.ToString(), $"移入回收站{itemIds.Count}条；有源{sourceCount}条；人工{manualCount}条；原因：{reason}；物料：{removedDetails}");
-        await repository.ApplyBomBatchAsync(projectId, updatedStandard, updatedNonStandard, updatedUnclassified, updatedElectrical, virtualItems, componentDrawingItems, [], [audit], cancellationToken);
+        await repository.ApplyBomBatchAsync(projectId, updatedStandard, updatedNonStandard, updatedUnclassified, updatedElectrical, virtualItems, componentDrawingItems, [], [audit], cancellationToken, explicitlyRemovedItems: itemIds);
         foreach (var changedKind in selected.Select(item => item.Kind).Where(candidate => candidate is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical).Distinct())
             await SyncBomDraftAsync(projectId, changedKind, actor, cancellationToken);
         return updatedStandard.Concat(updatedNonStandard).Concat(updatedUnclassified).Concat(updatedElectrical).ToArray();
@@ -5447,9 +5416,7 @@ public sealed partial class PdmWorkflowService(
         var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken) ?? throw new PdmNotFoundException("审批任务不存在。");
         if (!await ApprovalEmergencyPolicy.CanAsync(repository, package.ProjectId, package.EmergencyRoleCodes, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户不属于该审批流配置的紧急代批角色，或无项目访问权限。");
-        reason = decision == ApprovalDecision.Approved && package.DrawingReview is not null && string.IsNullOrWhiteSpace(reason)
-            ? null
-            : RequiredComment(reason, "紧急代批原因");
+        reason = RequiredComment(reason, "紧急代批原因");
         return await CompleteApprovalDecisionAsync(taskId, actor, decision, reason, true, reason, publishImmediately, cancellationToken);
     }
 
@@ -5823,40 +5790,58 @@ public sealed partial class PdmWorkflowService(
         if (settings.CheckoutIdleReleaseMinutes is < 5 or > 1440 || settings.CheckoutReleaseCountdownSeconds is < 30 or > 300)
             throw new PdmRuleException("闲置释放等待须为5到1440分钟，倒计时须为30到300秒。");
         if (settings.CheckoutForceReleaseHours is < 24 or > 720) throw new PdmRuleException("长期离线自动回收须为24到720小时。");
-        if (settings.CheckoutReminderHours < 1
-            || settings.CheckoutStrongReminderHours <= settings.CheckoutReminderHours
-            || settings.CheckoutOverdueHours <= settings.CheckoutStrongReminderHours
-            || settings.CheckoutOverdueHours > 720)
-            throw new PdmRuleException("提醒、强提醒和超时时间必须依次增大，且不超过720小时。");
+        if (settings.CheckoutReminderHours < 1 || settings.CheckoutStrongReminderHours <= settings.CheckoutReminderHours || settings.CheckoutStrongReminderHours > 720)
+            throw new PdmRuleException("旧版提醒和强提醒时间须依次增大，且不超过720小时。");
+        if (settings.CheckoutOverdueHours is < 1 or > 720 || settings.CheckoutOverdueReleaseGraceHours is < 1 or > 720)
+            throw new PdmRuleException("占用超时提醒和提醒后自动释放的等待时间均须为1到720小时。");
     }
 
     private static EditLockAttentionLevel AttentionLevel(TimeSpan elapsed, PdmSystemSettings settings) =>
         elapsed >= TimeSpan.FromHours(settings.CheckoutOverdueHours) ? EditLockAttentionLevel.Overdue
-        : elapsed >= TimeSpan.FromHours(settings.CheckoutStrongReminderHours) ? EditLockAttentionLevel.StrongReminder
-        : elapsed >= TimeSpan.FromHours(settings.CheckoutReminderHours) ? EditLockAttentionLevel.Reminder
         : EditLockAttentionLevel.Normal;
 
-    private async Task<BomGenerationResult> GenerateMechanicalBomFromSnapshotAsync(
+    private Task<BomGenerationResult> GenerateMechanicalBomFromSnapshotAsync(
         Guid projectId,
         CadReferenceSnapshot snapshot,
         string actor,
         CancellationToken cancellationToken,
         bool apply,
-        bool preserveManualOverrides = true)
+        bool preserveManualOverrides = true) =>
+        GenerateMechanicalBomFromSnapshotCoreAsync(projectId, snapshot, actor, cancellationToken,
+            apply, preserveManualOverrides, batchReadSourceProperties: false);
+
+    private async Task<BomGenerationResult> GenerateMechanicalBomFromSnapshotCoreAsync(
+        Guid projectId,
+        CadReferenceSnapshot snapshot,
+        string actor,
+        CancellationToken cancellationToken,
+        bool apply,
+        bool preserveManualOverrides,
+        bool batchReadSourceProperties)
     {
         // An incomplete index may add confirmed sources, but cannot prove that an
         // existing material or quantity disappeared. Full reconciliation waits.
         var partialStructure = snapshot.Root.HasPendingStructureIndex;
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var documents = (await repository.ListDocumentsAsync(projectId, cancellationToken)).ToDictionary(item => item.Id);
-        var electrical = (await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken)).ToArray();
-        var existing = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken))
-            .Concat(await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken))
-            .Concat(await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken))
-            .Concat(await repository.GetBomAsync(projectId, BomKind.Virtual, cancellationToken))
-            .Concat(await repository.GetBomAsync(projectId, BomKind.ComponentDrawing, cancellationToken))
+        Task<IReadOnlyList<BomItem>> ReadBom(BomKind kind) => batchReadSourceProperties
+            ? repository.GetBomItemsForUpdateAsync(projectId, kind, cancellationToken)
+            : repository.GetBomAsync(projectId, kind, cancellationToken);
+        var electrical = (await ReadBom(BomKind.Electrical)).ToArray();
+        var existing = (await ReadBom(BomKind.Standard))
+            .Concat(await ReadBom(BomKind.NonStandard))
+            .Concat(await ReadBom(BomKind.Unclassified))
+            .Concat(await ReadBom(BomKind.Virtual))
+            .Concat(await ReadBom(BomKind.ComponentDrawing))
             .ToArray();
-        var sourceCache = new Dictionary<(Guid, string), (PdmDocument Document, DocumentVersion? Version)>();
+        // The save-time duplicate check only uses frozen version labels and property cards.
+        var sourceProperties = batchReadSourceProperties
+            ? (await repository.ListBomSourceVersionPropertiesAsync(FlattenOpenNodes(snapshot.Root)
+                .Where(node => node.DocumentId.HasValue && documents.ContainsKey(node.DocumentId.Value)
+                    && node.Kind != DocumentKind.Drawing && node.Role != ReferenceRole.ExternalFileDependency)
+                .Select(node => node.DocumentId!.Value).Distinct().ToArray(), cancellationToken)).ToLookup(version => version.DocumentId)
+            : null;
+        var sourceCache = new Dictionary<(Guid, string), (PdmDocument Document, BomSourceVersionProperties? Version)>();
         var existingByDocument = existing.ToLookup(item => item.SourceDocumentId);
         var existingById = existing.ToDictionary(item => item.Id);
         IReadOnlyList<BomVersion>? releasedCodeVersions = null;
@@ -5864,13 +5849,15 @@ public sealed partial class PdmWorkflowService(
         var virtualCount = 0;
         var reconciliationTime = timeProvider.GetUtcNow();
 
-        async Task<(PdmDocument Document, DocumentVersion? Version)?> SourceAsync(DocumentReferenceNode node)
+        async Task<(PdmDocument Document, BomSourceVersionProperties? Version)?> SourceAsync(DocumentReferenceNode node)
         {
             var documentId = node.DocumentId;
             if (!documentId.HasValue || !documents.TryGetValue(documentId.Value, out var document)) return null;
             var key = (documentId.Value, node.Revision?.Display ?? "");
             if (sourceCache.TryGetValue(key, out var cached)) return cached;
-            var history = await repository.ListDocumentVersionsAsync(documentId.Value, cancellationToken);
+            IEnumerable<BomSourceVersionProperties> history = sourceProperties is null
+                ? (await repository.ListDocumentVersionsAsync(documentId.Value, cancellationToken)).Select(BomSourceVersionProperties.From)
+                : sourceProperties[documentId.Value];
             var latest = node.Revision is null ? partialStructure ? null : history.FirstOrDefault()
                 : history.FirstOrDefault(version => version.Revision.Display == node.Revision.Value.Display);
             // Legacy snapshots can predate the first immutable version. Keep their source
@@ -6723,7 +6710,7 @@ public sealed partial class PdmWorkflowService(
             null) { ResolvedAt = category == "DrawingReviewApproved" ? createdAt : null }).ToArray(), cancellationToken);
     }
 
-    /// <summary>手动重试转图：把发布包的转图事项重新排队（不影响已完成的发布）。</summary>
+    /// <summary>重新排队转图，或用冻结资料继续已完成审批的失败发布。</summary>
     public async Task<ReleasePackage> DemandReleasePreviewRetryAsync(Guid releasePackageId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
@@ -6732,15 +6719,48 @@ public sealed partial class PdmWorkflowService(
         await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
-        if (package.State != ReleasePackageState.Published && package.State != ReleasePackageState.Publishing)
-            throw new PdmRuleException("只有审批完成等待转图或已发布的发布包可以重试转图。");
+        var resumingFailed = package.State == ReleasePackageState.PublishFailed;
+        if (!resumingFailed && package.State is not (ReleasePackageState.Published or ReleasePackageState.Publishing))
+            throw new PdmRuleException("请先完成发布审批，再重试转图。");
         if (!ReleasePreviewPolicy.RequiresConversion(package)) throw new PdmRuleException("该发布类型不支持转图。");
         if (ReleasePreviewPolicy.DeliversFrozenDrawings(package) && package.DrawingReview?.Items.Count is not > 0)
             throw new PdmRuleException("该历史长交期发布包缺少冻结审核图纸，无法补转。");
-        var saved = await repository.MarkReleasePreviewStateAsync(releasePackageId, ReleasePreviewState.Pending, null, 0, timeProvider.GetUtcNow(), cancellationToken);
-        await AuditAsync(actor, "release-package.preview.retry", nameof(ReleasePackage), releasePackageId.ToString(),
-            $"{package.Number}；重新排队转图", cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        ReleasePackage saved;
+        if (resumingFailed)
+        {
+            if (!package.CanResumePreviewRetry)
+                throw new PdmRuleException("发布包缺少完整审批或冻结转图来源，无法续跑，请核对发布包后重新提交。");
+            await ValidateFailedReleaseRetryAsync(package, cancellationToken);
+            saved = await repository.ResumeFailedReleasePreviewAsync(package, now, cancellationToken);
+        }
+        else
+            saved = await repository.MarkReleasePreviewStateAsync(releasePackageId, ReleasePreviewState.Pending, null, 0, now, cancellationToken);
+        var detail = resumingFailed ? $"{package.Number}；保留审批记录并重新排队发布；原失败原因：{package.PublishError}"
+            : $"{package.Number}；重新排队转图";
+        await AuditAsync(actor, "release-package.preview.retry", nameof(ReleasePackage), releasePackageId.ToString(), detail, cancellationToken);
         return saved;
+    }
+
+    private async Task ValidateFailedReleaseRetryAsync(ReleasePackage package, CancellationToken ct)
+    {
+        foreach (var versionId in PackageBomVersionIds(package))
+        {
+            var version = await repository.FindBomVersionAsync(package.ProjectId, versionId, ct);
+            if (version is null || version.State is not (BomVersionState.InReview or BomVersionState.Released))
+                throw new PdmConflictException("冻结BOM版本已变化，请核对发布包后重新提交。");
+            var frozen = PackageBomSnapshot(package, version.Kind);
+            if (!package.RootDocumentId.HasValue && !BomSnapshotsEqual(version.Items, frozen))
+                throw new PdmConflictException("冻结BOM内容已变化，请核对发布包后重新提交。");
+            if (version.Kind != BomKind.NonStandard && package.Scope != ReleaseScope.LegacyCombined
+                && (await repository.FindLatestBomVersionAsync(package.ProjectId, version.Kind, BomVersionState.Released, ct))?.Id != version.Id)
+                throw new PdmConflictException("同项目的正式BOM基线已更新，请重新核对发布范围。");
+        }
+        await ValidateReleaseVersionsAsync(package, ct, allowPackagePromotion: true);
+        var sources = await ReleaseBoundSourceReader.ReadAsync(repository, package, true, ct);
+        ReleasePreviewService.RequireFrozenDrawings(package, sources);
+        if (!sources.Any(source => source.Kind == DocumentKind.Drawing))
+            throw new PdmConflictException("发布包没有可核实的冻结工程图，无法重试转图。");
     }
 
     private async Task CreateReleasePreviewNotificationsAsync(

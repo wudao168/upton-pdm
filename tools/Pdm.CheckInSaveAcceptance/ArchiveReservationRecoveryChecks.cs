@@ -59,10 +59,13 @@ internal static partial class Program
                     pane.CreateControl();SetField(plugin,"taskPaneControl",pane);SetField(plugin,"lifetime",lifetime);
                     http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");
                     SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);Set(client,"EditJournalScope","recovery-fixture");SetField(plugin,"apiClient",client);
+                    SetField(client,"archiveRecoveryWindow",TimeSpan.Zero);
                     Exception failure=null;
                     try{await (Task)TreeCall(plugin,"CheckInBatchAsync",LinkedItems(node),project,"恢复测试",null,CancellationToken.None,null,null,decisions,null,false,null);}
                     catch(Exception error){failure=error;}
-                    Check(failure!=null&&handler.Reservations==1,"预留响应丢失时停止，不盲目重试写请求");
+                    if(failure==null||handler.Reservations!=1)
+                        throw new Exception("预留响应丢失且恢复时限用尽时停止。实际预留次数："+handler.Reservations,failure);
+                    Console.WriteLine("PASS: 预留响应丢失且恢复时限用尽时停止");
                     Check(handler.Cleanups==1,"即使尚未收到任何图档ID，也按批次清理服务器预留");
                     var records=Directory.GetFiles(Path.Combine(folder,"journal"),"*.json");
                     Check(records.Length==(offline?1:0),offline?"清理连接失败时保留恢复记录，不丢失未确认预留":"清理已确认后才移除恢复记录");
@@ -81,7 +84,13 @@ internal static partial class Program
         object Node(string name,string kind){var path=Path.GetFullPath(Path.Combine(output,name));File.WriteAllText(path,"saved "+name);var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName",name);Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),kind));return node;}
         var root=Node("显示总装.SLDASM","Assembly");
         for(var index=0;index<2;index++){var model=Node("P"+index+".SLDPRT","Part");var drawing=Node("P"+index+".SLDDRW","Drawing");((IList)Get(drawing,"ReferencedModels")).Add(model);nodes.Add(model);nodes.Add(drawing);((IList)Get(root,"Children")).Add(model);((IList)Get(model,"Children")).Add(drawing);}
-        var ids=nodes.ToDictionary(node=>(string)Get(node,"FileName"),node=>Guid.NewGuid());var registered=new HashSet<Guid>();var modelLinks=0;
+        var storedModel=Node("已入库零件.SLDPRT","Part");var addedDrawing=Node("已入库零件.SLDDRW","Drawing");
+        var storedId=Guid.NewGuid();Set(storedModel,"DocumentId",storedId);
+        ((IList)Get(addedDrawing,"ReferencedModels")).Add(storedModel);((IList)Get(storedModel,"Children")).Add(addedDrawing);
+        ((IList)Get(root,"Children")).Add(storedModel);nodes.Add(addedDrawing);
+        var ids=nodes.ToDictionary(node=>(string)Get(node,"FileName"),node=>Guid.NewGuid());
+        ids.Add((string)Get(storedModel,"FileName"),storedId);
+        var registered=new HashSet<Guid>{storedId};var modelLinks=0;
         var decisions=(IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(string),Type("PdmAddin+RegistrationDecision")));
         foreach(var node in nodes)decisions.Add(Get(node,"FullPath"),New("PdmAddin+RegistrationDecision",WorkingReuseHash((string)Get(node,"FullPath")),false,""));
         var journal=Type("ArchiveBatchJournal").GetField("directory",Flags);var old=journal.GetValue(null);journal.SetValue(null,Path.Combine(output,"batches"));
@@ -92,6 +101,7 @@ internal static partial class Program
             using(var handler=new ReferenceRecoveryHandler(request=>{
                 var json=new JavaScriptSerializer();var payload=json.Deserialize<Dictionary<string,object>>(request.Content.ReadAsStringAsync().GetAwaiter().GetResult());var doc=(Dictionary<string,object>)payload["document"];
                 var name=(string)doc["fileName"];var id=ids[name];
+                if(id==storedId)throw new Exception("配套新工程图登记不得重复登记已有模型");
                 if(name.EndsWith(".SLDDRW")){var model=Guid.Parse(Convert.ToString(doc["relatedModelDocumentId"]));if(model!=ids[Path.ChangeExtension(name,".SLDPRT")]||!registered.Contains(model))throw new Exception("工程图早于模型身份或关联错误");modelLinks++;}
                 if((string)doc["sourceSha256"]!=WorkingReuseHash(Path.GetFullPath(Path.Combine(output,name))))throw new Exception("登记内容指纹改变");
                 registered.Add(id);return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(json.Serialize(new{id,projectId=project,fileName=name,kind=doc["kind"],checkedOutBy="tester",checkoutSessionId=checkout,checkedOutAt=DateTime.UtcNow}))};
@@ -100,12 +110,12 @@ internal static partial class Program
             {
                 http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(client,"httpClient",http);Set(client,"EditJournalScope","registration-fixture");SetField(plugin,"apiClient",client);
                 SetField(plugin,"authenticatedUsername","tester");SetField(plugin,"currentTree",root);SetField(plugin,"editJournalScope","registration-fixture|tester");SetField(plugin,"editJournal",New("EditDraftJournal",Path.Combine(output,"drafts"),"registration-fixture|tester"));
-                var reserved=new List<Guid>();var task=(Task)TreeCall(plugin,"RegisterPendingArchiveDocumentsAsync",LinkedItems(nodes.ToArray()),project,batch,decisions,reserved,CancellationToken.None);await task;
-                if((int)Get(task,"Result")!=4||reserved.Count!=4||nodes.Any(node=>(Guid)Get(node,"DocumentId")!=ids[(string)Get(node,"FileName")]))throw new Exception("登记结果与文件身份不一致");
+                var reserved=new List<Guid>();var task=(Task)TreeCall(plugin,"RegisterPendingArchiveDocumentsAsync",LinkedItems(nodes.Append(storedModel).ToArray()),project,batch,decisions,reserved,CancellationToken.None);await task;
+                if((int)Get(task,"Result")!=nodes.Count||reserved.Count!=nodes.Count||nodes.Any(node=>(Guid)Get(node,"DocumentId")!=ids[(string)Get(node,"FileName")]))throw new Exception("登记结果与文件身份不一致");
                 Console.WriteLine("PASS: 新模型及工程图批量登记身份逐项匹配");
-                if(modelLinks!=2)throw new Exception("图模关系未检查");Console.WriteLine("PASS: 工程图登记前模型身份已就绪，双向关联入口保持原语义");
+                if(modelLinks!=3)throw new Exception("图模关系未检查");Console.WriteLine("PASS: 新工程图使用正确的模型身份，已入库模型未重复登记");
                 var saved=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(File.ReadAllText(Path.Combine(output,"batches",batch.ToString("N")+".json")));
-                if(((IEnumerable)saved["ReservedDocumentIds"]).Cast<object>().Count()!=4)throw new Exception("恢复记录遗漏身份");Console.WriteLine("PASS: 每份成功预留身份均保留在持久恢复记录中");
+                if(((IEnumerable)saved["ReservedDocumentIds"]).Cast<object>().Count()!=nodes.Count)throw new Exception("恢复记录遗漏身份");Console.WriteLine("PASS: 每份成功预留身份均保留在持久恢复记录中");
             }
         }
         finally{journal.SetValue(null,old);}

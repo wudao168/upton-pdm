@@ -8,6 +8,7 @@
     <Compile Include="../../src/Pdm.SolidWorks.Addin/EditDraftJournal.cs" Link="EditDraftJournal.cs" />
     <Compile Include="../../src/Pdm.SolidWorks.Addin/ArchiveFileFingerprint.cs" Link="ArchiveFileFingerprint.cs" />
     <Compile Include="../../src/Pdm.SolidWorks.Addin/PdmDocumentIdentityStore.cs" Link="PdmDocumentIdentityStore.cs" />
+    <Compile Include="../../src/Pdm.SolidWorks.Addin/ManagedCadPaths.cs" Link="ManagedCadPaths.cs" />
     <Compile Include="../../src/Pdm.LocalSettings/WorkspaceSettingsStore.cs" Link="WorkspaceSettingsStore.cs" />
     <Compile Include="../../src/Pdm.Desktop/WorkspaceVersionVerificationClient.cs" Link="WorkspaceVersionVerificationClient.cs" />
   </ItemGroup>

@@ -40,7 +40,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         this.repository = repository;
         this.pdfReleaseStamp = pdfReleaseStamp;
         storage = storageOptions?.Value ?? new PdmStorageOptions();
-        this.httpClient = httpClient ?? new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(15) })
+        this.httpClient = httpClient ?? new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(15), AllowAutoRedirect = false })
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
@@ -106,18 +106,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         var conversionSettings = repository is null
             ? PreviewConversionSettings.Default
             : (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion ?? PreviewConversionSettings.Default;
-        if (conversionSettings.TimeoutMinutes is < 1 or > 120) throw new PdmRuleException("图纸转换超时必须设置为1到120分钟。");
+        conversionSettings = SelectPreviewServers(conversionSettings, project.OrganizationId);
         var remote = conversionSettings.Mode == PreviewConversionMode.Remote;
-        if (remote && conversionSettings.Servers.Count > 0)
-        {
-            var allowed = conversionSettings.Servers.Where(host => !host.Disabled && (!host.CompanyId.HasValue || host.CompanyId == project.OrganizationId)).ToArray();
-            if (allowed.Length == 0) throw new PreviewServerUnavailableException("当前项目所属公司没有已勾选的转图服务器，等待管理员选择后重试。");
-            conversionSettings = conversionSettings with { Servers = allowed, AgentUrl = allowed[0].AgentUrl, AgentToken = allowed[0].AgentToken };
-        }
-        if (remote && string.IsNullOrWhiteSpace(conversionSettings.AgentUrl))
-            throw new PreviewServerUnavailableException("暂时没有已登记的远程转图服务器，等待登记后重试。");
-        if (remote && !Uri.TryCreate(conversionSettings.NormalizedAgentUrl, UriKind.Absolute, out _))
-            throw new PdmRuleException("远程转图服务器地址未配置，请在系统设置中填写转图电脑地址（例如 http://192.168.2.50:5199）。");
         if (!remote && !OperatingSystem.IsWindows())
             throw new PdmRuleException("本机SolidWorks转换只能在Windows服务器运行；如需在其他电脑转图，请在系统设置中选择远程转图服务器。");
 
@@ -251,6 +241,26 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         }
     }
 
+    private static PreviewConversionSettings SelectPreviewServers(PreviewConversionSettings conversion, Guid? companyId)
+    {
+        if (conversion.Mode != PreviewConversionMode.Remote)
+        {
+            if (conversion.TimeoutMinutes is < 1 or > 120) throw new PdmRuleException("图纸转换超时必须设置为1到120分钟。");
+            return conversion;
+        }
+
+        if (conversion.GetConfiguredServers().Count == 0)
+            throw new PreviewServerUnavailableException("暂时没有已登记的远程转图服务器，等待登记后重试。");
+        var eligible = conversion.GetEnabledServers(companyId);
+        if (eligible.Count == 0)
+            throw new PreviewServerUnavailableException("当前项目所属公司没有已勾选的转图服务器，等待管理员启用后重试。");
+        if (eligible.Any(server => !Uri.TryCreate(server.AgentUrl.Trim(), UriKind.Absolute, out var address) || address.Scheme is not ("http" or "https")))
+            throw new PdmRuleException("转图服务器地址格式不正确，请在系统设置中核对地址。");
+        if (eligible.Any(server => server.TimeoutMinutes is < 1 or > 120))
+            throw new PdmRuleException("每台转图服务器的超时必须设置为1到120分钟。");
+        return conversion with { Servers = eligible };
+    }
+
     /// <summary>本机转换：把源文件复制到临时工作目录后调用SolidWorks转换程序。</summary>
     private async Task<IReadOnlyDictionary<Guid, string>> RunLocalWorkerAsync(
         PreviewConversionSettings conversion,
@@ -306,10 +316,10 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         while (true)
         {
             if (publishingPackageId is Guid waitingId) ReleasePublishingProgress.Set(waitingId, "等待空闲转图服务器");
-            PreviewAgentPool.Lease? lease;
+            PreviewAgentPool.Lease lease;
             try
             {
-                lease = conversion.Servers.Count == 0 && waitForServer ? null : await PreviewAgentPool.AcquireAsync(conversion,
+                lease = await PreviewAgentPool.AcquireAsync(conversion,
                     $"{context?.RequestId} · {remaining.Count} 个图档", httpClient, cancellationToken, waitForServer && tried.Count == 0, tried);
             }
             catch (PreviewServerUnavailableException) when (remaining.Count < jobs.Count(job => job.Convert))
@@ -318,9 +328,9 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
             }
             using (lease)
             {
-                var settings = lease?.Settings ?? conversion;
+                var settings = lease.Settings;
                 var url = settings.NormalizedAgentUrl;
-                var serverName = settings.Servers.FirstOrDefault(server => string.Equals(server.AgentUrl.TrimEnd('/'), url, StringComparison.OrdinalIgnoreCase))?.Name ?? url;
+                var serverName = lease.Name;
                 var attempt = Guid.NewGuid();
                 var attemptRoot = Directory.CreateDirectory(Path.Combine(workRoot, attempt.ToString("N"))).FullName;
                 var attemptJobs = jobs.Select(job => job with { Convert = remaining.Contains(job.DocumentId) }).ToArray();
@@ -465,6 +475,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
                 if (!response.IsSuccessStatusCode)
                 {
                     var detail = await response.Content.ReadAsStringAsync(timeout.Token);
+                    if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+                        throw new AgentTransportException($"转图服务器{serverName}拒绝了转换请求，请核对该服务器的访问令牌。");
                     if (!waitForServer && response.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests)
                         throw new PreviewServerUnavailableException("转图服务器暂时无法接收任务，等待恢复后自动重试。");
                     if ((int)response.StatusCode is 502 or 503 or 504 || HostStartupFailure(PreviewAgentProtocol.DescribeError(detail)))

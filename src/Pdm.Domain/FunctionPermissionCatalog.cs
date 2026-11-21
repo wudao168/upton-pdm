@@ -10,6 +10,7 @@ public static class FunctionPermissionCatalog
     public const string SchemaMarker = "system.permission-profile.v2";
     public static bool RequiresExplicitGrant(string code) => code is PermissionCodes.MaterialRelationActivity
         or PermissionCodes.MaterialRelationDelete or PermissionCodes.EngineeringKitDelete or PermissionCodes.ProjectBudgetAssessmentEdit
+        or PermissionCodes.UserDeactivate or PermissionCodes.UserDelete
         || ProjectFileFormPermissions.RequiresExplicitGrant(code)
         || ProductionMobilePermissions.RequiresExplicitGrant(code)
         || QualityReviewPermissions.RequiresExplicitGrant(code)
@@ -65,6 +66,16 @@ public static class FunctionPermissionCatalog
             Dependencies = [PermissionCodes.ProjectContentView], Routes = routes
         });
         FunctionRoute Route(string method, string path) => new(method, "/api" + path);
+        result.Add(new(PermissionCodes.UserDeactivate, "停用人员账号", "人员管理", "停用当前管理公司内的账号并使其会话失效。", Sensitive: true)
+        {
+            Action = "edit", Dependencies = [PermissionCodes.OrganizationSettingsManage, PermissionCodes.RoleSettingsEdit],
+            Routes = [Route("PUT", "/users/{username}/deactivate")]
+        });
+        result.Add(new(PermissionCodes.UserDelete, "删除人员账号", "人员管理", "永久删除当前管理公司内未被系统引用的账号。", Sensitive: true)
+        {
+            Action = "delete", Dependencies = [PermissionCodes.OrganizationSettingsManage, PermissionCodes.RoleSettingsEdit],
+            Routes = [Route("DELETE", "/users/{username}")]
+        });
         result.Add(new(PermissionCodes.MaterialRelationActivity, "停用及启用关联配置", "料品管理", "控制已发布关联配置是否用于新增选配。", Sensitive: true)
         {
             Action = "edit", Dependencies = [PermissionCodes.MaterialRelationView, PermissionCodes.MaterialRelationPublish],

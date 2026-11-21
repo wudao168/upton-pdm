@@ -24,8 +24,7 @@ internal sealed class ControlledReferenceSearchScope : IDisposable
         previousSearchRules = application.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules);
         boundary = new ControlledOpenBoundary(Path.GetDirectoryName(rootPath), manifest);
         var directory = Path.GetDirectoryName(rootPath);
-        var folders = manifest.Files.Select(file => Path.GetDirectoryName(Path.GetFullPath(
-            Path.Combine(directory, file.RelativePath ?? file.FileName))))
+        var folders = manifest.Files.Select(file => Path.GetDirectoryName(ControlledReferenceMaterializer.ManifestPath(directory, file)))
             .Concat(manifest.RetainedLocalReferences.Values.SelectMany(record => record.Paths).Select(Path.GetDirectoryName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
         try

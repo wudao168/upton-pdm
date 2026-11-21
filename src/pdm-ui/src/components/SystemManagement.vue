@@ -17,7 +17,8 @@ import PermissionCenter from './PermissionCenter.vue'
 import ProductionScanSettings from './ProductionScanSettings.vue'
 import type { AuditEntry, CreateRoleInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, EquipmentTypeDefinition, OrganizationDirectory, OrganizationUnit, PdmCustomer, PdmSystemSettings, PdmUser, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, UpdateCrmIntegrationInput } from '../types'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  active?: boolean
   token: string
   customers: PdmCustomer[]
   crmIntegrationSettings: CrmIntegrationSettings
@@ -47,11 +48,13 @@ const props = defineProps<{
   onUpdateManagers: (unitId: string, primaryManager: string, collaborativeManagers: string[]) => Promise<OrganizationDirectory>
   onSaveUser: (input: SavePdmUserInput, creating: boolean) => Promise<PdmUser>
   onResetUserPassword: (username: string) => Promise<PdmUser>
+  onDeactivateUser: (username: string) => Promise<void>
+  onDeleteUser: (username: string) => Promise<void>
   onSaveFolderTemplate: (nodes: ProjectFolderTemplateNode[]) => Promise<ProjectFolderTemplateNode[]>
   onUpdateRolePermissions: (role: string, permissions: string[]) => Promise<RolePermissionDirectory>
   onCreateRole: (input: CreateRoleInput) => Promise<RolePermissionDirectory>
   onDeleteRole: (role: string) => Promise<RolePermissionDirectory>
-}>()
+}>(), { active: true })
 defineEmits<{ refreshAudit: []; updateActiveOrganizationId: [organizationId: string] }>()
 
 const activeTab = rememberedTab<SystemTab>('system.tab', 'u9', systemManagementTabs(() => true))
@@ -95,14 +98,14 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
         <DingTalkSettings :key="activeOrganizationId" :token="token" />
       </template>
     </U9IntegrationManagement>
-    <UserSettings v-else-if="activeTab === 'users'" :directory="organizationDirectory" :role-directory="rolePermissionDirectory" :active-organization-id="activeOrganizationId" :token="token" :permissions="permissions" :current-username="currentUsername" :platform-administrator="platformAdministrator" :pending="pending" :on-save-user="onSaveUser" :on-reset-password="onResetUserPassword" :on-save-role-permissions="onUpdateRolePermissions" :on-create-role="onCreateRole" :on-delete-role="onDeleteRole" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update-active-organization-id="$emit('updateActiveOrganizationId', $event)">
+    <UserSettings v-else-if="activeTab === 'users'" :directory="organizationDirectory" :role-directory="rolePermissionDirectory" :active-organization-id="activeOrganizationId" :token="token" :permissions="permissions" :current-username="currentUsername" :platform-administrator="platformAdministrator" :pending="pending" :on-save-user="onSaveUser" :on-reset-password="onResetUserPassword" :on-deactivate-user="onDeactivateUser" :on-delete-user="onDeleteUser" :on-save-role-permissions="onUpdateRolePermissions" :on-create-role="onCreateRole" :on-delete-role="onDeleteRole" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update-active-organization-id="$emit('updateActiveOrganizationId', $event)">
       <template #permissions>
         <PermissionCenter :token="token" :company-id="activeOrganizationId" :roles="rolePermissionDirectory.roles" />
       </template>
     </UserSettings>
     <AiProviderSettings v-else-if="activeTab === 'ai'" :key="activeOrganizationId" :token="token" />
     <ProductionScanSettings v-else-if="activeTab === 'production-scan'" :key="activeOrganizationId" :token="token" />
-    <StorageSettings :administrator="administrator || platformAdministrator" v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" :can-manage-storage="hasPermission('settings.storage.manage')" :can-manage-folders="hasPermission('settings.folder.manage')">
+    <StorageSettings :active="active" :administrator="administrator || platformAdministrator" v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :company-id="activeOrganizationId" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" :can-manage-storage="hasPermission('settings.storage.manage')" :can-manage-folders="hasPermission('settings.folder.manage')">
       <template #folders>
         <FolderTemplateSettings :nodes="folderTemplate" :users="organizationDirectory.users" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveFolderTemplate" />
       </template>

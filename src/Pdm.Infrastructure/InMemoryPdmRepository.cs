@@ -42,6 +42,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly Dictionary<(Guid OrganizationId, string CustomerCode), int> customerCounters = new();
     private readonly Dictionary<(Guid OrganizationId, string CustomerCode), SortedSet<int>> releasedCustomerNumbers = new();
     private readonly List<BomItem> bomItems;
+    internal InMemoryMaterialRepository? MaterialApplications { private get; set; }
     private readonly Dictionary<(Guid ProjectId, BomKind Kind), BomEmptyDeclaration> bomEmptyDeclarations = new();
     private readonly Dictionary<(Guid ProjectId, ProjectBomHeaderKind Kind), ProjectBomHeaderBinding> projectBomHeaders = new();
     private readonly ConcurrentDictionary<Guid, BomVersion> bomVersions = new();
@@ -342,14 +343,28 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return Task.FromResult(projectPermissionSettings);
     }
 
-    public Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
+    public Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken, bool preservePreviewConversion = false)
     {
-        systemSettings = BomPropertyMappingCatalog.Apply(settings with
+        lock (gate)
         {
-            DrawingQrPolicy = settings.DrawingQrPolicy with { Enabled = false },
-            ApprovalWorkflows = ReleaseApprovalSettings.UseOrganizationHierarchy(settings.ApprovalWorkflows)
-        });
-        return Task.FromResult(systemSettings);
+            systemSettings = BomPropertyMappingCatalog.Apply(settings with
+            {
+                DrawingQrPolicy = settings.DrawingQrPolicy with { Enabled = false },
+                ApprovalWorkflows = ReleaseApprovalSettings.UseOrganizationHierarchy(settings.ApprovalWorkflows),
+                PreviewConversion = preservePreviewConversion ? systemSettings.PreviewConversion : settings.PreviewConversion
+            });
+            return Task.FromResult(systemSettings);
+        }
+    }
+
+    public Task<PreviewConversionSettings> UpdatePreviewConversionAsync(Func<PreviewConversionSettings, PreviewConversionSettings> update, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var conversion = update(systemSettings.PreviewConversion);
+            systemSettings = systemSettings with { PreviewConversion = conversion };
+            return Task.FromResult(conversion);
+        }
     }
 
     public Task SetBrowserCadArchiveEnabledAsync(bool enabled, CancellationToken ct)
@@ -439,18 +454,21 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public Task<UserCompanyScope> SetUserCompanyScopeAsync(string username, Guid companyId, bool crossCompanyView, IReadOnlyList<Guid> accessibleCompanyIds, string actor, CancellationToken cancellationToken)
     {
-        var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
-            ?? throw new PdmNotFoundException("用户不存在。");
-        if (!organizations.TryGetValue(companyId, out var company) || !company.IsActive) throw new PdmRuleException("所属公司不存在或已停用。");
-        var normalized = accessibleCompanyIds.Where(id => id != companyId).Distinct().ToArray();
-        if (normalized.Any(id => !organizations.TryGetValue(id, out var target) || !target.IsActive)) throw new PdmRuleException("跨公司授权目标不存在或已停用。");
-        var updated = user with { CompanyId = companyId, CrossCompanyView = crossCompanyView && normalized.Length > 0, TokenVersion = user.TokenVersion + 1 };
-        users[user.Id] = updated;
-        userCompanyAccess[user.Id] = normalized.ToHashSet();
-        if (organizationMemberships.TryGetValue(username, out var membership)
-            && membership.UnitIds.Any(id => organizationUnits.TryGetValue(id, out var unit) && unit.OrganizationId != companyId))
-            organizationMemberships.TryRemove(username, out _);
-        return Task.FromResult(new UserCompanyScope(user.Id, companyId, updated.CrossCompanyView, normalized));
+        lock (gate)
+        {
+            var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
+                ?? throw new PdmNotFoundException("用户不存在。");
+            if (!organizations.TryGetValue(companyId, out var company) || !company.IsActive) throw new PdmRuleException("所属公司不存在或已停用。");
+            var normalized = accessibleCompanyIds.Where(id => id != companyId).Distinct().ToArray();
+            if (normalized.Any(id => !organizations.TryGetValue(id, out var target) || !target.IsActive)) throw new PdmRuleException("跨公司授权目标不存在或已停用。");
+            var updated = user with { CompanyId = companyId, CrossCompanyView = crossCompanyView && normalized.Length > 0, TokenVersion = user.TokenVersion + 1 };
+            users[user.Id] = updated;
+            userCompanyAccess[user.Id] = normalized.ToHashSet();
+            if (organizationMemberships.TryGetValue(username, out var membership)
+                && membership.UnitIds.Any(id => organizationUnits.TryGetValue(id, out var unit) && unit.OrganizationId != companyId))
+                organizationMemberships.TryRemove(username, out _);
+            return Task.FromResult(new UserCompanyScope(user.Id, companyId, updated.CrossCompanyView, normalized));
+        }
     }
 
     public Task<ProjectOrganization> SaveProjectOrganizationAsync(SaveProjectOrganizationCommand command, CancellationToken cancellationToken)
@@ -1397,18 +1415,23 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
     {
+        using var projectGate = await BomMaterialCodeApplicationRules.EnterProjectAsync(projectId, cancellationToken);
         lock (gate)
         {
+            var activeIds = bomItems.Where(item => item.ProjectId == projectId && item.Kind == kind
+                && !BomMaterialCodeApplicationRules.IsRemoved(item)).Select(item => item.Id).ToHashSet();
             bomItems.RemoveAll(item => item.ProjectId == projectId && item.Kind == kind);
             bomItems.AddRange(items);
-            return Task.FromResult<IReadOnlyList<BomItem>>(items.OrderBy(item => item.Sequence).ToArray());
+            MaterialApplications?.WithdrawRemovedBomApplications(projectId, items.Where(item => activeIds.Contains(item.Id)), timeProvider.GetUtcNow());
+            return items.OrderBy(item => item.Sequence).ToArray();
         }
     }
 
-    public Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
+    public async Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken, IReadOnlySet<Guid>? explicitlyRemovedItems = null)
     {
+        using var projectGate = await BomMaterialCodeApplicationRules.EnterProjectAsync(projectId, cancellationToken);
         lock (gate)
         {
             BomBatchApplyCount++;
@@ -1428,8 +1451,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 cadPropertyWritebacks[request.Id] = request;
             }
             foreach (var entry in auditEntries) audits.Enqueue(entry);
+            if (explicitlyRemovedItems is not null)
+                MaterialApplications?.WithdrawRemovedBomApplications(projectId,
+                    bomItems.Where(item => item.ProjectId == projectId && explicitlyRemovedItems.Contains(item.Id)), timeProvider.GetUtcNow());
         }
-        return Task.CompletedTask;
     }
 
     public Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken)
@@ -2684,6 +2709,22 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<ReleasePackage> ResumeFailedReleasePreviewAsync(ReleasePackage approved, DateTimeOffset queuedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(approved.Id, out var current) || !ReferenceEquals(current, approved) || !current.CanResumePreviewRetry)
+                throw new PdmConflictException("发布包状态已变化，请刷新后重试。");
+            if (packages.Values.Any(other => other.Id != approved.Id && other.ProjectId == approved.ProjectId
+                && ReleasePreviewPolicy.ConflictsWithFailedRetry(approved, other.Scope, other.State, other.RootDocumentId, other.PublishedAt)))
+                throw new PdmConflictException("同一BOM发布范围有其他在途发布包或更新的正式发布，请核对后再试。");
+            var updated = current with { State = ReleasePackageState.Publishing, PublishError = null,
+                PreviewState = ReleasePreviewState.Pending, PreviewError = null, PreviewAttempts = 0, PreviewUpdatedAt = queuedAt };
+            packages[current.Id] = updated;
+            return Task.FromResult(updated);
+        }
+    }
+
     public Task MarkPublishFailedAsync(Guid releasePackageId, string error, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -2713,34 +2754,44 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public Task<UserProfile> UpdateUserProfileAsync(string username, string? nickname, string gender, string? landline, string? mobilePhone, string? email, string? theme, CancellationToken cancellationToken)
     {
-        var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
-            ?? throw new PdmNotFoundException("用户不存在。");
-        var existingTheme = userProfiles.TryGetValue(user.Username, out var previous) ? previous.Theme : null;
-        var profile = new UserProfile(user.Username, user.DisplayName, nickname, gender, landline, mobilePhone, email, theme ?? existingTheme ?? "g");
-        userProfiles[user.Username] = profile;
-        return Task.FromResult(profile);
+        lock (gate)
+        {
+            var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
+                ?? throw new PdmNotFoundException("用户不存在。");
+            var existingTheme = userProfiles.TryGetValue(user.Username, out var previous) ? previous.Theme : null;
+            var profile = new UserProfile(user.Username, user.DisplayName, nickname, gender, landline, mobilePhone, email, theme ?? existingTheme ?? "g");
+            userProfiles[user.Username] = profile;
+            return Task.FromResult(profile);
+        }
     }
 
     public Task<UserAccount> UpdateUserPasswordAsync(string username, string passwordHash, CancellationToken cancellationToken)
     {
-        var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
-            ?? throw new PdmNotFoundException("用户不存在。");
-        var updated = user with { PasswordHash = passwordHash, TokenVersion = user.TokenVersion + 1 };
-        users[user.Id] = updated;
-        return Task.FromResult(updated);
+        lock (gate)
+        {
+            var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
+                ?? throw new PdmNotFoundException("用户不存在。");
+            var updated = user with { PasswordHash = passwordHash, TokenVersion = user.TokenVersion + 1 };
+            users[user.Id] = updated;
+            return Task.FromResult(updated);
+        }
     }
 
     public Task CreatePasswordResetRequestAsync(UserAccount user, DateTimeOffset requestedAt, CancellationToken cancellationToken)
     {
-        var existing = passwordResetTasks.Values.FirstOrDefault(item => string.Equals(item.Username, user.Username, StringComparison.OrdinalIgnoreCase));
-        if (existing is not null)
+        lock (gate)
         {
-            passwordResetTasks[existing.Id] = existing with { RequestedAt = requestedAt };
+            if (!users.ContainsKey(user.Id)) throw new PdmNotFoundException("用户不存在。");
+            var existing = passwordResetTasks.Values.FirstOrDefault(item => string.Equals(item.Username, user.Username, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null)
+            {
+                passwordResetTasks[existing.Id] = existing with { RequestedAt = requestedAt };
+                return Task.CompletedTask;
+            }
+            var task = new PasswordResetTask(Guid.NewGuid(), user.Username, user.DisplayName, requestedAt);
+            passwordResetTasks[task.Id] = task;
             return Task.CompletedTask;
         }
-        var task = new PasswordResetTask(Guid.NewGuid(), user.Username, user.DisplayName, requestedAt);
-        passwordResetTasks[task.Id] = task;
-        return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<PasswordResetTask>> ListPasswordResetTasksAsync(CancellationToken cancellationToken) =>
@@ -2748,8 +2799,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public Task CompletePasswordResetTaskAsync(Guid taskId, string passwordHash, string actor, DateTimeOffset completedAt, CancellationToken cancellationToken)
     {
-        if (!passwordResetTasks.TryRemove(taskId, out var task)) throw new PdmNotFoundException("密码重置申请不存在或已处理。");
-        return UpdateUserPasswordAsync(task.Username, passwordHash, cancellationToken);
+        lock (gate)
+        {
+            if (!passwordResetTasks.TryRemove(taskId, out var task)) throw new PdmNotFoundException("密码重置申请不存在或已处理。");
+            return UpdateUserPasswordAsync(task.Username, passwordHash, cancellationToken);
+        }
     }
 
     public Task<int> CountUsersAsync(CancellationToken cancellationToken) => Task.FromResult(users.Count);
@@ -2770,22 +2824,29 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!defaultCompanyId.HasValue || defaultCompanyId == Guid.Empty) defaultCompanyId = SeedOrganizations().First(item => item.IsActive).Id;
             user = user with { CompanyId = defaultCompanyId == Guid.Empty ? null : defaultCompanyId };
         }
-        if (users.Values.Any(item => string.Equals(item.Username, user.Username, StringComparison.OrdinalIgnoreCase)) || !users.TryAdd(user.Id, user))
+        lock (gate)
         {
-            throw new PdmConflictException("用户名已经存在。 ");
+            if (users.Values.Any(item => string.Equals(item.Username, user.Username, StringComparison.OrdinalIgnoreCase)) || !users.TryAdd(user.Id, user))
+                throw new PdmConflictException("用户名已经存在。 ");
         }
 
         return Task.CompletedTask;
     }
 
-    public Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken)
+    public async Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken, ManagedUserEditActor? editActor = null)
     {
-        var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
-            ?? throw new PdmNotFoundException("用户不存在。");
-        var normalizedRoles = roleCodes.Prepend(roleCode).Where(code => !string.IsNullOrWhiteSpace(code)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var updated = user with { DisplayName = displayName, Role = role, RoleCode = roleCode, RoleCodes = normalizedRoles, IsActive = isActive, TokenVersion = user.TokenVersion + 1 };
-        users[user.Id] = updated;
-        return Task.FromResult(updated);
+        if (editActor is not null) await GetAuthorizationSettingsAsync(cancellationToken);
+        lock (gate)
+        {
+            if (editActor is not null)
+                UserAccountAdministration.RequireEdit(authorizationSettings!, users.Values.ToArray(), editActor, username, role, roleCode, roleCodes, isActive);
+            var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
+                ?? throw new PdmNotFoundException("用户不存在。");
+            var normalizedRoles = roleCodes.Prepend(roleCode).Where(code => !string.IsNullOrWhiteSpace(code)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var updated = user with { DisplayName = displayName, Role = role, RoleCode = roleCode, RoleCodes = normalizedRoles, IsActive = isActive, TokenVersion = user.TokenVersion + 1 };
+            users[user.Id] = updated;
+            return updated;
+        }
     }
 
     private static UserProfile CreateDefaultProfile(UserAccount user) => new(user.Username, user.DisplayName, null, "unspecified", null, null, null);

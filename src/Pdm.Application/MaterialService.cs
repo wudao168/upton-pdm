@@ -350,6 +350,7 @@ public sealed class MaterialService(
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
         await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
+        using var projectGate = await BomMaterialCodeApplicationRules.EnterProjectAsync(command.ProjectId, cancellationToken);
         var resolutions = await ResolveStandardBomMaterialsAsync(new(command.ProjectId, command.BomItemIds), actor, role, cancellationToken);
         var applicationItems = new Dictionary<Guid, BomItem>();
         foreach (var resolution in resolutions)
@@ -357,6 +358,8 @@ public sealed class MaterialService(
             var item = await repository.FindBomItemAsync(command.ProjectId, resolution.BomItemId, cancellationToken)
                 ?? throw new PdmNotFoundException("BOM物料不存在。");
             await RequireBomKindEditAsync(command.ProjectId, item.Kind, actor, role, cancellationToken);
+            if (BomMaterialCodeApplicationRules.IsRemoved(item))
+                throw new PdmRuleException("BOM物料已删除，请恢复后重新申请料号。");
             EnsureMaterialCodeRequiredFields(item);
             applicationItems[item.Id] = item;
         }
@@ -613,9 +616,20 @@ public sealed class MaterialService(
     {
         var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
         if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken)) throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        using var projectGate = await BomMaterialCodeApplicationRules.EnterProjectAsync(application.ProjectId, cancellationToken);
+        application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
         if (application.BomHeaderKind is not null && application.BomItemId is null) throw new PdmRuleException("BOM表头料号由系统自动审批，不能人工批准或退回。");
+        if (application.Status == MaterialCodeApplicationStatus.Withdrawn && application.DecisionComment == BomMaterialCodeApplicationRules.RemovedSourceReason)
+            throw new PdmConflictException(BomMaterialCodeApplicationRules.RemovedSourceReason);
         if (application.Status != MaterialCodeApplicationStatus.Pending || application.RowVersion != expectedRowVersion) throw new PdmConflictException("料号申请或审批节点已变化，请刷新后重试。");
         var capability = await WithApprovalCapabilitiesAsync(application, actor, role, cancellationToken);
+        if (approved && (emergencySubstitute ? capability.CanEmergencyDecide : capability.CanDecide == true)
+            && application.BomItemId is Guid bomItemId)
+        {
+            var source = await repository.FindBomItemAsync(application.ProjectId, bomItemId, cancellationToken);
+            if (source is null || BomMaterialCodeApplicationRules.IsRemoved(source))
+                throw new PdmConflictException("来源BOM物料已删除，该料号申请无法审批。");
+        }
         MaterialCodeApprovalSnapshot? next = null;
         MaterialCodeApprovalNode? completed = null;
         if (application.ApprovalWorkflow is not null)
@@ -674,6 +688,7 @@ public sealed class MaterialService(
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
         var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
             ?? throw new PdmNotFoundException("料号申请不存在。");
+        using var projectGate = await BomMaterialCodeApplicationRules.EnterProjectAsync(application.ProjectId, cancellationToken);
         if (application.BomHeaderKind is not null || application.BomItemId is null)
             throw new PdmRuleException("只有BOM物料料号申请可以撤回。");
         if (!string.Equals(application.RequestedBy, actor, StringComparison.OrdinalIgnoreCase) && !await repository.HasUserPermissionAsync(actor, role, "material.application.manage-others", cancellationToken))
@@ -942,7 +957,7 @@ public sealed class MaterialService(
     {
         var item = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
-        if (item.IsPendingClassification || item.IsManualUnmatched || item.IsPendingRemoval || item.IsManuallyExcluded)
+        if (item.IsPendingClassification || item.IsManualUnmatched || item.IsPendingRemoval || BomMaterialCodeApplicationRules.IsRemoved(item))
             throw new PdmRuleException("该BOM物料仍有待处理状态，不能创建物料主档。");
         EnsureMaterialCodeRequiredFields(item);
 
@@ -1330,6 +1345,7 @@ public sealed class MaterialService(
             now)
         {
             MaterialCode = materialForApproval.MaterialCode,
+            MaterialKind = materialForApproval.Kind,
             MaterialName = materialForApproval.Name,
             Specification = materialForApproval.Specification,
             Brand = materialForApproval.Brand,

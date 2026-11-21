@@ -11,10 +11,13 @@ public sealed partial class PdmAddin
 {
     private string blockedControlledOpenMessage;
 
+    private KeyValuePair<string, ControlledOpenManifestDto> FindControlledDrawingContext(string fullPath)
+        => controlledOpenManifests.FirstOrDefault(pair => pair.Value.Files.Any(file =>
+            PathsEqual(fullPath, ControlledReferenceMaterializer.ManifestPath(pair.Key, file))));
+
     private IModelDoc2 OpenControlledArchiveDrawing(string fullPath, bool readOnly)
     {
-        var context = controlledOpenManifests.FirstOrDefault(pair => pair.Value.Files.Any(file =>
-            PathsEqual(fullPath, Path.Combine(pair.Key, file.RelativePath ?? file.FileName))));
+        var context = FindControlledDrawingContext(fullPath);
         if (context.Value != null)
             return OpenControlledReadOnlyDocumentCore(fullPath, ToSolidWorksDocumentType(CadDocumentKind.Drawing),
                 string.Empty, context.Value, true, true);
@@ -56,7 +59,7 @@ public sealed partial class PdmAddin
         {
             if (node.Status == CadReferenceStatus.Virtual || node.IsStoredImport || string.IsNullOrWhiteSpace(node.FullPath)
                 || !known.TryGetValue(Path.GetFileName(node.FullPath), out var file)) continue;
-            var expected = Path.GetFullPath(Path.Combine(context.Key, file.RelativePath ?? file.FileName));
+            var expected = ControlledReferenceMaterializer.ManifestPath(context.Key, file);
             if (CanUseDeferredArchiveCopy(node, file, expected)) continue;
             if (!PathsEqual(node.FullPath, expected) || node.DocumentId.HasValue && node.DocumentId != file.DocumentId)
                 throw new InvalidOperationException("当前存档结构引用了另一份同名文件，尚未保存、上传或升版，原窗口和修改均保留。请从当前PLM工作区重新打开配套图档。"
@@ -80,7 +83,7 @@ public sealed partial class PdmAddin
         {
             var file = context.Value.Files.FirstOrDefault(candidate => string.Equals(candidate.FileName, Path.GetFileName(fileName), StringComparison.OrdinalIgnoreCase));
             if (file == null) continue;
-            var expected = Path.GetFullPath(Path.Combine(context.Key, file.RelativePath ?? file.FileName));
+            var expected = ControlledReferenceMaterializer.ManifestPath(context.Key, file);
             if (PathsEqual(fileName, expected)) return false;
             PluginDiagnosticLog.Record("受控打开拦截", "当前受控图档禁止加载另一目录的同名文件；请求=" + fileName + "；工作副本=" + expected);
             blockedControlledOpenMessage = "已阻止打开原目录或另一工作区的同名图档，当前PLM图档和修改均保留。请使用当前工作区的配套图档。"
@@ -90,15 +93,33 @@ public sealed partial class PdmAddin
         return false;
     }
 
-    private bool HasOutdatedLoadedAssemblyContext(ControlledOpenManifestDto requested)
+    private async Task<(bool Outdated, bool Reused)> CheckLoadedModelForOpenAsync(
+        ControlledOpenManifestDto requested, bool canReuse, bool acquirePermission)
+    {
+        var load = canReuse ? BeginAssemblyReuseReferenceLoad(requested.ProjectId, requested.RootDocumentId) : null;
+        var reused = false;
+        try
+        {
+            var outdated = requested.UsesLatestModelReferences && await HasOutdatedLoadedAssemblyContextAsync(requested);
+            reused = canReuse && !outdated && await TryOpenModelInLoadedContextAsync(requested, acquirePermission);
+            return (outdated, reused);
+        }
+        finally { FinishAssemblyReferenceOperation(load, reused); }
+    }
+
+    private async Task<bool> HasOutdatedLoadedAssemblyContextAsync(ControlledOpenManifestDto requested)
     {
         var desired = requested.Files.Where(file => DocumentKindFromPath(file.FileName) != CadDocumentKind.Drawing)
             .ToDictionary(file => file.DocumentId);
         var loadedPaths = new HashSet<string>(CaptureLoadedCachePaths(), StringComparer.OrdinalIgnoreCase);
-        return controlledOpenManifests.Any(context => context.Value.ProjectId == requested.ProjectId
-            && context.Value.Files.Any(file => desired.TryGetValue(file.DocumentId, out var newer)
+        var changed = controlledOpenManifests.Where(context => context.Value.ProjectId == requested.ProjectId)
+            .SelectMany(context => context.Value.Files.Where(file => desired.TryGetValue(file.DocumentId, out var newer)
                 && file.VersionId != newer.VersionId && !WorkingReuseFileBytesMatch(file, newer)
-                && loadedPaths.Contains(ControlledReferenceMaterializer.LocalPath(context.Key, file))));
+                && loadedPaths.Contains(ControlledReferenceMaterializer.LocalPath(context.Key, file))))
+            .Select(file => file.DocumentId).Distinct().ToArray();
+        if (changed.Length == 0) return false;
+        var contextIds = await VerifiedOpenContextIdsAsync(requested);
+        return changed.Any(id => !contextIds.Contains(id));
     }
 
     private bool TryGetCurrentReferenceOpen(CadTreeNode node, out Guid projectId, out Guid versionId)
@@ -113,10 +134,8 @@ public sealed partial class PdmAddin
             if (context.Value.ProjectId != currentProjectId || context.Value.RootDocumentId == node.DocumentId
                 || DocumentKindFromPath(context.Value.RootRelativePath) != CadDocumentKind.Assembly
                 || IsReadOnlyPreviewPath(context.Key) || IsHistoricalDerivedPath(context.Key)
-                || !context.Value.Files.Any(file => file.DocumentId == currentTree.DocumentId
-                    && PathsEqual(currentTree.FullPath, ControlledReferenceMaterializer.LocalPath(context.Key, file)))) continue;
-            var source = context.Value.Files.SingleOrDefault(file => file.DocumentId == node.DocumentId
-                && PathsEqual(node.FullPath, ControlledReferenceMaterializer.LocalPath(context.Key, file)));
+                || FindWorkingManifestFile(context, currentTree.DocumentId, currentTree.FullPath) == null) continue;
+            var source = FindWorkingManifestFile(context, node.DocumentId, node.FullPath);
             if (source == null || source.VersionId == Guid.Empty) continue;
             projectId = context.Value.ProjectId;
             versionId = source.VersionId;
@@ -124,6 +143,17 @@ public sealed partial class PdmAddin
         }
         return false;
     }
+
+    private static ControlledOpenFileDto FindWorkingManifestFile(KeyValuePair<string, ControlledOpenManifestDto> context,
+        Guid? documentId, string path) => context.Value.Files.SingleOrDefault(file => file.DocumentId == documentId
+        && PathsEqual(path, ControlledReferenceMaterializer.ManifestPath(context.Key, file)));
+
+    private bool UsesCurrentWorkingAssemblyReferences(Guid projectId, Guid documentId, Guid versionId, string path) =>
+        DocumentKindFromPath(path) == CadDocumentKind.Assembly && controlledOpenManifests.Any(context =>
+            context.Value.ProjectId == projectId && context.Value.RootDocumentId != documentId
+            && context.Value.UsesLatestModelReferences && !IsReadOnlyPreviewPath(context.Key) && !IsHistoricalDerivedPath(context.Key)
+            && FindWorkingManifestFile(context, documentId, path)?.VersionId == versionId
+            && FindLoadedDocument(ManagedCadPaths.Resolve(context.Key, context.Value.RootRelativePath)) != null);
 
     private Task<bool> TryOpenModelInLoadedContextAsync(ControlledOpenManifestDto requested, bool acquirePermission)
         => TryOpenModelInLoadedContextCoreAsync(requested, acquirePermission, null);
@@ -143,12 +173,12 @@ public sealed partial class PdmAddin
                 && string.Equals(file.FileName, root.FileName, StringComparison.OrdinalIgnoreCase)
                 && (!opensCurrentReference || PathsEqual(referencePath, ControlledReferenceMaterializer.LocalPath(pair.Key, file))))
             && (!opensCurrentReference || loadedDocuments.Any(model => PathsEqual(model.GetPathName(),
-                Path.Combine(pair.Key, pair.Value.RootRelativePath))))
+                ManagedCadPaths.Resolve(pair.Key, pair.Value.RootRelativePath))))
             && (loaded.Length > 0
                 ? loaded.All(model => pair.Value.Files.Any(file => file.DocumentId == root.DocumentId
-                    && PathsEqual(model.GetPathName(), Path.Combine(pair.Key, file.RelativePath ?? file.FileName))))
+                    && PathsEqual(model.GetPathName(), ControlledReferenceMaterializer.ManifestPath(pair.Key, file))))
                 : pair.Value.Files.Any(file => file.DocumentId == pair.Value.RootDocumentId
-                    && loadedDocuments.Any(model => PathsEqual(model.GetPathName(), Path.Combine(pair.Key, file.RelativePath ?? file.FileName))))))
+                    && loadedDocuments.Any(model => PathsEqual(model.GetPathName(), ControlledReferenceMaterializer.ManifestPath(pair.Key, file))))))
             .OrderByDescending(pair => pair.Value.Files.Count).ToArray();
         // Lightweight/unloaded children are absent from GetDocuments. Their loaded
         // owner's verified manifest still fixes the physical workspace; making a
@@ -174,10 +204,12 @@ public sealed partial class PdmAddin
         if (loadedRoot != null && !string.IsNullOrWhiteSpace(root.Configuration)
             && !string.Equals(loadedRoot.ConfigurationManager?.ActiveConfiguration?.Name, root.Configuration, StringComparison.OrdinalIgnoreCase))
             throw WorkingModelContextMismatch(root.FileName);
-        var contextIds = !acquirePermission && kind == CadDocumentKind.Part
-            ? await VerifiedOpenContextIdsAsync(requested, opensCurrentReference) : new HashSet<Guid>();
+        var contextIds = await VerifiedOpenContextIdsAsync(requested, opensCurrentReference);
         var files = new List<ControlledOpenFileDto>();
         var committedMemoryFiles = new Dictionary<string, ControlledOpenFileDto>(StringComparer.OrdinalIgnoreCase);
+        var savedAssemblyHashes = new Dictionary<Guid, string>();
+        var currentWorkingAssembly = !opensCurrentReference && requested.UsesLatestModelReferences && loadedRoot is IAssemblyDoc
+            && context.Value.RootDocumentId == root.DocumentId;
         var releasedPromotionIds = new HashSet<Guid>();
         IReadOnlyDictionary<Guid, DocumentDto> documents = null;
         // Associated drawings are opened separately against this same context. They
@@ -190,13 +222,10 @@ public sealed partial class PdmAddin
             // can use different configurations from those same versioned bytes.
             // Apply the same file identity rule to every open/checkout entry point;
             // actual occurrence structures are verified separately below.
-            var sameReferenceFile = DocumentKindFromPath(file.FileName) == CadDocumentKind.Part
-                && file.DocumentId != requested.RootDocumentId && source != null
-                && source.VersionId == file.VersionId && WorkingReuseFileBytesMatch(source, file);
             if (source == null
                 || !string.Equals(source.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
-                || !isContext && !sameReferenceFile && !(loadedRoot != null && kind == CadDocumentKind.Part && file.DocumentId == requested.RootDocumentId)
-                    && !string.Equals(source.Configuration ?? string.Empty, file.Configuration ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                || !isContext && !(loadedRoot != null && kind == CadDocumentKind.Part && file.DocumentId == requested.RootDocumentId)
+                    && !WorkingManifestConfigurationMatches(requested.RootDocumentId, source, file))
                 throw WorkingModelContextMismatch(file.FileName);
             var path = ControlledReferenceMaterializer.LocalPath(context.Key, source);
             if (!WorkingReuseBindingMatches(path, requested.ProjectId, source)) throw WorkingModelContextMismatch(file.FileName);
@@ -235,8 +264,11 @@ public sealed partial class PdmAddin
             var model = FindLoadedDocument(path);
             var promotionHasEditableState = releasedPromotionIds.Contains(file.DocumentId)
                 && (localEdits.ContainsKey(file.DocumentId) || model != null && !model.IsOpenedReadOnly());
-            if (!committedMemory && (!ControlledReferenceMaterializer.Matches(path, source)
-                || model?.GetSaveFlag() == true && !model.IsOpenedReadOnly() || promotionHasEditableState))
+            // Activation keeps verified environment windows and bytes in place.
+            // Their dirty state is not a write precondition for this selected model.
+            // Identity/path checks above and native source checks below still apply.
+            if (!committedMemory && (!ControlledReferenceMaterializer.TryReadVerifiedCopyHash(path, source, out var diskHash)
+                || !isContext && model?.GetSaveFlag() == true && !model.IsOpenedReadOnly() || promotionHasEditableState))
             {
                 if (documents == null) documents = (await apiClient.GetDocumentsAsync(requested.ProjectId, lifetime.Token)).ToDictionary(item => item.Id);
                 documents.TryGetValue(file.DocumentId, out var document);
@@ -245,13 +277,19 @@ public sealed partial class PdmAddin
                     || !WorkingReuseDraftMatches(path, source, document, draft, checkoutSessionId, authenticatedUsername))
                     throw WorkingModelContextMismatch(file.FileName, promotionHasEditableState
                         ? "审批发布来源已核对，但当前编辑记录、工作基线或获取会话不完整" : null);
+                if (currentWorkingAssembly && source.VersionId == file.VersionId && model is IAssemblyDoc
+                    && !model.GetSaveFlag() && !model.IsOpenedReadOnly() && !loadedRoot.IsOpenedReadOnly()
+                    && !draft.CheckoutSessionLost && !draft.RecoveryRequired
+                    && document.ProjectId == requested.ProjectId && !string.IsNullOrWhiteSpace(diskHash)
+                    && (!document.CheckoutLeaseExpiresAt.HasValue || document.CheckoutLeaseExpiresAt.Value.ToUniversalTime() > DateTime.UtcNow))
+                    savedAssemblyHashes[file.DocumentId] = diskHash;
             }
-            if (isContext) LogOperation("零件打开复用已核对的装配环境，未切换父装配版本或配置：" + source.FileName);
             files.Add(new ControlledOpenFileDto { DocumentId = source.DocumentId, VersionId = source.VersionId,
                 FileName = source.FileName, RelativePath = source.RelativePath, Configuration = source.Configuration,
                 Revision = source.Revision, DrawingVersion = source.DrawingVersion, Sha256 = source.Sha256, FileLength = source.FileLength,
                 NativeIsolation = source.NativeIsolation, IsNativeIsolated = source.IsNativeIsolated, IsRoot = source.DocumentId == requested.RootDocumentId });
         }
+        if (contextIds.Count > 0) LogOperation("图档打开保留已核对的装配环境，未切换、保存或解锁环境图档；数量=" + contextIds.Count);
         var localRoot = files.Single(file => file.IsRoot);
         var rootPath = ControlledReferenceMaterializer.LocalPath(context.Key, localRoot);
         var manifest = new ControlledOpenManifestDto { Id = requested.Id, ProjectId = requested.ProjectId,
@@ -260,6 +298,39 @@ public sealed partial class PdmAddin
             RootRelativePath = localRoot.RelativePath ?? localRoot.FileName,
             RootRevision = releasedPromotionIds.Contains(localRoot.DocumentId) ? localRoot.Revision : requested.RootRevision, Files = files,
             ReferenceIssues = OpenReferenceFindings.Merge(requested.ReferenceIssues), Warnings = requested.Warnings };
+        if (savedAssemblyHashes.ContainsKey(root.DocumentId))
+        {
+            // Only the active, verified checkout contributes saved additions. Keep this
+            // allowance in the operation manifest, never in the immutable server context.
+            manifest.RequireWorkspaceRetainedReferences = true;
+            foreach (var pair in savedAssemblyHashes)
+            {
+                manifest.ResumedDocumentIds.Add(pair.Key);
+                manifest.RetainedWorkingHashes.Add(pair.Key, pair.Value);
+            }
+            await PrepareRetainedLocalReferencesAsync(rootPath, manifest);
+        }
+        async Task VerifySavedAssemblyLeasesAsync()
+        {
+            var current = (await apiClient.GetDocumentsAsync(requested.ProjectId, lifetime.Token)).ToDictionary(doc => doc.Id);
+            foreach (var owner in files.Where(f => savedAssemblyHashes.ContainsKey(f.DocumentId)))
+            {
+                var path = ControlledReferenceMaterializer.LocalPath(context.Key, owner);
+                var head = (await apiClient.GetVersionsAsync(owner.DocumentId, lifetime.Token, 1)).FirstOrDefault();
+                current.TryGetValue(owner.DocumentId, out var document);
+                localEdits.TryGetValue(owner.DocumentId, out var draft);
+                var model = FindLoadedDocument(path);
+                if (head?.Id != owner.VersionId || document?.ProjectId != requested.ProjectId || draft == null
+                    || draft.CheckoutSessionLost || draft.RecoveryRequired || model == null || model.GetSaveFlag() || model.IsOpenedReadOnly()
+                    || document.CheckoutLeaseExpiresAt.HasValue && document.CheckoutLeaseExpiresAt.Value.ToUniversalTime() <= DateTime.UtcNow
+                    || !WorkingReuseBindingMatches(path, requested.ProjectId, owner)
+                    || !WorkingReuseDraftMatches(path, owner, document, draft, checkoutSessionId, authenticatedUsername)
+                    || !string.Equals(ComputeFileHash(path), savedAssemblyHashes[owner.DocumentId], StringComparison.OrdinalIgnoreCase))
+                    throw WorkingModelContextMismatch(owner.FileName, "核对已保存的新增引用期间，装配版本、编辑权限或工作副本发生变化");
+            }
+        }
+        var resumesSavedReferences = manifest.RetainedLocalReferences.Count > 0;
+        if (resumesSavedReferences) await VerifySavedAssemblyLeasesAsync();
         ControlledOpenBoundary.RequireLoadedSources(application, rootPath, manifest);
         var missingComponents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var search = new ControlledReferenceSearchScope(application, rootPath, manifest))
@@ -299,13 +370,26 @@ public sealed partial class PdmAddin
                 throw WorkingModelContextMismatch(root.FileName, "审批发布核对期间当前模型配置发生变化，请恢复所选配置后重试");
         }
         VerifyReleasedPromotions();
-        if (acquirePermission)
+        if (acquirePermission && resumesSavedReferences)
+        {
+            // A renewal validates edit permission but cannot reacquire a lease released
+            // between the earlier identity check and this request.
+            var owners = savedAssemblyHashes.Keys.ToArray();
+            var lease = await apiClient.HeartbeatEditSessionAsync(checkoutSessionId, checkoutMachineName, owners, lifetime.Token);
+            if (lease?.SessionId != checkoutSessionId || lease.ActiveDocumentIds == null
+                || !new HashSet<Guid>(lease.ActiveDocumentIds).SetEquals(owners) || lease.LostDocumentIds?.Count > 0)
+                throw WorkingModelContextMismatch(root.FileName, "服务器未确认本机原有编辑权限");
+            await AcquireLinkedDrawingPermissionsAsync(requested.ProjectId, new[] { root.DocumentId }, context.Key, lifetime.Token);
+            await VerifySavedAssemblyLeasesAsync();
+        }
+        else if (acquirePermission)
         {
             var node = new CadTreeNode { DocumentId = localRoot.DocumentId, FullPath = rootPath, FileName = localRoot.FileName,
                 Kind = kind, Configuration = localRoot.Configuration, OpenedVersionId = localRoot.VersionId };
+            string nativeConflict = null;
             if (!await TryAcquireReusableWorkingCopyWithVerifiedDocumentsAsync(new[] { new BatchOperationItem(node, 0) }, requested.ProjectId,
-                localRoot.DocumentId, false, verifiedDocuments => documents = verifiedDocuments))
-                throw WorkingModelContextMismatch(localRoot.FileName);
+                localRoot.DocumentId, false, verifiedDocuments => documents = verifiedDocuments, reason => nativeConflict = reason))
+                throw WorkingModelContextMismatch(localRoot.FileName, nativeConflict);
         }
         VerifyReleasedPromotions();
         void VerifyCommittedMemory()
@@ -320,32 +404,63 @@ public sealed partial class PdmAddin
         {
             if (!opensCurrentReference) return;
             if (!controlledOpenManifests.TryGetValue(context.Key, out var current) || !ReferenceEquals(current, context.Value)
-                || FindLoadedDocument(Path.Combine(context.Key, current.RootRelativePath)) == null
+                || FindLoadedDocument(ManagedCadPaths.Resolve(context.Key, current.RootRelativePath)) == null
                 || files.Any(file => !current.Files.Any(source => source.DocumentId == file.DocumentId && source.VersionId == file.VersionId
                     && PathsEqual(ControlledReferenceMaterializer.LocalPath(context.Key, source), ControlledReferenceMaterializer.LocalPath(context.Key, file)))
                     || !WorkingReuseBindingMatches(ControlledReferenceMaterializer.LocalPath(context.Key, file), requested.ProjectId, file)))
                 throw WorkingModelContextMismatch(localRoot.FileName, "装配工作区或版本绑定在打开期间发生变化，请刷新设计树后重试");
         }
         VerifyCurrentReference();
-        using (var search = new ControlledReferenceSearchScope(application, rootPath, manifest))
+        var openReadOnly = loadedRoot == null && !acquirePermission;
+        var beforeNativeOpen = openReadOnly ? new HashSet<string>(
+            ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+                .Select(model => model.GetPathName()), StringComparer.OrdinalIgnoreCase) : null;
+        IModelDoc2 openedRoot = null;
+        try
         {
-            var opened = OpenOrActivateDocumentOnSolidWorksThread(rootPath, ToSolidWorksDocumentType(kind),
-                loadedRoot == null ? root.Configuration : localRoot.Configuration, readOnly: loadedRoot == null && !acquirePermission);
-            if (opened == null)
+            using var search = new ControlledReferenceSearchScope(application, rootPath, manifest);
+            openedRoot = OpenOrActivateDocumentOnSolidWorksThread(rootPath, ToSolidWorksDocumentType(kind),
+                loadedRoot == null ? root.Configuration : localRoot.Configuration, readOnly: openReadOnly);
+            if (openedRoot == null)
                 throw new IOException("尚未激活当前PLM工作副本，原窗口和文件已保留：" + localRoot.FileName);
             if (loadedRoot == null && !string.IsNullOrWhiteSpace(root.Configuration)
-                && !string.Equals(opened.ConfigurationManager?.ActiveConfiguration?.Name, root.Configuration, StringComparison.OrdinalIgnoreCase))
+                && !string.Equals(openedRoot.ConfigurationManager?.ActiveConfiguration?.Name, root.Configuration, StringComparison.OrdinalIgnoreCase))
                 throw WorkingModelContextMismatch(root.FileName);
-            if (loadedRoot == null || missingComponents.Count > 0)
+            if (loadedRoot == null || missingComponents.Count > 0 || resumesSavedReferences)
             {
                 missingComponents.Clear();
-                ValidateControlledLoadedSources(opened, rootPath, manifest, application, missingComponents);
+                ValidateControlledLoadedSources(openedRoot, rootPath, manifest, application, missingComponents);
             }
             search.VerifyLoadedSources(missingComponents);
+        }
+        catch (Exception error)
+        {
+            if (openedRoot != null && beforeNativeOpen != null && !beforeNativeOpen.Contains(rootPath)
+                && openedRoot.IsOpenedReadOnly())
+                CloseRejectedControlledOpen(openedRoot, rootPath, beforeNativeOpen, error, closeNewDependencies: true);
+            throw;
         }
         VerifyCommittedMemory();
         VerifyReleasedPromotions();
         VerifyCurrentReference();
+        // A lightweight occurrence may have acquired permission while it was
+        // unloaded. Admit the read-only window first, verify its real sources,
+        // then resume the same lease without a second server checkout.
+        if (!acquirePermission && localEdits.TryGetValue(localRoot.DocumentId, out var openDraftBefore)
+            && !openDraftBefore.Closed && !openDraftBefore.CheckoutSessionLost
+            && openDraftBefore.SessionId == checkoutSessionId && openedRoot.IsOpenedReadOnly())
+        {
+            var current = await apiClient.GetDocumentAsync(localRoot.DocumentId, lifetime.Token);
+            VerifyCurrentReference();
+            if (current?.ProjectId == requested.ProjectId
+                && (!current.CheckoutLeaseExpiresAt.HasValue || current.CheckoutLeaseExpiresAt.Value.ToUniversalTime() > DateTime.UtcNow)
+                && ReferenceEquals(openedRoot, FindLoadedDocument(rootPath))
+                && WorkingReuseBindingMatches(rootPath, requested.ProjectId, localRoot)
+                && localEdits.TryGetValue(localRoot.DocumentId, out var openDraftAfter)
+                && ReferenceEquals(openDraftBefore, openDraftAfter) && !openDraftAfter.CheckoutSessionLost
+                && WorkingReuseDraftMatches(rootPath, localRoot, current, openDraftAfter, checkoutSessionId, authenticatedUsername))
+                await EnsureCheckedOutDocumentEditableAsync(rootPath, localRoot.DocumentId, requested.ProjectId, current.CheckedOutAt);
+        }
         if (acquirePermission) CompleteRecordedAcquisitions(new[] { localRoot.DocumentId });
         RememberExplicitProjectPath(rootPath, requested.ProjectId);
         ScheduleTreeRefresh();
@@ -358,59 +473,27 @@ public sealed partial class PdmAddin
 
     private async Task<HashSet<Guid>> VerifiedOpenContextIdsAsync(ControlledOpenManifestDto requested, bool opensCurrentReference = false)
     {
-        var contextIds = new HashSet<Guid>();
         var root = requested.Files.Single(file => file.DocumentId == requested.RootDocumentId);
         if (!requested.Files.Any(file => file.DocumentId != root.DocumentId
-            && DocumentKindFromPath(file.FileName) == CadDocumentKind.Assembly && string.IsNullOrWhiteSpace(file.Configuration)))
-            return contextIds;
-        async Task<DocumentReferenceNodeDto> Snapshot(ControlledOpenFileDto file)
-        {
-            var exact = (await apiClient.GetVersionsAsync(file.DocumentId, lifetime.Token, opensCurrentReference ? (int?)null : 1))
-                .FirstOrDefault(version => !opensCurrentReference || version.Id == file.VersionId);
-            if (exact?.Id != file.VersionId)
-                throw new InvalidOperationException("核对引用类型期间图档版本发生变化，已保留全部窗口和文件，请刷新后重试：" + file.FileName);
-            var snapshot = exact.ReferenceSnapshot;
-            return snapshot?.DocumentId == file.DocumentId && snapshot.Kind == (int)DocumentKindFromPath(file.FileName)
-                && string.Equals(snapshot.FileName, file.FileName, StringComparison.OrdinalIgnoreCase) ? snapshot : null;
-        }
-        var rootSnapshot = await Snapshot(root);
-        var snapshots = new List<DocumentReferenceNodeDto>();
-        if (rootSnapshot != null) snapshots.Add(rootSnapshot);
-        // Drawings pin their view models, but those models own the feature-context records.
-        // Read each direct view model's exact manifest version, never infer context by name.
-        if (DocumentKindFromPath(root.FileName) == CadDocumentKind.Drawing && rootSnapshot != null)
-            foreach (var id in (rootSnapshot.Children ?? new List<DocumentReferenceNodeDto>())
-                .Where(node => !node.IsContextReference && node.DocumentId.HasValue
-                    && (node.Kind == (int)CadDocumentKind.Part || node.Kind == (int)CadDocumentKind.Assembly))
-                .Select(node => node.DocumentId.Value).Distinct())
-            {
-                var model = requested.Files.SingleOrDefault(file => file.DocumentId == id);
-                if (model == null) continue;
-                var snapshot = await Snapshot(model);
-                if (snapshot != null) snapshots.Add(snapshot);
-            }
-        var references = new List<DocumentReferenceNodeDto>();
-        var pending = new Stack<DocumentReferenceNodeDto>(snapshots.SelectMany(snapshot => snapshot.Children ?? new List<DocumentReferenceNodeDto>()));
-        while (pending.Count > 0)
-        {
-            var reference = pending.Pop();
-            references.Add(reference);
-            if (!reference.IsContextReference)
-                foreach (var child in reference.Children ?? new List<DocumentReferenceNodeDto>()) pending.Push(child);
-        }
-        foreach (var reference in references.Where(reference => reference.IsContextReference
-            && !reference.ReferenceTypeUnverified && reference.Role == (int)CadReferenceRole.ExternalFileDependency
-            && reference.Kind == (int)CadDocumentKind.Assembly && reference.DocumentId.HasValue
-            && reference.Status != (int)CadReferenceStatus.Virtual && reference.Children?.Count == 0))
-            if (requested.Files.Any(file => file.DocumentId == reference.DocumentId
-                && string.Equals(file.FileName, reference.FileName, StringComparison.OrdinalIgnoreCase)))
-                contextIds.Add(reference.DocumentId.Value);
-        // A view model or real feature source always wins over an additional context record.
-        contextIds.ExceptWith(references.Where(reference => !reference.IsContextReference && reference.DocumentId.HasValue)
-            .Select(reference => reference.DocumentId.Value));
-        contextIds.Remove(requested.RootDocumentId);
-        return contextIds;
+            && DocumentKindFromPath(file.FileName) == CadDocumentKind.Assembly)) return new HashSet<Guid>();
+        var exact = (await apiClient.GetVersionsAsync(root.DocumentId, lifetime.Token, opensCurrentReference ? (int?)null : 1))
+            .FirstOrDefault(version => !opensCurrentReference || version.Id == root.VersionId);
+        if (exact?.Id != root.VersionId)
+            throw new InvalidOperationException("核对引用类型期间图档版本发生变化，已保留全部窗口和文件，请刷新后重试：" + root.FileName);
+        var evidence = new Dictionary<Guid, DocumentVersionDto> { [root.DocumentId] = exact };
+        var required = await ReadRequiredOperationFileIdsAsync(requested, evidence);
+        return new HashSet<Guid>(requested.Files.Where(file => file.DocumentId != root.DocumentId
+            && DocumentKindFromPath(file.FileName) != CadDocumentKind.Drawing && !required.Contains(file.DocumentId))
+            .Select(file => file.DocumentId));
     }
+
+    // Shared by opening and checkout. A context is an explicitly recorded assembly
+    // environment, not a component or a feature driver. Unknown links stay protected.
+    private static bool IsVerifiedAssemblyEnvironmentReference(DocumentReferenceNodeDto reference) =>
+        reference.IsContextReference && !reference.ReferenceTypeUnverified
+        && reference.Role == (int)CadReferenceRole.ExternalFileDependency
+        && reference.Kind == (int)CadDocumentKind.Assembly && reference.DocumentId.HasValue
+        && reference.Status != (int)CadReferenceStatus.Virtual && reference.Children?.Count == 0;
 
     private bool WorkingReuseCommittedMemoryMatches(string path, ControlledOpenFileDto file)
     {

@@ -30,6 +30,7 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
     public InMemoryMaterialRepository(TimeProvider timeProvider, IPdmRepository? projectRepository = null)
     {
         this.projectRepository = projectRepository;
+        if (projectRepository is InMemoryPdmRepository projects) projects.MaterialApplications = this;
         var now = timeProvider.GetUtcNow();
         rules[MaterialKind.Electrical] = new(MaterialKind.Electrical, "0101", "电气外购件", MaterialSupplyMode.Purchase, true, "system", now);
         rules[MaterialKind.Standard] = new(MaterialKind.Standard, "0102", "机械外购件", MaterialSupplyMode.Purchase, true, "system", now);
@@ -329,6 +330,30 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
             var saved = current with { ApprovalWorkflow = approvalWorkflow ?? current.ApprovalWorkflow, Status = status, DecidedBy = actor, DecidedAt = decidedAt, DecisionComment = comment, MaterialId = materialId, MaterialCode = materialCode, RowVersion = current.RowVersion + 1 };
             applications[applicationId] = saved;
             return Task.FromResult(saved);
+        }
+    }
+
+    internal void WithdrawRemovedBomApplications(Guid projectId, IEnumerable<BomItem> items, DateTimeOffset now)
+    {
+        var removed = items.Where(BomMaterialCodeApplicationRules.IsRemoved).Select(item => item.Id).ToHashSet();
+        if (removed.Count == 0) return;
+        lock (gate)
+        {
+            foreach (var application in applications.Values)
+            {
+                if (application.ProjectId != projectId || application.BomItemId is not Guid itemId || !removed.Contains(itemId)
+                    || application.BomHeaderKind is not null || application.Status != MaterialCodeApplicationStatus.Pending
+                    || application.MaterialId is not null || application.MaterialCode is not null)
+                    continue;
+                applications[application.Id] = application with
+                {
+                    Status = MaterialCodeApplicationStatus.Withdrawn,
+                    DecidedBy = "system",
+                    DecidedAt = now,
+                    DecisionComment = BomMaterialCodeApplicationRules.RemovedSourceReason,
+                    RowVersion = application.RowVersion + 1
+                };
+            }
         }
     }
 
@@ -825,6 +850,7 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
         return task with
         {
             MaterialCode = material?.MaterialCode,
+            MaterialKind = material?.Kind,
             MaterialName = material?.Name,
             Specification = material?.Specification,
             Brand = material?.Brand,

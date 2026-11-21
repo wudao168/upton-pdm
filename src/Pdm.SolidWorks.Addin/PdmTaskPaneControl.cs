@@ -50,8 +50,6 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly LinkLabel treeHealth = new LinkLabel();
     private readonly TreeView structureTree = new StructureTreeView();
     private readonly Panel structureTreeSurface = new Panel();
-    private readonly Label selectedFile = new Label();
-    private readonly Label selectedMeta = new Label();
     private readonly Label checkoutReminder = new Label();
     private readonly Button loginButton = new Button();
     private readonly Button openClientButton = new Button();
@@ -459,6 +457,16 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkoutReminder.BackColor = critical ? Color.FromArgb(255, 236, 232) : Color.FromArgb(255, 247, 225);
             checkoutReminder.ForeColor = critical ? Color.FromArgb(176, 45, 36) : Color.FromArgb(155, 91, 15);
             checkoutReminder.Visible = !string.IsNullOrWhiteSpace(text);
+        });
+    }
+
+    internal void ClearCheckoutReminder(string matchingText)
+    {
+        RunOnUiThread(() =>
+        {
+            if (!string.Equals(checkoutReminder.Text, matchingText, StringComparison.Ordinal)) return;
+            checkoutReminder.Text = string.Empty;
+            checkoutReminder.Visible = false;
         });
     }
 
@@ -1155,23 +1163,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             }
         };
 
-        var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 3) };
-        treeHost.Controls.Add(structureTreeSurface);
-
-        var detail = new Panel { Dock = DockStyle.Bottom, Height = 118, BackColor = Color.White, Padding = new Padding(9, 7, 9, 5) };
-        selectedFile.Text = "未选择图档";
-        selectedFile.Dock = DockStyle.Top;
-        selectedFile.Height = 22;
-        selectedMeta.Text = "配置、版本和编辑状态";
-        selectedMeta.Dock = DockStyle.Top;
-        selectedMeta.Height = 80;
-        selectedMeta.ForeColor = Color.FromArgb(111, 128, 149);
-        selectedMeta.AutoEllipsis = true;
-        detail.Controls.Add(selectedMeta);
-        detail.Controls.Add(selectedFile);
-
-        tab.Controls.Add(treeHost);
-        tab.Controls.Add(detail);
+        tab.Controls.Add(structureTreeSurface);
         tab.Controls.Add(treeHealth);
         tab.Controls.Add(searchToolbar);
         tab.Controls.Add(checkoutAccessStatus);
@@ -2304,6 +2296,10 @@ internal sealed class PdmTaskPaneControl : UserControl
         void ApplyPlan(TreeBuildPlan plan)
         {
             if (generation != treeBuildGeneration || !ReferenceEquals(modelRoot, rootNode)) return;
+            // A metadata refresh builds the replacement tree in the background.
+            // Retain the user's latest selection in the still-visible tree.
+            if (!displayImmediately && SelectedNode is CadTreeNode activeSelection)
+                selectedInstancePath = TreeViewIdentity(activeSelection);
             structureTree.BeginUpdate();
             plan.PresentationStamp = presentationStamp;
             plan.RestoredView = restoredView;
@@ -3053,8 +3049,6 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         if (node == null)
         {
-            selectedFile.Text = "未选择图档";
-            selectedMeta.Text = "配置、版本和编辑状态";
             checkoutButton.Text = "获取";
             checkoutButton.Enabled = false;
             checkinButton.Enabled = CanOpenArchiveDialog;
@@ -3067,45 +3061,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             return;
         }
 
-        selectedFile.Text = string.Concat(
-            string.IsNullOrWhiteSpace(node.DrawingNumber) ? Path.GetFileNameWithoutExtension(node.FileName) : node.DrawingNumber,
-            " · ",
-            string.IsNullOrWhiteSpace(node.DisplayName) ? node.FileName : node.DisplayName);
-        var workStateText = WorkStateText(node);
         var embedded = node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath);
-        var editState = string.IsNullOrWhiteSpace(workStateText) ? string.Empty : string.Concat("　状态：", workStateText);
-        if (node.StoredReferenceWarnings.Count > 0) editState += "　最新存档有引用提示 " + node.StoredReferenceWarnings.Count + " 项（版本记录中查看）";
-        var selectedVersionText = node.IsInterconnectImport ? "随总装核对" : embedded ? "随父装配" : string.IsNullOrWhiteSpace(node.CurrentRevision)
-            ? string.IsNullOrWhiteSpace(node.Revision) ? "未归档" : node.BusinessVersionText
-            : VersionText(node);
-        var editor = node.IsInterconnectImport ? "随总装处理" : embedded ? "随父装配编辑" : string.IsNullOrWhiteSpace(node.CheckedOutBy)
-            ? "未检出"
-            : string.Concat(DisplayUserName(node.CheckedOutBy),
-                string.IsNullOrWhiteSpace(node.CheckoutMachine) ? string.Empty : string.Concat(" @ ", node.CheckoutMachine),
-                node.CheckedOutAt.HasValue ? string.Concat(" · ", node.CheckedOutAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")) : string.Empty);
-        var provenance = node.IsInterconnectImport ? "\r\n来源：3D Interconnect导入组件\r\n来源路径记录（存档时核对有效链接）：" + node.ImportedSourcePath
-            : embedded ? "\r\n来源：嵌入式组件（保存在所属装配体内）" : node.IsExternalProvenance
-            ? string.Concat("\r\n来源：工作区外的PLM来源副本", ProvenanceProjectText(node))
-            : PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath)
-                ? string.Concat("\r\n来源：工作区", node.DocumentId.HasValue ? "受控文件" : "本地文件（未入库）")
-                : "\r\n来源：普通本地文件（未受控）";
-        selectedMeta.Text = string.Concat(
-            "文件：", node.FileName,
-            "\r\n业务状态：", LifecycleText(node.LifecycleState), editState, "　编辑：", editor,
-            "\r\n配置：", string.IsNullOrWhiteSpace(node.Configuration) ? "默认" : node.Configuration,
-            "　版本：", selectedVersionText,
-            !embedded && !node.IsInterconnectImport && !string.IsNullOrWhiteSpace(node.LoadedDrawingVersion)
-                ? "\r\n工作副本图纸版本：" + node.LoadedDrawingVersion
-                : !embedded && !node.IsInterconnectImport && IsVersionOutdated(node) ? "\r\n本地版本早于服务器当前图纸版本" : string.Empty,
-            "\r\n描述：", string.IsNullOrWhiteSpace(node.Description) ? "-" : node.Description,
-            "　材料：", string.IsNullOrWhiteSpace(node.Material) ? "-" : node.Material,
-            provenance,
-            node.IsStoredImport ? "\r\n存储：" + node.ImportedStorageOwnerPath + "（内部组件随此图档存档，不单独登记或升版）"
-                : node.IsInterconnectImport ? "\r\n存档：尚未确认原生保存归属，请保存所属装配后重试。"
-                : embedded ? "\r\n存储：所属父装配体内" : "\r\n路径：" + (string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath));
         var localFileExists = !string.IsNullOrWhiteSpace(node.FullPath) && File.Exists(node.FullPath);
-        actionToolTip.SetToolTip(selectedMeta, selectedMeta.Text + (node.StoredReferenceWarnings.Count == 0 ? string.Empty
-            : "\r\n最新版本引用提示：\r\n" + string.Join("\r\n", node.StoredReferenceWarnings)));
         var canRegister = !embedded && !node.DocumentId.HasValue
             && localFileExists
             && (node.Kind == CadDocumentKind.Assembly || node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Drawing);
@@ -3227,13 +3184,6 @@ internal sealed class PdmTaskPaneControl : UserControl
             && !workspaceOperationActive;
         ApplyActionButtonAppearance(checkinButton, SubmitAvailableColor);
         ApplyActionButtonAppearance(propertyEditButton, SecondaryActionAvailableColor);
-    }
-
-    private string ProvenanceProjectText(CadTreeNode node)
-    {
-        if (!node.ProvenanceProjectId.HasValue) return string.Empty;
-        var project = availableProjects.FirstOrDefault(item => item.Id == node.ProvenanceProjectId.Value);
-        return project == null ? "" : string.Concat("（", project.Code, " · ", project.Name, "）");
     }
 
     private bool CanSelectForBatchAction(CadTreeNode node)
@@ -3636,7 +3586,8 @@ internal sealed class PdmTaskPaneControl : UserControl
 
         var editingByCurrentUser = IsEditingByCurrentUser(node);
         PluginDiagnosticLog.Record("权限按钮", (editingByCurrentUser ? "放弃编辑" : "获取权限") + "；图档=" + node.FullPath);
-        RaiseSelected(editingByCurrentUser ? DiscardCheckoutRequested : CheckoutRequested);
+        var selectedHandler = editingByCurrentUser ? DiscardCheckoutRequested : CheckoutRequested;
+        selectedHandler?.Invoke(this, new CadTreeNodeEventArgs(node));
     }
 
     private void RaiseSelected(EventHandler<CadTreeNodeEventArgs> handler)

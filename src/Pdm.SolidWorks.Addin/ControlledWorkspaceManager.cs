@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -56,7 +56,7 @@ internal sealed partial class ControlledWorkspaceManager
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
             SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
-            ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "snapshot");
+            RecordWorkspace(target, manifest, "snapshot");
             verifiedSnapshotDirectories[manifest.RootDocumentId] = target;
             return ResolveRootPath(target, manifest);
         }
@@ -64,7 +64,7 @@ internal sealed partial class ControlledWorkspaceManager
         var parent = Path.GetDirectoryName(target) ?? throw new InvalidDataException("受控工作区路径无效。");
         EnsureNoUnarchivedDrawingIsRemoved(target, manifest.Files);
         Directory.CreateDirectory(parent);
-        var staging = Path.Combine(workspaceRoot, ".uplm", "Staging", manifest.Id.ToString("N"));
+        var staging = OperationDirectory(target, "Staging", manifest.Id.ToString("N"), ManifestPaths(manifest.Files));
         if (Directory.Exists(staging)) Directory.Delete(staging, true);
         Directory.CreateDirectory(staging);
         try
@@ -88,7 +88,7 @@ internal sealed partial class ControlledWorkspaceManager
             }
             if (!ValidateWorkspace(target, manifest.Files)) throw new InvalidDataException("只读缓存的版本记录校验失败，未打开图档。");
             SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
-            ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "snapshot");
+            RecordWorkspace(target, manifest, "snapshot");
             verifiedSnapshotDirectories[manifest.RootDocumentId] = target;
             return ResolveRootPath(target, manifest);
         }
@@ -110,7 +110,7 @@ internal sealed partial class ControlledWorkspaceManager
             foreach (var file in manifest.Files) BindWorkspaceFile(target, target, manifest, file);
             SetWorkspaceAttributes(target, manifest, editableDocumentIds ?? Array.Empty<Guid>());
             RegisterLegacySnapshotsOnce(manifest);
-            ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "working");
+            RecordWorkspace(target, manifest, "working");
             return ResolveRootPath(target, manifest);
         }
         return await UpdateWorkingCacheAsync(manifest, target, editableDocumentIds, cancellationToken).ConfigureAwait(false);
@@ -235,8 +235,11 @@ internal sealed partial class ControlledWorkspaceManager
             || HasPotentialLocalChanges(target, manifest.Files, Array.Empty<Guid>());
     }
 
-    public IReadOnlyList<string> GetWorkingFilePaths(ControlledOpenManifestDto manifest) =>
-        manifest.Files.Select(file => ManifestPath(WorkingDirectory(manifest), file)).ToArray();
+    public IReadOnlyList<string> GetWorkingFilePaths(ControlledOpenManifestDto manifest)
+    {
+        var directory = WorkingDirectory(manifest);
+        return manifest.Files.Select(file => ManifestPath(directory, file)).ToArray();
+    }
 
     public string GetWorkingFilePath(ControlledOpenManifestDto manifest, Guid documentId)
     {
@@ -265,6 +268,9 @@ internal sealed partial class ControlledWorkspaceManager
             if (Valid(candidate)) return candidate;
         var target = Path.Combine(parent, prefix + manifest.Id.ToString("N"));
         if (Directory.Exists(target)) target += "-" + Guid.NewGuid().ToString("N");
+        var kind = Path.GetFileName(preferred).StartsWith("r", StringComparison.OrdinalIgnoreCase) ? "r" : "l";
+        var alternate = Path.Combine(parent, ManagedCadPaths.CompactEntryName(kind, target));
+        target = ManagedCadPaths.ChooseDirectory(target, new[] { alternate }, ManifestPaths(manifest.Files));
         PluginDiagnosticLog.Record("只读副本恢复", "原目录及本地内容已保留，另行取回服务器副本：" + target);
         return target;
     }
@@ -282,45 +288,97 @@ internal sealed partial class ControlledWorkspaceManager
     private string ReadOnlyDirectory(ControlledOpenManifestDto manifest, bool historicalPreview)
     {
         var root = Path.Combine(SnapshotRoot(manifest), historicalPreview ? "ReadOnly" : "Latest", manifest.RootVersionId.ToString("N"));
-        if (historicalPreview) return root;
+        if (historicalPreview)
+            return ChooseManifestDirectory(manifest, root, "r", manifest.RootDocumentId + "|" + manifest.RootVersionId);
         // A parent can retain its version while a child advances. Each complete file
         // combination gets an immutable cache directory instead of replacing open files.
         var shape = manifest.RootVersionId + "|" + manifest.RootDocumentId + "|" + string.Join("|", manifest.Files.OrderBy(file => file.DocumentId)
             .Select(file => file.DocumentId + ":" + file.VersionId + ":" + file.Sha256));
-        using (var hash = System.Security.Cryptography.SHA256.Create())
-            return Path.Combine(SnapshotRoot(manifest), "Latest", BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(shape))).Replace("-", "").Substring(0, 32));
+        using var hash = System.Security.Cryptography.SHA256.Create();
+        var preferred = Path.Combine(SnapshotRoot(manifest), "Latest",
+            BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(shape))).Replace("-", "").Substring(0, 32));
+        return ChooseManifestDirectory(manifest, preferred, "l", shape);
     }
 
     private string WorkingDirectory(ControlledOpenManifestDto manifest)
     {
-        if (serverWorkingDirectories.TryGetValue(manifest.RootDocumentId, out var prepared)) return prepared;
+        var files = ManifestPaths(manifest.Files);
+        if (serverWorkingDirectories.TryGetValue(manifest.RootDocumentId, out var prepared)
+            && ManagedCadPaths.Fits(prepared, files)) return prepared;
+
         var project = ProjectViewDirectory(workspaceRoot, manifest.ProjectCode);
         var server = Path.Combine(project, "装配工作区", "plm-" + manifest.RootDocumentId.ToString("N"));
-        if (Directory.Exists(server)) return server;
-        var legacyRoot = Path.Combine(project, manifest.RootRelativePath ?? "");
-        if (PdmDocumentIdentityStore.TryReadLocalMetadata(legacyRoot, out var metadata)
-            && metadata.DocumentId == manifest.RootDocumentId) return project;
-        return Path.Combine(project, "装配工作区", manifest.RootDocumentId.ToString("N"));
+        var preferred = Path.Combine(project, "装配工作区", manifest.RootDocumentId.ToString("N"));
+        if (Directory.Exists(server)) preferred = server;
+        else if (ManagedCadPaths.Fits(project, manifest.RootRelativePath))
+        {
+            var legacyRoot = ManagedCadPaths.Resolve(project, manifest.RootRelativePath);
+            if (PdmDocumentIdentityStore.TryReadLocalMetadata(legacyRoot, out var metadata)
+                && metadata.DocumentId == manifest.RootDocumentId) preferred = project;
+        }
+
+        var identity = manifest.ProjectId + "|" + manifest.RootDocumentId;
+        var compact = CompactManifestDirectories(manifest, "w", identity).ToArray();
+        // Once a compact working context exists, keep the same paths for later
+        // opens and checkout even when a newer manifest includes shorter names.
+        var existing = CompactManifestDirectories(manifest, "w", "recovery|" + identity).Concat(compact)
+            .FirstOrDefault(directory => Directory.Exists(directory) && ManagedCadPaths.Fits(directory, files));
+        var target = SelectManagedDirectory(existing ?? preferred, compact, files);
+        if (!string.Equals(preferred, target, StringComparison.OrdinalIgnoreCase) && Directory.Exists(preferred))
+        {
+            var fitting = manifest.Files.Where(file => ManagedCadPaths.Fits(preferred, ManifestRelativePath(file)));
+            var conflicts = DescribeCacheConflicts(preferred, fitting, PendingLocalEdits, manifest.ProjectId);
+            if (conflicts.Count > 0)
+                throw new InvalidDataException("原工作目录中有未提交的修改，已保留。请核对以下图档后，再切换到较短的受控目录："
+                    + string.Join("、", conflicts.Select(file => file.FileName)));
+        }
+        return target;
     }
 
-    private string HistoricalDerivedDirectory(ControlledOpenManifestDto manifest) =>
-        serverDerivedDirectories.TryGetValue(manifest.RootDocumentId, out var prepared) ? prepared : Path.Combine(
-            workspaceRoot,
-            ".uplm",
-            "Derived",
-            SafeSegment(manifest.ProjectCode),
-            manifest.RootDocumentId.ToString("N"),
-            manifest.RootVersionId.ToString("N"),
-            manifest.Id.ToString("N"));
+    private string HistoricalDerivedDirectory(ControlledOpenManifestDto manifest)
+    {
+        if (serverDerivedDirectories.TryGetValue(manifest.RootDocumentId, out var prepared)) return prepared;
+        var preferred = Path.Combine(workspaceRoot, ".uplm", "Derived", SafeSegment(manifest.ProjectCode),
+            manifest.RootDocumentId.ToString("N"), manifest.RootVersionId.ToString("N"), manifest.Id.ToString("N"));
+        return ChooseManifestDirectory(manifest, preferred, "d", manifest.Id.ToString("N"));
+    }
+
+    private static string ManifestRelativePath(ControlledOpenFileDto file) => file.RelativePath ?? file.FileName;
+    private static string[] ManifestPaths(IEnumerable<ControlledOpenFileDto> files) => files.Select(ManifestRelativePath).ToArray();
+
+    private IEnumerable<string> CompactManifestDirectories(ControlledOpenManifestDto manifest, string kind, string identity) =>
+        ServerWorkspaceRoots.Select(root => ManagedCadPaths.CompactDirectory(root, kind, identity, manifest.ProjectCode ?? ""));
+
+    private string ChooseManifestDirectory(ControlledOpenManifestDto manifest, string preferred, string kind, string identity) =>
+        SelectManagedDirectory(preferred, CompactManifestDirectories(manifest, kind, identity), ManifestPaths(manifest.Files));
+
+    private string ManagedRootOf(string directory) => ServerWorkspaceRoots.OrderByDescending(root => root.Length)
+        .FirstOrDefault(root => ManagedCadPaths.IsWithin(directory, root)) ?? workspaceRoot;
+
+    private string SelectManagedDirectory(string preferred, IEnumerable<string> alternatives, IEnumerable<string> paths)
+    {
+        var target = ManagedCadPaths.ChooseDirectory(preferred, alternatives, paths);
+        ControlledCacheMaintenance.RequireOrdinaryPath(target, ManagedRootOf(target));
+        return target;
+    }
+
+    private string OperationDirectory(string target, string category, string identity, IEnumerable<string> paths)
+    {
+        var root = ManagedRootOf(target);
+        return SelectManagedDirectory(Path.Combine(root, ".uplm", category, identity),
+            new[] { ManagedCadPaths.CompactDirectory(root, "s", category + "|" + identity) }, paths);
+    }
+
+    private void RecordWorkspace(string target, ControlledOpenManifestDto manifest, string kind) =>
+        ControlledCacheMaintenance.Record(ManagedRootOf(target), target, manifest, kind);
 
     internal static string ProjectViewDirectory(string root, string projectCode) =>
         Path.Combine(root, "View", SafeSegment(projectCode));
 
     private static string ResolveRootPath(string directory, ControlledOpenManifestDto manifest)
     {
-        var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        var path = Path.GetFullPath(Path.Combine(root, manifest.RootRelativePath ?? string.Empty));
-        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        var path = ManagedCadPaths.Resolve(directory, manifest.RootRelativePath);
+        if (!File.Exists(path))
         {
             throw new FileNotFoundException("受控工作区中未找到根图档。", path);
         }
@@ -418,8 +476,8 @@ internal sealed partial class ControlledWorkspaceManager
             return;
         }
 
-        var backup = RecoveryDirectory("snapshot");
         var originalAttributes = SnapshotFileAttributes(target);
+        var backup = RecoveryDirectory("snapshot", target, originalAttributes.Keys);
         var backupCompleted = false;
         var keepRecovery = false;
         try
@@ -501,7 +559,7 @@ internal sealed partial class ControlledWorkspaceManager
         IReadOnlyCollection<ControlledOpenFileDto> files,
         IReadOnlyDictionary<Guid, string> expectedHashes = null)
     {
-        var backup = RecoveryDirectory("working");
+        var backup = RecoveryDirectory("working", target, ManifestPaths(files));
         var changed = new List<Tuple<string, string, FileAttributes?>>();
         var previousBindings = new Dictionary<string, PdmControlledFileMetadata>(StringComparer.OrdinalIgnoreCase);
         var keepRecovery = false;
@@ -577,11 +635,9 @@ internal sealed partial class ControlledWorkspaceManager
         }
     }
 
-    private string RecoveryDirectory(string category) => Path.Combine(
-        workspaceRoot,
-        ".uplm",
-        "Recovery",
-        string.Concat(category, "-", DateTime.UtcNow.ToString("yyyyMMddHHmmss"), "-", Guid.NewGuid().ToString("N")));
+    private string RecoveryDirectory(string category, string target, IEnumerable<string> files) =>
+        OperationDirectory(target, "Recovery",
+            category + "-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss") + "-" + Guid.NewGuid().ToString("N"), files);
 
     private static void CopyFileAtomically(string source, string target)
     {
@@ -592,7 +648,7 @@ internal sealed partial class ControlledWorkspaceManager
             return;
         }
 
-        var temporary = Path.Combine(Path.GetDirectoryName(target), ".pdm-" + Guid.NewGuid().ToString("N") + ".tmp");
+        var temporary = ManagedCadPaths.TemporarySibling(target);
         try
         {
             using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
@@ -644,20 +700,8 @@ internal sealed partial class ControlledWorkspaceManager
         return fullPath.Substring(root.Length);
     }
 
-    private static string ManifestPath(string directory, ControlledOpenFileDto file)
-    {
-        var root = Path.GetFullPath(directory)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-            + Path.DirectorySeparatorChar;
-        var relativePath = file.RelativePath ?? file.FileName ?? string.Empty;
-        var path = Path.GetFullPath(Path.Combine(root, relativePath));
-        if (string.IsNullOrWhiteSpace(relativePath)
-            || !path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException("PLM打开清单包含越界文件路径。");
-        }
-        return path;
-    }
+    private static string ManifestPath(string directory, ControlledOpenFileDto file) =>
+        ManagedCadPaths.Resolve(directory, ManifestRelativePath(file));
 
     private static void CopyDirectory(string source, string target)
     {

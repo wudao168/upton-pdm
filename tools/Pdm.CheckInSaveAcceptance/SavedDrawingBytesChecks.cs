@@ -10,6 +10,48 @@ using System.Threading.Tasks;
 
 internal static partial class Program
 {
+    static void SavedDrawingPreflightCacheScenario(string folder)
+    {
+        var node=LinkedNode(folder,"SAVED-PROPERTIES.SLDDRW","Drawing");
+        var path=(string)Get(node,"FullPath");
+        var plugin=New("PdmAddin");
+        var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+        var nativeWrites=new List<string>();
+        var drawing=new Model(appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),path,false,nativeWrites);
+        var opens=0;var closes=0;
+        SetField(plugin,"application",new Proxy(appType,call=>{
+            switch(call.MethodName)
+            {
+                case "GetDocuments":return new object[0];
+                case "GetOpenDocumentByName":return null;
+                case "GetDocumentVisible":return true;
+                case "DocumentVisible":return null;
+                case "OpenDoc6":
+                    TreeCheck((string)call.Args[0]==path&&((int)call.Args[2]&1027)==1027,"属性读取只打开指定工程图的只读出详图副本");
+                    opens++;return drawing.GetTransparentProxy();
+                case "CloseDoc":
+                    TreeCheck((string)call.Args[0]==Path.GetFileName(path),"属性读取只关闭自己打开的工程图");
+                    closes++;return null;
+                default:throw new Exception("属性核对不应调用："+call.MethodName);
+            }
+        }).GetTransparentProxy());
+        IDictionary ReadProperties(string hash)=>(IDictionary)TreeCall(plugin,"ReadArchivePreflightPropertiesCore",node,null,null,null,hash);
+        var initialHash=WorkingReuseHash(path);
+        drawing.MemoryProperties["物料名称"]="首次完整读取";
+        var initial=ReadProperties(initialHash);
+        Set(node,"ArchiveInspectedProperties",initial);
+        Set(node,"ArchiveInspectedPropertiesSha256",initialHash);
+        drawing.MemoryProperties["物料名称"]="文件变化后重新读取";
+        var reused=ReadProperties(initialHash);
+        TreeCheck(opens==1&&closes==1&&(string)reused["全局/物料名称"]=="首次完整读取","源指纹相同的重试不重复打开工程图读取属性");
+        File.AppendAllText(path,"new saved drawing contents");
+        var changedHash=WorkingReuseHash(path);
+        var refreshed=ReadProperties(changedHash);
+        TreeCheck(opens==2&&closes==2&&(string)refreshed["全局/物料名称"]=="文件变化后重新读取"
+            &&WorkingReuseHash(path)==changedHash&&nativeWrites.Count==0,"源指纹变化时重新读取属性并保留工程图字节");
+        Console.WriteLine("PASS: saved drawing preflight reuses complete properties only for matching source bytes");
+    }
+
     static async Task SavedDrawingBytesScenario(string output)
     {
         output=Path.GetFullPath(output); Directory.CreateDirectory(output);
@@ -38,22 +80,28 @@ internal static partial class Program
             }).GetTransparentProxy();
             SetField(plugin,"application",app);SetField(plugin,"currentTree",node);
             var cards=Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(Type("CadDocumentKind"),typeof(IReadOnlyList<string>)));
-            var snapshot=new Dictionary<string,string>{{"全局/名称","已核对的工程图名称"}};
-            if(loaded||mode=="cache-changed")
+            var snapshot=new Dictionary<string,string>{{"全局/名称","已核对的工程图名称"},
+                {"UPLM.CustomPropertiesRead","1"},{"UPLM.CustomPropertyConfigurations","[]"}};
+            Set(node,"ArchiveInspectedProperties",snapshot);Set(node,"ArchiveInspectedPropertiesSha256",originalHash);
+            if(mode=="cache-changed")
             {
-                Set(node,"ArchiveInspectedProperties",snapshot);Set(node,"ArchiveInspectedPropertiesSha256",originalHash);
-                if(mode=="cache-changed"){File.AppendAllText(path,"saved update");original=File.ReadAllBytes(path);}
+                File.AppendAllText(path,"saved update");original=File.ReadAllBytes(path);
+                Exception staleFailure=null;
+                try { TreeCall(plugin,"ReadArchivePreflightPropertiesCore",node,cards,null,null,WorkingReuseHash(path)); }
+                catch(Exception error) { staleFailure=error; }
+                Check(staleFailure!=null&&staleFailure.ToString().Contains("未能完整读取图档自定义属性")&&forbidden>0,
+                    "源字节改变后必须重新读取属性，无法读取时阻止使用旧索引");
+                forbidden=0;
+                snapshot=new Dictionary<string,string>(snapshot);
+                snapshot["全局/名称"]="文件变化后核对的名称";
+                Set(node,"ArchiveInspectedProperties",snapshot);Set(node,"ArchiveInspectedPropertiesSha256",WorkingReuseHash(path));
             }
             if(mode=="readonly")File.SetAttributes(path,FileAttributes.ReadOnly);
             if(!loaded)
             {
-                var props=(IDictionary)TreeCall(plugin,"ReadArchivePreflightProperties",node,cards,null,null);
+                var props=(IDictionary)TreeCall(plugin,"ReadArchivePreflightPropertiesCore",node,cards,null,null,WorkingReuseHash(path));
                 Check(forbidden==0,mode+"：预检不调用OpenDoc6/OpenDoc7、不改变图纸窗口");
-                Check(((IEnumerable)Get(node,"ReferenceWarnings")).Cast<string>().Any(value=>value.StartsWith("属性索引待补齐：")),mode+"：属性未完整提取时明确记录待补齐提示");
-                var frozen=Type("PdmApiClient").GetMethod("CaptureArchiveSnapshot",Flags).Invoke(null,new object[]{node,new HashSet<string>{path}});
-                var root=(Dictionary<string,object>)TreeCall(frozen,"CreateRoot");
-                Check(((object[])root["referenceWarnings"]).Cast<string>().Any(value=>value.Contains("属性索引待补齐")),mode+"：待补齐记录随存档快照持久保留");
-                Check(!props.Contains("全局/名称"),mode+"：不把未经核对的旧属性声明为当前值");
+                Check((string)props["全局/名称"]==snapshot["全局/名称"],mode+"：使用同一份已保存字节的完整属性索引");
             }
             using(var client=(IDisposable)New("PdmApiClient","http://fixture.invalid/"))
             using(var handler=new ReferenceRecoveryHandler(request=>new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("[]")}))
@@ -65,7 +113,8 @@ internal static partial class Program
                 catch(Exception error){failure=error;}
                 if(mode=="dirty")
                 {
-                    Check(failure!=null&&failure.ToString().Contains("未保存"),"工程图真实未保存修改仍在上传前阻止，不用磁盘旧内容覆盖修改");
+                    Check(failure?.GetBaseException().GetType().Name=="ArchivePendingSaveException",
+                        "工程图真实未保存修改仍在上传前阻止，不用磁盘旧内容覆盖修改");
                     Check(forbidden==0,"拒绝未保存修改时不打开、保存或关闭其他窗口");
                 }
                 else if(mode=="needs-model-update")
@@ -81,7 +130,7 @@ internal static partial class Program
                     Check(File.ReadAllBytes(path).SequenceEqual(original),mode+"：源文件内容不变");
                     var props=(IDictionary)Get(prepared,"Properties");
                     if(mode=="loaded-clean")Check((string)props["全局/名称"]=="已核对的工程图名称","已核对且内容哈希相同的属性快照被复用");
-                    if(mode=="cache-changed")Check(!props.Contains("全局/名称"),"源文件变化后不复用旧属性快照");
+                    if(mode=="cache-changed")Check((string)props["全局/名称"]=="文件变化后核对的名称","源文件变化后仅提交重新核对的属性");
                     if(mode=="readonly")Check((File.GetAttributes(path)&FileAttributes.ReadOnly)!=0,"共享只读工程图保持只读属性");
                     Type("PdmAddin").GetMethod("DeleteCheckInUploadCopy",Flags).Invoke(null,new object[]{copy});
                 }
@@ -94,12 +143,17 @@ internal static partial class Program
         Set(cachedNode,"FullPath",cachedPath);Set(cachedNode,"FileName",Path.GetFileName(cachedPath));
         var cachedPlugin=New("PdmAddin");var cachedVersion=New("DocumentVersionDto");
         Set(cachedVersion,"Id",Guid.NewGuid());Set(cachedVersion,"Sha256",WorkingReuseHash(cachedPath));
-        Set(cachedVersion,"PropertySnapshot",new Dictionary<string,string>{{"全局/名称","已存档且已核对的名称"}});
+        Set(cachedVersion,"FileLength",new FileInfo(cachedPath).Length);
+        Set(cachedVersion,"PropertySnapshot",new Dictionary<string,string>{{"全局/名称","已存档且已核对的名称"},
+            {"UPLM.CustomPropertiesRead","1"},{"UPLM.CustomPropertyConfigurations","[]"}});
         var cachedProperties=(IDictionary)TreeCall(cachedPlugin,"ReadSavedDrawingProperties",cachedNode,WorkingReuseHash(cachedPath),cachedVersion);
         Check((string)cachedProperties["全局/名称"]=="已存档且已核对的名称","磁盘内容匹配已有版本时直接复用已核对属性索引");
         Check(!((IEnumerable)Get(cachedNode,"ReferenceWarnings")).Cast<string>().Any(),"已有完整索引的相同文件不误报属性待补齐");
         var cachedRoot=New("DocumentReferenceNodeDto");Set(cachedRoot,"ReferenceWarnings",new List<string>{"属性索引待补齐：先前未提取"});Set(cachedVersion,"ReferenceSnapshot",cachedRoot);
-        TreeCall(cachedPlugin,"ReadSavedDrawingProperties",cachedNode,WorkingReuseHash(cachedPath),cachedVersion);
-        Check(((IEnumerable)Get(cachedNode,"ReferenceWarnings")).Cast<string>().Any(value=>value.StartsWith("属性索引待补齐：")),"相同字节不能把先前尚未提取的属性索引冒充完整");
+        Exception incomplete=null;
+        try { TreeCall(cachedPlugin,"ReadSavedDrawingProperties",cachedNode,WorkingReuseHash(cachedPath),cachedVersion); }
+        catch(Exception error) { incomplete=error; }
+        Check(incomplete!=null&&incomplete.ToString().Contains("未能完整读取图档自定义属性"),
+            "原版本带有未完整读取的提醒时，再次读取失败会阻止提交");
     }
 }

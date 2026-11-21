@@ -47,13 +47,20 @@ internal static partial class Program
     SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);
     var task=(Task)TreeCall(plugin,"VerifiedOpenContextIdsAsync",requested,false);await task;
     var actual=new HashSet<Guid>(((IEnumerable)Get(task,"Result")).Cast<Guid>());
-    Assert(actual.SetEquals(expected),name+"：真实W3快照仅识别两个已确认装配环境");
+    var environmentClosure=new HashSet<Guid>(requestedFiles.Where(file=>
+     !((string)Get(file,"FileName")).EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)
+     && (string)Get(file,"FileName")!="标签机钣金.SLDPRT").Select(file=>(Guid)Get(file,"DocumentId")));
+    Assert(actual.SetEquals(environmentClosure)&&expected.IsSubsetOf(actual),name+"：真实W3快照区分已确认装配环境及其下载成员");
     Assert(!actual.Contains((Guid)Get(root,"DocumentId")),name+"：当前图档和实际视图模型不会当成上下文放行");
     Assert(calls.Count==(name.EndsWith("SLDDRW")?2:1)&&calls.Distinct().Count()==calls.Count,name+"：仅按需读取当前图档及直接模型，不遍历43份元数据");
     Assert(requestedFiles.Where(file=>!actual.Contains((Guid)Get(file,"DocumentId"))).All(file=>
      {var prior=files.Single(original=>Get(original,"DocumentId").Equals(Get(file,"DocumentId")));return Get(prior,"VersionId").Equals(Get(file,"VersionId"))&&Equals(Get(prior,"Configuration"),Get(file,"Configuration"));}),name+"：真实模型版本和配置保持严格校验输入");
    }
   }
-  Assert(json.Serialize(owner)==ownerJson,"捕获的原工作区清单未改变，无真实CAD、文件覆盖或PLM写入");
+  object Stable(object value) => value is IDictionary<string,object> map
+   ? (object)new SortedDictionary<string,object>(map.ToDictionary(pair=>pair.Key,pair=>Stable(pair.Value)),StringComparer.Ordinal)
+   : value is object[] array ? array.Select(Stable).ToArray() : value;
+  Assert(json.Serialize(Stable(json.DeserializeObject(json.Serialize(owner))))==json.Serialize(Stable(json.DeserializeObject(ownerJson))),
+   "捕获的原工作区清单所有字段未改变，无真实CAD、文件覆盖或PLM写入");
  }
 }

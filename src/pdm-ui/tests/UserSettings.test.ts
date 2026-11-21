@@ -1,8 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import UserSettings from '../src/components/UserSettings.vue'
 import type { OrganizationDirectory, RolePermissionDirectory } from '../src/types'
+import { listUserAccountOperations } from '../src/api'
+import { userAccountPermissions } from '../src/navigationAccess'
+
+vi.mock('../src/api', async importOriginal => ({ ...await importOriginal<typeof import('../src/api')>(), listUserAccountOperations: vi.fn() }))
 
 const directory: OrganizationDirectory = {
   organizations: [{ id: 'org-1', name: '昆山阿普顿自动化系统有限公司', projectCompanyCode: '7', modelCompanyCode: 'AK', crmCompanyName: '', isActive: true, currentProjectSequence: 1, currentSerialSequence: 1 }],
@@ -24,7 +28,7 @@ const roles: RolePermissionDirectory = {
 }
 
 describe('UserSettings', () => {
-  afterEach(() => { document.body.innerHTML = '' })
+  afterEach(() => { vi.restoreAllMocks(); document.body.innerHTML = '' })
 
   it('在一个页面提供用户、权限中心和组织关系，并可创建用户', async () => {
     const saveUser = vi.fn().mockResolvedValue({ username: 'new-user', displayName: '新用户', role: 'Engineer', isActive: true })
@@ -39,6 +43,8 @@ describe('UserSettings', () => {
         pending: false,
         onSaveUser: saveUser,
         onResetPassword: vi.fn(),
+        onDeactivateUser: vi.fn(),
+        onDeleteUser: vi.fn(),
         onSaveOrganization: vi.fn(),
         onSaveUnit: vi.fn(),
         onUpdateMemberships: vi.fn(),
@@ -86,5 +92,67 @@ describe('UserSettings', () => {
     await flushPromises()
 
     expect(saveUser).toHaveBeenCalledWith(expect.objectContaining({ username: 'new-user', displayName: '新用户', role: 'Engineer', roles: ['Engineer', 'PlanningManager'], password: '11111111' }), true)
+  })
+
+  it('在状态列按授权和账号引用提供停用与删除，并在确认后提交', async () => {
+    const accounts = [
+      { ...directory.users[0], companyId: 'org-1', canDeactivate: true, canDelete: false, deleteReason: '用户已被组织关系引用。' },
+      { username: 'unused', displayName: '待清理账号', role: 'Engineer', companyId: 'org-1', isActive: false, canDeactivate: false, canDelete: true },
+    ]
+    let finishReferenceCheck!: (result: typeof accounts) => void
+    const referenceCheck = new Promise<typeof accounts>(resolve => { finishReferenceCheck = resolve })
+    vi.mocked(listUserAccountOperations).mockImplementation((_token, checkDeleteReferences) => checkDeleteReferences
+      ? referenceCheck
+      : Promise.resolve(accounts.map(account => ({ ...account, canDelete: false, deleteReason: undefined }))))
+    const deactivate = vi.fn().mockResolvedValue(undefined)
+    const remove = vi.fn().mockResolvedValue(undefined)
+    const confirmed = Promise.resolve('confirm') as ReturnType<typeof ElMessageBox.confirm>
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel').mockReturnValue(confirmed)
+    const wrapper = mount(UserSettings, {
+      props: {
+        directory: { ...directory, users: accounts }, roleDirectory: roles, activeOrganizationId: 'org-1',
+        token: 'local-test-token', permissions: [userAccountPermissions.deactivate, userAccountPermissions.delete],
+        currentUsername: 'admin', pending: false, onDeactivateUser: deactivate, onDeleteUser: remove,
+        onSaveUser: vi.fn(), onResetPassword: vi.fn(), onSaveOrganization: vi.fn(), onSaveUnit: vi.fn(),
+        onUpdateMemberships: vi.fn(), onUpdateManagers: vi.fn(), onSaveRolePermissions: vi.fn(),
+        onCreateRole: vi.fn(), onDeleteRole: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const [referenced, unused] = wrapper.findAll('.user-status-actions')
+    expect(referenced.get('button').text()).toBe('停用')
+    expect(unused.findAll('button')).toHaveLength(0)
+    expect(wrapper.get('.user-delete-check').text()).toBe('检查删除引用…')
+    expect(listUserAccountOperations).toHaveBeenCalledWith('local-test-token', false, expect.any(AbortSignal))
+    expect(listUserAccountOperations).toHaveBeenCalledWith('local-test-token', true, expect.any(AbortSignal))
+    finishReferenceCheck(accounts)
+    await flushPromises()
+    expect(wrapper.find('.user-delete-check').exists()).toBe(false)
+    expect(referenced.get('button.pdm-danger-action').attributes('disabled')).toBeDefined()
+    expect(referenced.get('[title]').attributes('title')).toBe('用户已被组织关系引用。')
+    await referenced.get('button:not(.pdm-danger-action)').trigger('click')
+    await flushPromises()
+    expect(deactivate).not.toHaveBeenCalled()
+    await referenced.get('button:not(.pdm-danger-action)').trigger('click')
+    await flushPromises()
+    expect(deactivate).toHaveBeenCalledWith('engineer')
+    expect(unused.findAll('button')).toHaveLength(1)
+    await unused.get('button').trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('待清理账号'), '删除用户', expect.any(Object))
+    expect(remove).toHaveBeenCalledWith('unused')
+
+    const reads = vi.mocked(listUserAccountOperations).mock.calls
+    const readsBeforePermissionChange = reads.length
+    await wrapper.setProps({ permissions: [userAccountPermissions.deactivate] })
+    await flushPromises()
+    expect(reads.slice(readsBeforePermissionChange).map(([, checkDeleteReferences]) => checkDeleteReferences)).toEqual([false])
+    expect(wrapper.find('.user-delete-check').exists()).toBe(false)
+    await wrapper.setProps({ permissions: ['system.role.view'] })
+    expect(wrapper.findAll('.user-status-actions button')).toHaveLength(0)
+    expect(vi.mocked(listUserAccountOperations).mock.calls[0][2].aborted).toBe(true)
+    wrapper.unmount()
   })
 })

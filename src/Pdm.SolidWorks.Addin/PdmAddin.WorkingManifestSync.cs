@@ -64,8 +64,7 @@ public sealed partial class PdmAddin
     {
         var path = ControlledReferenceMaterializer.LocalPath(directory, source);
         var workspace = PdmDocumentIdentityStore.CurrentWorkspaceRoot;
-        if (string.IsNullOrWhiteSpace(manifest.ProjectCode)
-            || !IsPathWithinDirectory(path, ControlledWorkspaceManager.ProjectViewDirectory(workspace, manifest.ProjectCode)))
+        if (!PdmDocumentIdentityStore.IsProjectWorkspacePath(workspace, manifest.ProjectCode, path))
             throw new InvalidOperationException("总装工作区路径需要核对，已保留窗口和图档，尚未获取编辑权限。");
         // Use the same backup and atomic replacement as post-archive cache sync.
         // The only loaded path eligible here is the root with exact live evidence.
@@ -83,6 +82,7 @@ public sealed partial class PdmAddin
             {
                 // SOLIDWORKS can keep a non-delete-sharing handle even in read-only
                 // mode. Reattach in the original frame from the exact archived bytes.
+                using var search = new ControlledReferenceSearchScope(application, path, manifest);
                 VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
                 if (!copy.Model.Visible || copy.Model.ForceReleaseLocks() != 1) throw;
                 VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
@@ -165,7 +165,7 @@ public sealed partial class PdmAddin
                 if (completed == null) return previous;
                 files.Add(completed); continue;
             }
-            if (!WorkingConfigurationMatches(before, current)
+            if (!WorkingManifestConfigurationMatches(latest.RootDocumentId, before, current)
                 || !string.Equals(before.RelativePath ?? before.FileName, current.RelativePath ?? current.FileName, StringComparison.OrdinalIgnoreCase)) return previous;
             var path = ControlledReferenceMaterializer.LocalPath(directory, before);
             // The caller verifies current bytes and any live draft before acquiring.
@@ -219,7 +219,7 @@ public sealed partial class PdmAddin
         foreach (var file in current.Files)
         {
             var original = before.Files.FirstOrDefault(item => item.DocumentId == file.DocumentId);
-            if (original != null && original.VersionId == file.VersionId && WorkingConfigurationMatches(original, file)
+            if (original != null && original.VersionId == file.VersionId && WorkingManifestConfigurationMatches(current.RootDocumentId, original, file)
                 && string.Equals(original.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(original.RelativePath ?? original.FileName, file.RelativePath ?? file.FileName, StringComparison.OrdinalIgnoreCase))
             {
@@ -231,7 +231,7 @@ public sealed partial class PdmAddin
         }
         conflicts.AddRange(before.Files.Where(file => !current.Files.Any(item => item.DocumentId == file.DocumentId))
             .Select(file => file.FileName + "（已不属于服务器当前装配结构，本地文件保留）"));
-        if (before.RootVersionId != current.RootVersionId) conflicts.Insert(0, Path.GetFileName(before.RootRelativePath) + "（总装基准版本已变化）");
+        if (!WorkingReuseRootVersionMatches(before, current)) conflicts.Insert(0, Path.GetFileName(before.RootRelativePath) + "（总装基准版本已变化）");
         return conflicts.Count == 0 ? "工作清单范围需核对" : string.Join("、", conflicts.Take(6));
     }
 }

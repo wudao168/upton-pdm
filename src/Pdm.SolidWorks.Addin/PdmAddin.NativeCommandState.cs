@@ -9,6 +9,7 @@ namespace Upton.Pdm.SolidWorks;
 public sealed partial class PdmAddin
 {
     private int nativeUiCommandId;
+    private int nativeCommandSequence;
     private int nativeFileOpenCommandId;
     private int nativeLoadEpoch;
     private int unknownAddedEpoch;
@@ -24,11 +25,28 @@ public sealed partial class PdmAddin
     private int nativeOpenCompletionEpoch = -1;
     private int nativeDocumentLoadedEpoch = -1;
     private int nativeActivationCompletedEpoch = -1;
+    private int nativeIdleSequence;
+    private ReferenceActivationObservation referenceActivationObservation;
+
+    private sealed class ReferenceActivationObservation
+    {
+        internal int Epoch, IdleSequence, Count, AssemblyStamp, ReferenceStamp;
+        internal IModelDoc2 Assembly, Reference;
+    }
+
+    // swCommands_Circle can remain as the last UI command after a sketch has
+    // closed. It is not an open, insert, or assembly structure command.
+    private const int SketchCircleCommand = 46;
+    // swCommands_Open_Comp_File can remain as the last command when rebuilding
+    // an assembly loads another reference without a matching FileOpenPostNotify.
+    private const int OpenComponentFileCommand = 970;
 
     private int OnNativeDocumentLoaded(string title, string path)
     {
         // Unlike FileOpenPostNotify, this event also covers lazily loaded references.
         // Record evidence only; never traverse or resolve CAD in the callback.
+        var load = assemblyReferenceLoad;
+        if (load?.ForReuse == true && load.Observed.Contains(path)) load.Loaded.Add(path);
         if (nativeFileOpenInProgress != 0 && PathsEqual(path, pendingOpenPath))
             nativeDocumentLoadedEpoch = nativeLoadEpoch;
         return 0;
@@ -52,6 +70,8 @@ public sealed partial class PdmAddin
     private void ObserveNativeFileOpening(string fileName)
     {
         nativeLoadEpoch++;
+        ObserveAssemblyReferenceLoad(fileName);
+        referenceActivationObservation = null;
         pendingOpenPath = fileName;
         pendingOpenHost = nativeFileOpenCommandId == 2 ? assemblyEventDocument : null;
         pendingOpenHostPath = assemblyEventDocumentPath;
@@ -162,12 +182,11 @@ public sealed partial class PdmAddin
         return 0;
     }
 
-    private string ArchiveRequestBusyReason()
-    {
-        if (!IsSolidWorksCommandActive()) return null;
-        return "SolidWorks当前命令或文件加载尚未结束，请先完成或取消插入、配合等操作，再点击“存档”。"
-            + "本次尚未开始存档，文件和未保存修改均已保留。";
-    }
+    private const string ArchiveBusyReminder =
+        "SolidWorks当前命令或文件加载尚未结束，请先完成或取消插入、配合等操作，再点击“存档”。"
+        + "本次尚未开始存档，文件和未保存修改均已保留。";
+
+    private string ArchiveRequestBusyReason() => IsSolidWorksCommandActive() ? ArchiveBusyReminder : null;
 
     private bool CanStartArchiveRequest()
     {
@@ -192,6 +211,7 @@ public sealed partial class PdmAddin
     // event plus an idle, stable native document. Time alone is never completion.
     private bool TryCompleteFinishedNativeOpen()
     {
+        if (TryCompleteAssemblyReferenceLoad()) return true;
         if (TryCompleteLoadedReferenceActivation()) return true;
         var epoch = nativeLoadEpoch;
         bool Proof() => nativeFileOpenInProgress != 0 && nativeFileOpenCommandId == 2
@@ -221,9 +241,13 @@ public sealed partial class PdmAddin
     private bool TryCompleteLoadedReferenceActivation()
     {
         var epoch = nativeLoadEpoch;
-        bool Proof() => nativeFileOpenInProgress != 0 && nativeFileOpenCommandId == 0
-            && nativeDocumentLoadedEpoch == epoch && nativeActivationCompletedEpoch == epoch
-            && pendingOpenIdleEpoch == epoch && nativeLoadEpoch == epoch && unknownAddedEpoch == 0
+        var sourceCommand = nativeFileOpenCommandId;
+        var confirmAcrossIdle = sourceCommand == SketchCircleCommand || sourceCommand == OpenComponentFileCommand;
+        var activationNotified = nativeDocumentLoadedEpoch == epoch && nativeActivationCompletedEpoch == epoch;
+        bool Proof() => nativeFileOpenInProgress != 0
+            && nativeFileOpenCommandId == sourceCommand
+            && (confirmAcrossIdle || sourceCommand == 0 && activationNotified)
+            && pendingOpenIdleEpoch == epoch && nativeLoadEpoch == epoch && unknownAddedEpoch == 0 && !unknownRemovalObserved
             && NativeInsertionEvidenceAllowed();
         if (!Proof()) return false;
         try
@@ -236,19 +260,44 @@ public sealed partial class PdmAddin
             if (active == null || string.IsNullOrWhiteSpace(path) || PathsEqual(path, currentDocumentIdentity)
                 || active.GetBlockingState() != 0) return false;
             lock (activeTreeCacheSync)
-                if (!activeTreeCache.Values.Any(entry => PathsEqual(DocumentIdentity(entry.Tree), path))) return false;
+                if (!activeTreeCache.Values.Any(entry => PathsEqual(DocumentIdentity(entry.Tree), path)
+                    && (!confirmAcrossIdle || entry.Tree.Kind == CadDocumentKind.Assembly))) return false;
             if (!controlledOpenManifests.Any(context => context.Value.Files.Any(file => file.IsRoot
                     && PathsEqual(ControlledReferenceMaterializer.LocalPath(context.Key, file), path))
                 && context.Value.Files.Any(file => PathsEqual(ControlledReferenceMaterializer.LocalPath(context.Key, file), pendingOpenPath)))) return false;
             var loaded = application.GetOpenDocumentByName(pendingOpenPath) as IModelDoc2;
             if (loaded == null || !PathsEqual(loaded.GetPathName(), pendingOpenPath) || loaded.GetBlockingState() != 0) return false;
             var stamp = active.GetUpdateStamp();
+            var referenceStamp = confirmAcrossIdle ? loaded.GetUpdateStamp() : 0;
             var count = application.GetDocumentCount();
             application.GetRunningCommandInfo(out _, out _, out busy);
             if (busy || application.CommandInProgress || active.GetBlockingState() != 0
                 || loaded.GetBlockingState() != 0 || active.GetUpdateStamp() != stamp || application.GetDocumentCount() != count
                 || !ReferenceEquals(application.ActiveDoc, active) || !Proof()) return false;
+            if (confirmAcrossIdle)
+            {
+                if (loaded.GetUpdateStamp() != referenceStamp || !Proof()) return false;
+                // Some versions load nested references without a complete pair of
+                // document-load/activation events. Confirm the same objects, stamps
+                // and document count on two separate native idle notifications.
+                var prior = referenceActivationObservation;
+                if (prior == null || prior.Epoch != epoch || prior.Count != count
+                    || prior.AssemblyStamp != stamp || prior.ReferenceStamp != referenceStamp
+                    || !ReferenceEquals(prior.Assembly, active) || !ReferenceEquals(prior.Reference, loaded))
+                {
+                    referenceActivationObservation = new ReferenceActivationObservation
+                    {
+                        Epoch = epoch, IdleSequence = nativeIdleSequence, Count = count,
+                        Assembly = active, AssemblyStamp = stamp, Reference = loaded, ReferenceStamp = referenceStamp
+                    };
+                    return false;
+                }
+                if (prior.IdleSequence == nativeIdleSequence) return false;
+                referenceActivationObservation = null;
+                if (nativeUiCommandId == sourceCommand) nativeUiCommandId = 0;
+            }
             OnFileOpened(pendingOpenPath);
+            taskPaneControl?.ClearCheckoutReminder(ArchiveBusyReminder);
             LogOperation("已核对引用加载完成和总装激活，恢复设计树：" + path);
             return true;
         }

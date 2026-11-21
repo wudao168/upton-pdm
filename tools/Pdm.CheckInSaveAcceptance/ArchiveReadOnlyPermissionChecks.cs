@@ -2,11 +2,13 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
+using System.Windows.Forms;
 
 internal static partial class Program
 {
@@ -16,15 +18,18 @@ internal static partial class Program
   Type("ArchiveBatchJournal").GetField("directory",Flags).SetValue(null,Path.Combine(Path.GetFullPath(folder),"batch-journal"));
   void Check(bool ok,string text){if(!ok)throw new Exception(text);Console.WriteLine("PASS: "+text);}
   foreach(var kind in new[]{"Part","Assembly","Drawing"})
-  foreach(var mode in new[]{"new","existing","owned","denied"})
+  foreach(var mode in new[]{"new","existing","owned","stale-owned","denied"})
   {
    var path=Path.Combine(folder,kind+"-"+mode+(kind=="Part"?".SLDPRT":kind=="Assembly"?".SLDASM":".SLDDRW"));
    File.WriteAllText(path,"saved original bytes; no real CAD opened");File.SetAttributes(path,FileAttributes.ReadOnly);
    var original=File.ReadAllBytes(path);var project=Guid.NewGuid();var id=Guid.NewGuid();var session=Guid.NewGuid();
    var addin=New("PdmAddin");SetField(addin,"authenticatedUsername","tester");SetField(addin,"checkoutSessionId",session);
+   var priorContext=SynchronizationContext.Current;
+   using var pane=(Control)New("PdmTaskPaneControl","存档权限回归");SetField(addin,"taskPaneControl",pane);
+   SynchronizationContext.SetSynchronizationContext(priorContext);
    var node=New("CadTreeNode");Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),kind));Set(node,"FullPath",path);Set(node,"FileName",Path.GetFileName(path));
    if(mode!="new")Set(node,"DocumentId",id);
-   if(mode=="owned"){Set(node,"CheckedOutBy","tester");Set(node,"CheckoutSessionId",session);}
+   if(mode=="owned"||mode=="stale-owned"){Set(node,"CheckedOutBy","tester");Set(node,"CheckoutSessionId",session);}
    SetField(addin,"currentTree",node);
    var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var nativeCalls=0;var dirty=false;
    var model=new Proxy(appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{
@@ -36,8 +41,9 @@ internal static partial class Program
    using(var handler=new ReferenceRecoveryHandler(request=>{
     requests.Add(request.RequestUri.AbsolutePath);
     if(mode=="denied")return new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"title\":\"当前用户没有存档权限。\"}")};
+    var released=mode=="stale-owned"&&request.Method==HttpMethod.Get;
     return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(new JavaScriptSerializer().Serialize(new{
-     id,projectId=project,fileName=Path.GetFileName(path),kind=Convert.ToInt32(Get(node,"Kind")),checkedOutBy="tester",checkoutSessionId=session,
+     id,projectId=project,fileName=Path.GetFileName(path),kind=Convert.ToInt32(Get(node,"Kind")),checkedOutBy=released?null:"tester",checkoutSessionId=released?(Guid?)null:session,
      revision=new{display="W1"}}))};
    }))
    using(var client=(IDisposable)New("PdmApiClient","http://fixture.invalid/"))
@@ -51,7 +57,10 @@ internal static partial class Program
     Check((failure!=null)==(mode=="denied"),kind+"/"+mode+"：已保存只读图档可准备存档，PLM拒绝权限仍拦截");
     Check(nativeCalls==0&&(File.GetAttributes(path)&FileAttributes.ReadOnly)!=0,kind+"/"+mode+"：不强制切换可编辑，不改源文件只读属性");
     Check(Convert.ToBase64String(File.ReadAllBytes(path))==Convert.ToBase64String(original),kind+"/"+mode+"：原文件名和内容不变");
-    Check(requests.Count==(mode=="owned"?0:1)&&requests.TrueForAll(value=>value.EndsWith(mode=="new"?"/registrations":"/checkout")),kind+"/"+mode+"：只准备PLM权限，不上传或提交版本");
+    var expectedRequests=mode=="new"?new[]{"/registrations"}:mode=="owned"?new[]{"/documents/"+id}
+        :mode=="stale-owned"?new[]{"/documents/"+id,"/checkout"}:new[]{"/checkout"};
+    Check(requests.Count==expectedRequests.Length&&requests.Zip(expectedRequests,(actual,expected)=>actual.EndsWith(expected)).All(equal=>equal),
+      kind+"/"+mode+"：按服务器当前会话准备权限，不上传或提交版本");
     if(mode!="denied")
     {
      var copier=Array.Find(Type("PdmAddin").GetMethods(Flags),method=>method.Name=="CreateCheckInUploadCopy"&&method.GetParameters().Length==2&&method.GetParameters()[0].ParameterType==typeof(string));

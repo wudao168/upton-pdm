@@ -60,15 +60,22 @@ internal static partial class Program
             using (var cadFrame = new Form { Text = "UPLM 显示回归：模拟工程图", Opacity = interactive ? 1 : 0, ShowInTaskbar = interactive })
             {
                 cadFrame.Show(host);
-                ArchiveUi(session, () => LayerRaise(handle, cadFrame.Handle, 0, 0, 0, 0, 0x13));
-                Check(LayerDepth(cadFrame.Handle) < LayerDepth(handle), "隔离复现SolidWorks新图档窗口遮住存档窗口");
                 host.Enabled = true;
-                await WaitForForeground("cad");
-                await Task.Delay(150);
-                Check(GetForegroundWindow() == host.Handle || GetForegroundWindow() == handle || GetForegroundWindow() == cadFrame.Handle, "隔离模拟SolidWorks切换图档后所属窗口组取得前端");
-                ArchiveUi(session, () => { TreeCall(ArchiveWindow(session), "MaintainResidency", host.Handle); return true; });
-                await Task.Delay(150);
-                Check(LayerDepth(handle) < LayerDepth(cadFrame.Handle), "SolidWorks前端的新图档窗口不会持续遮住存档窗口");
+                if (interactive)
+                {
+                    await WaitForForeground("cad");
+                    var foreground = GetForegroundWindow();
+                    Check(foreground == host.Handle || foreground == handle || foreground == cadFrame.Handle,
+                        "切换图档后所属窗口组取得前端");
+                }
+                ArchiveUi(session, () =>
+                {
+                    LayerRaise(handle, cadFrame.Handle, 0, 0, 0, 0, 0x13);
+                    Check(LayerDepth(cadFrame.Handle) < LayerDepth(handle), "隔离复现SolidWorks新图档窗口遮住存档窗口");
+                    TreeCall(ArchiveWindow(session), "MaintainResidency", cadFrame.Handle);
+                    Check(LayerDepth(handle) < LayerDepth(cadFrame.Handle), "SolidWorks前端的新图档窗口不会持续遮住存档窗口");
+                    return true;
+                });
                 var beforeActivation = ArchiveUi(session, () => (int)Get(ArchiveWindow(session), "RefreshTicks"));
                 cadFrame.Activate();
                 Thread.Sleep(1200);

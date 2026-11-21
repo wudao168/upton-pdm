@@ -31,6 +31,7 @@ public sealed class WorkflowNotificationHostedService(IServiceScopeFactory scope
                     finally { if (previousTenant is null) TenantContext.Clear(); else TenantContext.Set(previousTenant); }
                     historyReconciled = true;
                 }
+                await ReleaseDrawingReworkNotifications.SyncAsync(scope.ServiceProvider.GetRequiredService<IPdmRepository>(), stoppingToken);
                 foreach (var job in await store.ListDueAsync(clock.GetUtcNow(), 25, stoppingToken))
                     try { await service.ProcessAsync(job.Id, stoppingToken); }
                     catch (Exception error) when (error is not OperationCanceledException)

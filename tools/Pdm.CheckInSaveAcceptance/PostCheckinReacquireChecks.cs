@@ -81,6 +81,7 @@ internal static partial class Program
      object Document(object file,int kind){var doc=New("DocumentDto");Set(doc,"Id",Get(file,"DocumentId"));Set(doc,"ProjectId",project);Set(doc,"FileName",Get(file,"FileName"));Set(doc,"Kind",kind);return doc;}
      var partDoc=Document(files[1],1);var drawingDoc=Document(files[2],2);var rootDoc=Document(files[0],0);var checkoutRequests=new List<Guid>();var granted=new List<Guid>();var headReads=0;var dependencyRaceTriggered=false;var unexpected=new List<string>();
      using(var lifetime=new CancellationTokenSource())
+     using(var pane=(IDisposable)New("PdmTaskPaneControl","存档后再次获取回归"))
      using(var client=(IDisposable)New("PdmApiClient","http://post-checkin.invalid/"))
      using(var handler=new ReferenceRecoveryHandler(request=>{
       var path=request.RequestUri.AbsolutePath;object data;
@@ -114,6 +115,7 @@ internal static partial class Program
      {
       http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);SetField(memory,"CommittedScope",Get(client,"EditJournalScope"));
       var scope=(string)Get(client,"EditJournalScope")+"|tester";SetField(plugin,"editJournal",New("EditDraftJournal",Path.Combine(folder,"journal"),scope));SetField(plugin,"editJournalScope",scope);
+      SetField(plugin,"taskPaneControl",pane);
       if(!noReceipt)
       {
        var receipt=New("PdmAddin+CompletedWorkingArchive");SetField(receipt,"ProjectId",project);SetField(receipt,"DocumentId",Get(files[1],"DocumentId"));SetField(receipt,"VersionId",Get(files[1],"VersionId"));SetField(receipt,"StoredSha256",Get(files[1],"Sha256"));SetField(receipt,"SourceSha256",Get(files[1],"Sha256"));SetField(receipt,"StoredLength",Get(files[1],"FileLength"));SetField(receipt,"SourceLength",Get(files[1],"FileLength"));SetField(receipt,"Username","tester");SetField(receipt,"ServerScope",Get(client,"EditJournalScope"));((IDictionary)Field(plugin,"completedWorkingArchives")).Add(partPath,receipt);

@@ -17,7 +17,7 @@ import LoginView from './components/LoginView.vue'
 import { pagePreferenceScopeKey, readPagePreference, writePagePreference } from './pagePreference'
 import { refreshTablePreferences } from './tablePreferences'
 import { refreshMaterialStockPlans, setMaterialStockContext } from './materialStockPlans'
-import { listMaterialStockPlans, listReleaseDrawingReviews } from './api'
+import { listEditLocks, listMaterialStockPlans, listReleaseDrawingReviews } from './api'
 import ProjectWorkspaceHeader from './components/ProjectWorkspaceHeader.vue'
 import type { ProjectTab } from './components/ProjectWorkspaceHeader.vue'
 import SideNav from './components/SideNav.vue'
@@ -32,9 +32,9 @@ import { postDesktopMessage } from './api'
 import type { U9SyncBlocker } from './api'
 import { usePdmWorkspace } from './composables/usePdmWorkspace'
 import { useWorkHoursReminder } from './composables/useWorkHoursReminder'
-import { isTaskCenterNotification, oplResponseIssueId, releaseApprovalTaskForNotification } from './taskNotifications'
+import { isTaskCenterNotification, oplResponseIssueId, releaseApprovalTaskForNotification, releaseDrawingReworkDocumentId } from './taskNotifications'
 import { canViewProjectTab, projectCenterAccessKey } from './projectCenterAccess'
-import type { AddDrawingReviewMarkupInput, DocumentNode, DrawingReviewBatchEntry, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, UserNotification, WorkspaceLocalFileState, WorkspaceLocalStateSnapshot } from './types'
+import type { AddDrawingReviewMarkupInput, DocumentNode, DrawingReviewBatchEntry, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, UserNotification, WorkspaceLocalFileState, WorkspaceLocalStateSnapshot } from './types'
 import { resolveUserDisplayName, userDisplayNameKey } from './userDisplay'
 import { applyPdmTheme, isPdmTheme, watchPdmSystemTheme, type PdmTheme } from './themes'
 
@@ -91,9 +91,13 @@ const canViewTab = (tab: string) => workspace.hasPermission('project.view') && (
 const canProjectOperation = (action: string) => !workspace.currentPermissions.value.includes('system.project-center-permissions.v1') || workspace.hasPermission(`project.content.${action}`)
 const releasePreviewIssues = ref<Record<string, boolean>>({})
 watch(() => workspace.currentUsername.value, () => { releasePreviewIssues.value = {} })
-function refreshCurrentBom() {
-  const projectId = workspace.project.value?.id
-  if (projectId) void runOperation(() => workspace.reload(projectId), '当前BOM已刷新')
+async function refreshCurrentBom() {
+  if (!workspace.project.value.id) return
+  try {
+    if (await workspace.refreshCurrentBom()) ElMessage.success('当前BOM已刷新')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'BOM刷新失败，请重试。')
+  }
 }
 const displayUserName = (username?: string | null, emptyText = '—') => resolveUserDisplayName([...workspace.users.value, ...workspace.organizationDirectory.value.users], username, emptyText)
 provide(userDisplayNameKey, displayUserName)
@@ -264,7 +268,7 @@ const savedTheme = window.localStorage.getItem('pdm_theme')
 const theme = ref<PdmTheme>(isPdmTheme(savedTheme) ? savedTheme : 'g')
 const stopSystemThemeWatch = watchPdmSystemTheme(() => theme.value)
 const materialApprovalNotices = computed(() => workspace.canReceiveMaterialNotifications.value ? workspace.materialCodeApprovalTasks.value : [])
-const notificationCount = computed(() => workspace.notifications.value.filter(item => !item.readAt && isTaskCenterNotification(item) && !releaseApprovalTaskForNotification(item, workspace.myApprovalTasks.value)).length + workspace.myApprovalTasks.value.length + materialApprovalNotices.value.length + workspace.programTemplateTasks.value.length + workspace.passwordResetTasks.value.length + new Set(workspace.editLocks.value.filter(lock => lock.ownedByCurrentUser || lock.releaseRequestedBy || lock.canForceRelease).map(lock => lock.projectId)).size)
+const notificationCount = computed(() => workspace.notifications.value.filter(item => !item.readAt && isTaskCenterNotification(item) && !releaseApprovalTaskForNotification(item, workspace.myApprovalTasks.value)).length + workspace.myApprovalTasks.value.length + materialApprovalNotices.value.length + workspace.programTemplateTasks.value.length + workspace.passwordResetTasks.value.length)
 const materialNoticeCount = ref(0)
 const canManageProjectPlan = computed(() => workspace.project.value.effectiveProjectPermissions?.includes('project.plan.edit') === true)
 const bonusProjectPermissions = computed(() => {
@@ -467,9 +471,57 @@ const canDecideDrawingReview = computed(() => {
 })
 const releaseDocumentReviewInline = ref(false)
 const releaseDocumentReviewActive = ref(false), requestedDocumentReleaseId = ref('')
+const requestedReviewDrawingId = ref('')
 watch(releaseDocumentReviewActive, active => { if(active)drawingReviewPanelCollapsed.value=false })
-watch(() => workspace.project.value.id, () => { releaseDocumentReviewActive.value = false; requestedDocumentReleaseId.value = '' })
-async function openDocumentReleaseReview(id: string) { requestedDocumentReleaseId.value = id; await openProjectTab('documents') }
+watch(() => workspace.project.value.id, () => { releaseDocumentReviewActive.value = false; requestedDocumentReleaseId.value = ''; requestedReviewDrawingId.value = '' })
+const workspaceReleasePending = ref(false)
+const workspaceEditLock = ref<EditLockSummary>()
+let workspaceEditLockRequest: AbortController | undefined
+let workspaceEditLockTimer = 0
+const workspaceReleaseDocumentId = computed(() => {
+  if (!desktopAvailable || !workspace.authenticated.value || activeView.value !== 'workspace' || projectTab.value !== 'documents' || releaseDocumentReviewActive.value) return ''
+  const documentId = workspace.selectedNode.value.documentId
+  return documentId && workspace.readableDocumentIds.value.has(documentId) ? documentId : ''
+})
+const selectedWorkspaceLock = computed(() => {
+  const lock = workspaceEditLock.value
+  return lock?.documentId === workspaceReleaseDocumentId.value && lock.projectId === workspace.project.value.id ? lock : undefined
+})
+const workspaceReleaseAvailable = computed(() => {
+  const lock = selectedWorkspaceLock.value
+  return !!lock?.sessionId && !!lock.checkedOutAt && (canReleaseOffline(lock) || lock.canEmergencyRelease === true)
+})
+function canReleaseOffline(lock: EditLockSummary) {
+  return lock.canForceRelease && !lock.ownedByCurrentUser
+}
+async function refreshWorkspaceEditLock() {
+  const documentId = workspaceReleaseDocumentId.value
+  if (!documentId || document.hidden || workspaceEditLockRequest || workspace.operationPending.value) return
+  const projectId = workspace.project.value.id, context = navigationContextKey.value
+  const request = new AbortController()
+  workspaceEditLockRequest = request
+  try {
+    const locks = await listEditLocks(workspace.getAccessToken(), documentId, request.signal)
+    if (!request.signal.aborted && documentId === workspaceReleaseDocumentId.value && projectId === workspace.project.value.id && context === navigationContextKey.value) {
+      workspaceEditLock.value = locks.find(lock => lock.documentId === documentId && lock.projectId === projectId)
+    }
+  } catch {
+    if (!request.signal.aborted) workspaceEditLock.value = undefined
+  } finally {
+    if (workspaceEditLockRequest === request) workspaceEditLockRequest = undefined
+  }
+}
+watch([workspaceReleaseDocumentId, () => workspace.project.value.id, navigationContextKey], () => {
+  workspaceEditLockRequest?.abort()
+  workspaceEditLockRequest = undefined
+  workspaceEditLock.value = undefined
+  void refreshWorkspaceEditLock()
+})
+async function openDocumentReleaseReview(id: string, documentId = '') {
+  requestedReviewDrawingId.value = documentId
+  requestedDocumentReleaseId.value = id
+  await openProjectTab('documents')
+}
 const drawingReviewOverlayState = computed(() => ({
   // 图档统一使用页面内的发布包审核栏，原生预览区域为右栏让出空间。
   visible: false,
@@ -789,12 +841,15 @@ async function openManagedProject(projectId: string, requestedTab?: ProjectTab, 
   }
 }
 
-async function openReleasePackage(projectId: string, releasePackageId: string) {
+async function openReleasePackage(projectId: string, releasePackageId: string, drawingId = '') {
   requestedReleasePackageId.value = ''
   try {
     const review = (await listReleaseDrawingReviews(projectId, workspace.getAccessToken())).find(item => item.id === releasePackageId)
     if (review && ['审批中','工艺审核','待批准'].includes(review.state)) {
-      if (await openManagedProject(projectId, 'documents')) requestedDocumentReleaseId.value = releasePackageId
+      if (await openManagedProject(projectId, 'documents')) {
+        requestedReviewDrawingId.value = drawingId
+        requestedDocumentReleaseId.value = releasePackageId
+      }
       return
     }
   } catch { /* 图档不可访问或原流程单据，沿用原发布入口及权限校验 */ }
@@ -919,7 +974,7 @@ async function openNotification(notification: UserNotification) {
     return
   }
   if (notification.projectId && notification.releasePackageId) {
-    await openReleasePackage(notification.projectId, notification.releasePackageId)
+    await openReleasePackage(notification.projectId, notification.releasePackageId, releaseDrawingReworkDocumentId(notification))
   }
 }
 
@@ -1081,6 +1136,10 @@ onMounted(() => {
   window.addEventListener('pdm-client-version', handleClientVersion)
   window.chrome?.webview?.addEventListener('message', handleReviewOverlayAction)
   if (desktopAvailable) postDesktopMessage('client-version-request')
+  if (desktopAvailable) {
+    void refreshWorkspaceEditLock()
+    workspaceEditLockTimer = window.setInterval(refreshWorkspaceEditLock, 15_000)
+  }
   requestWorkspaceLocalState()
 })
 onBeforeUnmount(() => {
@@ -1090,6 +1149,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('pdm-solidworks-status', handleWorkspaceSolidWorksStatus)
   window.removeEventListener('pdm-client-version', handleClientVersion)
   window.chrome?.webview?.removeEventListener?.('message', handleReviewOverlayAction)
+  window.clearInterval(workspaceEditLockTimer)
+  workspaceEditLockRequest?.abort()
   stopSystemThemeWatch()
   if (document.documentElement.dataset.pdmTheme === theme.value) delete document.documentElement.dataset.pdmTheme
 })
@@ -1175,6 +1236,43 @@ async function obsoleteSelectedDocument() {
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error instanceof Error ? error.message : '作废图档失败')
+  }
+}
+
+async function releaseSelectedWorkspacePermission() {
+  const lock = selectedWorkspaceLock.value
+  if (!lock?.sessionId || !workspaceReleaseAvailable.value || workspaceReleasePending.value || workspace.operationPending.value) return
+  const { documentId, projectId, sessionId, checkedOutAt, fileName } = lock
+  const offline = canReleaseOffline(lock)
+  const context = navigationContextKey.value
+  workspaceReleasePending.value = true
+  try {
+    const { value } = await ElMessageBox.prompt(`释放 ${fileName} 的编辑权限。未存档的修改保留在原编辑人电脑，请填写释放原因。`, '释放权限', {
+      confirmButtonText: '确认释放', confirmButtonClass: 'pdm-danger-action', cancelButtonText: '取消', inputType: 'textarea', type: 'warning',
+      inputValidator: reason => !reason?.trim() ? '释放原因不能为空' : reason.trim().length > 500 ? '释放原因不能超过 500 字' : true,
+    })
+    const currentLock = selectedWorkspaceLock.value
+    if (context !== navigationContextKey.value || currentLock?.sessionId !== sessionId || currentLock.checkedOutAt !== checkedOutAt
+      || currentLock.documentId !== documentId || currentLock.projectId !== projectId
+      || (offline ? !canReleaseOffline(currentLock) : !currentLock.canEmergencyRelease)) {
+      ElMessage.warning('图档或编辑权限状态已变化，请核对后重试。')
+      return
+    }
+    if (offline) await workspace.forceReleaseEditLock(documentId, value.trim(), { sessionId, checkedOutAt })
+    else await workspace.emergencyReleaseEditLock(documentId, sessionId, checkedOutAt, value.trim())
+    if (context === navigationContextKey.value && projectId === workspace.project.value.id) {
+      workspaceEditLockRequest?.abort()
+      workspaceEditLockRequest = undefined
+      if (selectedWorkspaceLock.value?.documentId === documentId && selectedWorkspaceLock.value.sessionId === sessionId) workspaceEditLock.value = undefined
+      await workspace.refreshOpenProjectDocuments(true)
+    }
+    ElMessage.success('图档编辑权限已释放')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error && /[\u3400-\u9fff]/.test(error.message) ? error.message : '释放图档编辑权限失败，请刷新图档后核对。')
+  } finally {
+    workspaceReleasePending.value = false
+    void refreshWorkspaceEditLock()
   }
 }
 
@@ -1527,6 +1625,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         </div>
         <div v-if="canManageSystem && visitedViews.has('admin')" v-show="activeView === 'admin'" class="pdm-navigation-page" data-navigation-page="admin">
         <SystemManagement
+          :active="activeView === 'admin'"
           :token="workspace.getAccessToken()"
           :customers="workspace.customers.value"
           :crm-integration-settings="workspace.crmIntegrationSettings.value"
@@ -1556,6 +1655,8 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :on-update-managers="workspace.updateOrganizationUnitManagers"
           :on-save-user="workspace.saveUser"
           :on-reset-user-password="workspace.resetUserPassword"
+          :on-deactivate-user="workspace.deactivateUser"
+          :on-delete-user="workspace.deleteUser"
           :on-save-folder-template="workspace.saveFolderTemplate"
           :on-update-role-permissions="workspace.updateRolePermissions"
           :on-create-role="workspace.createRole"
@@ -1633,8 +1734,8 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             <ProjectPlanManager :requested-task-id="requestedPlanTaskId" :single-plan="showSingleProjectPlan" @task-request-handled="requestedPlanTaskId = undefined" v-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
             <QualityManager :show-company-review-entry="canOpenCompanyReview" :company-review-revision="qualityThemeRevision" @open-company-review="openCompanyReview" @open-issue="openQualityIssue" :form-permissions="bonusProjectPermissions ?? []" @locate-archive="openFormArchive" v-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.project.value.effectiveProjectPermissions?.includes('validation-plan.edit') === true" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" :requested-quality-acceptance="requestedQualityAcceptance" :requested-section="requestedQualitySection" @request-handled="requestedValidationPlanProjectId = ''" />
             <section v-if="mountedDocumentsProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.module === '图档工作区')" v-show="projectTab === 'documents'" class="pdm-document-workspace">
-              <ReleaseDrawingWorkspace :key="workspace.project.value.id" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :permissions="workspace.project.value.effectiveProjectPermissions ?? []" :requested-id="requestedDocumentReleaseId" :visible="projectTab === 'documents'" @active="releaseDocumentReviewActive = $event" @inline="releaseDocumentReviewInline = $event" @updated="value => { workspace.releasePackages.value = workspace.releasePackages.value.map(p => p.id === value.id ? value : p); workspace.refreshApprovalInbox() }" v-slot="releaseReview">
-              <WorkspaceExplorerBar :project="workspace.project.value" :selected="releaseReview.selectedNode ?? workspace.selectedNode.value" :local-state="selectedWorkspaceLocalState" :desktop-available="desktopAvailable" @open-folder="openWorkspaceFolder" />
+              <ReleaseDrawingWorkspace :key="workspace.project.value.id" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :permissions="workspace.project.value.effectiveProjectPermissions ?? []" :requested-id="requestedDocumentReleaseId" :requested-drawing-id="requestedReviewDrawingId" :visible="projectTab === 'documents'" @active="releaseDocumentReviewActive = $event" @inline="releaseDocumentReviewInline = $event" @updated="value => { workspace.releasePackages.value = workspace.releasePackages.value.map(p => p.id === value.id ? value : p); workspace.refreshApprovalInbox() }" v-slot="releaseReview">
+              <WorkspaceExplorerBar :project="workspace.project.value" :selected="releaseReview.selectedNode ?? workspace.selectedNode.value" :local-state="selectedWorkspaceLocalState" :desktop-available="desktopAvailable" :can-release-edit-permission="!releaseReview.selected && workspaceReleaseAvailable" :release-pending="workspaceReleasePending || workspace.operationPending.value" @open-folder="openWorkspaceFolder" @release-edit-permission="releaseSelectedWorkspacePermission" />
               <div class="pdm-workspace" :class="{ 'has-release-review': releaseReview.selected }">
                 <DocumentTree :query="releaseReview.selected ? releaseReview.query : workspace.searchQuery.value" @update:query="value => releaseReview.selected ? releaseReview.setQuery(value) : workspace.searchQuery.value=value"
                   :filter="releaseReview.selected ? releaseReview.filter : workspace.documentFilter.value" @update:filter="value => releaseReview.selected ? releaseReview.setFilter(value) : workspace.setDocumentFilter(value)"
@@ -1659,7 +1760,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                     <p v-if="releaseReview.error" role="alert">{{ releaseReview.error }}</p>
                   </div><div v-if="markup.visible" class="pdm-release-review-markup"><PreviewMarkupTools :disabled="markup.disabled" :saving="markup.saving" :dirty="markup.dirty" @command="markup.command" @save="markup.save"/></div></template>
 <template #content>
-                          <ReleaseDrawingReviewPanel v-if="releaseReview.selected" :key="releaseReview.selected.id" :release="releaseReview.selected" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :editable="releaseReview.editable" :emergency="releaseReview.emergency" embedded :selected-document-id="releaseReview.drawingId" :external-preview-ready="releaseReview.previewReady" @select-document="releaseReview.selectDocument" @updated="releaseReview.receive" />
+                          <ReleaseDrawingReviewPanel v-if="releaseReview.selected" :key="releaseReview.selected.id" :release="releaseReview.selected" :history="releaseReview.history" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :editable="releaseReview.editable" :emergency="releaseReview.emergency" embedded :selected-document-id="releaseReview.drawingId" :external-preview-ready="releaseReview.previewReady" @select-document="releaseReview.selectDocument" @updated="releaseReview.receive" />
                           <p v-else class="pdm-release-review-empty">{{ releaseReview.loading ? '正在读取发布包…' : releaseReview.packages.length ? '请在上方选择发布包进行审核。' : '暂无可审核的发布包，请从非标件BOM发起发布。' }}</p>
                         </template>
                       </DrawingReviewPanel>

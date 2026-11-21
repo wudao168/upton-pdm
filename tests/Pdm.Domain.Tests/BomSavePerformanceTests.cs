@@ -79,6 +79,52 @@ public sealed class BomSavePerformanceTests
     }
 
     [Theory]
+    [InlineData(false, true, "ARCHIVED")]
+    [InlineData(true, true, "ARCHIVED")]
+    [InlineData(false, false, "LATEST")]
+    [InlineData(true, false, null)]
+    public async Task ManualDuplicateCheckUsesOneBatchAndRespectsFrozenSourceRevision(
+        bool partialStructure, bool archivedRevisionExists, string? duplicateCode)
+    {
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("SAVE-" + Guid.NewGuid().ToString("N"),
+            "BOM保存", "admin", "vault", "release"), "admin", default);
+        var session = Guid.NewGuid();
+        var root = await ArchiveBatchTests.Register(repository, project, "ROOT", DocumentKind.Assembly, session);
+        var part = await ArchiveBatchTests.Register(repository, project, "PART", DocumentKind.Part, session);
+        var boundRevision = RevisionLabel.Parse("W1");
+        var occurrence = ArchiveBatchTests.Node(part) with { Revision = boundRevision };
+        var tree = ArchiveBatchTests.Node(root) with
+        {
+            StructureIndexPending = partialStructure,
+            Children = [occurrence with { InstancePath = "ROOT/PART-1" }, occurrence with { InstancePath = "ROOT/PART-2" }]
+        };
+        var rows = new[] { "ARCHIVED", "LATEST" }.Select((code, index) => new BomItem(Guid.NewGuid(), project.Id,
+            BomKind.Standard, index + 1, code, code, 1, "个", null, null, "W1", true) { Source = "Manual" }).ToArray();
+        await repository.ReplaceBomAsync(project.Id, BomKind.Standard, rows, default);
+
+        var proxy = DispatchProxy.Create<IPdmRepository, CountingRepository>();
+        var counter = (CountingRepository)(object)proxy;
+        counter.Target = repository;
+        counter.ReferenceSnapshot = ArchiveBatchTests.Commit(project, root, tree, 'A', true).ReferenceSnapshot;
+        var latest = SourceProperties("W2", "LATEST");
+        counter.SourceProperties = archivedRevisionExists ? [latest, SourceProperties("W1", "ARCHIVED")] : [latest];
+        var workflow = new PdmWorkflowService(proxy, null!, null!, TimeProvider.System);
+        var inputs = rows.Select(row => new BomItemInput(row.Sequence, row.DrawingNumber, row.Name, row.Quantity,
+            row.Unit, row.Material, row.Specification, row.Revision, row.IsComplete, Id: row.Id)).ToArray();
+
+        var saved = await workflow.ReplaceBomAsync(project.Id, BomKind.Standard, inputs, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(1, counter.SourcePropertyBatches);
+        Assert.Equal(new[] { root.Id, part.Id }.Order(), counter.RequestedSourceDocuments.Order());
+        Assert.Equal(0, counter.VersionReads);
+        Assert.All(saved, row => Assert.Equal(row.DrawingNumber == duplicateCode, row.ReconciliationStatus == "DuplicateSourcePending"));
+
+        BomSourceVersionProperties SourceProperties(string revision, string code) => new(part.Id, RevisionLabel.Parse(revision),
+            new Dictionary<string, string?> { ["全局/物料分类"] = "标准件", ["全局/物料编码"] = code, ["全局/物料名称"] = code });
+    }
+
+    [Theory]
     [InlineData(BomKind.Standard)]
     [InlineData(BomKind.Electrical)]
     public async Task MissingArchivedVersionDoesNotCreateWritebacksOrReadFullSnapshots(BomKind kind)
@@ -113,9 +159,23 @@ public sealed class BomSavePerformanceTests
         public int VersionVerificationReads;
         public List<Guid> RequestedDocuments = [];
         public Dictionary<Guid, DocumentVersionVerification> LatestVersions = [];
+        public int SourcePropertyBatches;
+        public CadReferenceSnapshot? ReferenceSnapshot;
+        public List<Guid> RequestedSourceDocuments = [];
+        public IReadOnlyList<BomSourceVersionProperties> SourceProperties = [];
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
-            if (method!.Name == nameof(IPdmRepository.GetLatestReferenceSnapshotAsync)) SnapshotReads++;
+            if (method!.Name == nameof(IPdmRepository.GetLatestReferenceSnapshotAsync))
+            {
+                SnapshotReads++;
+                if (ReferenceSnapshot is not null) return Task.FromResult<CadReferenceSnapshot?>(ReferenceSnapshot);
+            }
+            if (method.Name == nameof(IPdmRepository.ListBomSourceVersionPropertiesAsync))
+            {
+                SourcePropertyBatches++;
+                RequestedSourceDocuments.AddRange((IReadOnlyCollection<Guid>)args![0]!);
+                return Task.FromResult(SourceProperties);
+            }
             if (method.Name == nameof(IPdmRepository.GetSystemSettingsAsync)) SettingsReads++;
             if (method.Name == nameof(IPdmRepository.ListDocumentVersionsAsync))
             {

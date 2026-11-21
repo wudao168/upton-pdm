@@ -520,7 +520,8 @@ public interface IPdmRepository
         Task.FromResult(DocumentOperationRuleSettings.Default);
     Task<DocumentOperationRuleSettings> SetDocumentOperationRuleAsync(string ruleId, bool enabled, long expectedRevision, CancellationToken cancellationToken) =>
         throw new NotSupportedException("当前存储未实现图档规则设置。");
-    Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken);
+    Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken, bool preservePreviewConversion = false);
+    Task<PreviewConversionSettings> UpdatePreviewConversionAsync(Func<PreviewConversionSettings, PreviewConversionSettings> update, CancellationToken cancellationToken);
     async Task SetBrowserCadArchiveEnabledAsync(bool enabled, CancellationToken ct) =>
         await UpdateSystemSettingsAsync((await GetSystemSettingsAsync(ct)) with { BrowserCadArchiveEnabled = enabled }, ct);
     Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken);
@@ -626,6 +627,13 @@ public interface IPdmRepository
         return result;
     }
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
+    async Task<IReadOnlyList<BomSourceVersionProperties>> ListBomSourceVersionPropertiesAsync(IReadOnlyCollection<Guid> documentIds, CancellationToken ct)
+    {
+        var results = new List<BomSourceVersionProperties>();
+        foreach (var id in documentIds)
+            results.AddRange((await ListDocumentVersionsAsync(id, ct)).Select(BomSourceVersionProperties.From));
+        return results;
+    }
     Task<IReadOnlyList<DocumentVersionVerificationResult>> ListDocumentVersionVerificationsAsync(IReadOnlyList<DocumentVersionVerificationRequest> requests, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
     // 报表只读取正式图纸版本元数据；生产仓储使用批量轻量查询，不加载CAD引用和BOM快照。
@@ -659,6 +667,7 @@ public interface IPdmRepository
     Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> FindReferenceSnapshotAsync(Guid snapshotId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);
+    Task<IReadOnlyList<BomItem>> GetBomItemsForUpdateAsync(Guid projectId, BomKind kind, CancellationToken ct) => GetBomAsync(projectId, kind, ct);
     async Task<IReadOnlyList<BomHierarchyMetric>> ReadBomHierarchyMetricsAsync(IReadOnlyList<Guid> projectIds, CancellationToken ct)
     {
         var result = new List<BomHierarchyMetric>();
@@ -682,7 +691,7 @@ public interface IPdmRepository
     Task SaveBomReleaseConfirmationsAsync(Guid projectId, IReadOnlyDictionary<Guid, BomReleaseConfirmation?> confirmations, CancellationToken cancellationToken)
         => throw new NotSupportedException();
     Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken);
-    Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
+    Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken, IReadOnlySet<Guid>? explicitlyRemovedItems = null);
     Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken);
     Task<BomItem> UpdateBomMaterialCodeAsync(Guid projectId, Guid itemId, string materialCode, CancellationToken cancellationToken);
     Task<BomItem> UpdateBomReconciliationAsync(Guid projectId, Guid itemId, string? status, string? note, string? updatedBy, DateTimeOffset? updatedAt, CancellationToken cancellationToken);
@@ -776,6 +785,7 @@ public interface IPdmRepository
     Task<bool> ExpireEditHandoffAsync(EditHandoff handoff, DateTimeOffset now, CancellationToken cancellationToken) => Task.FromResult(false);
     Task<PdmDocument> CloseCheckoutAsync(Guid documentId, string actor, Guid sessionId, DateTimeOffset checkedOutAt, string sha256, bool draftPreserved, CancellationToken cancellationToken);
     Task<IReadOnlyList<string>> ListNotificationRecipientsAsync(string sourceKey, CancellationToken cancellationToken);
+    Task<DateTimeOffset?> FindNotificationCreatedAtAsync(string recipient, string sourceKey, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken);
@@ -790,6 +800,7 @@ public interface IPdmRepository
         IReadOnlyList<ArchiveBatchFile> files, CancellationToken cancellationToken);
     Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> SaveReleasePdfTitleBlockAsync(Guid packageId, PdfTitleBlockSnapshot snapshot, CancellationToken cancellationToken);
+    Task<IReadOnlyList<Guid>> ListReleasePackagesWithDrawingReworkAsync(CancellationToken cancellationToken);
     Task<ReleasePackage> SaveReleaseDrawingReviewAsync(Guid packageId, ReleaseDrawingReview review, int expectedRevision, Guid? approvalTaskId, CancellationToken cancellationToken, Guid? documentId = null);
     Task AttachWorkVersionPreviewAsync(Guid documentId, Guid versionId, DocumentPreviewArtifact preview, CancellationToken ct);
     Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
@@ -839,6 +850,7 @@ public interface IPdmRepository
     Task<PdmDocument> ObsoleteDocumentAsync(Guid documentId, string actor, CancellationToken cancellationToken);
     Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken);
     Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken);
+    Task<ReleasePackage> ResumeFailedReleasePreviewAsync(ReleasePackage approved, DateTimeOffset queuedAt, CancellationToken cancellationToken);
     Task MarkPublishFailedAsync(Guid releasePackageId, string error, CancellationToken cancellationToken);
     Task<UserAccount?> FindUserAsync(string username, CancellationToken cancellationToken);
     Task<UserProfile?> FindUserProfileAsync(string username, CancellationToken cancellationToken);
@@ -849,7 +861,10 @@ public interface IPdmRepository
     Task CompletePasswordResetTaskAsync(Guid taskId, string passwordHash, string actor, DateTimeOffset completedAt, CancellationToken cancellationToken);
     Task<int> CountUsersAsync(CancellationToken cancellationToken);
     Task CreateUserAsync(UserAccount user, CancellationToken cancellationToken);
-    Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken);
+    Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken, ManagedUserEditActor? editActor = null);
+    Task<IReadOnlyDictionary<string, string>> GetUserDeletionReferencesAsync(IReadOnlyList<UserAccount> candidates, CancellationToken cancellationToken);
+    Task<UserAccount> DeactivateManagedUserAsync(string username, string actor, Guid? companyId, CancellationToken cancellationToken);
+    Task DeleteUnreferencedUserAsync(string username, string actor, Guid? companyId, CancellationToken cancellationToken);
     Task AppendAuditAsync(AuditEntry entry, CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListStandardStructureReferenceAuditsAsync(CancellationToken cancellationToken);

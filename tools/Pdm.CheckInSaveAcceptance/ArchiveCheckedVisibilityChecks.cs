@@ -79,6 +79,7 @@ internal static partial class Program
      var window=ArchiveWindow(session);window.TopMost=false;window.Opacity=0;
      var form=((Panel)Field(window,"selection")).Controls.OfType<Form>().Single();form.Opacity=1;
      var container=(Control)Field(form,"fileDetails");var list=(Control)Field(form,"files");var history=(Control)Field(window,"history");var summary=(Label)Field(form,"selectionSummary");
+     var toolbarNames=new[]{"全选","清除","勾选变更项","补充工程图","仅显示勾选","仅显示未勾选","取消存档","重新检查","确认存档"};
      void LayoutCheck(string label)
      {
       window.PerformLayout();form.PerformLayout();
@@ -87,10 +88,25 @@ internal static partial class Program
       Check(Math.Abs(left.Top-right.Top)<=1&&Math.Abs(left.Bottom-right.Bottom)<=1,label+"：过程记录框与左侧白色列表内容区上下边缘对齐");
       var needed=TextRenderer.MeasureText(summary.Text,summary.Font,new Size(summary.Width,10000),TextFormatFlags.WordBreak).Height+summary.Padding.Vertical;
       Check(summary.Visible&&summary.Height>=needed&&summary.Bottom<=container.Top,label+"：勾选数量在图档上方完整显示");
+      var buttons=ArchiveControls(form).OfType<Button>().Where(button=>toolbarNames.Contains(button.Text)).ToArray();
+      Check(buttons.Length==toolbarNames.Length,label+"：九个操作入口齐全");
+      var summaryTop=summary.Parent.RectangleToScreen(summary.Bounds).Top;
+      var bounds=buttons.Select(button=>button.Parent.RectangleToScreen(button.Bounds)).ToArray();
+      var clipped=buttons.Where((button,index)=>!button.Visible||!button.Parent.ClientRectangle.Contains(button.Bounds)||bounds[index].Bottom>summaryTop).ToArray();
+      Check(clipped.Length==0,label+"：操作按钮完整位于工具栏内 "+string.Join("、",clipped.Select(button=>button.Text)));
+      Check(summaryTop-bounds.Max(rectangle=>rectangle.Bottom)<=bounds.Max(rectangle=>rectangle.Height)/2,
+       label+"：工具栏高度随按钮行数收紧");
+      for(var first=0;first<bounds.Length;first++)
+       for(var second=first+1;second<bounds.Length;second++)
+        TreeCheck(!bounds[first].IntersectsWith(bounds[second]),label+"：按钮发生重叠 "+buttons[first].Text+" / "+buttons[second].Text);
+      Console.WriteLine("PASS: "+label+"：九个操作按钮的实际边界互不重叠");
      }
      LayoutCheck("默认窗口");Save(window,"aligned-default");
      window.Size=window.MinimumSize;TreeCall(window,"Report","正在处理当前图档",(string)Get(part,"FileName"),1,3);LayoutCheck("最小窗口和当前文件提示");
-     window.Size=new Size(1500,1000);form.Font=new Font("Microsoft YaHei UI",12F);form.Scale(new SizeF(1.25F,1.25F));LayoutCheck("放大字体与窗口");Save(window,"aligned-scaled");
+     window.Size=new Size(1500,1000);form.Font=new Font("Microsoft YaHei UI",12F);form.Scale(new SizeF(1.25F,1.25F));LayoutCheck("125% 缩放窗口");Save(window,"aligned-scaled");
+     window.Size=window.MinimumSize;LayoutCheck("125% 最小窗口");
+     window.Size=new Size(1500,1000);form.Scale(new SizeF(1.2F,1.2F));LayoutCheck("150% 缩放窗口");Save(window,"aligned-scaled-150");
+     window.Size=window.MinimumSize;LayoutCheck("150% 最小窗口");Save(window,"aligned-minimum-150");
      ((Button)Field(form,"operationCancel")).PerformClick();return true;
     });
    });

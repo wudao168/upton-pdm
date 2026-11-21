@@ -4,9 +4,11 @@ import { decideReleaseDrawing, decideReleaseDrawingNode } from '../api'
 import ApprovalNoteEditor from './ApprovalNoteEditor.vue'
 import ReleaseReviewBomTable from './ReleaseReviewBomTable.vue'
 import type { ReleaseDrawingReview, ReleasePackageSummary } from '../types'
+import { frozenBomChanges, frozenNetChange, previousReleaseBaseline, releaseInstanceIds } from '../frozenBomChanges'
+import { releaseEarlyCredits, releaseMaterialKey } from '../releaseEarlyCredits'
 import { userErrorMessage } from '../userErrorMessage'
-import { drawingReviewStatus } from '../drawingReviewStatus'
-const props = defineProps<{ release: ReleasePackageSummary; token: string; editable: boolean; emergency?: boolean; username?: string; embedded?: boolean; selectedDocumentId?: string; externalPreviewReady?: boolean }>()
+import { drawingHasActiveReturn, drawingReviewStatus } from '../drawingReviewStatus'
+const props = defineProps<{ release: ReleasePackageSummary; history?: ReleasePackageSummary[]; token: string; editable: boolean; emergency?: boolean; username?: string; embedded?: boolean; selectedDocumentId?: string; externalPreviewReady?: boolean }>()
 const emit = defineEmits<{ updated: [release: ReleasePackageSummary]; selectDocument: [id: string] }>()
 const review = ref<ReleaseDrawingReview | null>(), selectedId = ref(''), filter = ref('all'), query = ref('')
 const pending = ref(false), error = ref(''), comment = ref('')
@@ -21,16 +23,28 @@ watch(selectedId, id=>{if(props.embedded)emit('selectDocument',id)})
 const currentTask = computed(() => props.release.steps.find(s => s.status === 'current' && s.id !== 'production-release'))
 const businessNote = ref<string>(), notice = ref('')
 const all = computed(() => (review.value?.items ?? []).map(item => {
-  const own = drawingReviewStatus(item, review.value?.roundId, currentTask.value?.id, props.username)
-  return { ...item, status: own.latest, hasIssue: own.hasIssue }
+  const own = drawingReviewStatus(item, review.value, currentTask.value?.id, props.username)
+  const hasIssue = currentTask.value ? drawingHasActiveReturn(item, review.value, props.release.steps) : own.hasIssue
+  return { ...item, status: own.latest, hasIssue, hasCurrentIssue: own.hasIssue }
 }))
-watch(() => currentTask.value?.id, () => { comment.value = '' })
+watch([() => props.release.id, () => review.value?.roundId, () => currentTask.value?.id, () => props.emergency], () => { comment.value = '' })
 const items = computed(() => all.value.filter(i => (!query.value || i.fileName.toLocaleLowerCase().includes(query.value.toLocaleLowerCase()))
   && (filter.value === 'all' || (filter.value === 'Issue' ? i.hasIssue : i.status === filter.value))))
 const selected = computed(() => all.value.find(i => i.documentId === selectedId.value))
-const linkedBom = computed(() => ['草稿','已退回'].includes(props.release.state) ? [] : props.release.nonStandardBomSnapshot.filter(i => i.id && selected.value?.bomItemIds.includes(i.id)))
+const supplement = computed(() => props.release.scope === 'NonStandardSupplement')
+const previous = computed(() => previousReleaseBaseline('NonStandard', props.release, props.history ?? []))
+const bomRows = computed(() => {
+  const release = props.release
+  if (!supplement.value) return release.nonStandardBomSnapshot.map(item => ({ item, quantity: item.quantity * (release.wholeSetMultiplier ?? 1) }))
+  if (!previous.value || !props.history) return []
+  const credits = releaseEarlyCredits(release, props.history)
+  return frozenBomChanges(release, release.nonStandardBomSnapshot, previous.value.nonStandardBomSnapshot, previous.value.wholeSetMultiplier ?? 1)
+    .map(row => ({ item: row.item, quantity: frozenNetChange(row, row.change === '删除' ? 0 : credits.get(releaseMaterialKey(row.item)) ?? 0) }))
+})
+const linkedBom = computed(() => ['草稿','已退回'].includes(props.release.state) ? [] :
+  bomRows.value.filter(({ item }) => releaseInstanceIds(item).some(id => selected.value?.bomItemIds.includes(id))))
 const counts = computed(() => ({ pending: all.value.filter(i => i.required && i.status === 'Pending').length,
-  confirmed: all.value.filter(i => i.status === 'Confirmed').length, issues: all.value.filter(i => i.hasIssue).length }))
+  confirmed: all.value.filter(i => i.status === 'Confirmed').length, issues: all.value.filter(i => i.hasCurrentIssue).length }))
 const inReview = computed(() => ['审批中','工艺审核','待批准'].includes(props.release.state))
 const canDecide = computed(() => props.editable && inReview.value && !!currentTask.value && !pending.value)
 const canUndo = computed(() => selected.value?.status === 'Issue')
@@ -39,12 +53,13 @@ const cannotApprove = computed(() => {
   if (!canDecide.value) return '当前没有可处理的审批任务。'
   if (!all.value.length) return ''
   if (!selected.value) return '请先选择图纸。'
-  if (selected.value.hasIssue) return '请等待设计修改并存档，或撤回本人的退回。'
+  if (selected.value.hasIssue) return selected.value.status === 'Issue'
+    ? '请等待设计修改并存档，或撤回本人的退回。' : '这张图纸正在等待设计修改并存档。'
   if (selected.value.status === 'Confirmed')
     return counts.value.pending || counts.value.issues ? '当前图纸已确认，请继续处理尚未完成的图纸。' : ''
   return canConfirmPreview.value ? '' : '请在 Windows 客户端使用 eDrawings 加载原图。'
 })
-watch([() => props.release.id, () => selected.value?.documentId, () => selected.value?.token], () => { comment.value = '' })
+watch([() => selected.value?.documentId, () => selected.value?.token], () => { if (!props.emergency) comment.value = '' })
 function receive(value: ReleasePackageSummary) {
   const before = currentTask.value
   if (value.state === '已退回') notice.value = '审核不通过，发布单已退回修改。'
@@ -54,7 +69,9 @@ function receive(value: ReleasePackageSummary) {
 }
 async function approve() {
   if (cannotApprove.value || !currentTask.value) return
-  if (!all.value.length || (selected.value?.status === 'Confirmed' && !counts.value.pending && !counts.value.issues)) { await completeNode(); return }
+  const reason = props.emergency ? comment.value.trim() : undefined
+  if (props.emergency && !reason) { error.value = '请填写紧急代批原因。'; return }
+  if (!all.value.length || (selected.value?.status === 'Confirmed' && !counts.value.pending && !counts.value.issues)) { await completeNode(reason); return }
   const drawing = selected.value
   if (!drawing || drawing.status === 'Confirmed') return
   if (!canConfirmPreview.value) { error.value = '请先使用 eDrawings 加载本次送审原图，再提交通过。'; return }
@@ -62,10 +79,10 @@ async function approve() {
   pending.value = true; error.value = ''
   try {
     const value = await decideReleaseDrawing(packageId, { documentId: drawing.documentId, token: drawing.token, status: 'Confirmed',
-      approvalTaskId: taskId, roundId, businessNote: businessNote.value, comment: comment.value.trim(), emergencyReason: props.emergency ? comment.value.trim() || undefined : undefined }, props.token, props.emergency)
+      approvalTaskId: taskId, roundId, businessNote: businessNote.value, comment: comment.value.trim(), emergencyReason: reason }, props.token, props.emergency)
     if (props.release.id !== packageId || review.value?.roundId !== roundId) { emit('updated', value); return }
     receive(value)
-    comment.value = ''
+    if (!props.emergency) comment.value = ''
     await nextTick()
     // 同一节点继续审核尚未通过的必审图纸；节点流转及会签仍由服务端决定。
     if (currentTask.value?.id === taskId && selectedId.value === drawing.documentId) {
@@ -83,7 +100,7 @@ async function returnDrawing() {
   const undo = canUndo.value
   const reason = comment.value.trim()
   if (!undo && !reason) {
-    error.value = '请填写退回原因。'
+    error.value = props.emergency ? '请填写紧急代批原因和退回说明。' : '请填写退回原因。'
     return
   }
   pending.value = true
@@ -103,10 +120,10 @@ async function returnDrawing() {
   }
 }
 
-async function completeNode() {
+async function completeNode(emergencyReason?: string) {
   if (!currentTask.value || !canDecide.value) return
   pending.value = true; error.value = ''
-  try { receive(await decideReleaseDrawingNode(props.release.id, { approvalTaskId: currentTask.value.id, roundId: review.value?.roundId, decision: 'Approved', comment: comment.value, businessNote: businessNote.value, emergencyReason: props.emergency ? comment.value.trim() || undefined : undefined }, props.token, props.emergency)) }
+  try { receive(await decideReleaseDrawingNode(props.release.id, { approvalTaskId: currentTask.value.id, roundId: review.value?.roundId, decision: 'Approved', comment: comment.value, businessNote: businessNote.value, emergencyReason }, props.token, props.emergency)) }
   catch (e) { error.value = userErrorMessage(e instanceof Error ? e.message : '') }
   finally { pending.value = false }
 }
@@ -127,25 +144,26 @@ function move(offset: number) {
     <ApprovalNoteEditor v-model="businessNote" label="发布备注" :identity="release.id + currentTask?.id" :nodes="release.steps.map(s => s.participants)" :editable="!!(editable && !emergency && currentTask?.participants?.policy?.editBusinessNote)" />
     <p v-if="error" class="review-error" role="alert">{{ error }}</p>
     <div class="review-decision">
-      <textarea v-model="comment" rows="2" maxlength="500" placeholder="审核意见（选填），退回时须填写原因" aria-label="图纸审核意见" :disabled="!canDecide" />
+      <textarea v-model="comment" rows="2" maxlength="500" :placeholder="emergency ? '紧急代批原因（必填），退回时请同时说明问题' : '审核意见（选填），退回时须填写原因'" :aria-label="emergency ? '紧急代批原因' : '图纸审核意见'" :disabled="!canDecide" />
       <div class="review-actions">
-        <button type="button" class="pdm-primary-action" :disabled="!!cannotApprove" :title="cannotApprove" @click="approve">通过</button>
-        <button type="button" :disabled="!canReturn" @click="returnDrawing">{{ canUndo ? '撤回退回' : '退回' }}</button>
+        <button type="button" class="pdm-primary-action" :disabled="!!cannotApprove" :title="cannotApprove" @click="approve">{{ emergency ? '紧急代批' : '通过' }}</button>
+        <button type="button" :disabled="!canReturn" @click="returnDrawing">{{ canUndo ? '撤回退回' : emergency ? '代批退回' : '退回' }}</button>
         <span class="review-navigation"><button type="button" :disabled="pending || !selected || items.findIndex(i => i.documentId === selectedId) >= items.length - 1" @click="move(1)">下一张</button><button type="button" :disabled="pending || !selected || items.findIndex(i => i.documentId === selectedId) <= 0" @click="move(-1)">上一张</button></span>
       </div>
     </div>
     <p v-if="selected?.hasIssue" class="review-hint">待修改，存档新版本后自动复审。</p>
-    <details class="review-notes"><summary title="BOM按冻结明细行统计；图纸按送审文件去重，一张图纸可对应多条BOM明细。">冻结BOM（{{ release.nonStandardBomSnapshot.length }}条明细／{{ all.length }}张图纸）</summary><div class="review-full-bom"><ReleaseReviewBomTable :rows="release.nonStandardBomSnapshot" :multiplier="release.wholeSetMultiplier" label="本次冻结BOM明细" /></div></details>
+    <p v-if="supplement && !previous" class="review-hint">尚未取得上一发布基线，暂无法核对需求净变更。</p>
+    <details class="review-notes"><summary>{{ supplement ? '本次变更BOM' : '冻结BOM' }}（{{ supplement && !previous ? '—' : bomRows.length }}条明细／{{ all.length }}张图纸）</summary><div class="review-full-bom"><ReleaseReviewBomTable :rows="bomRows" :net-change="supplement" label="本次冻结BOM明细" /></div></details>
     <div v-if="all.length" class="review-workspace">
       <aside v-if="!embedded">
         <div class="review-filters"><input v-model="query" type="search" placeholder="图号/名称" aria-label="搜索审核图纸"><select v-model="filter" aria-label="图纸审核状态"><option value="all">全部图纸</option><option value="Pending">待确认</option><option value="Confirmed">已确认</option><option value="Issue">待修改</option></select></div>
         <div class="review-drawing-list"><button v-for="item in items" :key="item.documentId" type="button" :class="{ active: selectedId === item.documentId }" :disabled="pending" @click="selectedId = item.documentId"><strong>{{ item.fileName }}</strong><span>{{ item.required ? '必审' : '已发布参照' }} · {{ labels[item.status] }} · {{ item.bomItemIds.length }} 项BOM</span></button><p v-if="!items.length">没有匹配的图纸。</p></div>
-        <div v-if="selected" class="review-linked-bom"><strong>对应冻结BOM</strong><ReleaseReviewBomTable :rows="linkedBom" :multiplier="release.wholeSetMultiplier" label="当前图纸对应BOM明细" /></div>
+        <div v-if="selected" class="review-linked-bom"><strong>对应冻结BOM</strong><ReleaseReviewBomTable :rows="linkedBom" :net-change="supplement" label="当前图纸对应BOM明细" /></div>
       </aside>
       <main v-if="selected">
         <div v-if="!embedded" class="review-preview-toolbar"><strong>{{ selected.fileName }}</strong></div>
         <p v-if="!embedded" class="review-hint">请在 Windows 客户端的图档页面使用 eDrawings 查看送审原图并完成审核。</p>
-        <div v-if="embedded" class="review-linked-bom"><ReleaseReviewBomTable :rows="linkedBom" :multiplier="release.wholeSetMultiplier" label="当前图纸对应BOM明细" /></div>
+        <div v-if="embedded" class="review-linked-bom"><ReleaseReviewBomTable :rows="linkedBom" :net-change="supplement" label="当前图纸对应BOM明细" /></div>
       </main>
     </div>
     <p v-else>本次发布没有需要审核的图纸。</p>

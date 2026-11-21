@@ -174,6 +174,7 @@ public sealed partial class MySqlPdmRepository
             CheckoutReminderHours = ReadInt(values, "checkout_reminder_hours", 4),
             CheckoutStrongReminderHours = ReadInt(values, "checkout_strong_reminder_hours", 8),
             CheckoutOverdueHours = ReadInt(values, "checkout_overdue_hours", 24),
+            CheckoutOverdueReleaseGraceHours = ReadInt(values, "checkout_overdue_release_grace_hours", PdmSystemSettings.DefaultCheckoutOverdueReleaseGraceHours),
             CheckoutForceReleaseHours = ReadInt(values, "checkout_force_release_hours", 48),
             CheckoutAutoReleaseEnabled = !values.TryGetValue("checkout_auto_release_enabled", out var autoRelease) || autoRelease != "false",
             CheckoutIdleReleaseMinutes = ReadInt(values, "checkout_idle_release_minutes", 30),
@@ -237,7 +238,7 @@ public sealed partial class MySqlPdmRepository
             new { Value = enabled ? "true" : "false", Now = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: ct));
     }
 
-    public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
+    public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken, bool preservePreviewConversion = false)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var connection = await OpenAsync(cancellationToken);
@@ -254,6 +255,7 @@ public sealed partial class MySqlPdmRepository
             new { Key = "checkout_reminder_hours", Value = settings.CheckoutReminderHours.ToString() },
             new { Key = "checkout_strong_reminder_hours", Value = settings.CheckoutStrongReminderHours.ToString() },
             new { Key = "checkout_overdue_hours", Value = settings.CheckoutOverdueHours.ToString() },
+            new { Key = "checkout_overdue_release_grace_hours", Value = settings.CheckoutOverdueReleaseGraceHours.ToString() },
             new { Key = "checkout_force_release_hours", Value = settings.CheckoutForceReleaseHours.ToString() },
             new { Key = "checkout_auto_release_enabled", Value = settings.CheckoutAutoReleaseEnabled ? "true" : "false" },
             new { Key = "checkout_idle_release_minutes", Value = settings.CheckoutIdleReleaseMinutes.ToString() },
@@ -283,6 +285,7 @@ public sealed partial class MySqlPdmRepository
             new { Key = "engineering_kit_options", Value = JsonSerializer.Serialize(settings.EngineeringKitOptions, jsonOptions) }
         })
         {
+            if (preservePreviewConversion && item.Key == "preview_conversion") continue;
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 INSERT INTO pdm_system_setting(setting_key,setting_value,updated_at) VALUES(@Key,@Value,@Now)
@@ -291,7 +294,29 @@ public sealed partial class MySqlPdmRepository
                 new { item.Key, item.Value, Now = now }, transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
-        return settings;
+        return preservePreviewConversion
+            ? settings with { PreviewConversion = (await GetSystemSettingsAsync(cancellationToken)).PreviewConversion }
+            : settings;
+    }
+
+    public async Task<PreviewConversionSettings> UpdatePreviewConversionAsync(
+        Func<PreviewConversionSettings, PreviewConversionSettings> update, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO pdm_system_setting(setting_key,setting_value,updated_at) VALUES('preview_conversion',@Value,@Now)
+            ON DUPLICATE KEY UPDATE setting_key=setting_key
+            """, new { Value = JsonSerializer.Serialize(PreviewConversionSettings.Default, jsonOptions), Now = now }, transaction, cancellationToken: cancellationToken));
+        var current = await connection.QuerySingleAsync<string>(new CommandDefinition(
+            "SELECT setting_value FROM pdm_system_setting WHERE setting_key='preview_conversion' FOR UPDATE", transaction: transaction, cancellationToken: cancellationToken));
+        var saved = update(ReadPreviewConversion(current));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE pdm_system_setting SET setting_value=@Value, updated_at=@Now WHERE setting_key='preview_conversion'",
+            new { Value = JsonSerializer.Serialize(saved, jsonOptions), Now = now }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return saved;
     }
 
     private static int ReadInt(IReadOnlyDictionary<string, string> values, string key, int defaultValue) =>
@@ -314,9 +339,12 @@ public sealed partial class MySqlPdmRepository
         }
     }
 
-    private PreviewConversionSettings ReadPreviewConversion(IReadOnlyDictionary<string, string> values)
+    private PreviewConversionSettings ReadPreviewConversion(IReadOnlyDictionary<string, string> values) =>
+        ReadPreviewConversion(values.GetValueOrDefault("preview_conversion"));
+
+    private PreviewConversionSettings ReadPreviewConversion(string? json)
     {
-        if (!values.TryGetValue("preview_conversion", out var json) || string.IsNullOrWhiteSpace(json))
+        if (string.IsNullOrWhiteSpace(json))
             return PreviewConversionSettings.Default;
         try
         {
@@ -428,13 +456,16 @@ public sealed partial class MySqlPdmRepository
     }
 
     // 目录读取已持有连接时复用该连接，避免并发请求占满连接池后嵌套等待。
-    private async Task<IReadOnlyList<UserAccount>> ListUsersAsync(MySqlConnection connection, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<UserAccount>> ListUsersAsync(MySqlConnection connection, CancellationToken cancellationToken, MySqlTransaction? transaction = null)
     {
         var rows = await connection.QueryAsync<AdministrationUserRow>(new CommandDefinition(
-            "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,assigned_role_code RoleCode,company_id CompanyId,cross_company_view CrossCompanyView,is_active IsActive,token_version TokenVersion FROM pdm_user ORDER BY username",
+            "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,assigned_role_code RoleCode,company_id CompanyId,cross_company_view CrossCompanyView,is_active IsActive,token_version TokenVersion FROM pdm_user ORDER BY username"
+                + (transaction is null ? "" : " FOR UPDATE"),
+            transaction: transaction,
             cancellationToken: cancellationToken));
         var roleCodes = (await connection.QueryAsync<UserRoleAssignmentRow>(new CommandDefinition(
             "SELECT user_id UserId,role_code RoleCode,is_primary IsPrimary FROM pdm_user_role ORDER BY user_id,is_primary DESC,created_at,role_code",
+            transaction: transaction,
             cancellationToken: cancellationToken))).GroupBy(item => item.UserId)
             .ToDictionary(group => group.Key, group => (IReadOnlyList<string>)group.Select(item => item.RoleCode).ToArray());
         return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode, row.CompanyId, row.CrossCompanyView,

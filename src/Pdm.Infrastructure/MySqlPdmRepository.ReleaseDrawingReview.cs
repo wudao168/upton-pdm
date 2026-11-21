@@ -8,6 +8,17 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed partial class MySqlPdmRepository
 {
+    public async Task<IReadOnlyList<Guid>> ListReleasePackagesWithDrawingReworkAsync(CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        var ids = await connection.QueryAsync<Guid>(new CommandDefinition("""
+            SELECT id FROM release_package
+            WHERE state IN ('ProcessReview','Approval')
+              AND JSON_SEARCH(drawing_review_json,'one','Issue',NULL,'$.items[*].notes[*].status') IS NOT NULL
+            """, cancellationToken: ct));
+        return ids.ToArray();
+    }
+
     public async Task<ReleasePackage> SaveReleaseDrawingReviewAsync(Guid packageId, ReleaseDrawingReview review,
         int expectedRevision, Guid? approvalTaskId, CancellationToken ct, Guid? documentId = null)
     {
@@ -64,10 +75,9 @@ public sealed partial class MySqlPdmRepository
         {
             var package = await FindReleasePackageAsync(connection, transaction, packageId, ct)
                 ?? throw new PdmNotFoundException("发布包不存在。");
-            var task = ReleaseDrawingRevision.CurrentTask(package);
-            var review = package.DrawingReview;
-            var item = review?.Items.SingleOrDefault(value => value.DocumentId == document.Id);
-            if (task is null || item is null || !ReleaseDrawingReview.HasIssue(review!, item, task.Id)) continue;
+            var item = package.DrawingReview?.Items.SingleOrDefault(value => value.DocumentId == document.Id);
+            if (item is null || ReleaseDrawingRevision.ActiveReturn(package, item) is not { } issue) continue;
+            var task = package.ApprovalTasks.Single(step => step.Id == issue.ApprovalTaskId);
             if (document.CheckedOutBy is not null)
                 throw new PdmRuleException("退回图纸须结束编辑并提交存档，才能自动进入复审。");
             var previous = await FindDocumentVersionAsync(connection, transaction, document.Id, item.VersionId, ct)
@@ -76,19 +86,25 @@ public sealed partial class MySqlPdmRepository
                 "SELECT display_name FROM pdm_user WHERE username=@Actor", new { Actor = version.CreatedBy }, transaction, cancellationToken:ct));
             var updated = ReleaseDrawingRevision.Replace(package, task, item, previous, version, designer);
             await connection.ExecuteAsync(new CommandDefinition("""
-                UPDATE release_package SET drawing_review_json=@Review,version_bindings_json=@Bindings,
+                UPDATE release_package SET state=@State,drawing_review_json=@Review,version_bindings_json=@Bindings,
                     pdf_title_block_snapshot_json=@TitleBlock,row_version=row_version+1 WHERE id=@Id
                 """, new
                 {
                     Id = packageId,
+                    State = updated.State.ToString(),
                     Review = JsonSerializer.Serialize(updated.DrawingReview, jsonOptions),
                     Bindings = JsonSerializer.Serialize(updated.VersionBindings, jsonOptions),
                     TitleBlock = updated.PdfTitleBlockSnapshot is { } titleBlock ? JsonSerializer.Serialize(titleBlock, jsonOptions) : null
                 }, transaction, cancellationToken:ct));
-            var participants = updated.ApprovalTasks.Single(value => value.Id == task.Id).Participants;
-            await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE approval_task SET participants_json=@Participants WHERE id=@Id AND decision_value IS NULL",
-                new { task.Id, Participants = ApprovalGroupJson.Write(participants) }, transaction, cancellationToken:ct));
+            var resetTasks = updated.ApprovalTasks.Where((step, index) => !ReferenceEquals(step, package.ApprovalTasks[index]));
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,
+                    is_emergency_substitute=0,emergency_reason=NULL,participants_json=@Participants
+                WHERE id=@Id AND release_package_id=@PackageId
+                """, resetTasks.Select(step => new
+                {
+                    step.Id, PackageId = packageId, Participants = ApprovalGroupJson.Write(step.Participants)
+                }), transaction, cancellationToken:ct));
             lockDrawing |= package.LocksDocuments && updated.VersionBindings!.Any(binding => binding.DocumentId == document.Id && binding.Publish);
         }
         if (!lockDrawing) return document;

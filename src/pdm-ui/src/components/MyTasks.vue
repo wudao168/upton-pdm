@@ -6,7 +6,7 @@ import { ElMessageBox } from 'element-plus'
 import { ClipboardCheck, KeyRound, RotateCw as RefreshCw } from '@lucide/vue'
 import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask, UserNotification } from '../types'
 import { useUserDisplayName } from '../userDisplay'
-import { isProjectTodo, isTaskCenterNotification, oplResponseCategory, releaseApprovalTaskForNotification } from '../taskNotifications'
+import { isProjectTodo, isTaskCenterNotification, oplResponseCategory, releaseApprovalTaskForNotification, releaseDrawingResubmittedCategory, releaseDrawingReworkCategory } from '../taskNotifications'
 
 const displayUserName = useUserDisplayName()
 function passwordApplicantName(task: PasswordResetTask) {
@@ -40,7 +40,9 @@ const approvalNotifications = computed(() => {
     const task = releaseApprovalTaskForNotification(notification, props.tasks)
     if (!task) continue
     const previous = notifications.get(task.id)
-    if (!previous || (!!previous.readAt === !!notification.readAt
+    const resubmitted = notification.category === releaseDrawingResubmittedCategory
+    const previousResubmitted = previous?.category === releaseDrawingResubmittedCategory
+    if (!previous || (resubmitted !== previousResubmitted ? resubmitted : !!previous.readAt === !!notification.readAt
       ? new Date(notification.createdAt).getTime() > new Date(previous.createdAt).getTime()
       : !!previous.readAt)) notifications.set(task.id, notification)
   }
@@ -63,6 +65,7 @@ type TaskCenterRow = {
   locks?: EditLockSummary[]
   password?: PasswordResetTask
 }
+const isReleaseApprovalCopy = (row: TaskCenterRow) => row.notification?.category === 'ApprovalNodeCopy' && !!row.notification.releasePackageId
 
 const bomHeaderLabels = {
   Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气件BOM',
@@ -156,6 +159,7 @@ function notificationActionLabel(notification: UserNotification) {
   if (notification.category === 'ProjectStaffingPending') return notification.resolvedAt ? '查看项目' : '指定项目经理'
   if (notification.category === 'ProjectAssigned') return '查看项目'
   if (notification.category.startsWith('ExpenseApproval')) return '查看费用申请'
+  if (notification.category === releaseDrawingReworkCategory || notification.category === releaseDrawingResubmittedCategory) return '查看图纸'
   if (notification.category.startsWith('DrawingReview')) return '查看审核'
   if (notification.category === 'WorkflowValidationPlan') return '查看验证计划'
   if (notification.category === 'WorkflowMaterialCode') return '查看BOM'
@@ -171,7 +175,8 @@ function notificationActionLabel(notification: UserNotification) {
 }
 
 function isApprovalNotification(notification: UserNotification) {
-  if (notification.category.startsWith('ProjectBonus')) return true
+  if (notification.category.startsWith('ProjectBonus') || notification.category === releaseDrawingReworkCategory
+    || notification.category === releaseDrawingResubmittedCategory) return true
   return notification.category.startsWith('ExpenseApproval') || notification.category.startsWith('DrawingReview') || notification.category.startsWith('ReleaseApproval')
     || ['WorkflowValidationPlan', 'WorkflowMaterialCode', 'MaterialMasterRejected', 'MaterialCodeApplicationRejected',
       'project-plan-approval', 'project-application'].includes(notification.category)
@@ -225,17 +230,21 @@ const rows = computed<TaskCenterRow[]>(() => [
     createdAt: notification.createdAt,
     notification,
   })),
-  ...props.tasks.map(task => ({
-    key: `approval-${task.id}`,
-    kind: 'approval' as const,
-    status: '待审批',
-    statusClass: 'is-remind',
-    title: task.kind === 'validationPlan' ? `${task.projectCode} ${task.qualityAcceptance ? '质量验收' : '验证计划'}审批` : `${task.projectCode} BOM发布审批`,
-    content: task.kind === 'validationPlan' ? `${task.projectName} · R${task.validationPlanRevision} · ${task.stepName || stageLabel(task.stage)}` : `${task.projectName} · ${task.releasePackageNumber} · ${task.stepName || '审批节点（名称待补充）'}`,
-    createdAt: approvalNotifications.value.get(task.id)?.createdAt ?? task.createdAt,
-    approval: task,
-    notification: approvalNotifications.value.get(task.id),
-  })),
+  ...props.tasks.map((task): TaskCenterRow => {
+    const notification = approvalNotifications.value.get(task.id)
+    const resubmitted = notification?.category === releaseDrawingResubmittedCategory ? notification : undefined
+    return {
+      key: `approval-${task.id}`,
+      kind: 'approval',
+      status: resubmitted ? '待复审' : '待审批',
+      statusClass: 'is-remind',
+      title: resubmitted?.title ?? (task.kind === 'validationPlan' ? `${task.projectCode} ${task.qualityAcceptance ? '质量验收' : '验证计划'}审批` : `${task.projectCode} BOM发布审批`),
+      content: resubmitted?.content ?? (task.kind === 'validationPlan' ? `${task.projectName} · R${task.validationPlanRevision} · ${task.stepName || stageLabel(task.stage)}` : `${task.projectName} · ${task.releasePackageNumber} · ${task.stepName || '审批节点（名称待补充）'}`),
+      createdAt: notification?.createdAt ?? task.createdAt,
+      approval: task,
+      notification,
+    }
+  }),
   ...materialTaskRows.value,
   ...props.programTemplateTasks.map(task => ({
     key: `program-${task.id}`,
@@ -280,7 +289,7 @@ const rows = computed<TaskCenterRow[]>(() => [
 const pendingBusinessTask = (row: TaskCenterRow) => ['ExpenseApprovalPending', 'ProjectBonusPending', oplResponseCategory].includes(row.notification?.category ?? '') && !row.notification?.resolvedAt
 const pendingRows = computed(() => rows.value.filter(row => row.approval || pendingBusinessTask(row) || !row.notification?.readAt))
 const filterCounts = computed(() => ({
-  all: pendingRows.value.length,
+  all: pendingRows.value.filter(item => item.kind !== 'lock').length,
   todo: pendingRows.value.filter(item => item.kind === 'todo').length,
   notification: pendingRows.value.filter(item => item.kind === 'notification').length,
   approval: pendingRows.value.filter(item => item.kind === 'approval').length,
@@ -289,7 +298,9 @@ const filterCounts = computed(() => ({
   lock: lockGroups.value.length,
   password: props.passwordResetTasks.length,
 }))
-const filteredRows = computed(() => rows.value.filter(row => (showHistory.value || row.approval || pendingBusinessTask(row) || !row.notification?.readAt) && (taskFilter.value === 'all' || row.kind === taskFilter.value)))
+const filteredRows = computed(() => rows.value.filter(row =>
+  (showHistory.value || row.approval || pendingBusinessTask(row) || !row.notification?.readAt)
+  && (taskFilter.value === 'all' ? row.kind !== 'lock' : row.kind === taskFilter.value)))
 const pagedRows = computed(() => filteredRows.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
 const totalPages = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / pageSize.value)))
 
@@ -341,7 +352,7 @@ async function requestRelease(locks: EditLockSummary[]) {
       await props.onRequestRelease(lock.documentId, '需要继续编辑该图档，请在完成后关闭图档。')
       completed++
     }
-    ElMessage.success(`已通知编辑人员，${completed} 个图档结束编辑后会在消息中心通知您`)
+    ElMessage.success(`已向编辑人员发送 ${completed} 个图档的处理请求`)
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     const message = error instanceof Error ? error.message : '申请释放失败'
@@ -415,7 +426,7 @@ async function resetPassword(task: PasswordResetTask) {
           <tbody>
             <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'todo' || row.kind === 'notification' || row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.notification ? $emit('openNotification', row.notification) : row.approval?.kind === 'validationPlan' ? $emit('openValidationPlan', row.approval.projectId, row.approval.qualityAcceptance) : row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId!) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
               <td><span class="pdm-status" :class="row.statusClass">{{ row.status }}</span></td>
-              <td><strong>{{ row.title }}</strong></td>
+              <td :class="{ 'pdm-task-copy-title': isReleaseApprovalCopy(row) }" :title="isReleaseApprovalCopy(row) ? row.title : undefined"><strong>{{ row.title }}</strong></td>
               <td :title="row.content">{{ row.content }}</td>
               <td>{{ formatDateTime(row.createdAt) }}</td>
               <td>
@@ -474,5 +485,10 @@ async function resetPassword(task: PasswordResetTask) {
   align-self: stretch;
   flex-shrink: 0;
   width: 100%;
+}
+.pdm-task-table td.pdm-task-copy-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
 }
 </style>

@@ -105,8 +105,11 @@ public sealed class ReleasePreviewService(
     {
         var pending = await repository.ListReleasePackagesAwaitingPreviewAsync(MaxAttempts, BatchSize, cancellationToken);
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
+        var workerCount = settings.PreviewConversion.Mode == PreviewConversionMode.Remote
+            ? settings.PreviewConversion.GetConfiguredServers().Count(server => !server.Disabled)
+            : 1;
         await Parallel.ForEachAsync(pending, new ParallelOptions {
-            MaxDegreeOfParallelism = Math.Clamp(settings.PreviewConversion.Servers.Count, 1, BatchSize), CancellationToken = cancellationToken
+            MaxDegreeOfParallelism = Math.Clamp(workerCount, 1, BatchSize), CancellationToken = cancellationToken
         }, async (package, token) => { await ProcessAsync(package, token); });
         return pending.Count;
     }

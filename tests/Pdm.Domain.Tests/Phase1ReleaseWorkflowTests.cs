@@ -3833,6 +3833,61 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.All(published.ApprovalTasks, task => Assert.Equal(ApprovalDecision.Approved, task.Decision));
     }
 
+    [Theory]
+    [InlineData(ReleaseScope.NonStandardWithDrawing)]
+    [InlineData(ReleaseScope.NonStandardLongLead)]
+    public async Task DrawingPublication_TerminalFailureCanResumeFromFrozenApproval(ReleaseScope scope)
+    {
+        var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var publisher = new RecordingPublisher { ConversionUnavailable = true };
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var seededPackage = Assert.Single(await repository.ListReleasePackagesAsync(ProjectId, default));
+        await repository.MarkPublishFailedAsync(seededPackage.Id, "清理测试初始审批", default);
+        var draft = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
+            scope, CurrentIds(repository, BomKind.NonStandard), "admin", UserRole.Administrator, default);
+        var approved = await PublishThroughAllStepsAsync(workflow, draft, repository);
+        Assert.Equal(ReleasePackageState.Publishing, approved.State);
+        await repository.MarkPublishFailedAsync(approved.Id, "转图任务意外终止", default);
+        var failed = (await repository.FindReleasePackageAsync(approved.Id, default))!;
+        Assert.True(failed.CanResumePreviewRetry);
+        Assert.False((failed with { ApprovalTasks = [] }).CanResumePreviewRetry);
+        Assert.False((failed with { VersionBindings = [] }).CanResumePreviewRetry);
+
+        var competing = failed with { Id = Guid.NewGuid(), Scope = ReleaseScope.NonStandardWithDrawing, State = ReleasePackageState.Publishing };
+        await repository.CreateReleasePackageAsync(competing, default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.DemandReleasePreviewRetryAsync(failed.Id, "admin", UserRole.Administrator, default));
+        Assert.Equal(ReleasePackageState.PublishFailed, (await repository.FindReleasePackageAsync(failed.Id, default))!.State);
+        await repository.MarkPublishFailedAsync(competing.Id, "测试结束", default);
+
+        if (failed.NonStandardBomVersionId is Guid bomId)
+        {
+            await repository.SetBomVersionStateAsync([bomId], BomVersionState.Draft, "admin", null, default);
+            await Assert.ThrowsAsync<PdmConflictException>(() => workflow.DemandReleasePreviewRetryAsync(failed.Id, "admin", UserRole.Administrator, default));
+            await repository.SetBomVersionStateAsync([bomId], BomVersionState.InReview, "admin", null, default);
+        }
+        var workingBom = await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, workingBom.Select(item => item with { Quantity = item.Quantity + 1 }).ToArray(), default);
+
+        var requeued = await workflow.DemandReleasePreviewRetryAsync(failed.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal(ReleasePackageState.Publishing, requeued.State);
+        Assert.Equal(ReleasePreviewState.Pending, requeued.PreviewState);
+        Assert.Equal(0, requeued.PreviewAttempts);
+        Assert.Null(requeued.PublishError);
+        Assert.Equal(failed.ApprovalTasks.ToArray(), requeued.ApprovalTasks.ToArray());
+        Assert.Equal(failed.NonStandardBomSnapshot.ToArray(), requeued.NonStandardBomSnapshot.ToArray());
+        await Assert.ThrowsAsync<PdmConflictException>(() => repository.ResumeFailedReleasePreviewAsync(failed, DateTimeOffset.UtcNow, default));
+
+        publisher.ConversionUnavailable = false;
+        var published = await workflow.ResumePublishAsync(requeued.Id, default);
+        Assert.Equal(ReleasePackageState.Published, published.State);
+        Assert.Equal(failed.ApprovalTasks.ToArray(), published.ApprovalTasks.ToArray());
+        Assert.Equal(failed.NonStandardBomSnapshot.ToArray(), published.NonStandardBomSnapshot.ToArray());
+    }
+
     [Fact]
     public async Task DrawingPublication_StopsAutomaticRetriesAndPreservesApprovalUntilExplicitRetry()
     {
@@ -3975,7 +4030,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
                     $".release-previews/{source.DocumentId:N}.{(source.Kind == DocumentKind.Drawing ? "pdf" : "step")}",
                     1,
                     new string('A', 64),
-                    source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256));
+                    source.Kind == DocumentKind.Drawing && !ReleasePreviewPolicy.DeliversFrozenDrawings(package) ? new string('F', 64) : source.SourceSha256));
             if (PreviewOnlyDrawings) previews = previews.Where(pair => sources.Single(source => source.DocumentId == pair.Key).Kind == DocumentKind.Drawing).ToDictionary(pair => pair.Key, pair => pair.Value);
             var published = PreviewError is null || PreviewOnlyDrawings ? previews : new Dictionary<Guid, DocumentPreviewArtifact>();
             var publishedPath = PublishedPath;

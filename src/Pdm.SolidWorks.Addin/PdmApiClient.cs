@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Collections.Generic;
 using System.Net.Http;
@@ -198,13 +198,20 @@ internal sealed partial class PdmApiClient : IDisposable
                 : string.Concat("api/projects/", projectId, "/documents/register"),
             RegistrationPayload(node, sourceSha256, allowDuplicateContent, duplicateReason, archiveBatchId, sessionId, machineName), cancellationToken);
 
+    internal static (string DrawingNumber, string Name) GetRegistrationMetadata(CadTreeNode node)
+    {
+        var drawingNumber = Path.GetFileNameWithoutExtension(node.FileName);
+        return (drawingNumber, string.IsNullOrWhiteSpace(node.DisplayName) ? drawingNumber : node.DisplayName);
+    }
+
     private static object RegistrationPayload(CadTreeNode node, string sourceSha256, bool allowDuplicateContent, string duplicateReason,
         Guid? archiveBatchId, Guid? sessionId, string machineName)
     {
+        var (drawingNumber, name) = GetRegistrationMetadata(node);
         var document = new
             {
-                drawingNumber = Path.GetFileNameWithoutExtension(node.FileName),
-                name = string.IsNullOrWhiteSpace(node.DisplayName) ? Path.GetFileNameWithoutExtension(node.FileName) : node.DisplayName,
+                drawingNumber,
+                name,
                 fileName = node.FileName,
                 kind = (int)node.Kind,
                 relatedModelDocumentId = node.RelatedModelDocumentId,
@@ -735,12 +742,12 @@ internal sealed partial class PdmApiClient : IDisposable
             // This allocates temporary storage only; no file bytes or versions are
             // submitted until its session ID has been received and journaled.
             session = await RecoverArchiveConnectionAsync("建立上传会话", (retryToken, retry) =>
-                PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = file.Name, totalLength = file.Length, sha256,
+                PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = originalFile.Name, totalLength = file.Length, sha256,
                 batchId = archiveBatchId, documentId = archiveBatchId.HasValue ? (Guid?)documentId : null,
                 checkoutSessionId = archiveBatchId.HasValue ? checkoutSessionId : null }, retryToken), cancellationToken).ConfigureAwait(false);
             transfer = new ArchiveUploadState { SessionId = session.Id,
                 RelativePath = string.IsNullOrWhiteSpace(session.TargetRelativePath)
-                    ? Path.Combine(".versions", documentId.ToString("N"), Guid.NewGuid().ToString("N"), file.Name)
+                    ? Path.Combine(".versions", documentId.ToString("N"), Guid.NewGuid().ToString("N"), originalFile.Name)
                     : session.TargetRelativePath };
             ArchiveUploadJournal.Save(journalPath, transfer);
         }
@@ -803,34 +810,49 @@ internal sealed partial class PdmApiClient : IDisposable
 
     public async Task<string> DownloadVersionToTempAsync(Guid documentId, Guid versionId, string fileName, string revision, CancellationToken cancellationToken)
     {
-        var directory = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "history", documentId.ToString("N"), versionId.ToString("N"));
+        var historyRoot = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "history");
+        var versionKey = versionId.ToString("N");
+        var directory = Path.Combine(historyRoot, documentId.ToString("N"), versionKey);
+        var leaf = BuildVersionCopyFileName(fileName, revision, versionId);
+        if (!ManagedCadPaths.Fits(directory, leaf))
+        {
+            leaf = Path.GetFileName(fileName);
+            directory = ManagedCadPaths.ChooseDirectory(directory, new[] { Path.Combine(historyRoot, versionKey),
+                ManagedCadPaths.CompactDirectory(ManagedCadPaths.CompactWorkspaceRoot, "r", versionKey, documentId.ToString("N")) }, new[] { leaf });
+        }
+        var path = ManagedCadPaths.Resolve(directory, leaf);
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, BuildVersionCopyFileName(fileName, revision, versionId));
         if (File.Exists(path))
         {
             return path;
         }
 
-        var partialPath = path + ".download";
-        if (File.Exists(partialPath)) File.Delete(partialPath);
-        using (var response = await httpClient.GetAsync(string.Concat("api/documents/", documentId, "/versions/", versionId, "/file?download=false"), cancellationToken).ConfigureAwait(false))
+        var partialPath = ManagedCadPaths.TemporarySibling(path);
+        try
         {
-            if (!response.IsSuccessStatusCode)
+            using (var response = await httpClient.GetAsync(string.Concat("api/documents/", documentId, "/versions/", versionId, "/file?download=false"), cancellationToken).ConfigureAwait(false))
             {
-                ThrowAuthenticationExpiredIfNeeded(response);
-                throw new InvalidOperationException("历史版本文件读取失败。");
+                if (!response.IsSuccessStatusCode)
+                {
+                    ThrowAuthenticationExpiredIfNeeded(response);
+                    throw new InvalidOperationException("历史版本文件读取失败。");
+                }
+                using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                using (var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) await input.CopyToAsync(output).ConfigureAwait(false);
             }
-            using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
-            using (var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) await input.CopyToAsync(output).ConfigureAwait(false);
+            if (File.Exists(path))
+            {
+                File.SetAttributes(path, FileAttributes.Normal);
+                File.Delete(path);
+            }
+            File.Move(partialPath, path);
+            File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+            return path;
         }
-        if (File.Exists(path))
+        finally
         {
-            File.SetAttributes(path, FileAttributes.Normal);
-            File.Delete(path);
+            if (File.Exists(partialPath)) File.Delete(partialPath);
         }
-        File.Move(partialPath, path);
-        File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
-        return path;
     }
 
     public async Task<string> DownloadVersionToWorkspaceStageAsync(
@@ -840,10 +862,14 @@ internal sealed partial class PdmApiClient : IDisposable
         string expectedSha256,
         CancellationToken cancellationToken)
     {
-        var directory = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "workspace-stage", Guid.NewGuid().ToString("N"));
+        var tempRoot = Path.GetTempPath();
+        var stagingId = Guid.NewGuid().ToString("N");
+        var leaf = Path.GetFileName(fileName);
+        var directory = ManagedCadPaths.ChooseStagingDirectory(
+            Path.Combine(tempRoot, "UPTON-PDM", "workspace-stage", stagingId), stagingId, new[] { leaf });
+        var path = ManagedCadPaths.Resolve(directory, leaf);
+        var partialPath = ManagedCadPaths.TemporarySibling(path);
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, Path.GetFileName(fileName));
-        var partialPath = path + ".download";
         try
         {
             string contentSha256 = expectedSha256;
@@ -907,17 +933,9 @@ internal sealed partial class PdmApiClient : IDisposable
         string stagingDirectory,
         CancellationToken cancellationToken)
     {
-        var relativePath = file.RelativePath ?? file.FileName;
-        var root = Path.GetFullPath(stagingDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        var path = Path.GetFullPath(Path.Combine(root, relativePath ?? string.Empty));
-        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException("PLM打开清单包含无效相对路径。");
-        }
-
+        var path = ManagedCadPaths.Resolve(stagingDirectory, file.RelativePath ?? file.FileName);
+        var partialPath = ManagedCadPaths.TemporarySibling(path);
         Directory.CreateDirectory(Path.GetDirectoryName(path));
-        var partialPath = path + ".download";
-        if (File.Exists(partialPath)) File.Delete(partialPath);
         try
         {
             for (var attempt = 1; ; attempt++)
@@ -1696,6 +1714,7 @@ internal sealed class ControlledOpenManifestDto
     // Local proof for resuming an existing checkout, never supplied by the server
     // or serialized into immutable version/cache manifests.
     internal Dictionary<Guid, string> RetainedWorkingHashes { get; } = new Dictionary<Guid, string>();
+    internal bool RequireWorkspaceRetainedReferences { get; set; }
     internal WorkspaceCacheBackup CacheBackup { get; set; }
     internal bool WorkspaceOpenCanceled { get; set; }
     internal HashSet<string> CompletedReferencePrepasses { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

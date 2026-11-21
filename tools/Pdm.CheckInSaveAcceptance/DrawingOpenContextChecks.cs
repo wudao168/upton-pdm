@@ -23,6 +23,7 @@ internal static partial class Program
   {
    foreach(var mode in new[]{"clean","registered-clean","registered-owned-part","drawing-placeholder","drawing-placeholder-source-copy","archive-closed-drawing","archive-saved-drawing-edit","dirty-total","dirty-owned-part","saved-owned-part","loaded-owned-drawing","missing-drawing","latest-edit-owned","latest-edit-new",
     "stale-version","stale-config","stale-drawing","bad-binding","unknown-edit","other-directory","wrong-view-second-sheet","native-open-null","historical-conflict",
+    "lightweight-part","lightweight-stale-version","lightweight-bad-binding",
     "resolved-yes","resolved-no","resolved-without-confirmation","resolved-yes-missing","resolved-yes-wrong-revision","resolved-yes-stale-model","resolved-yes-wrong-view",
     "context-yes","context-older-environment","context-no-marker","context-unverified","context-true-source","context-parent-tampered","context-model-mismatch","context-wrong-second-sheet"})
    {
@@ -64,12 +65,13 @@ internal static partial class Program
     }
     var rootPath=Path.Combine(folder,(string)Get(files[0],"FileName"));var partPath=Path.Combine(folder,(string)Get(files[1],"FileName"));var drawingPath=Path.Combine(folder,(string)Get(files[2],"FileName"));
     if(mode=="missing-drawing"){File.SetAttributes(drawingPath,FileAttributes.Normal);File.Delete(drawingPath);files.RemoveAt(2);}
-    if(mode=="stale-version"||mode=="resolved-yes-stale-model"||mode=="context-model-mismatch")Set(requestedFiles[1],"VersionId",Guid.NewGuid());
+    var lightweight=mode.StartsWith("lightweight-",StringComparison.Ordinal);
+    if(mode=="stale-version"||mode=="lightweight-stale-version"||mode=="resolved-yes-stale-model"||mode=="context-model-mismatch")Set(requestedFiles[1],"VersionId",Guid.NewGuid());
     if(mode=="stale-config")Set(requestedFiles[1],"Configuration","Other");
     if(mode=="stale-drawing")Set(requestedFiles[0],"VersionId",Guid.NewGuid());
     if(mode.StartsWith("drawing-placeholder")){Set(files[2],"Configuration","图纸");Set(requestedFiles[0],"Configuration","默认");}
     if(mode=="drawing-placeholder-source-copy"){Set(requestedFiles[0],"Sha256",new string('A',64));Set(requestedFiles[0],"FileLength",(long)bytes.Length+1207);}
-    if(mode=="bad-binding")identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{partPath,Guid.NewGuid(),project,Get(files[1],"VersionId"),"W3",hash,(long)bytes.Length});
+    if(mode=="bad-binding"||mode=="lightweight-bad-binding")identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{partPath,Guid.NewGuid(),project,Get(files[1],"VersionId"),"W3",hash,(long)bytes.Length});
     var dirty=new HashSet<string>(StringComparer.OrdinalIgnoreCase);var writable=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     if(mode=="dirty-total")dirty.Add(rootPath);
     if(mode=="dirty-owned-part"||mode=="registered-owned-part"){dirty.Add(partPath);writable.Add(partPath);}
@@ -96,7 +98,9 @@ internal static partial class Program
     object View(object model,string path)=>new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.View",true),call=>call.MethodName=="get_ReferencedDocument"?model:call.MethodName=="GetReferencedModelName"?path:throw new Exception(call.MethodName)).GetTransparentProxy();
     var wrongView=mode=="wrong-view-second-sheet"||mode=="resolved-yes-wrong-view"||mode=="context-wrong-second-sheet";
     var drawing=new SheetReferenceModelProxy(modelType,true,call=>call.MethodName=="GetViews"?new object[]{new object[]{View(outside,outsidePath),View(part,partPath)},new object[]{View(null,"old-sheet-property.SLDASM"),View(wrongView?outside:part,wrongView?outsidePath:partPath)}}:ModelCall(call,drawingPath,3)).GetTransparentProxy();
-    loaded.Add(rootPath,total);loaded.Add(partPath,part);if(mode=="loaded-owned-drawing"||mode=="latest-edit-owned")loaded.Add(drawingPath,drawing);
+    loaded.Add(rootPath,total);
+    if(lightweight)active=rootPath;else loaded.Add(partPath,part);
+    if(mode=="loaded-owned-drawing"||mode=="latest-edit-owned")loaded.Add(drawingPath,drawing);
     string parentPath=null;
     if(contextCase){parentPath=Path.Combine(folder,(string)Get(files[3],"FileName"));loaded.Add(parentPath,new DiscardAssemblyProxy(modelType,call=>call.MethodName=="GetComponents"?new[]{component}:ModelCall(call,parentPath,2)).GetTransparentProxy());}
     if(mode=="other-directory")
@@ -108,7 +112,7 @@ internal static partial class Program
     SetField(plugin,"application",new Proxy(appType,call=>{
      switch(call.MethodName){case "GetDocuments":return loaded.Values.ToArray();case "get_ActiveDoc":return loaded.TryGetValue(active,out var current)?current:null;
       case "CloseDoc":var path=loaded.Keys.FirstOrDefault(value=>Path.GetFileName(value)==(string)call.Args[0]);closed.Add(path??(string)call.Args[0]);if(path!=null)loaded.Remove(path);return null;
-      case "OpenDoc6":opened.Add((string)call.Args[0]);if(mode=="native-open-null"||(string)call.Args[0]!=drawingPath)throw new IOException("原生工程图打开失败，保留原窗口。");if(mode=="archive-saved-drawing-edit")writable.Remove(drawingPath);active=(string)call.Args[0];loaded[active]=drawing;return drawing;
+      case "OpenDoc6":opened.Add((string)call.Args[0]);if(mode=="native-open-null"||(string)call.Args[0]!=drawingPath)throw new IOException("原生工程图打开失败，保留原窗口。");if(mode=="archive-saved-drawing-edit")writable.Remove(drawingPath);if(lightweight)loaded.Add(partPath,part);active=(string)call.Args[0];loaded[active]=drawing;return drawing;
       case "ActivateDoc3":active=drawingPath;return drawing;
       case "GetDocumentDependencies2":return new string[0];case "GetCurrentWorkingDirectory":case "GetSearchFolders":return "";case "SetCurrentWorkingDirectory":case "SetSearchFolders":return true;
       case "GetUserPreferenceToggle":return search;case "SetUserPreferenceToggle":search=(bool)call.Args[1];return true;
@@ -152,9 +156,11 @@ internal static partial class Program
       await task;for(var index=0;index<200&&(int)Field(plugin,"openOperationInProgress")!=0;index++)await Task.Delay(10);success=(bool)Get(task,"Result");
      }
      promptTimer.Stop();
-     var expected=mode.StartsWith("registered-")||mode.StartsWith("drawing-placeholder")||mode.StartsWith("archive-")||new[]{"clean","dirty-total","dirty-owned-part","saved-owned-part","loaded-owned-drawing","missing-drawing","latest-edit-owned","latest-edit-new","resolved-yes","context-yes","context-older-environment"}.Contains(mode);
+     var expected=mode.StartsWith("registered-")||mode.StartsWith("drawing-placeholder")||mode.StartsWith("archive-")||new[]{"clean","dirty-total","dirty-owned-part","saved-owned-part","loaded-owned-drawing","missing-drawing","latest-edit-owned","latest-edit-new","resolved-yes","context-yes","context-older-environment","lightweight-part"}.Contains(mode);
      var allowedClose=wrongView?1:0;
-     if(!loaded.ContainsKey(rootPath)||!loaded.ContainsKey(partPath)||contextCase&&!loaded.ContainsKey(parentPath)||closed.Count!=allowedClose||closed.Any(path=>path!=drawingPath))throw new Exception("Drawing open closed the user's part/total "+mode+": "+string.Join(";",closed));
+     if(!loaded.ContainsKey(rootPath)||loaded.ContainsKey(partPath)!=(!lightweight||expected)||contextCase&&!loaded.ContainsKey(parentPath)||closed.Count!=allowedClose||closed.Any(path=>path!=drawingPath))throw new Exception("Drawing open closed the user's part/total "+mode+": "+string.Join(";",closed));
+     if(lightweight&&(!expected&&opened.Count!=0||expected&&(!opened.SequenceEqual(new[]{drawingPath})||active!=drawingPath)))
+        throw new Exception("轻化引用必须在原工作区按精确基准打开，版本或绑定冲突时保持原图档："+mode);
      if(success!=expected)throw new Exception("Unexpected drawing open result "+mode+": "+Field(plugin,"controlledOpenFailureMessage"));
      if(mutation.Count!=0||handler.Mutations!=0||handler.Downloads!=(mode=="missing-drawing"?1:0))throw new Exception("Unexpected model mutation or broad download "+mode+" native="+string.Join(",",mutation)+" download="+handler.Downloads);
      if(contexts.Count!=1||!ReferenceEquals(contexts[contextKey],owner)||((IList)Get(owner,"Files")).Count!=fileCount||edits.Count!=editCount+(mode=="latest-edit-new"?1:0))throw new Exception("Opening replaced assembly manifest or edit recovery "+mode);
@@ -204,7 +210,7 @@ internal static partial class Program
      refs.Add(new{documentId=Get(environment,"DocumentId"),fileName=Get(environment,"FileName"),kind=0,role=1,isContextReference=mode!="context-no-marker",referenceTypeUnverified=mode=="context-unverified",children=new object[0]});
      if(mode=="context-true-source")refs.Add(new{documentId=Get(environment,"DocumentId"),fileName=Get(environment,"FileName"),kind=0,role=1,isContextReference=false,children=new object[0]});
     }
-    value=new[]{new{id=Get(file,"VersionId"),sha256=Get(file,"Sha256"),fileLength=Get(file,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",sourceHash}},referenceSnapshot=new{documentId=id,fileName=Get(file,"FileName"),kind=kind,children=refs.ToArray()}}};
+    value=new[]{new{id=Get(file,"VersionId"),documentId=id,sha256=Get(file,"Sha256"),fileLength=Get(file,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",sourceHash}},referenceSnapshot=new{documentId=id,fileName=Get(file,"FileName"),kind=kind,children=refs.ToArray()}}};
    }
    else if(path.EndsWith("/checkout")){Checkouts++;Set(document,"CheckedOutBy","tester");Set(document,"CheckoutSessionId",session);value=document;}
    else{Mutations++;throw new Exception("Unexpected business mutation "+path);}

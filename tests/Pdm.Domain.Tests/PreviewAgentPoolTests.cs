@@ -24,18 +24,21 @@ public sealed class PreviewAgentPoolTests
     public async Task SkipsBusyServerAndDoesNotAssignTheSameServerTwice()
     {
         var prefix = Guid.NewGuid().ToString("N");
-        var servers = new[] { new PreviewAgentServer("忙碌", $"http://{prefix}-busy", "one"),
-            new PreviewAgentServer("空闲", $"http://{prefix}-idle", "two") };
+        var disabled = new PreviewAgentServer("已停用", $"http://{prefix}-disabled", "disabled") { Disabled = true };
+        var busy = new PreviewAgentServer("忙碌", $"http://{prefix}-busy", "one");
+        var idle = new PreviewAgentServer("空闲", $"http://{prefix}-idle", "two", 47);
         using var client = new HttpClient(new HealthHandler());
-        var settings = new PreviewConversionSettings { Servers = servers };
+        var settings = new PreviewConversionSettings { Servers = [disabled, busy, idle] };
         using var lease = await PreviewAgentPool.AcquireAsync(settings, "first", client, default);
-        Assert.Equal(servers[1].AgentUrl, lease.Settings.AgentUrl);
-        Assert.Equal("two", lease.Settings.AgentToken);
+        Assert.Equal(idle.Name, lease.Name);
+        Assert.Equal(idle.AgentUrl, lease.Settings.AgentUrl);
+        Assert.Equal(idle.AgentToken, lease.Settings.AgentToken);
+        Assert.Equal(idle.TimeoutMinutes, lease.Settings.TimeoutMinutes);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PreviewAgentPool.AcquireAsync(settings, "second", client, cancellation.Token));
         lease.Dispose();
         using var next = await PreviewAgentPool.AcquireAsync(settings, "third", client, default);
-        Assert.Equal(servers[1].AgentUrl, next.Settings.AgentUrl);
+        Assert.Equal(idle.AgentUrl, next.Settings.AgentUrl);
     }
 
     [Fact]

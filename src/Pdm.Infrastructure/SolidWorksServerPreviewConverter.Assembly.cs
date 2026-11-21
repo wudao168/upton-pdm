@@ -38,16 +38,8 @@ public sealed partial class SolidWorksServerPreviewConverter
                     && await ReleaseDeliveryFiles.MatchesAsync(output, cached.FileLength, cached.Sha256, cancellationToken))
                     return cached with { Path = output };
             }
-            var conversion = (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion ?? PreviewConversionSettings.Default;
-            if (conversion.Mode == PreviewConversionMode.Remote && conversion.Servers.Count > 0)
-            {
-                var eligible = conversion.Servers.Where(host => !host.Disabled && (!host.CompanyId.HasValue || host.CompanyId == project.OrganizationId)).ToArray();
-                if (eligible.Length == 0) throw new PreviewServerUnavailableException("当前项目所属公司没有已勾选的转图服务器。");
-                conversion = conversion with { Servers = eligible, AgentUrl = eligible[0].AgentUrl, AgentToken = eligible[0].AgentToken };
-            }
-            if (conversion.Mode == PreviewConversionMode.Remote && string.IsNullOrWhiteSpace(conversion.AgentUrl) && conversion.Servers.Count == 0)
-                throw new PreviewServerUnavailableException("当前没有已登记的远程转图服务器，请等待服务器登记后重试。");
-            if (conversion.TimeoutMinutes is < 1 or > 120) throw new PdmRuleException("转图超时必须设置为1到120分钟。");
+            var configured = (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion ?? PreviewConversionSettings.Default;
+            var conversion = SelectPreviewServers(configured, project.OrganizationId);
             var work = Path.Combine(storage.ConversionWorkRoot, "assembly-preview", Guid.NewGuid().ToString("N"));
             var sourceRoot = Path.Combine(work, "sources");
             var outputRoot = Path.Combine(work, "outputs");
@@ -81,7 +73,8 @@ public sealed partial class SolidWorksServerPreviewConverter
                 }
                 var errors = conversion.Mode == PreviewConversionMode.Remote
                     ? await RunRemoteAgentAsync(conversion, jobs, work, outputRoot, cancellationToken,
-                        context: new PreviewAgentContext(initiator, project.Code, "桌面客户端", root.FileName, manifest.Id.ToString("D")))
+                        context: new PreviewAgentContext(initiator, project.Code, "桌面客户端", root.FileName, manifest.Id.ToString("D")),
+                        waitForServer: configured.Servers.Count > 0)
                     : await RunLocalWorkerAsync(conversion, jobs, sourceRoot, work, outputRoot, cancellationToken);
                 if (errors.Count > 0)
                     throw new PdmRuleException("最新装配预览生成失败，请检查引用文件和转图日志后重试。");

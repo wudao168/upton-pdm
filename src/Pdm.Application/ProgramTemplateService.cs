@@ -34,7 +34,7 @@ public sealed class ProgramTemplateService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateManage, cancellationToken);
         var normalized = NormalizeOptionCatalog(catalog);
         var settings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
-        await pdmRepository.UpdateSystemSettingsAsync(settings with { ProgramTemplateOptions = normalized }, cancellationToken);
+        await pdmRepository.UpdateSystemSettingsAsync(settings with { ProgramTemplateOptions = normalized }, cancellationToken, preservePreviewConversion: true);
         await AuditAsync(actor, "program-template.options.update", nameof(ProgramTemplateOptionCatalog), Guid.Empty,
             $"模板类型{normalized.Types?.Count ?? 0}项、分类{normalized.Categories.Count}项、厂商{normalized.Vendors.Count}项、平台{normalized.Platforms.Count}项", cancellationToken);
         return normalized;

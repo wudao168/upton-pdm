@@ -1112,6 +1112,11 @@ internal sealed class SolidWorksReferenceTreeScanner
     public void UpdateDrawingReferences(IModelDoc2 document, CadTreeNode drawing)
     {
         if (document?.GetType() != (int)swDocumentTypes_e.swDocDRAWING) return;
+        var inheritedScope = drawing.NativeFileScopePaths;
+        var missingDrawingRoot = inheritedScope != null && !inheritedScope.Contains(drawing.FullPath);
+        if (missingDrawingRoot && (!string.Equals(document.GetPathName(), drawing.FullPath, StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(drawing.FullPath)))
+            throw new InvalidOperationException("当前打开的工程图与待存档图档路径不一致，未更新工程图引用：" + drawing.FileName);
         drawing.DrawingViewsRead = false;
         var expectedModels = drawing.ReferencedModels.ToArray();
         var references = new List<CadTreeNode>();
@@ -1175,14 +1180,19 @@ internal sealed class SolidWorksReferenceTreeScanner
                 || expected.DocumentId.HasValue && actual.DocumentId == expected.DocumentId)) continue;
             PluginDiagnosticLog.Record("工程图关联", drawing.FileName + "：旧关联未出现在当前视图中，按实际视图更新：" + expected.FileName);
         }
-            // Actual views supersede the candidate-discovery scope. Keep every
-            // model in subsequent version comparison and archive serialization.
-            drawing.DrawingScopePaths = null;
-            drawing.ReferencedModels.Clear();
-            drawing.ReferencedModels.AddRange(references);
-            drawing.RelatedModelDocumentId = references.Count == 1 ? references[0].DocumentId : null;
-        if (drawing.NativeFileScopePaths != null)
-            NativeArchiveManifest.ConfirmFileScope(drawing, drawing.NativeFileScopePaths.ToArray());
+        // Actual views supersede the candidate-discovery scope. Keep every
+        // model in subsequent version comparison and archive serialization.
+        drawing.DrawingScopePaths = null;
+        drawing.ReferencedModels.Clear();
+        drawing.ReferencedModels.AddRange(references);
+        drawing.RelatedModelDocumentId = references.Count == 1 ? references[0].DocumentId : null;
+        if (inheritedScope != null)
+        {
+            // An automatically selected companion inherits the model's scope.
+            // The opened drawing provides independent evidence for its own root.
+            NativeArchiveManifest.ConfirmFileScope(drawing,
+                missingDrawingRoot ? inheritedScope.Append(drawing.FullPath).ToArray() : inheritedScope.ToArray());
+        }
         drawing.DrawingViewsRead = true;
     }
 

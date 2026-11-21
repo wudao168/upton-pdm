@@ -1,4 +1,4 @@
-import type { BomItem, BomVersion, ReleasePackageSummary } from './types'
+import type { BomItem, BomVersion, ReleasePackageSummary, VersionAlignmentStatus } from './types'
 import { u9UnitOptions } from './u9Units'
 
 export function drawingRevisionLabel(revision?: string | null): string {
@@ -35,8 +35,8 @@ export function documentVersionSummary(value: DrawingVersionInfo): string {
 }
 
 type RevisionItem = Pick<BomItem, 'kind' | 'revision' | 'sourceDocumentId' | 'displayRevision'> & Partial<Pick<BomItem, 'id' | 'drawingNumber' | 'unit' | 'summaryItemIds' | 'releaseTrackingId'>>
-const isWork = (revision: string) => /^(?:[A-Z]-)?W[1-9]\d*$/i.test(revision)
-const releasedLabel = (revision: string) => isWork(revision) ? '未发布' : revision || '未发布'
+export const isWorkRevision = (revision: string) => /^(?:[A-Z]-)?W[1-9]\d*$/i.test(revision)
+const releasedLabel = (revision: string) => isWorkRevision(revision) ? '未发布' : revision || '未发布'
 export const bomVersionLabel = (value?: string | null) => value?.trim().replace(/-B(?=\d+$)/, '-V') || ''
 export function packageRevisionLabel(item: RevisionItem, release: ReleasePackageSummary): string {
   const binding = item.sourceDocumentId ? release.versionBindings?.find(row => row.documentId === item.sourceDocumentId) : undefined
@@ -51,11 +51,11 @@ export function packageRevisionLabel(item: RevisionItem, release: ReleasePackage
       const previous = /^(?:([A-Z])-)?W[1-9]\d*$/i.exec(binding.revision)
       return binding.targetRevision || (previous ? previous[1] ? String.fromCharCode(previous[1].toUpperCase().charCodeAt(0) + 1) : 'A' : binding.revision)
     }
-    return isWork(binding.revision) ? binding.previousReleasedRevision || unavailable : releasedLabel(binding.revision)
+    return isWorkRevision(binding.revision) ? binding.previousReleasedRevision || unavailable : releasedLabel(binding.revision)
   }
-  if (!material && published && item.sourceDocumentId && isWork(item.revision)
+  if (!material && published && item.sourceDocumentId && isWorkRevision(item.revision)
     && ['NonStandardWithDrawing', 'NonStandardSupplement', 'LegacyCombined'].includes(release.scope)) return '历史版次待核对'
-  return material && (isWork(item.revision) || !item.revision?.trim()) ? unavailable : releasedLabel(item.revision)
+  return material && (isWorkRevision(item.revision) || !item.revision?.trim()) ? unavailable : releasedLabel(item.revision)
 }
 
 export function packageRevisionHint(item: RevisionItem, release: ReleasePackageSummary): string {
@@ -71,7 +71,7 @@ export function bomRevisionLabel(item: RevisionItem, packages: ReleasePackageSum
   const bomDisplay = !!item.displayRevision && /^(?:S|E)-/i.test(item.displayRevision)
     && (packages.some(row => ['已发布', 'Published'].includes(row.state)) || versions.some(row => row.state === 'Released'))
   if ((item.kind === 'Standard' || item.kind === 'Electrical') && (!item.displayRevision || ['未发布', '—'].includes(item.displayRevision) || bomDisplay)) {
-    if (!item.sourceDocumentId && item.revision.trim() && !isWork(item.revision)) return releasedLabel(item.revision)
+    if (!item.sourceDocumentId && item.revision.trim() && !isWorkRevision(item.revision)) return releasedLabel(item.revision)
     const unitKey = (unit = '') => /^\d+$/.test(unit.trim()) ? unit.trim().padStart(3, '0')
       : unit.trim() === '件' ? '001' : u9UnitOptions.find(row => row.name === unit.trim())?.code || unit.trim()
     const matches = (row: BomItem) => !row.manuallyExcluded && !row.releaseExcluded && !row.pendingClassification
@@ -93,7 +93,7 @@ export function bomRevisionLabel(item: RevisionItem, packages: ReleasePackageSum
     const version = versions.filter(row => row.kind === item.kind && row.state === 'Released').sort((a, b) => b.versionNumber - a.versionNumber).find(row => row.items.some(matches))
     if (version) {
       const frozen = version.items.find(matches)!
-      return isWork(frozen.revision) || !frozen.revision.trim() ? bomVersionLabel(version.label) : releasedLabel(frozen.revision)
+      return isWorkRevision(frozen.revision) || !frozen.revision.trim() ? bomVersionLabel(version.label) : releasedLabel(frozen.revision)
     }
     if (bomDisplay) return releasedLabel(item.revision)
   }
@@ -106,4 +106,29 @@ export function bomRevisionLabel(item: RevisionItem, packages: ReleasePackageSum
     return '未发布'
   }
   return releasedLabel(item.revision)
+}
+
+export function classifyVersionAlignment(latest: string, structure: string): VersionAlignmentStatus {
+  if (latest === '—') return 'VersionConflict'
+  if (structure === '—') return 'NotSnapshotted'
+  if (latest === structure) return 'Synced'
+
+  const latestOrder = revisionOrder(latest)
+  const structureOrder = revisionOrder(structure)
+  if (!latestOrder || !structureOrder) return 'VersionConflict'
+  if (latestOrder[0] > structureOrder[0] || (latestOrder[0] === structureOrder[0] && latestOrder[1] > structureOrder[1])) {
+    return 'StructureStale'
+  }
+  return 'VersionConflict'
+}
+
+function revisionOrder(value: string): [number, number] | null {
+  const normalized = value.trim().toUpperCase()
+  const workOnly = /^W(\d+)$/.exec(normalized)
+  if (workOnly) return [0, Number(workOnly[1])]
+
+  const released = /^([A-Z]+)(?:-W(\d+))?$/.exec(normalized)
+  if (!released) return null
+  const base = [...released[1]].reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0)
+  return [base, Number(released[2] ?? 0)]
 }

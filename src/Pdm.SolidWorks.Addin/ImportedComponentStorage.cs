@@ -218,7 +218,7 @@ internal sealed class ImportedComponentStorage
             try
             {
                 if (pack != null && Marshal.IsComObject(pack)) Marshal.ReleaseComObject(pack);
-                if (previous != null && !string.Equals((application.ActiveDoc as IModelDoc2)?.GetPathName(), previous.GetPathName(), StringComparison.OrdinalIgnoreCase))
+                if (previous != null && !PdmAddin.PathsEqual((application.ActiveDoc as IModelDoc2)?.GetPathName(), previous.GetPathName()))
                     try { Activate(previous); }
                     catch (Exception error) { PluginDiagnosticLog.Record("图档恢复", "原生清单读取后恢复原活动文档失败，清单仍有效：" + error); }
             }
@@ -250,10 +250,12 @@ internal sealed class ImportedComponentStorage
 
     private void Activate(IModelDoc2 document)
     {
-        var errors = 0;
-        var activated = application.ActivateDoc3(document.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref errors) as IModelDoc2;
-        if (activated == null || errors != 0 || !string.Equals(activated.GetPathName(), document.GetPathName(), StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("无法切换到需要核对的图档，已停止存档并保留本地文件：" + document.GetPathName() + "；状态码：" + errors);
+        var path = document.GetPathName();
+        if (PdmAddin.PathsEqual((application.ActiveDoc as IModelDoc2)?.GetPathName(), path)) return;
+        if (PdmAddin.ActivateLoadedDocumentByPath(application, path, out var errors, out var conflictingSource) != null
+            && (errors == 0 || errors == (int)swActivateDocError_e.swDocNeedsRebuildWarning)) return;
+        throw new InvalidOperationException("无法切换到需要核对的图档，已停止存档并保留本地文件：" + path
+            + (conflictingSource ? "。另一目录中的同名图档仍处于打开状态。" : "；状态码：" + errors));
     }
 
     internal static bool IsStableOwner(string path) => !string.IsNullOrWhiteSpace(path)

@@ -7,7 +7,73 @@ import { refreshMaterialStockPlans, setMaterialStockContext } from '../src/mater
 import { computed, reactive, ref } from 'vue'
 import { projectCenterAccessKey, projectCenterSchema } from '../src/projectCenterAccess'
 import BomManager from '../src/components/BomManager.vue'
-import type { BomGenerationResult, BomItem, BomVersion, DocumentNode, DocumentVersionSummary, MaterialRelationCompleteness, PdmMaterial, ReleasePackageSummary } from '../src/types'
+import type { BomGenerationResult, BomItem, BomVersion, DocumentNode, DocumentVersionSummary, ManagedDocument, MaterialRelationCompleteness, PdmMaterial, ReleasePackageSummary } from '../src/types'
+
+it('非标件的存档工作版本高于BOM时显示核对提示，历史BOM保持原状', async () => {
+  const item: BomItem = { id: 'plate', kind: 'NonStandard', sequence: 1, drawingNumber: '', name: '下封板',
+    specification: '70003340.M0.04-001', quantity: 2, unit: '001', revision: 'W1', complete: true, sourceDocumentId: 'plate-model' }
+  const document: ManagedDocument = { id: 'plate-model', projectId: 'project', drawingNumber: '70003340.M0.04-001',
+    fileName: '70003340.M0.04-001.SLDPRT', name: '下封板', kind: 'Part', state: 'Work', revision: 'W2', storedVersionCount: 2 }
+  const archived: BomVersion = { id: 'historical-plate', projectId: 'project', kind: 'NonStandard', label: 'N-HISTORY-V01',
+    versionNumber: 1, state: 'Released', items: [{ ...item }], createdBy: 'designer', updatedBy: 'designer',
+    createdAt: '2026-11-14', updatedAt: '2026-11-14' }
+  const wrapper = mount(BomManager, { props: { standard: [], nonStandard: [item], electrical: [], declarations: [], pending: false,
+    editable: false, projectId: 'project', requestedBomKind: 'NonStandard', versions: [archived], documents: [] } })
+  const notice = '.pdm-bom-drawing-revision-notice'
+  const message = '图档已更新 W1 → W2，BOM 待核对'
+  try {
+    await flushPromises()
+    expect(wrapper.find(notice).exists()).toBe(false)
+    await wrapper.setProps({ documents: [{ ...document, id: 'unrelated' }] })
+    expect(wrapper.find(notice).exists()).toBe(false)
+    await wrapper.setProps({ documents: [document] })
+    expect(wrapper.get(notice).attributes('title')).toBe(message)
+    await wrapper.get(notice).trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain(message)
+    await wrapper.get('[aria-label="关闭问题详情"]').trigger('click')
+    await wrapper.get('[aria-label="选择BOM版本"]').setValue(archived.id)
+    expect(wrapper.find(notice).exists()).toBe(false)
+    await wrapper.get('[aria-label="选择BOM版本"]').setValue('current')
+    await wrapper.setProps({ documents: [{ ...document, state: 'Released', revision: 'A' }] })
+    expect(wrapper.find(notice).exists()).toBe(false)
+    await wrapper.setProps({ documents: [document], nonStandard: [{ ...item, revision: 'W2' }] })
+    expect(wrapper.find(notice).exists()).toBe(false)
+    expect(archived.items[0]).toMatchObject({ revision: 'W1', quantity: 2 })
+    expect(wrapper.emitted('save')).toBeUndefined()
+  } finally { wrapper.unmount() }
+})
+
+it('回收站恢复非标件后在当前页刷新审核候选，并忽略更早的请求结果', async () => {
+  showDetailedColumns()
+  const item: BomItem = { id: 'plate', kind: 'NonStandard', sequence: 1, drawingNumber: '', name: '下封板',
+    specification: 'MODEL-OLD', quantity: 2, unit: '001', revision: 'W1', complete: true, sourceDocumentId: 'plate-model' }
+  const candidate = { candidateId: item.id, bomItemId: item.id, modelDocumentId: 'plate-model', drawingNumber: 'MODEL-CURRENT',
+    name: item.name, bomKinds: ['NonStandard'], modelRevision: 'W1', drawingDocumentId: 'plate-drawing' }
+  const unavailable = { ...candidate, state: 'Unavailable', reason: '非标BOM缺少关联2D工程图' }
+  const requests = materialApi.listDrawingReviewCandidates
+  requests.mockReset().mockResolvedValue([unavailable])
+  const wrapper = mount(BomManager, { props: { standard: [], nonStandard: [item], electrical: [], declarations: [],
+    pending: false, projectId: 'project', token: 'test-token', requestedBomKind: 'NonStandard' } })
+  try {
+    await flushPromises()
+    const badge = '.pdm-bom-drawing-review-status'
+    expect(wrapper.get(badge).text()).toBe('不可审核')
+    let finishEarlier!: (value: unknown) => void
+    requests.mockImplementationOnce(() => new Promise(resolve => { finishEarlier = resolve }))
+    await wrapper.setProps({ nonStandard: [{ ...item, manuallyExcluded: true }] })
+    expect(finishEarlier).toBeDefined()
+    requests.mockResolvedValue([{ ...candidate, state: 'Ready' }])
+    await wrapper.setProps({ nonStandard: [{ ...item, manuallyExcluded: false }] })
+    await flushPromises()
+    expect(wrapper.get(badge).text()).toBe('待发起')
+    finishEarlier([unavailable])
+    await flushPromises()
+    expect(wrapper.get(badge).text()).toBe('待发起')
+  } finally {
+    wrapper.unmount()
+    requests.mockReset().mockResolvedValue([])
+  }
+})
 
 it('移除发布后本轮归零，历史仍可筛选分页且不修改冻结快照', async () => {
   const removed: BomItem[] = Array.from({ length: 35 }, (_, index) => ({ id: 'removed-' + index, kind: 'Standard', sequence: index + 1,

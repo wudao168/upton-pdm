@@ -54,8 +54,11 @@ internal static class WorkspaceLocalStateReader
         EditDraftJournal draftJournal = null)
     {
         var directories = PdmDocumentIdentityStore.ManagedWorkspaceRoots(workspaceRoot)
-            .SelectMany(root => new[] { ProjectDirectory(root, projectCode),
-                Path.Combine(root, ".uplm", "Snapshots", SafeSegment(projectCode)) })
+            .SelectMany(root => PdmDocumentIdentityStore.IsMachineCompactRoot(root)
+                ? new[] { ManagedCadPaths.CompactProjectDirectory(root, projectCode) }
+                : new[] { ProjectDirectory(root, projectCode),
+                    Path.Combine(root, ".uplm", "Snapshots", SafeSegment(projectCode)),
+                    ManagedCadPaths.CompactProjectDirectory(root, projectCode) })
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var projectDirectory = directories.FirstOrDefault(Directory.Exists) ?? directories[0];
         var result = new WorkspaceLocalStateSnapshot
@@ -134,7 +137,7 @@ internal static class WorkspaceLocalStateReader
         return Path.Combine(root, "View", SafeSegment(projectCode));
     }
 
-    private static IEnumerable<string> EnumerateAccessibleFiles(string directory)
+    internal static IEnumerable<string> EnumerateAccessibleFiles(string directory)
     {
         var pending = new Stack<string>();
         pending.Push(directory);
@@ -143,7 +146,12 @@ internal static class WorkspaceLocalStateReader
             var current = pending.Pop();
             string[] files;
             string[] children;
-            try { files = Directory.GetFiles(current); children = Directory.GetDirectories(current); }
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) continue;
+                files = Directory.GetFiles(current);
+                children = Directory.GetDirectories(current);
+            }
             catch (IOException) { continue; }
             catch (UnauthorizedAccessException) { continue; }
             foreach (var file in files) yield return file;

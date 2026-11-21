@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -67,12 +68,20 @@ public sealed partial class PdmAddin
                 for (var index = 0; index < jobs.Length; index++)
                 {
                     token.ThrowIfCancellationRequested(); var job = jobs[index];
-                    var copy = CreateCheckInUploadCopy(job.Path, job.Id); paths.Add(copy);
-                    CheckInUploadHashes.VerifySource(job.Path, job.Hash, token);
-                    var hash = ComputeFileHash(copy);
-                    if (!string.Equals(hash, job.Hash, StringComparison.OrdinalIgnoreCase))
-                        throw new System.IO.IOException("上传副本与已确认源文件内容不一致，尚未上传：" + job.Name);
-                    results.Add(new ArchiveDiskCopy { Path = copy, Hash = hash, Length = new System.IO.FileInfo(copy).Length });
+                    try
+                    {
+                        var copy = CreateCheckInUploadCopy(job.Path, job.Id);
+                        paths.Add(copy);
+                        CheckInUploadHashes.VerifySource(job.Path, job.Hash, token);
+                        var hash = ComputeFileHash(copy);
+                        if (!string.Equals(hash, job.Hash, StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidOperationException("上传副本与已确认源文件内容不一致，尚未上传：" + job.Name);
+                        results.Add(new ArchiveDiskCopy { Path = copy, Hash = hash, Length = new FileInfo(copy).Length });
+                    }
+                    catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+                    {
+                        throw new InvalidOperationException(job.Name + "：准备上传副本失败，本批尚未上传。" + ArchivePreflightError(error), error);
+                    }
                     ArchiveSession.Current?.ReportFile(alreadyPrepared + index + 1, prepared.Count, job.Name, "上传副本已准备并核对源文件");
                 }
                 return results.ToArray();

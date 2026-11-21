@@ -574,17 +574,16 @@ internal sealed class ProjectDocumentsControl : UserControl
         var target = root;
         try
         {
-            var directory = ControlledWorkspaceManager.ProjectViewDirectory(
-                workspaceRootResolver(),
-                project.Code);
+            var workspace = workspaceRootResolver();
+            var directory = ControlledWorkspaceManager.ProjectViewDirectory(workspace, project.Code);
             var pathsByDocument = localPaths != null && localPathsDirectory == directory && localPathsExpiresUtc > DateTime.UtcNow
-                ? localPaths : await Task.Run(() => ReadLocalWorkspacePaths(directory, project.Id, token), token);
+                ? localPaths : await Task.Run(() => ReadProjectLocalWorkspacePaths(workspace, project.Code, project.Id, token), token);
             token.ThrowIfCancellationRequested();
             if (IsDisposed || !ReferenceEquals(root, target) || SelectedProjectId != project.Id) return;
             localPaths = pathsByDocument;
             localPathsDirectory = directory;
             localPathsExpiresUtc = DateTime.UtcNow.AddSeconds(2);
-            ApplyLocalWorkspacePaths(target, directory, pathsByDocument);
+            ApplyLocalWorkspacePaths(target, workspace, project.Code, pathsByDocument);
             tree.Invalidate();
             UpdateSelectionState();
         }
@@ -603,19 +602,45 @@ internal sealed class ProjectDocumentsControl : UserControl
         }
     }
 
-    private static Dictionary<Guid, string> ReadLocalWorkspacePaths(string directory, Guid projectId, CancellationToken token)
+    private static Dictionary<Guid, string> ReadLocalWorkspacePaths(string directory, Guid projectId, CancellationToken token) =>
+        ReadWorkspacePaths(new[] { directory }, projectId, token);
+
+    private static Dictionary<Guid, string> ReadProjectLocalWorkspacePaths(
+        string workspace, string projectCode, Guid projectId, CancellationToken token)
+    {
+        var directories = new List<string>();
+        foreach (var root in PdmDocumentIdentityStore.ManagedWorkspaceRoots(workspace))
+        {
+            token.ThrowIfCancellationRequested();
+            if (!PdmDocumentIdentityStore.IsMachineCompactRoot(root))
+                directories.Add(ControlledWorkspaceManager.ProjectViewDirectory(root, projectCode));
+            var projectDirectory = ManagedCadPaths.CompactProjectDirectory(root, projectCode);
+            if (!Directory.Exists(projectDirectory)) continue;
+            try
+            {
+                ControlledCacheMaintenance.RequireOrdinaryPath(projectDirectory, root);
+                directories.AddRange(Directory.EnumerateDirectories(projectDirectory).Where(entry =>
+                    ManagedCadPaths.IsCompactProjectEntry(root, entry) && "wb".Contains(Path.GetFileName(entry)[0])));
+            }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+            { PluginDiagnosticLog.Record("工作区路径", "无法核对短路径目录，已保留缓存：" + error); }
+        }
+        return ReadWorkspacePaths(directories.Distinct(StringComparer.OrdinalIgnoreCase), projectId, token);
+    }
+
+    private static Dictionary<Guid, string> ReadWorkspacePaths(IEnumerable<string> directories, Guid projectId, CancellationToken token)
     {
         var pathsByDocument = new Dictionary<Guid, string>();
-        if (!Directory.Exists(directory)) return pathsByDocument;
         var ambiguousDocuments = new HashSet<Guid>();
-        foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        foreach (var path in directories.SelectMany(WorkspaceLocalStateReader.EnumerateAccessibleFiles))
         {
             token.ThrowIfCancellationRequested();
             Guid documentId;
             Guid? boundProjectId;
-            if (PdmDocumentIdentityStore.TryRead(path, out documentId))
+            if (PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata))
             {
-                boundProjectId = PdmDocumentIdentityStore.ReadProjectId(path);
+                documentId = metadata.DocumentId;
+                boundProjectId = metadata.ProjectId;
             }
             else if (!PdmDocumentIdentityStore.TryReadProvenance(path, out documentId, out boundProjectId))
             {
@@ -640,7 +665,8 @@ internal sealed class ProjectDocumentsControl : UserControl
 
     private static void ApplyLocalWorkspacePaths(
         CadTreeNode node,
-        string projectDirectory,
+        string workspace,
+        string projectCode,
         IReadOnlyDictionary<Guid, string> pathsByDocument)
     {
         if (node == null) return;
@@ -648,33 +674,14 @@ internal sealed class ProjectDocumentsControl : UserControl
         {
             node.FullPath = path;
         }
-        else if (IsPathWithinDirectory(node.FullPath, projectDirectory))
+        else if (PdmDocumentIdentityStore.IsProjectWorkspacePath(workspace, projectCode, node.FullPath))
         {
             node.FullPath = string.Empty;
         }
 
         foreach (var child in node.Children)
         {
-            ApplyLocalWorkspacePaths(child, projectDirectory, pathsByDocument);
-        }
-    }
-
-    private static bool IsPathWithinDirectory(string path, string directory)
-    {
-        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(directory)) return false;
-        try
-        {
-            var root = Path.GetFullPath(directory)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                + Path.DirectorySeparatorChar;
-            return Path.GetFullPath(path).StartsWith(root, StringComparison.OrdinalIgnoreCase);
-        }
-        catch (Exception exception) when (exception is IOException
-            || exception is UnauthorizedAccessException
-            || exception is ArgumentException
-            || exception is NotSupportedException)
-        {
-            return false;
+            ApplyLocalWorkspacePaths(child, workspace, projectCode, pathsByDocument);
         }
     }
 

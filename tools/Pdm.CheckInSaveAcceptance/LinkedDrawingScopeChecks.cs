@@ -78,6 +78,50 @@ internal static partial class Program
                 var baseline = (Task)TreeCall(client, "BaseVersionFromHistoryAsync", source, documentId, CancellationToken.None, knownVersions); await baseline;
                 if (!Equals(Get(baseline, "Result"), committedId)) throw new Exception("下一次原图档提交未使用已确认的W2基准");
                 Console.WriteLine("PASS: 多次不关图继续编辑保留最新已提交内存基准，不被原文件旧W1回执降级");
+
+                var drawing = LinkedNode(output, "已提交内存基准.SLDDRW", "Drawing");
+                var drawingId = (Guid)Get(drawing, "DocumentId");
+                var drawingPath = (string)Get(drawing, "FullPath");
+                var diskVersion = Guid.NewGuid();
+                var diskHash = WorkingReuseHash(drawingPath);
+                var length = new FileInfo(drawingPath).Length;
+                TreeCheck((bool)store.GetMethod("TryWriteControlledVersion", Flags).Invoke(null,
+                    new object[] { drawingPath, drawingId, project, diskVersion, "W1", diskHash, length }), "已记下工程图磁盘的 V1 绑定");
+                Set(drawing, "OpenedVersionId", diskVersion);
+                Set(drawing, "Revision", "A");
+                var drawingNative = new Model(modelType, drawingPath, true, new List<string>());
+                using (var drawingMemory = (IDisposable)New("PdmAddin+ArchiveMemoryCopy", drawingNative.GetTransparentProxy(), drawingPath))
+                {
+                    var drawingHead = LinkedVersion(drawing, LinkedSnapshot(drawing));
+                    Set(drawingHead, "Revision", LinkedRevision("W2")); Set(drawingHead, "Sha256", new string('D', 64));
+                    var stagedPath = Path.Combine(output, "drawing-memory-copy.SLDDRW");
+                    File.WriteAllText(stagedPath, "updated drawing views");
+                    var stagedHash = WorkingReuseHash(stagedPath);
+                    SetField(drawingMemory, "CommittedVersion", drawingHead); SetField(drawingMemory, "CommittedDocumentId", drawingId);
+                    SetField(drawingMemory, "CommittedUser", "tester"); SetField(drawingMemory, "CommittedScope", Get(client, "EditJournalScope"));
+                    SetField(drawingMemory, "Stamp", drawingNative.UpdateStamp); SetField(drawingMemory, "SourceHash", diskHash);
+                    SetField(drawingMemory, "CopyPath", stagedPath); SetField(drawingMemory, "CopyHash", stagedHash);
+                    var copies = (IDictionary)Field(plugin, "archiveMemoryCopies"); copies.Add(drawingPath, drawingMemory);
+                    var prepared = New("PdmAddin+PreparedArchiveFile", drawing, new Dictionary<string, string>(), stagedPath, diskHash, drawingHead, null, stagedHash, length);
+                    Set(prepared, "MemorySnapshot", true);
+                    var batch = Array.CreateInstance(prepared.GetType(), 1); batch.SetValue(prepared, 0);
+                    await (Task)TreeCall(plugin, "PrepareArchiveSnapshotsAsync", batch, new[] { drawingPath }, CancellationToken.None);
+                    TreeCheck(Equals(Get(Get(prepared, "ReferenceSnapshot"), "ExpectedVersionId"), Get(drawingHead, "Id"))
+                        && WorkingReuseHash(drawingPath) == diskHash, "工程图原窗口再次提交使用已验证的 V2 内存基准并保持 V1 磁盘内容");
+                    var otherHead = LinkedVersion(drawing, LinkedSnapshot(drawing));
+                    var refused = false;
+                    try { TreeCall(plugin, "PreparedMemoryArchiveBase", prepared, otherHead); }
+                    catch (System.Reflection.TargetInvocationException error) when (error.InnerException is InvalidOperationException) { refused = true; }
+                    TreeCheck(refused, "已提交内存图档不能越过后来出现的服务器版本");
+                    drawingNative.Modify();
+                    refused = false;
+                    try { TreeCall(plugin, "PreparedMemoryArchiveBase", prepared, drawingHead); }
+                    catch (System.Reflection.TargetInvocationException error) when (error.InnerException is InvalidOperationException) { refused = true; }
+                    TreeCheck(refused, "冻结后发生的本地编辑不能复用已生成副本");
+                    copies.Remove(drawingPath);
+                }
+                Console.WriteLine("PASS: 配套工程图再次存档固定 V2 内存基准，过期服务器头和后续真实编辑受阻");
+
                 native.Destroy(); Set(source, "DocumentId", null); Set(source, "OpenedVersionId", null);
                 review = (Task)TreeCall(plugin, "ReviewRegistrationDuplicatesAsync", LinkedItems(source), project); await review;
                 if (!Equals(Get(source, "OpenedVersionId"), versionId)) throw new Exception("已关闭的旧内存会话仍被作为当前基准使用");
@@ -201,6 +245,10 @@ internal static partial class Program
         var actual = LinkedNode(folder, "ACTUAL.SLDPRT", "Part");
         ((IList)Get(drawing, "ReferencedModels")).Add(model); Set(drawing, "RequiresModelUpdate", true);
         Set(drawing, "CheckedOutBy", "tester"); Set(drawing, "CheckoutSessionId", session); SetField(plugin, "authenticatedUsername", "tester");
+        var checkout = New("DocumentDto");
+        Set(checkout, "Id", Get(drawing, "DocumentId"));
+        Set(checkout, "CheckedOutBy", "tester"); Set(checkout, "CheckoutSessionId", session);
+        TreeCall(plugin, "TrackCheckoutDocument", checkout);
         var appType = Type("PdmAddin").GetField("application", Flags).FieldType; var interop = appType.Assembly;
         var nativeActual = new SheetReferenceModelProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), false,
             call => call.MethodName == "GetPathName" ? Get(actual, "FullPath") : throw new Exception(call.MethodName)).GetTransparentProxy();
@@ -219,13 +267,14 @@ internal static partial class Program
                 default: throw new Exception("引用不一致时不得保存或上传：" + call.MethodName);
             }
         }).GetTransparentProxy();
+        object activeForUpdate = null;
         var app = new Proxy(appType, call =>
         {
             switch (call.MethodName)
             {
                 case "GetType": return appType;
-                case "get_ActiveDoc": return null; case "GetDocuments": return new[] { native };
-                case "ActivateDoc3": call.Args[3] = 0; return native;
+                case "get_ActiveDoc": return activeForUpdate; case "GetDocuments": return new[] { native };
+                case "ActivateDoc3": call.Args[3] = 0; activeForUpdate=native;return native;
                 default: throw new Exception(call.MethodName);
             }
         }).GetTransparentProxy();

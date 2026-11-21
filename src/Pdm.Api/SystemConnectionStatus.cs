@@ -37,9 +37,9 @@ public sealed class SystemConnectionStatus(
     {
         var settings = (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion;
         if (settings.Mode != PreviewConversionMode.Remote) return new("unconfigured", "PDF：使用本机转换，未连接远程转图服务器。");
-        if (settings.Servers.Count == 0 && string.IsNullOrWhiteSpace(settings.AgentUrl))
-            return new("unconfigured", "PDF：尚未配置转图服务器，请联系管理员完善转换设置。");
-        var servers = settings.Servers.Count > 0 ? settings.Servers : [new PreviewAgentServer("转图服务器", settings.AgentUrl, settings.AgentToken)];
+        var servers = settings.GetConfiguredServers().Where(server => !server.Disabled).ToArray();
+        if (servers.Length == 0)
+            return new("unconfigured", "PDF：没有已启用的转图服务器，请联系管理员完善转换设置。");
         var results = await Task.WhenAll(servers.Select(async server =>
         {
             if (!Uri.TryCreate(server.AgentUrl.Trim().TrimEnd('/') + PreviewAgentProtocol.HealthPath, UriKind.Absolute, out var uri)
@@ -48,7 +48,7 @@ public sealed class SystemConnectionStatus(
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(5));
-                using var client = clients.CreateClient();
+                using var client = clients.CreateClient("preview-workbench");
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri);
                 if (!string.IsNullOrWhiteSpace(server.AgentToken)) request.Headers.Add(PreviewAgentProtocol.TokenHeader, server.AgentToken);
                 using var response = await client.SendAsync(request, timeout.Token);

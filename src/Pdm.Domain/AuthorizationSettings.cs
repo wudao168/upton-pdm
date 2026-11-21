@@ -12,6 +12,8 @@ public sealed record AuthorizationSettings(long Revision, IReadOnlyList<Authoriz
 {
     public bool DingTalkSelfBindingDefaultsApplied { get; init; }
     public bool AiWebDefaultsApplied { get; init; }
+    public bool UserManagementDefaultsApplied { get; init; }
+    public bool DocumentReleaseDefaultsApplied { get; init; }
 }
 
 public static class AuthorizationActions

@@ -13,13 +13,20 @@ internal static partial class Program
     static void ReferenceActivationScenario(string output)
     {
         var interop = Type("PdmAddin").GetField("application", Flags).FieldType.Assembly;
-        foreach (var mode in new[] { "complete", "no-post", "no-activation", "no-idle", "same-document", "command", "blocked", "new-load", "insertion", "uncached" })
+        foreach (var mode in new[] { "complete", "no-post", "no-activation", "no-idle", "same-document", "command", "blocked", "new-load", "insertion", "uncached",
+            "sketch-tool", "sketch-tool-busy", "sketch-tool-reference-changed", "sketch-tool-other-path", "sketch-tool-unloaded",
+            "component-open", "component-open-busy", "component-open-reference-changed", "component-open-assembly-changed",
+            "component-open-insertion", "component-open-foreign", "component-open-unloaded", "component-open-new-load", "file-open-command" })
         {
+            var sketch = mode.StartsWith("sketch-tool", StringComparison.Ordinal);
+            var componentOpen = mode.StartsWith("component-open", StringComparison.Ordinal);
+            var confirmAcrossIdle = sketch || componentOpen;
             var plugin = New("PdmAddin"); var folder = Path.GetFullPath(output);
             var owner = Path.Combine(folder, "总装.SLDASM"); var child = Path.Combine(folder, "零件.SLDPRT");
             Directory.CreateDirectory(folder); File.WriteAllText(owner, "mock owner"); File.WriteAllText(child, "mock child");
             var project = Guid.NewGuid(); var tree = New("CadTreeNode");
             Set(tree, "FullPath", owner); Set(tree, "FileName", "总装.SLDASM");
+            Set(tree, "Kind", Enum.Parse(Type("CadDocumentKind"), "Assembly"));
             if (mode != "uncached") TreeCall(plugin, "CacheActiveTree", owner, tree, (Guid?)project);
             SetField(plugin, "currentDocumentIdentity", mode == "same-document" ? owner : child);
             var manifest = New("ControlledOpenManifestDto"); Set(manifest, "ProjectId", project);
@@ -30,13 +37,14 @@ internal static partial class Program
                 Set(file, "IsRoot", name.EndsWith("SLDASM")); files.Add(file);
             }
             Set(manifest, "Files", files); ((IDictionary)Field(plugin, "controlledOpenManifests")).Add(folder, manifest);
+            var assemblyStamp = 7; var referenceStamp = 7;
             object Model(string path) => new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call =>
             {
                 switch (call.MethodName)
                 {
                     case "GetPathName": return path;
                     case "GetBlockingState": return mode == "blocked" ? 1 : 0;
-                    case "GetUpdateStamp": return 7;
+                    case "GetUpdateStamp": return path == owner ? assemblyStamp : referenceStamp;
                     default: throw new Exception("树恢复不得修改或遍历模型：" + call.MethodName);
                 }
             }).GetTransparentProxy();
@@ -47,22 +55,34 @@ internal static partial class Program
                 {
                     case "get_StartupProcessCompleted": return true;
                     case "get_CommandInProgress": return false;
-                    case "GetRunningCommandInfo": return new ReturnMessage(null, new object[] { 0, "", mode == "command" }, 3, call.LogicalCallContext, call);
+                    case "GetRunningCommandInfo": return new ReturnMessage(null, new object[] { 2, "", mode == "command" || mode.EndsWith("-busy", StringComparison.Ordinal) }, 3, call.LogicalCallContext, call);
                     case "get_ActiveDoc": return rootModel;
                     case "GetDocumentCount": return 2;
                     case "GetOpenDocumentByName":
-                        if (mode == "new-load") SetField(plugin, "nativeLoadEpoch", 2);
-                        return childModel;
+                        if (mode == "new-load" || mode == "component-open-new-load") SetField(plugin, "nativeLoadEpoch", 2);
+                        if (mode.EndsWith("-unloaded", StringComparison.Ordinal)) return null;
+                        return mode == "sketch-tool-other-path" || mode == "component-open-foreign" ? rootModel : childModel;
                     default: throw new Exception("树恢复不得打开、保存或激活模型：" + call.MethodName);
                 }
             }).GetTransparentProxy());
             SetField(plugin, "nativeFileOpenInProgress", 1); SetField(plugin, "nativeLoadEpoch", 1);
+            if (confirmAcrossIdle || mode == "file-open-command") SetField(plugin, "nativeFileOpenCommandId", sketch ? 46 : componentOpen ? 970 : 2);
             SetField(plugin, "pendingOpenPath", child); SetField(plugin, "pendingOpenIdleEpoch", mode == "no-idle" ? -1 : 1);
-            if (mode != "no-post") TreeCall(plugin, "OnNativeDocumentLoaded", "零件", child);
-            if (mode != "no-activation") TreeCall(plugin, "OnActiveModelDocumentChanged");
-            if (mode == "insertion") SetField(plugin, "unknownAddedEpoch", 1);
+            if (!confirmAcrossIdle && mode != "no-post") TreeCall(plugin, "OnNativeDocumentLoaded", "零件", child);
+            if (!confirmAcrossIdle && mode != "no-activation") TreeCall(plugin, "OnActiveModelDocumentChanged");
+            if (mode == "insertion" || mode == "component-open-insertion") SetField(plugin, "unknownAddedEpoch", 1);
             var recovered = (bool)TreeCall(plugin, "TryCompleteFinishedNativeOpen");
-            if (recovered != (mode == "complete") || ((int)Field(plugin, "nativeFileOpenInProgress") == 0) != recovered)
+            if (confirmAcrossIdle)
+            {
+                TreeCheck(!recovered && !(bool)TreeCall(plugin, "TryCompleteFinishedNativeOpen"), "同一空闲回调不得重复作为两次稳定证据");
+                if (mode.EndsWith("-reference-changed", StringComparison.Ordinal)) referenceStamp++;
+                if (mode == "component-open-assembly-changed") assemblyStamp++;
+                SetField(plugin, "nativeIdleSequence", 1);
+                recovered = (bool)TreeCall(plugin, "TryCompleteFinishedNativeOpen");
+            }
+            if (recovered != (mode == "complete" || mode == "sketch-tool" || mode == "component-open")
+                || ((int)Field(plugin, "nativeFileOpenInProgress") == 0) != recovered
+                || recovered && (int)Field(plugin, "pendingTreeRefresh") == 0)
                 throw new Exception("引用加载后的切换恢复判定错误：" + mode);
             Console.WriteLine("PASS: 总装切换仅在加载后通知、激活、空闲及稳定状态齐全时恢复：" + mode);
         }

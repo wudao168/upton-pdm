@@ -72,6 +72,97 @@ public sealed class WorkflowNotificationTests
         Assert.Equal("Sent", Assert.Single(await f.Service.ReleaseRecordsAsync(package, default)).State);
     }
 
+    [Fact]
+    public async Task TechnicalAssistantReceivesConfiguredApprovalCopiesAndKeepsUnreadHistory()
+    {
+        using var f = await Fixture.Create();
+        var package = await f.Release(ReleaseScope.StandardFormal, "standard-release");
+        var decisionTime = DateTimeOffset.UtcNow;
+        await ApprovalNodeCopies.NotifyAsync(f.Repository, new(["assistant-a", "supply"], "审核已通过"),
+            package.ProjectId, package.Id, package.ApprovalTasks[0].Id, "副总批准", decisionTime, default);
+        Assert.Equal(1, await f.Notices("assistant-a"));
+        Assert.Equal(1, await f.Notices("supply"));
+
+        var history = new UserNotification(Guid.NewGuid(), "assistant-a", "ApprovalNodeCopy", "副总批准 · 审批抄送",
+            "审核已通过", package.ProjectId, package.Id, "approval-copy:legacy", decisionTime, null);
+        var inbox = new NotificationInboxService(f.Repository, new InMemoryProjectPlanningRepository(),
+            f.Repository, f.Plans, TimeProvider.System);
+        var decisions = await inbox.ReviewAsync([history, history with { Recipient = "supply", Id = Guid.NewGuid() }], default);
+        Assert.Empty(decisions);
+        await inbox.ReconcileAsync("assistant-a", default);
+        Assert.Null(Assert.Single(await f.Repository.ListUserNotificationsAsync("assistant-a", 100, default)).ReadAt);
+        await ApprovalNodeCopies.NotifyAsync(f.Repository, new(["assistant-a", "supply"], "审核已通过"),
+            package.ProjectId, package.Id, package.ApprovalTasks[0].Id, "副总批准", decisionTime, default);
+        Assert.Equal(1, await f.Notices("assistant-a"));
+        Assert.Equal(0, await f.Notices("assistant-b"));
+    }
+
+    [Theory]
+    [InlineData("Pending")]
+    [InlineData("Succeeded")]
+    [InlineData("Failed")]
+    public async Task TechnicalAssistantReceivesPublishedNoticeRegardlessOfAutomaticSyncState(string syncState)
+    {
+        using var f = await Fixture.Create();
+        f.SetCompany(f.Company);
+        await f.Rule("standard-release");
+        var package = await f.Release(ReleaseScope.StandardFormal, "standard-release");
+        var deliveries = new InMemoryReleaseDeliveryStore();
+        var service = f.Service;
+        var now = DateTimeOffset.UtcNow;
+        await service.CaptureReleaseAsync(package, default);
+        await f.Repository.MarkPublishedAsync(package.Id, "unused", now, default);
+        var job = await f.Job("standard-release");
+        var delivery = new ReleaseDeliveryState
+        {
+            ReleasePackageId = package.Id, ProjectId = package.ProjectId, CompanyId = f.Company,
+            PackageNumber = package.Number, ProjectCode = f.Project.Code, PublishedAt = now,
+            U9 = new() { ["Standard"] = new(syncState, "测试同步状态") }
+        };
+        await deliveries.CreateAsync(delivery, now, default);
+        await service.ProcessAsync(job.Id, default);
+        Assert.Equal(1, await f.Notices("assistant-a"));
+        Assert.Equal(1, await f.Notices("supply"));
+        Assert.Equal("Sent", (await f.Store.FindJobAsync(job.Id, default))!.State);
+        await service.ProcessAsync(job.Id, default);
+        Assert.Equal(1, await f.Notices("assistant-a"));
+        Assert.Equal(1, await f.Notices("supply"));
+        Assert.Equal(0, await f.Notices("assistant-b"));
+        var inbox = new NotificationInboxService(f.Repository, new InMemoryProjectPlanningRepository(),
+            f.Repository, f.Plans, TimeProvider.System);
+        await inbox.ReconcileAsync("assistant-a", default);
+        Assert.Null(Assert.Single(await f.Repository.ListUserNotificationsAsync("assistant-a", 100, default)).ReadAt);
+    }
+
+    [Fact]
+    public async Task TechnicalAssistantPreviewMessagesUseNormalBusinessNotificationAuthorization()
+    {
+        using var f = await Fixture.Create();
+        var package = await f.Release(ReleaseScope.StandardFormal, "standard-release");
+        var now = DateTimeOffset.UtcNow;
+        UserNotification Message(string phase) => new(Guid.NewGuid(), "assistant-a", phase == "pending" ? "ReleasePreviewPending" : "ReleasePreviewResult",
+            "发布资料状态", "按配置接收", package.ProjectId, package.Id, $"release-package:{package.Id:N}:preview:{phase}", now, null);
+        UserNotification[] notices = [Message("pending"), Message("completed"), Message("failed")];
+        Assert.Equal(notices, await NotificationRecipientPolicy.FilterAsync(f.Repository, notices, default));
+        foreach (var role in new[] { "developer", "TechnicalAssistant" })
+            await PermissionTestUsers.Revoke(f.Repository, role, AuthorizationActions.BusinessNotifications);
+        Assert.Empty(await NotificationRecipientPolicy.FilterAsync(f.Repository, notices, default));
+    }
+
+    [Fact]
+    public async Task AssignedManagerWhoIsAlsoTechnicalAssistantReceivesPublishedSummary()
+    {
+        using var f = await Fixture.Create();
+        f.Project = await f.Repository.SetMainProjectStaffingAsync(f.Project.Id, new("assistant-a", [], []), "submitter", default);
+        var package = await f.Release(ReleaseScope.StandardFormal, "standard-release");
+        await f.Repository.MarkPublishedAsync(package.Id, "unused", DateTimeOffset.UtcNow, default);
+        package = (await f.Repository.FindReleasePackageAsync(package.Id, default))!;
+        await ReleaseManagementNotifications.NotifyPublishedAsync(f.Repository, package, f.Project, DateTimeOffset.UtcNow, default);
+        await ReleaseManagementNotifications.NotifyPublishedAsync(f.Repository, package, f.Project, DateTimeOffset.UtcNow, default);
+        Assert.Single(await f.Repository.ListUserNotificationsAsync("assistant-a", 100, default), item => item.Category == "ReleaseDepartment");
+        Assert.Equal(0, await f.Notices("assistant-b"));
+    }
+
     private sealed class Fixture : IDisposable
     {
         public InMemoryPdmRepository Repository { get; } = new(TimeProvider.System);

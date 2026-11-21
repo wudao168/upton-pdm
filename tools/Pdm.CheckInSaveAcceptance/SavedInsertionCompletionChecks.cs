@@ -95,7 +95,7 @@ internal static partial class Program
         {
             "openOperationInProgress", "controlledOpenInProgress", "workspaceOperationInProgress",
             "batchDialogInProgress", "checkInOperationInProgress", "draftSnapshotInProgress",
-            "refreshSuppressionDepth", "automaticDrawingOperationInProgress", "treeRefreshInProgress", "ControlledOpenBoundary"
+            "refreshSuppressionDepth", "ownedReferenceResolutionDepth", "treeRefreshInProgress", "ControlledOpenBoundary"
         };
         foreach (var scope in scopes)
         {

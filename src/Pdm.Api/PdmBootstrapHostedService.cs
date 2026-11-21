@@ -23,6 +23,7 @@ public sealed class PdmBootstrapHostedService(
         }
         if (await repository.CountUsersAsync(cancellationToken) > 0)
         {
+            await repository.GetAuthorizationSettingsAsync(cancellationToken);
             return;
         }
 
@@ -57,6 +58,7 @@ public sealed class PdmBootstrapHostedService(
             true,
             RoleCode: "platform_admin",
             CompanyId: primaryCompanyId), cancellationToken);
+        await repository.GetAuthorizationSettingsAsync(cancellationToken);
         logger.LogInformation("Created the initial PLM platform administrator account.");
     }
 

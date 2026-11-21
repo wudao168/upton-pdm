@@ -65,7 +65,7 @@ public sealed partial class ReleaseRecoveryTests
     }
 
     [Fact]
-    public async Task UnfinishedConversionNotifiesSubmitterAndDivisionAssistantsOnceThenReportsRecovery()
+    public async Task FailedConversionNotifiesSubmitterAndAuthorizedAssistantWithoutSendingAssistantARecoveryNotice()
     {
         using var f = await Fixture.CreateAsync();
         var company = (await f.Repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
@@ -76,7 +76,7 @@ public sealed partial class ReleaseRecoveryTests
         var names = new[] { "submitter", "assigned-reviewer", "actual-reviewer", "assistant", "mixed-admin", "other-assistant", "foreign-reviewer", "inactive-reviewer", "system-admin" };
         foreach (var name in names)
         {
-            var roles = name == "mixed-admin" ? new[] { "Administrator", "TechnicalAssistant" }
+            var roles = name == "mixed-admin" ? new[] { "developer", "TechnicalAssistant" }
                 : name.Contains("assistant") ? new[] { "TechnicalAssistant" }
                 : name == "system-admin" ? new[] { "Administrator" } : new[] { "Engineer" };
             await f.Repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", UserRole.Engineer, name != "inactive-reviewer",
@@ -95,7 +95,7 @@ public sealed partial class ReleaseRecoveryTests
                 Task("foreign-reviewer", null, 3), Task("inactive-reviewer", null, 4), Task("system-admin", null, 5)] };
         ((ConcurrentDictionary<Guid, ReleasePackage>)typeof(InMemoryPdmRepository).GetField("packages", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(f.Repository)!)[package.Id] = package;
         await f.Service.ReconcileDeliveryAsync(package.Id, default);
-        foreach (var name in new[] { "submitter", "assistant", "mixed-admin" })
+        foreach (var name in new[] { "submitter", "mixed-admin" })
         {
             var notice = Assert.Single(await f.Repository.ListUserNotificationsAsync(name, 100, default));
             Assert.Equal(package.Id, notice.ReleasePackageId);
@@ -105,17 +105,17 @@ public sealed partial class ReleaseRecoveryTests
             await f.Repository.MarkUserNotificationReadAsync(notice.Id, name, DateTimeOffset.UtcNow, default);
         }
         await f.Service.ReconcileDeliveryAsync(package.Id, default);
-        Assert.Single(await f.Repository.ListUserNotificationsAsync("assistant", 100, default));
-        foreach (var name in new[] { "assigned-reviewer", "actual-reviewer", "other-assistant", "foreign-reviewer", "inactive-reviewer", "system-admin" })
+        Assert.Single(await f.Repository.ListUserNotificationsAsync("mixed-admin", 100, default));
+        foreach (var name in new[] { "assistant", "assigned-reviewer", "actual-reviewer", "other-assistant", "foreign-reviewer", "inactive-reviewer", "system-admin" })
             Assert.Empty(await f.Repository.ListUserNotificationsAsync(name, 100, default));
         Assert.Equal(0, f.Converter.Calls);
         package = await f.Repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending, null, 0, DateTimeOffset.UtcNow, default);
         Assert.True(await f.Service.ProcessAsync(package, default));
-        var recovered = await f.Repository.ListUserNotificationsAsync("assistant", 100, default);
-        Assert.Equal(2, recovered.Count);
-        Assert.Contains(recovered, notice => notice.Title == "图纸转换已完成");
+        var recovered = await f.Repository.ListUserNotificationsAsync("mixed-admin", 100, default);
+        Assert.NotNull(Assert.Single(recovered).ResolvedAt);
+        Assert.Contains(await f.Repository.ListUserNotificationsAsync("submitter", 100, default), notice => notice.Title == "图纸转换已完成");
         await f.Service.ReconcileDeliveryAsync(package.Id, default);
-        Assert.Equal(2, (await f.Repository.ListUserNotificationsAsync("assistant", 100, default)).Count);
+        Assert.Single(await f.Repository.ListUserNotificationsAsync("mixed-admin", 100, default));
     }
 
     [Fact]

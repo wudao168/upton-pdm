@@ -273,18 +273,20 @@ internal sealed partial class BatchOperationDialog : Form
         }
         RebuildFileTree();
 
-        var operationPanel = new TableLayoutPanel
+        var operationPanel = new ArchiveOperationPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = false,
             Height = 60,
             ColumnCount = 10,
-            RowCount = 3,
+            RowCount = 5,
             Margin = new Padding(0, 0, 0, 4)
         };
         operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 4));
         operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+        operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
@@ -300,13 +302,14 @@ internal sealed partial class BatchOperationDialog : Form
         checkIn.Anchor = AnchorStyles.Left;
         checkIn.Margin = Padding.Empty;
         changeNote.Margin = Padding.Empty;
-        operationPanel.Controls.Add(new Label
+        var projectLabel = new Label
         {
             Text = "归属项目",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 0, 6, 0)
-        }, 0, 0);
+        };
+        operationPanel.Controls.Add(projectLabel, 0, 0);
         operationPanel.Controls.Add(projectSelector, 1, 0);
         operationPanel.Controls.Add(acquire, 3, 0);
         operationPanel.Controls.Add(checkIn, 5, 0);
@@ -322,13 +325,14 @@ internal sealed partial class BatchOperationDialog : Form
         standardLibraryTip.SetToolTip(standardLibrary, canArchiveStandardLibrary ? "存入集团共享标准库，首次自动归入未分类；升版保留原分类。" : "仅获授权的标准化部门成员可存档到标准库。");
         operationPanel.Controls.Add(standardLibrary, 7, 0);
         operationPanel.Controls.Add(drawingType, 9, 0);
-        operationPanel.Controls.Add(new Label
+        var noteLabel = new Label
         {
             Text = "变更说明",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 0, 6, 0)
-        }, 0, 2);
+        };
+        operationPanel.Controls.Add(noteLabel, 0, 2);
         operationPanel.Controls.Add(changeNote, 1, 2);
         editDisposition.Items.AddRange(new object[] { "存档并释放权限", "存档并继续编辑", "存档并交接给协助人" });
         editDisposition.SelectedIndex = 0;
@@ -337,6 +341,9 @@ internal sealed partial class BatchOperationDialog : Form
         operationPanel.Controls.Add(editDisposition, 3, 2);
         operationPanel.SetColumnSpan(editDisposition, 5);
         operationPanel.Controls.Add(handoffRecipient, 9, 2);
+        operationPanel.AdaptProjectRow(projectSelector, projectLabel, noteLabel,
+            new Control[] { acquire, checkIn, standardLibrary, drawingType },
+            new Control[] { noteLabel, changeNote, editDisposition, handoffRecipient });
         void UpdateDisposition()
         {
             editDisposition.Enabled = checkIn.Checked && !ArchiveToStandardLibrary;
@@ -354,7 +361,12 @@ internal sealed partial class BatchOperationDialog : Form
         UpdateDisposition();
 
         var standardButtonSize = new Size(80, 28);
-        var selectionButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = false, WrapContents = false, Margin = Padding.Empty };
+        var selectionButtons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            WrapContents = true,
+            Margin = Padding.Empty
+        };
         var selectAll = new Button { Text = "全选", AutoSize = false, Size = standardButtonSize };
         var clear = new Button { Text = "清除", AutoSize = false, Size = standardButtonSize };
         var supplement = new Button { Text = "补充工程图", AutoSize = false, Size = standardButtonSize };
@@ -428,30 +440,18 @@ internal sealed partial class BatchOperationDialog : Form
             if (!checkIn.Checked) standardLibrary.Checked = false;
         };
 
-        var selectionBar = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = false,
-            ColumnCount = 3,
-            RowCount = 1,
-            Margin = new Padding(0, 0, 0, 6)
-        };
-        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 522));
-        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 252));
-        selectionBar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        selectionBar.Controls.Add(selectionButtons, 0, 0);
-
         var actionButtons = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             WrapContents = false,
             Margin = Padding.Empty
         };
         actionButtons.Controls.Add(cancel);
         actionButtons.Controls.Add(recheck);
         actionButtons.Controls.Add(execute);
-        selectionBar.Controls.Add(actionButtons, 2, 0);
+        var selectionBar = new ArchiveToolbar(selectionButtons, actionButtons);
         var footer = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -471,8 +471,8 @@ internal sealed partial class BatchOperationDialog : Form
             RowCount = 5
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
@@ -508,6 +508,132 @@ internal sealed partial class BatchOperationDialog : Form
             archiveSelectionTouched = false;
             await AnalyzeArchiveSelectionAsync(false);
         };
+    }
+
+    private sealed class ArchiveOperationPanel : TableLayoutPanel
+    {
+        private ProjectBrowserControl project;
+        private Control projectLabel;
+        private Control noteLabel;
+        private Control[] modeControls;
+        private Control[] noteControls;
+        private bool expanded;
+
+        public void AdaptProjectRow(ProjectBrowserControl selector, Control projectLabel, Control noteLabel,
+            Control[] modes, Control[] notes)
+        {
+            project = selector;
+            this.projectLabel = projectLabel;
+            this.noteLabel = noteLabel;
+            modeControls = modes;
+            noteControls = notes;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            AutoSize = true;
+        }
+
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            if (project == null) return base.GetPreferredSize(proposedSize);
+            var width = Parent?.DisplayRectangle.Width ?? proposedSize.Width;
+            var height = RowStyles[0].Height + RowStyles[1].Height + RowStyles[2].Height;
+            if (NeedsFullProjectRow(width)) height += RowStyles[0].Height + RowStyles[1].Height;
+            return new Size(width, (int)Math.Ceiling(height));
+        }
+
+        protected override void OnLayout(LayoutEventArgs eventArgs)
+        {
+            base.OnLayout(eventArgs);
+            if (project == null || !ArrangeProjectRow(NeedsFullProjectRow(Parent?.DisplayRectangle.Width ?? ClientSize.Width))) return;
+            base.OnLayout(eventArgs);
+            Parent?.PerformLayout(this, nameof(PreferredSize));
+        }
+
+        private bool NeedsFullProjectRow(int width)
+        {
+            int CellWidth(Control control) => control.GetPreferredSize(Size.Empty).Width + control.Margin.Horizontal;
+            var fixedWidth = ColumnStyles.Cast<ColumnStyle>().Where(style => style.SizeType == SizeType.Absolute).Sum(style => style.Width);
+            var autoWidth = Math.Max(CellWidth(projectLabel), CellWidth(noteLabel))
+                + modeControls.Where(control => ColumnStyles[GetColumn(control)].SizeType == SizeType.AutoSize).Sum(CellWidth);
+            // The note-row dropdown spans several of these columns and can also widen them.
+            var columnWidths = GetColumnWidths();
+            var occupied = columnWidths.Where((_, column) => column != 1).Sum();
+            return width - Math.Max(occupied, fixedWidth + autoWidth) < project.MinimumProjectDisplayWidth;
+        }
+
+        private bool ArrangeProjectRow(bool fullWidth)
+        {
+            if (expanded == fullWidth) return false;
+            expanded = fullWidth;
+            SuspendLayout();
+            try
+            {
+                if (fullWidth)
+                {
+                    foreach (var control in noteControls) SetRow(control, 4);
+                    foreach (var control in modeControls) SetRow(control, 2);
+                }
+                SetColumnSpan(project, fullWidth ? ColumnCount - 1 : 1);
+                if (!fullWidth)
+                {
+                    foreach (var control in modeControls) SetRow(control, 0);
+                    foreach (var control in noteControls) SetRow(control, 2);
+                }
+                RowStyles[3].Height = fullWidth ? RowStyles[1].Height : 0;
+                RowStyles[4].Height = fullWidth ? RowStyles[0].Height : 0;
+            }
+            finally { ResumeLayout(false); }
+            return true;
+        }
+    }
+
+    private sealed class ArchiveToolbar : TableLayoutPanel
+    {
+        private readonly FlowLayoutPanel selectors;
+        private readonly FlowLayoutPanel actions;
+
+        public ArchiveToolbar(FlowLayoutPanel selectors, FlowLayoutPanel actions)
+        {
+            this.selectors = selectors;
+            this.actions = actions;
+            Dock = DockStyle.Fill;
+            Margin = new Padding(0, 0, 0, 6);
+            ColumnCount = 3;
+            RowCount = 1;
+            ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
+            ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            Controls.Add(selectors, 0, 0);
+            Controls.Add(actions, 2, 0);
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            AutoSize = true;
+        }
+
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            // Parent table layout can query preferred height without giving a width.
+            // Measure against its actual display area so that wrapping uses the same space as layout.
+            var width = Parent?.DisplayRectangle.Width ?? proposedSize.Width;
+            var actionSize = actions.GetPreferredSize(Size.Empty);
+            var available = Math.Max(1, width - actionSize.Width - (int)ColumnStyles[1].Width);
+            var completedHeight = 0;
+            var rowWidth = 0;
+            var rowHeight = 0;
+            foreach (Control button in selectors.Controls)
+            {
+                var buttonWidth = button.Width + button.Margin.Horizontal;
+                if (rowWidth > 0 && rowWidth + buttonWidth > available)
+                {
+                    completedHeight += rowHeight;
+                    rowWidth = 0;
+                    rowHeight = 0;
+                }
+
+                rowWidth += buttonWidth;
+                rowHeight = Math.Max(rowHeight, button.Height + button.Margin.Vertical);
+            }
+            return new Size(width, Math.Max(actionSize.Height, completedHeight + rowHeight));
+        }
     }
 
     public BatchOperationKind Operation => checkIn.Checked

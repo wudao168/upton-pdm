@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { describe, expect, it, vi } from 'vitest'
+import * as api from '../src/api'
 import StorageSettings from '../src/components/StorageSettings.vue'
 import type { PdmSystemSettings } from '../src/types'
 
@@ -25,27 +26,74 @@ const settings: PdmSystemSettings = {
 }
 
 describe('StorageSettings BOM property mappings', () => {
-  it('shows named servers and preserves the other server when editing conversion settings', async () => {
-    const servers = [{ name: '一号转图机', agentUrl: 'http://one:5199', agentToken: 'one', timeoutMinutes: 30 },
-      { name: '二号转图机', agentUrl: 'http://two:5199', agentToken: 'two', timeoutMinutes: 30 }]
+  it('edits the long-held checkout reminder and grace period independently', async () => {
     const onSaveSettings = vi.fn().mockImplementation(async input => input)
-    const wrapper = mount(StorageSettings, { props: {
-      settings: { ...settings, previewConversion: { mode: 'Remote', agentUrl: servers[0]!.agentUrl, agentToken: 'one', timeoutMinutes: 30, servers } },
-      equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
-      onSaveSettings, onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
-    }, global: { plugins: [ElementPlus] } })
-    expect(wrapper.text()).toContain('一号转图机')
-    expect(wrapper.text()).toContain('二号转图机')
-    const hosts = wrapper.findAll('.preview-hosts input[type=checkbox]')
-    expect(hosts).toHaveLength(2)
-    await hosts[1]!.setValue(false)
-    await wrapper.get('input[aria-label="转图服务器地址"]').setValue('http://changed:5199')
-    await wrapper.findAll('button').find(button => button.text() === '保存图纸转换设置')!.trigger('click')
-    await flushPromises()
-    expect(onSaveSettings.mock.calls[0]![0].previewConversion.servers).toEqual([{ ...servers[0], agentUrl: 'http://changed:5199', disabled: false }, { ...servers[1], disabled: true }])
-    wrapper.unmount()
+    const wrapper = mount(StorageSettings, {
+      props: {
+        settings, equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
+        onSaveSettings, onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    try {
+      await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '编辑权限')!.trigger('click')
+      const pane = wrapper.get('#pane-checkout-policy')
+      const duration = (caption: string) => pane.findAll('label').find(label => label.text().startsWith(caption))!.get<HTMLInputElement>('input')
+      const reminder = duration('占用提醒（小时）')
+      const grace = duration('提醒后宽限（小时）')
+      expect(reminder.element.value).toBe('24')
+      expect(grace.element.value).toBe('12')
+      await reminder.setValue('6')
+      await grace.setValue('3')
+      await pane.get('button.pdm-primary-action').trigger('click')
+      await flushPromises()
+      expect(onSaveSettings).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        checkoutOverdueHours: 6, checkoutOverdueReleaseGraceHours: 3,
+        checkoutReminderHours: 4, checkoutStrongReminderHours: 8,
+      }))
+    } finally {
+      wrapper.unmount()
+    }
   })
-  it('explains that project storage is grouped under the main project code', () => {
+
+  it('loads the conversion server list when its settings tab opens', async () => {
+    const listServers = vi.spyOn(api, 'listPreviewServers').mockResolvedValue([
+      { name: '一号转图机', agentUrl: 'http://one:5199', hasToken: true, timeoutMinutes: 25, disabled: false },
+      { name: '二号转图机', agentUrl: 'http://two:5199', hasToken: false, timeoutMinutes: 45, disabled: true },
+    ])
+    const readStatuses = vi.spyOn(api, 'getPreviewServerStatuses').mockResolvedValue([
+      { agentUrl: 'http://one:5199', connected: true, workerReady: true, checkedAt: '2026-11-21T03:00:00Z', message: '连接正常' },
+      { agentUrl: 'http://two:5199', connected: false, workerReady: false, checkedAt: '2026-11-21T03:00:00Z', message: '无法连接' },
+    ])
+    const wrapper = mount(StorageSettings, { props: {
+      settings, token: 'test-token', canManageStorage: true,
+      equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
+      onSaveSettings: vi.fn(), onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
+    }, global: { plugins: [ElementPlus] } })
+    try {
+      expect(listServers).not.toHaveBeenCalled()
+      expect(readStatuses).not.toHaveBeenCalled()
+      const tab = wrapper.findAll('[role="tab"]').find(item => item.text() === '图纸转换')!
+      await tab.trigger('click')
+      await flushPromises()
+
+      expect(listServers).toHaveBeenCalledExactlyOnceWith('test-token')
+      expect(readStatuses).toHaveBeenCalledExactlyOnceWith('test-token', expect.any(AbortSignal))
+      const rows = wrapper.get('[aria-label="转图服务器列表"]').findAll('tbody tr')
+      expect(rows.map(row => row.findAll('td').slice(0, 6).map(cell => cell.text()))).toEqual([
+        ['一号转图机', 'http://one:5199', '已设置', '25', '已启用', '在线'],
+        ['二号转图机', 'http://two:5199', '未设置', '45', '已停用', '离线'],
+      ])
+      const signal = readStatuses.mock.calls[0]![1]!
+      await wrapper.findAll('[role="tab"]').find(item => item.text() === '存档位置')!.trigger('click')
+      expect(signal.aborted).toBe(true)
+    } finally {
+      wrapper.unmount()
+      listServers.mockRestore()
+      readStatuses.mockRestore()
+    }
+  })
+  it('shows the project storage directories without instructional copy', () => {
     const wrapper = mount(StorageSettings, {
       props: {
         settings, equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
@@ -54,9 +102,15 @@ describe('StorageSettings BOM property mappings', () => {
       global: { plugins: [ElementPlus] },
     })
 
-    expect(wrapper.text()).toContain('主项目号作为容器')
-    expect(wrapper.text()).toContain('D:\\PDM\\Vault\\P700001\\P700001-0')
-    expect(wrapper.text()).toContain('D:\\PDM\\Release\\P700001\\P700001-1')
+    const pane = wrapper.get('.pdm-storage-location-pane')
+    expect(pane.text()).toContain('项目文件夹规则')
+    const directories = pane.get('table[aria-label="项目存档目录"]')
+    expect(directories.findAll('tbody th').map(cell => cell.text()))
+      .toEqual(['图档存档根目录', '生产发包根目录', '料品资料存档根目录'])
+    expect(directories.findAll<HTMLInputElement>('input').map(input => input.element.value))
+      .toEqual([settings.vaultRoot, settings.releaseRoot, settings.materialAttachmentRoot])
+    expect(pane.findAll('small, input[placeholder]')).toHaveLength(0)
+    expect(pane.text()).not.toContain('主项目号作为容器')
     wrapper.unmount()
   })
 
@@ -70,9 +124,10 @@ describe('StorageSettings BOM property mappings', () => {
       global: { plugins: [ElementPlus] },
     })
 
-    const attachmentRootLabel = wrapper.findAll('.pdm-settings-form label').find(label => label.text().includes('料品资料存档根目录'))!
-    expect((attachmentRootLabel.get('input').element as HTMLInputElement).value).toBe('D:\\PDM\\MaterialAttachments')
-    await attachmentRootLabel.get('input').setValue('  E:\\PLM\\MaterialArchive  ')
+    const attachmentRootLabel = wrapper.get('table[aria-label="项目存档目录"]').findAll('label').find(label => label.text() === '料品资料存档根目录')!
+    const input = wrapper.get<HTMLInputElement>(`input[id="${attachmentRootLabel.attributes('for')}"]`)
+    expect(input.element.value).toBe('D:\\PDM\\MaterialAttachments')
+    await input.setValue('  E:\\PLM\\MaterialArchive  ')
     await wrapper.findAll('button').find(button => button.text() === '保存存储设置')!.trigger('click')
     await flushPromises()
 

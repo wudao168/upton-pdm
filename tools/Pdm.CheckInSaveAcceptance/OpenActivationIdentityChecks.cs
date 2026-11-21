@@ -9,12 +9,26 @@ internal static partial class Program
  static void OpenActivationIdentityScenario()
  {
   var failures=new List<string>();
-  foreach(var mode in new[]{"load-already-active","load-returned-wrong","known-name-conflict","loaded-unique","active-unique","zero-error-wrong-return","zero-error-active-other","generic-error-bitmask","rebuild-warning","dirty-target","null-zero"})
+  foreach(var mode in new[]{"load-already-active","load-manifest-configuration","load-returned-wrong","known-name-conflict","loaded-unique","active-unique","zero-error-wrong-return","zero-error-active-other","generic-error-bitmask","rebuild-warning","dirty-target","null-zero"})
   {
    try
    {
     var plugin=New("PdmAddin");var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
     var targetPath=@"C:\qa\Snapshots\7000093.101.03-02.SLDPRT";var workingPath=@"C:\qa\Working\7000093.101.03-02.SLDPRT";var rootPath=@"C:\qa\Working\ROOT.SLDASM";
+    var requestedConfiguration=string.Empty;
+    if(mode=="load-manifest-configuration")
+    {
+     var manifest=New("ControlledOpenManifestDto");var fileType=Type("ControlledOpenFileDto");
+     var files=(System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(fileType));
+     var configuration=Type("PdmAddin").GetMethod("ControlledOpenModelConfiguration",Flags);
+     foreach(var info in new[]{(Path.GetFileName(targetPath),"默认","默认"),("总装.SLDASM","加工","加工"),("工程图.SLDDRW","图纸",""),("旧件.SLDPRT",null,"")})
+     {
+      var id=Guid.NewGuid();var file=New("ControlledOpenFileDto");
+      Set(file,"DocumentId",id);Set(file,"FileName",info.Item1);Set(file,"Configuration",info.Item2);files.Add(file);Set(manifest,"Files",files);
+      if((string)configuration.Invoke(null,new[]{manifest,(object)id})!=info.Item3)throw new Exception("Wrong configuration passed from PLM manifest");
+      if(info.Item1==Path.GetFileName(targetPath))requestedConfiguration=info.Item3;
+     }
+    }
     var targetReadOnly=mode!="dirty-target";var wrongReadOnly=false;var wrongPermissionWrites=0;var targetPermissionWrites=0;var opens=0;var activations=0;
     object Model(string path)=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{switch(call.MethodName)
     {
@@ -35,6 +49,7 @@ internal static partial class Program
      if(call.MethodName=="OpenDoc6")
      {
       opens++;if((string)call.Args[0]!=targetPath)throw new Exception("Open request changed target path");
+      if((string)call.Args[3]!=requestedConfiguration)throw new Exception("Native open was not given the PLM configuration");
       var args=(object[])call.Args.Clone();args[4]=0;args[5]=2;
       object returned=mode=="null-zero"?null:mode=="load-returned-wrong"?wrong:target;
       if(returned!=null){active=returned;if(!loaded.Exists(item=>ReferenceEquals(item,returned)))loaded.Add(returned);}
@@ -51,9 +66,9 @@ internal static partial class Program
      throw new Exception("Opening must not close or mutate another document: "+call.MethodName);
     }).GetTransparentProxy();SetField(plugin,"application",app);
     object result=null;Exception failure=null;
-    try{result=Type("PdmAddin").GetMethod("OpenOrActivateDocumentOnSolidWorksThread",Flags).Invoke(plugin,new object[]{targetPath,1,"",true});}
+    try{result=Type("PdmAddin").GetMethod("OpenOrActivateDocumentOnSolidWorksThread",Flags).Invoke(plugin,new object[]{targetPath,1,requestedConfiguration,true});}
     catch(TargetInvocationException error){failure=error.InnerException;}
-    var succeeds=mode=="load-already-active"||mode=="loaded-unique"||mode=="active-unique"||mode=="rebuild-warning";
+    var succeeds=mode=="load-already-active"||mode=="load-manifest-configuration"||mode=="loaded-unique"||mode=="active-unique"||mode=="rebuild-warning";
     if(mode=="dirty-target")
     {if(!(failure is InvalidOperationException)||targetPermissionWrites!=0||activations!=0)throw new Exception("Dirty target was modified or activated");}
     else if(failure!=null||succeeds&&!ReferenceEquals(result,target)||!succeeds&&result!=null)throw new Exception("Wrong open/activation result",failure);

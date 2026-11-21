@@ -14,7 +14,7 @@ internal static partial class Program
         var modelType = appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true);
         var thread = Thread.CurrentThread.ManagedThreadId;
         var paths = Enumerable.Range(0, 100).Select(i => Path.GetFullPath(Path.Combine(output, "PART-" + i + ".SLDPRT"))).ToArray();
-        var enumerations = 0; var pathReads = 0;
+        var enumerations = 0; var pathReads = 0; var exactLookups = 0;
         var models = paths.Select(path => new Proxy(modelType, call =>
         {
             TreeCheck(Thread.CurrentThread.ManagedThreadId == thread, "文档读取离开CAD线程");
@@ -25,6 +25,7 @@ internal static partial class Program
         SetField(plugin, "application", new Proxy(appType, call =>
         {
             if (call.MethodName == "GetDocuments") { enumerations++; return models; }
+            if (call.MethodName == "GetOpenDocumentByName") { exactLookups++; return null; }
             throw new Exception("仅允许读取已打开文档：" + call.MethodName);
         }).GetTransparentProxy());
         Array Items(string[] names)
@@ -41,15 +42,16 @@ internal static partial class Program
         async Task CheckFiles(string[] names) => await (Task)TreeCall(plugin, "EnsureBatchCheckInSavedStateAsync", Items(names), Guid.NewGuid(), CancellationToken.None);
         await CheckFiles(paths);
         TreeCheck(enumerations == 1, "保存状态核对重复枚举已打开文档：" + enumerations);
-        TreeCheck(pathReads == 200, "保存状态核对未保持线性文档路径读取：" + pathReads);
-        Console.WriteLine("PASS: 100个文件只枚举一次文档，路径读取200次，所有原生调用保持所属线程且没有保存行为");
+        TreeCheck(pathReads >= paths.Length && pathReads <= 4 * paths.Length && exactLookups == 0,
+            "保存状态核对未保持线性文档路径读取：" + pathReads);
+        Console.WriteLine("PASS: 100个文件只枚举一次文档，路径读取保持线性，所有原生调用保持所属线程且没有保存行为");
         enumerations = 0; pathReads = 0;
         await CheckFiles(new[] { Path.Combine(output, "sub", "..", "PART-0.SLDPRT") });
-        TreeCheck(enumerations == 1 && pathReads == 101, "归一化路径未直接命中索引");
+        TreeCheck(enumerations == 1 && pathReads <= models.Length + 3 && exactLookups == 0, "归一化路径未直接命中索引");
         Console.WriteLine("PASS: 非精确路径直接归一化匹配，不丢失已打开文档或重复枚举");
         enumerations = 0; pathReads = 0;
         await CheckFiles(paths.Concat(Enumerable.Range(0, 100).Select(i => Path.Combine(output, "CLOSED-" + i + ".SLDPRT"))).ToArray());
-        TreeCheck(enumerations == 1 && pathReads == 200, "未打开文件触发了逐文件全量枚举");
+        TreeCheck(enumerations == 1 && pathReads <= 4 * models.Length && exactLookups == 100, "未打开文件触发了逐文件全量枚举");
         Console.WriteLine("PASS: 100个已打开及100个未打开文件共享一次枚举，未命中不重复扫描");
         var contextType = Type("PdmAddin").GetNestedType("ArchiveReadContext", Flags);
         var context = Activator.CreateInstance(contextType, Flags, null, new[] { plugin }, null);

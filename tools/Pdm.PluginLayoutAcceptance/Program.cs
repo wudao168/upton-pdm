@@ -63,6 +63,15 @@ internal static partial class Program
             ((IList)Get(root, "Children")).Add(part); ((IList)Get(part, "Children")).Add(drawing);
             var project = New("ProjectDto"); Set(project, "Id", Guid.NewGuid()); Set(project, "Code", "P700015-1"); Set(project, "Name", "插件布局验证项目");
             var projects = Array.CreateInstance(T("ProjectDto"), 1); projects.SetValue(project, 0); Call(pane, "SetProjects", projects);
+            host.ClientSize = new Size(410, 1040);
+            Call(pane, "SetTree", (object)null);
+            Call(pane, "SetWorkspaceOperationState", true, "正在准备本地文件");
+            Call(pane, "SetWorkspaceOperationProgress", "正在准备本地文件（454项）", 1, 454);
+            Pump();
+            VerifyTreeToStatus(pane, "pane-empty-progress");
+            Assert(((Control)Field(pane, "workspaceOperationProgress")).Visible, "progress bar missing during operation");
+            Save(pane, "pane-empty-progress");
+            Call(pane, "SetWorkspaceOperationState", false, "");
             Call(pane, "SetTree", root); Pump();
             var tabs = (TabControl)Field(pane, "tabs");
             Assert(tabs.TabPages.Cast<TabPage>().Select(tab => tab.Text).SequenceEqual(new[] { "设计树", "工作区", "版本信息", "日志" }), "only four supported tabs must remain");
@@ -161,6 +170,7 @@ internal static partial class Program
         var fullWidth = new List<Control>();
         if (tab.Text == "设计树")
         {
+            VerifyTreeToStatus(pane, key);
             firstContent = (Control)Field(pane, "checkoutButton");
             fullWidth.Add((Control)Field(pane, "searchBox"));
             fullWidth.Add((Control)Field(pane, "structureTreeSurface"));
@@ -198,6 +208,17 @@ internal static partial class Program
             Assert(bounds.Left == inner.Left && bounds.Right == inner.Right,
                 key + " " + tab.Text + " content edges differ from tabs: " + bounds + " vs " + inner);
         }
+    }
+
+    static void VerifyTreeToStatus(Control pane, string key)
+    {
+        var tree = (Control)Field(pane, "structureTreeSurface");
+        var status = (Control)Field(pane, "workspaceOperationPanel");
+        var treeBottom = pane.RectangleToClient(ScreenBounds(tree)).Bottom;
+        var statusTop = pane.RectangleToClient(ScreenBounds(status)).Top;
+        measurements.Add(new { View = key, Type = "TreeToStatus", TreeBottom = treeBottom, StatusTop = statusTop });
+        Assert(tree.Visible && status.Visible && tree.Height > 0 && status.Height > 0 && treeBottom == statusTop,
+            key + " design tree must meet the visible operation status panel: treeBottom=" + treeBottom + " statusTop=" + statusTop);
     }
 
     static void VerifyWorkspaceAlignment(Control pane, TabControl tabs, string key)

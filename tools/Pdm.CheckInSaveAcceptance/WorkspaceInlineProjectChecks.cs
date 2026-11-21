@@ -11,7 +11,9 @@ internal static partial class Program
 {
  static async Task WorkspaceInlineProjectScenario(Form host,string output)
  {
+  output=Path.GetFullPath(output);
   Directory.CreateDirectory(output);host.ClientSize=new Size(440,1020);
+  TreeCallStatic("PdmDocumentIdentityStore","ConfigureBrowserReadScope",Path.GetFullPath(output));
   void Check(bool value,string message){TreeCheck(value,message);Console.WriteLine("PASS: "+message);}
   var projects=(IList)Activator.CreateInstance(typeof(System.Collections.Generic.List<>).MakeGenericType(Type("ProjectDto")));
   object Project(string code,Guid? parent=null)
@@ -80,6 +82,21 @@ internal static partial class Program
    SetField(pane,"localPaths",paths);var node=New("CadTreeNode");Set(node,"DocumentId",id);
    Check((string)TreeCall(pane,"LocalStateText",node)=="多个本地副本","同一图档多份缓存显示多个本地副本，不再显示未下载");
    Set(node,"DocumentId",Guid.NewGuid());Check((string)TreeCall(pane,"LocalStateText",node)=="未下载","真正没有缓存时仍显示未下载");
+   var compactId=Guid.NewGuid();
+   string CompactFile(string kind,string projectCode)
+   {
+    var folder=(string)TreeCallStatic("ManagedCadPaths","CompactDirectory",output,kind,compactId.ToString("N"),projectCode);
+    const string prefix="长文件名", extension=".SLDPRT";
+    var available=257-Path.GetFullPath(folder).Length-1-prefix.Length-extension.Length;
+    if(available<1)throw new InvalidOperationException("测试输出目录过长，无法创建接近上限的受控文件。");
+    var target=Path.Combine(folder,prefix+new string('件',available)+extension);
+    Directory.CreateDirectory(folder);File.WriteAllText(target,"same controlled bytes");
+    if(!(bool)store.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{target,compactId,Get(second,"Id"),version,"W1",WorkingReuseHash(target),(long?)new FileInfo(target).Length}))throw new Exception("Compact binding failed");
+    return target;
+   }
+   var currentPath=CompactFile("w","QA-MAIN-2");CompactFile("r","QA-MAIN-2");CompactFile("b","QA-MAIN-1");
+   var compactPaths=(IDictionary)TreeCallStatic("ProjectDocumentsControl","ReadProjectLocalWorkspacePaths",output,"QA-MAIN-2",Get(second,"Id"),CancellationToken.None);
+   Check(Equals(compactPaths[compactId],currentPath),"工作区识别本项目短路径副本，并跳过历史预览和其他项目目录");
   }
  }
 }

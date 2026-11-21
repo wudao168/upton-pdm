@@ -9,6 +9,18 @@ namespace Upton.Pdm.SolidWorks;
 internal static class ArchiveMissingReferencePolicy
 {
     internal const string WarningPrefix = "存档引用提示：";
+    private const string MissingReason = "引用文件缺失，未勾选，本次不上传";
+    internal static IEnumerable<string> ArchivedMissingPaths(IEnumerable<string> warnings)
+    {
+        foreach (var warning in warnings ?? Array.Empty<string>())
+        {
+            if (warning == null || !warning.StartsWith(WarningPrefix, StringComparison.Ordinal)) continue;
+            var end = warning.IndexOf("；" + MissingReason + "；", WarningPrefix.Length, StringComparison.Ordinal);
+            if (end <= WarningPrefix.Length) continue;
+            var path = warning.Substring(WarningPrefix.Length, end - WarningPrefix.Length);
+            if (Path.IsPathRooted(path)) yield return path;
+        }
+    }
     internal static bool BlockMissingReferences { get; set; }
 
     internal static IEnumerable<CadTreeNode> Walk(CadTreeNode root)
@@ -63,7 +75,7 @@ internal static class ArchiveMissingReferencePolicy
         if (BlockMissingReferences)
             throw new ArchiveWarningBlockedException("管理员已启用“引用缺失时阻止存档”：" + owner.FileName + " → " + Path.GetFileName(path)
                 + "；路径：" + path + "。尚未上传；请联系管理员核对策略。");
-        Record(owner, path, "引用文件缺失，未勾选，本次不上传");
+        Record(owner, path, MissingReason);
         foreach (var node in Walk(owner).Where(node => node != owner && string.Equals(node.FullPath, path, StringComparison.OrdinalIgnoreCase)))
             node.IsOutsideNativeFileScope = true;
         if (reference != null) reference.IsOutsideNativeFileScope = true;

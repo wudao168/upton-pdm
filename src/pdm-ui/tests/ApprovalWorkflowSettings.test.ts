@@ -15,6 +15,8 @@ describe('ApprovalWorkflowSettings', () => {
     await flow.find('.policy-settings label:last-child input').setValue(true)
     const actions = flow.findAll('button').filter(button => button.text() === '添加抄送')
     await actions[0]!.trigger('click')
+    expect(flow.get('.copy-options').text()).toContain('补充说明')
+    expect(flow.get('.copy-options').text()).toContain('发布审批抄送会自动附上项目号、子项目号（如有）、发布包号及节点或整包审批结果')
     await flow.get('.copy-options textarea').setValue('技术审核已完成')
     expect(flow.get('.flow-canvas').text()).toContain('技术审核已完成')
     await flow.get('.workflow-card-title button').trigger('click')

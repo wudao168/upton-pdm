@@ -11,6 +11,22 @@ public static class ReleaseDrawingRevision
             ? package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Decision is null)
             : null;
 
+    public static ReleaseDrawingReviewNote? ActiveReturn(ReleasePackage package, ReleaseDrawingReviewItem item)
+    {
+        if (package.DrawingReview is not { } review || CurrentTask(package) is null) return null;
+        return package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder)
+            .Select(task => ReleaseDrawingReview.ActiveIssue(review, item, task.Id)).FirstOrDefault(issue => issue is not null);
+    }
+
+    public static ApprovalTask RecheckStart(ReleasePackage package, ApprovalTask returnTask)
+    {
+        if (returnTask.Stage != ApprovalStage.MechanicalSupervisor || !ReleaseDrawingReview.Supports(package.Scope)
+            || package.DrawingReview?.NodeDriven != true) return returnTask;
+        return package.ApprovalTasks.Where(task => task.Stage == ApprovalStage.MainDesigner
+                && task.StepOrder < returnTask.StepOrder)
+            .MaxBy(task => task.StepOrder) ?? returnTask;
+    }
+
     public static ReleasePackage Replace(ReleasePackage package, ApprovalTask task, ReleaseDrawingReviewItem item,
         DocumentVersion previous, DocumentVersion version, string? designerName)
     {
@@ -42,26 +58,38 @@ public static class ReleaseDrawingRevision
         };
         if (newBinding.Publish)
             BomDrawingRevision.ValidateDrawingProperties(version, newBinding.TargetRevision, item.FileName);
-        // A partial signature covers all drawings in this node. The revised drawing must
-        // be confirmed again, while the remaining drawings keep their original tokens.
-        var group = task.Participants;
-        if (group is not null)
+        var firstStep = RecheckStart(package, task).StepOrder;
+        var preserved = new Dictionary<Guid, IReadOnlyList<string>>(review.PreservedConfirmations);
+        var approvalTasks = package.ApprovalTasks.Select(step =>
         {
-            group = group with
+            if (step.StepOrder < firstStep || step.StepOrder > task.StepOrder) return step;
+            // The prior node accepted these exact versions. Only a new drawing token needs reapproval.
+            if (step.Decision == ApprovalDecision.Approved)
+                preserved[step.Id] = review.Items.Where(drawing => drawing.Required).Select(drawing => drawing.Token).ToArray();
+            var group = step.Participants;
+            return step with
             {
-                Signatures = [],
-                Departments = group.Departments.Select(branch => branch with { Signatures = [] }).ToArray()
+                Decision = null, DecisionBy = null, Comment = null, DecidedAt = null,
+                IsEmergencySubstitute = false, EmergencyReason = null,
+                Participants = group is null ? null : group with
+                {
+                    Signatures = [],
+                    Departments = group.Departments.Select(branch => branch with { Signatures = [] }).ToArray()
+                }
             };
-        }
+        }).ToArray();
         return package with
         {
+            State = approvalTasks.Count(step => step.Decision is null) > 1
+                ? ReleasePackageState.ProcessReview : ReleasePackageState.Approval,
             VersionBindings = bindings.Select(value => value.DocumentId == item.DocumentId ? newBinding : value).ToArray(),
             DrawingReview = review with
             {
                 Revision = review.Revision + 1,
+                PreservedConfirmations = preserved,
                 Items = review.Items.Select(value => value.DocumentId == item.DocumentId ? replacement : value).ToArray()
             },
-            ApprovalTasks = package.ApprovalTasks.Select(value => value.Id == task.Id ? task with { Participants = group } : value).ToArray(),
+            ApprovalTasks = approvalTasks,
             PdfTitleBlockSnapshot = ReplaceTitleBlock(package.PdfTitleBlockSnapshot, version, ReleasePreviewPolicy.DeliversFrozenDrawings(package)
                 ? version.Revision.Display : version.Revision.Release().Display, designerName)
         };

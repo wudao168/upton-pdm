@@ -325,11 +325,13 @@ internal static class ControlledReferenceMaterializer
     private static bool IsNative(string path) => new[] { ".SLDASM", ".SLDPRT", ".SLDDRW" }
         .Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
+    internal static string ManifestPath(string directory, ControlledOpenFileDto file) =>
+        ManagedCadPaths.Resolve(directory, file.RelativePath ?? file.FileName);
+
     internal static string LocalPath(string directory, ControlledOpenFileDto file)
     {
-        var prefix = Path.GetFullPath(directory).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
-        var path = Path.GetFullPath(Path.Combine(prefix, file.RelativePath ?? file.FileName));
-        if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        var path = ManifestPath(directory, file);
+        if (!File.Exists(path))
             throw new IOException("PLM受控清单中的文件尚未完整下载：" + file.FileName);
         return path;
     }

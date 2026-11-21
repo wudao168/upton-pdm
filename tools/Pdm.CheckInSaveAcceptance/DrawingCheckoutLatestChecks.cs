@@ -15,11 +15,14 @@ internal static partial class Program
  static async Task DrawingCheckoutLatestScenario(string output)
  {
   Directory.CreateDirectory(output);
-  foreach(var mode in new[]{"loaded-clean","duplicate-close-event","isolated-copy","unloaded-clean","disk-edit","memory-edit","readonly-memory-edit","late-memory-edit","late-disk-edit",
-   "bad-binding","new-reference","corrupt-download","prepare-failed","reload-modified","wrong-close-event","foreign-model","wrong-second-sheet"})
+  foreach(var scenario in new[]{"loaded-clean","duplicate-close-event","isolated-copy","unloaded-clean","disk-edit","memory-edit","readonly-memory-edit","late-memory-edit","late-disk-edit",
+   "bad-binding","new-reference","corrupt-download","prepare-failed","reload-modified","wrong-close-event","foreign-model","wrong-second-sheet",
+   "archive-loaded-clean","archive-unloaded-clean","archive-disk-edit","archive-memory-edit"})
   using(var fixture=new DiscardPathFixture())
   {
-   void Check(bool value,string message){TreeCheck(value,message);Console.WriteLine("PASS: "+mode+"："+message);}
+   var forArchive=scenario.StartsWith("archive-",StringComparison.Ordinal);
+   var mode=forArchive?scenario.Substring("archive-".Length):scenario;
+   void Check(bool value,string message){TreeCheck(value,message);Console.WriteLine("PASS: "+scenario+"："+message);}
    var plugin=fixture.Plugin;var project=(Guid)Get(fixture.Manifest,"ProjectId");var session=(Guid)Field(plugin,"checkoutSessionId");
    var folder=Path.GetDirectoryName(fixture.CurrentPath);var drawing=fixture.AddWorkingPart("DRAWING.SLDDRW");Set(drawing,"Kind",Enum.Parse(Type("CadDocumentKind"),"Drawing"));
    var total=fixture.AddWorkingPart("TOP.SLDASM");Set(total,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));
@@ -79,7 +82,7 @@ internal static partial class Program
      case "GetUserPreferenceToggle":return search;case "SetUserPreferenceToggle":search=(bool)call.Args[1];return true;
      default:throw new Exception("不得切换或关闭模型："+call.MethodName);}
    }).GetTransparentProxy());
-   ((IDictionary)Field(plugin,"controlledOpenManifests")).Add(folder,fixture.Manifest);
+   ((IDictionary)Field(plugin,"controlledOpenManifests")).Add(folder+Path.DirectorySeparatorChar,fixture.Manifest);
    SetField(plugin,"currentTree",drawing);
    var handler=new DrawingGetHandler(document,latest,old,requested,mode=="corrupt-download"?new byte[]{1,2}:bytes,session,()=>{
     if(mode=="late-memory-edit")dirty=true;
@@ -91,17 +94,21 @@ internal static partial class Program
     ((HttpClient)Field(fixture.Client,"httpClient")).Dispose();SetField(fixture.Client,"httpClient",http);SetField(fixture.Client,"controlledOpenHttpClient",http);
     SetField(plugin,"controlledWorkspace",New("ControlledWorkspaceManager",fixture.Client,fixture.DirectoryPath));
     var selected=Array.CreateInstance(Type("BatchOperationItem"),1);selected.SetValue(New("BatchOperationItem",drawing,0),0);
-    Exception failure=null;try{await (Task)DiscardCall(plugin,"TryAcquireDrawingWorkingCopiesAsync",selected,project);}catch(Exception error){failure=error;}
+    Task Refresh() => forArchive
+     ? (Task)DiscardCall(plugin,"RefreshLinkedDrawingBeforeArchiveAsync",drawing,project,CancellationToken.None)
+     : (Task)DiscardCall(plugin,"TryAcquireDrawingWorkingCopiesAsync",selected,project);
+    Exception failure=null;try{await Refresh();}catch(Exception error){failure=error;}
     var success=mode=="loaded-clean"||mode=="duplicate-close-event"||mode=="isolated-copy"||mode=="unloaded-clean";
-    File.WriteAllText(Path.Combine(output,mode+".txt"),failure?.ToString()??"success");
-    File.WriteAllLines(Path.Combine(output,mode+"-calls.txt"),nativeCalls);
+    File.WriteAllText(Path.Combine(output,scenario+".txt"),failure?.ToString()??"success");
+    File.WriteAllLines(Path.Combine(output,scenario+"-calls.txt"),nativeCalls);
     Check((failure==null)==success,success?"旧版副本成功取得最新版并获取权限":"异常或修改状态安全停止，返回中文说明");
     if(success)
     {
-     Check(WorkingReuseHash(path)==latestHash&&handler.Checkouts==1&&handler.Downloads==1,"仅取回一份工程图且仅检出该工程图");
+     Check(WorkingReuseHash(path)==latestHash&&handler.Checkouts==(forArchive?0:1)&&handler.Downloads==1,
+      forArchive?"仅取回工程图，后续存档流程负责权限":"仅取回一份工程图且仅检出该工程图");
      var args=new object[]{path,null};Check((bool)identity.GetMethod("TryReadLocalMetadata",Flags).Invoke(null,args)&&Equals(Get(args[1],"VersionId"),Get(latest,"Id")),"本地版本记录更新为服务器新版");
      Check(reloads==(mode=="unloaded-clean"?0:1)&&(receivedOptions<0||(receivedOptions&2)==0),"专用重载不使用丢弃修改选项，未打开的工程图无需重载");
-     await (Task)DiscardCall(plugin,"TryAcquireDrawingWorkingCopiesAsync",selected,project);
+     await Refresh();
      Check(handler.Downloads==1&&reloads==(mode=="unloaded-clean"?0:1),"再次获取复用当前新版，不反复下载或重载");
     }
     else

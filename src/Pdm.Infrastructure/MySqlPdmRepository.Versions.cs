@@ -29,6 +29,22 @@ public sealed partial class MySqlPdmRepository
         return rows.Select(MapDocumentVersion).ToArray();
     }
 
+    public async Task<IReadOnlyList<BomSourceVersionProperties>> ListBomSourceVersionPropertiesAsync(IReadOnlyCollection<Guid> documentIds, CancellationToken ct)
+    {
+        if (documentIds.Count == 0) return [];
+        await using var connection = await OpenAsync(ct);
+        var results = new List<BomSourceVersionProperties>();
+        foreach (var batch in documentIds.Chunk(200))
+        {
+            var rows = await connection.QueryAsync<(Guid DocumentId, string RevisionLabel, string PropertySnapshotJson, DateTime CreatedAt)>(new CommandDefinition(
+                "SELECT document_id,revision_label,property_snapshot_json,created_at FROM document_version WHERE document_id IN @DocumentIds",
+                new { DocumentIds = batch }, cancellationToken: ct));
+            results.AddRange(rows.OrderByDescending(row => row.CreatedAt).Select(row => new BomSourceVersionProperties(row.DocumentId, RevisionLabel.Parse(row.RevisionLabel),
+                JsonSerializer.Deserialize<Dictionary<string, string?>>(row.PropertySnapshotJson, jsonOptions) ?? [])));
+        }
+        return results;
+    }
+
     public async Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

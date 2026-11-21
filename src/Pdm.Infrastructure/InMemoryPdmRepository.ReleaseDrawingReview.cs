@@ -5,6 +5,15 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed partial class InMemoryPdmRepository
 {
+    public Task<IReadOnlyList<Guid>> ListReleasePackagesWithDrawingReworkAsync(CancellationToken ct)
+    {
+        lock (gate)
+            return Task.FromResult<IReadOnlyList<Guid>>(packages.Values.Where(package =>
+                    ReleaseDrawingRevision.CurrentTask(package) is not null
+                    && package.DrawingReview?.Items.Any(item => item.Notes.Any(note => note.Status == "Issue")) == true)
+                .Select(package => package.Id).ToArray());
+    }
+
     public Task<ReleasePackage> SaveReleaseDrawingReviewAsync(Guid packageId, ReleaseDrawingReview review,
         int expectedRevision, Guid? approvalTaskId, CancellationToken ct, Guid? documentId = null)
     {
@@ -37,10 +46,9 @@ public sealed partial class InMemoryPdmRepository
         var replacements = new List<ReleasePackage>();
         foreach (var package in packages.Values.Where(value => value.ProjectId == document.ProjectId))
         {
-            var task = ReleaseDrawingRevision.CurrentTask(package);
-            var review = package.DrawingReview;
-            var drawing = review?.Items.SingleOrDefault(item => item.DocumentId == document.Id);
-            if (task is null || drawing is null || !ReleaseDrawingReview.HasIssue(review!, drawing, task.Id)) continue;
+            var drawing = package.DrawingReview?.Items.SingleOrDefault(item => item.DocumentId == document.Id);
+            if (drawing is null || ReleaseDrawingRevision.ActiveReturn(package, drawing) is not { } issue) continue;
+            var task = package.ApprovalTasks.Single(step => step.Id == issue.ApprovalTaskId);
             if (document.CheckedOutBy is not null)
                 throw new PdmRuleException("退回图纸须结束编辑并提交存档，才能自动进入复审。");
             var designer = users.Values.FirstOrDefault(user => user.Username.Equals(version.CreatedBy, StringComparison.OrdinalIgnoreCase))?.DisplayName;

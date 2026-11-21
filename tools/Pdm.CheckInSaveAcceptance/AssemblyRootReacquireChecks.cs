@@ -10,7 +10,7 @@ using System.Web.Script.Serialization;
 
 internal static partial class Program
 {
-    static async Task AssemblyRootReacquireScenario(string output)
+    static async Task AssemblyRootReacquireScenario(string output, bool lockRecoveryOnly = false)
     {
         output = Path.GetFullPath(output);
         var identity = Type("PdmDocumentIdentityStore");
@@ -28,7 +28,9 @@ internal static partial class Program
         }
         try
         {
-            foreach (var mode in new[] { "committed", "later-memory-edit", "later-disk-edit", "new-server-head", "server-denies", "changes-during-checkout", "locked-file" })
+            var modes = lockRecoveryOnly ? new[] { "retained-external-lock" }
+                : new[] { "committed", "later-memory-edit", "later-disk-edit", "new-server-head", "server-denies", "changes-during-checkout", "locked-file" };
+            foreach (var mode in modes)
             {
                 var directory = Path.Combine(output, "View", "QA", mode);
                 Directory.CreateDirectory(directory);
@@ -66,9 +68,47 @@ internal static partial class Program
                 var events = new List<string>();
                 var appType = Type("PdmAddin").GetField("application", Flags).FieldType;
                 var native = new Model(appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), path, true, events);
+                var originalMemory = File.ReadAllText(copyPath);
+                var detached = false;
+                var releaseCalls = 0;
+                var reloadCalls = 0;
+                if (lockRecoveryOnly)
+                {
+                    native.MemoryPayload = originalMemory;
+                    native.OnForceReleaseLocks = () => { releaseCalls++; detached = true; return 1; };
+                    native.OnReloadOrReplace = (readOnly, replacement, discardChanges) =>
+                    {
+                        reloadCalls++;
+                        if (!readOnly || !discardChanges || !detached)
+                            throw new Exception("回退重载必须在已分离的原窗口按只读方式执行。");
+                        native.Path = replacement ?? path;
+                        native.MemoryPayload = File.ReadAllText(native.Path);
+                        detached = false;
+                        return 0;
+                    };
+                }
                 var model = native.GetTransparentProxy();
-                SetField(plugin, "application", new Proxy(appType, call => call.MethodName == "GetDocuments" ? new[] { model }
-                    : call.MethodName == "get_ActiveDoc" ? model : throw new Exception("不得重新打开图档：" + call.MethodName)).GetTransparentProxy());
+                var originalDirectory = Path.Combine(output, "CAD 原工作目录");
+                var originalFolders = Path.Combine(output, "CAD 原搜索目录");
+                var workingDirectory = originalDirectory;
+                var searchFolders = originalFolders;
+                var searchOptions = new Dictionary<int, bool>();
+                var directoryChanges = 0;
+                SetField(plugin, "application", new Proxy(appType, call =>
+                {
+                    switch (call.MethodName)
+                    {
+                        case "GetDocuments": return new[] { model };
+                        case "get_ActiveDoc": return model;
+                        case "GetCurrentWorkingDirectory": return workingDirectory;
+                        case "GetSearchFolders": return searchFolders;
+                        case "GetUserPreferenceToggle": return searchOptions.TryGetValue((int)call.Args[0], out var enabled) && enabled;
+                        case "SetCurrentWorkingDirectory": workingDirectory = (string)call.Args[0]; directoryChanges++; return true;
+                        case "SetSearchFolders": searchFolders = (string)call.Args[1]; return true;
+                        case "SetUserPreferenceToggle": searchOptions[(int)call.Args[0]] = (bool)call.Args[1]; return true;
+                        default: throw new Exception("不得重新打开图档：" + call.MethodName);
+                    }
+                }).GetTransparentProxy());
                 ((IDictionary)Field(plugin, "controlledOpenManifests")).Add(directory, json.Deserialize(json.Serialize(owner), Type("ControlledOpenManifestDto")));
                 var root = New("CadTreeNode");
                 Set(root, "DocumentId", id);
@@ -126,7 +166,7 @@ internal static partial class Program
                     }
                     var beforeAcquire = WorkingReuseHash(path);
                     bool success = false;
-                    using (var fileLock = mode == "locked-file" ? new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read) : null)
+                    using (var fileLock = mode == "locked-file" || lockRecoveryOnly ? new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read) : null)
                         try
                         {
                             var task = (Task)TreeCall(plugin, "TryAcquireReusableWorkingCopyAsync", selected, project, id);
@@ -141,6 +181,16 @@ internal static partial class Program
                     Check(native.ReadOnly == !success && File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly) == !success,
                         mode + "：只有成功获取后才解除只读");
                     Check(events.Count == 0 && File.ReadAllText(removed) == "prior referenced part kept locally", mode + "：保留原窗口及旧结构中移除的本机文件");
+                    if (mode == "locked-file")
+                        Check(directoryChanges == 2 && workingDirectory == originalDirectory && searchFolders == originalFolders
+                            && searchOptions.Values.All(enabled => !enabled), "系统文件锁无法释放时恢复原工作目录、搜索目录和搜索设置");
+                    if (lockRecoveryOnly)
+                    {
+                        Check(WorkingReuseHash(path) == oldHash && WorkingReuseHash(copyPath) == copyHash
+                            && native.Path == path && native.MemoryPayload == originalMemory,
+                            "外部文件锁持续占用时，磁盘基准、存档副本和当前内存保持原样");
+                        Check(!detached, $"外部文件锁持续占用时原窗口应保持文件挂接；原生释放调用 {releaseCalls} 次，重载调用 {reloadCalls} 次");
+                    }
                     if (success) Check(Equals(Get(((IDictionary)Field(plugin, "localEdits"))[id], "BaseVersionId"), newVersion),
                         "原窗口再次获取后的恢复记录采用服务器最新版本");
                 }

@@ -38,6 +38,7 @@ public sealed partial class PdmWorkflowService
     public async Task<PdmDocument> EmergencyReleaseEditLockAsync(Guid documentId, Guid sessionId, DateTimeOffset checkedOutAt, string actor, UserRole role, string reason, CancellationToken ct)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentLockEmergencyRelease, ct);
+        await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View, ct);
         var current = await RequireDocumentAsync(documentId, ct);
         var project = await repository.FindProjectAsync(current.ProjectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
         if (!await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, ct)) throw new UnauthorizedAccessException("当前账号没有此项目的紧急接管权限。");
@@ -45,9 +46,6 @@ public sealed partial class PdmWorkflowService
         var updated = await repository.ReclaimCheckoutAsync(documentId, sessionId, checkedOutAt, null, timeProvider.GetUtcNow(), ct);
         await AuditAsync(actor, "document.checkout.emergency-release", nameof(PdmDocument), documentId.ToString(),
             $"原编辑人：{current.CheckedOutBy}；原会话：{sessionId}；原电脑：{current.CheckoutMachine}；原因：{reason}；未上传修改由原电脑恢复并比对", ct);
-        await NotifyEditReleasedAsync(current, ct);
-        await repository.CreateUserNotificationsAsync([new(Guid.NewGuid(), current.CheckedOutBy!, "EditLockReleased", "图档已被紧急接管",
-            $"{current.FileName}已由{actor}紧急解除占用。原会话不能提交，请保留本地修改并与服务器最新版比对。原因：{reason}", current.ProjectId, null, $"edit-emergency:{documentId:N}:{sessionId:N}:{checkedOutAt.UtcTicks}", timeProvider.GetUtcNow(), null)], ct);
         return updated;
     }
 
@@ -67,11 +65,10 @@ public sealed partial class PdmWorkflowService
             throw new PdmConflictException("服务器基准版本已经变化，已保留编辑权限，请先核对图档。");
         var updated = await repository.ReclaimCheckoutAsync(documentId, sessionId, checkedOutAt, null, timeProvider.GetUtcNow(), ct);
         await AuditAsync(actor, "document.checkout.auto-idle-release", nameof(PdmDocument), documentId.ToString(), "插件确认无未提交修改，闲置倒计时结束；服务端再次核对会话、审核和存档上传状态", ct);
-        await NotifyEditReleasedAsync(current, ct);
         return updated;
     }
 
-    // 后台任务只回收确认长期离线的旧一代会话，仓储事务内再次核对心跳、审核和上传状态。
+    // 按本轮实际发出的提醒计时，仓储事务内再次核对编辑代次、审核和上传状态。
     public async Task<int> MaintainEditCollaborationAsync(CancellationToken ct)
     {
         var now = timeProvider.GetUtcNow();
@@ -80,44 +77,32 @@ public sealed partial class PdmWorkflowService
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(ct))
         {
             if (document.CheckoutSessionId is not Guid sessionId || document.CheckedOutAt is not DateTimeOffset started || string.IsNullOrWhiteSpace(document.CheckedOutBy)) continue;
-            var project = await repository.FindProjectAsync(document.ProjectId, ct);
-            if (project is null) continue;
-            var managers = new[] { project.PrimaryProjectManager, project.DesignLead }.Concat(project.CollaborativeProjectManagers).Concat(project.DesignLeads)
-                .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            var key = $"{document.Id:N}:{sessionId:N}:{started.UtcTicks}";
-            if (document.CheckoutReleaseRequestedAt is DateTimeOffset requested)
+            if (now - started < TimeSpan.FromHours(settings.CheckoutOverdueHours)) continue;
+            var key = EditLockOverdueReminder.SourceKey(document);
+            var sentAt = await repository.FindNotificationCreatedAtAsync(document.CheckedOutBy, key, ct);
+            if (sentAt is null)
             {
-                if (now - requested >= TimeSpan.FromMinutes(5))
-                    await EditNoticeAsync([document.CheckedOutBy], "EditLockReminder", "请处理图档交接申请", $"{document.FileName}已有人等待编辑超过5分钟，请存档交接或说明继续编辑原因。", document.ProjectId, "edit-wait-reminder:" + EditHandoff.WaitingKey(document), ct);
-                if (now - requested >= TimeSpan.FromMinutes(10))
-                    await EditNoticeAsync(managers, "EditLockEscalated", "图档交接等待负责人处理", $"{document.FileName}的交接申请超过10分钟，请协调{document.CheckedOutBy}或按授权接管。", document.ProjectId, "edit-wait-escalated:" + EditHandoff.WaitingKey(document), ct);
+                var deadline = settings.CheckoutAutoReleaseEnabled
+                    ? $"提醒发出后{settings.CheckoutOverdueReleaseGraceHours}小时仍未处理，系统将自动释放编辑权限。请及时存档未提交修改。"
+                    : string.Empty;
+                await EditNoticeAsync([document.CheckedOutBy], "EditLockOverdue", "图档占用超时提醒",
+                    $"{document.FileName}已占用满{settings.CheckoutOverdueHours}小时，请存档或释放编辑权限。{deadline}", document.ProjectId, key, ct);
+                continue;
             }
-            if (now - started >= TimeSpan.FromHours(24))
-                await EditNoticeAsync(managers.Append(document.CheckedOutBy), "EditLockOverdue", "图档长期占用待处理", $"{document.FileName}已占用超过24小时，请核对未提交修改；在线图档不会仅因占用时长被自动释放。", document.ProjectId, "edit-long-held:" + key, ct);
-            var heartbeat = document.CheckoutLastHeartbeatAt ?? started;
-            if (now - started >= TimeSpan.FromHours(48) && document.CheckoutLeaseExpiresAt > now)
-                await EditNoticeAsync(managers, "EditLockEscalated", "在线图档长期未交接", $"{document.FileName}在线占用已超过48小时，请负责人核对未提交内容，必要时按授权紧急接管。在线修改不自动释放。", document.ProjectId, "edit-online-48h:" + key, ct);
-            if (!settings.CheckoutAutoReleaseEnabled || now - heartbeat < TimeSpan.FromHours(settings.CheckoutForceReleaseHours) || document.CheckoutLeaseExpiresAt >= now) continue;
+            if (!settings.CheckoutAutoReleaseEnabled || now - sentAt.Value < TimeSpan.FromHours(settings.CheckoutOverdueReleaseGraceHours)) continue;
             try
             {
-                await repository.ReclaimCheckoutAsync(document.Id, sessionId, started, now.AddHours(-settings.CheckoutForceReleaseHours), now, ct);
+                await repository.ReclaimCheckoutAsync(document.Id, sessionId, started, null, now, ct);
             }
             catch (PdmConflictException) { continue; }
             count++;
-            await AuditAsync("system", "document.checkout.auto-offline-release", nameof(PdmDocument), document.Id.ToString(),
-                $"持续离线超过{settings.CheckoutForceReleaseHours}小时；原编辑人：{document.CheckedOutBy}；原会话：{sessionId}；电脑：{document.CheckoutMachine}；未上传修改须从原电脑恢复", ct);
-            await NotifyEditReleasedAsync(document, ct);
-            await EditNoticeAsync(managers.Append(document.CheckedOutBy), "EditLockReleased", "长期离线图档已自动回收",
-                $"{document.FileName}持续离线已达到回收时限。旧会话已失效，接手人使用服务器最后存档版本；原电脑的未上传修改须另存并人工比对。", document.ProjectId, "edit-auto-released:" + key, ct);
+            await AuditAsync("system", "document.checkout.auto-overdue-release", nameof(PdmDocument), document.Id.ToString(),
+                $"占用提醒后{settings.CheckoutOverdueReleaseGraceHours}小时未处理；原编辑人：{document.CheckedOutBy}；原会话：{sessionId}；电脑：{document.CheckoutMachine}；未上传修改须从原电脑恢复", ct);
+            await repository.ResolveUserNotificationsAsync([key], now, ct);
         }
         foreach (var handoff in await repository.ListEditHandoffsAsync(ct))
         {
-            if (handoff.ExpiresAt > now || !await repository.ExpireEditHandoffAsync(handoff, now, ct)) continue;
-            var document = await repository.FindDocumentAsync(handoff.DocumentId, ct);
-            if (document is null) continue;
-            var waiting = handoff.WaitSourceKey is null ? [] : await repository.ListNotificationRecipientsAsync(handoff.WaitSourceKey, ct);
-            await EditNoticeAsync(waiting.Concat([handoff.FromUser, handoff.ToUser]), "EditLockAvailable", "图档交接预留已到期",
-                $"{document.FileName}的5分钟接手预留已到期，现在可按权限重新申请编辑。", handoff.ProjectId, $"edit-handoff-expired:{handoff.DocumentId:N}:{handoff.ExpiresAt.UtcTicks}", ct);
+            if (handoff.ExpiresAt <= now) await repository.ExpireEditHandoffAsync(handoff, now, ct);
         }
         return count;
     }
@@ -125,4 +110,10 @@ public sealed partial class PdmWorkflowService
     private Task EditNoticeAsync(IEnumerable<string> recipients, string kind, string title, string message, Guid projectId, string key, CancellationToken ct) =>
         repository.CreateUserNotificationsAsync(recipients.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(name => new UserNotification(Guid.NewGuid(), name, kind, title, message, projectId, null, key, timeProvider.GetUtcNow(), null)).ToArray(), ct);
+}
+
+internal static class EditLockOverdueReminder
+{
+    public static string SourceKey(PdmDocument document) =>
+        $"edit-overdue-owner:{document.Id:N}:{document.CheckoutSessionId:N}:{document.CheckedOutAt?.UtcTicks}";
 }

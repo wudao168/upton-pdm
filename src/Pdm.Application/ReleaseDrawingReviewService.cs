@@ -73,11 +73,14 @@ public sealed class ReleaseDrawingReviewService(IPdmRepository repository, TimeP
             ?? throw new PdmNotFoundException("该图纸不在本发布包的冻结审核范围内。");
         if (item.Token!=input.Token) throw new PdmConflictException("图纸或BOM审核资料已变化，请刷新后核对。");
         if (input.Status is not ("Confirmed" or "Issue" or "Pending")) throw new PdmRuleException("图纸审核状态无效。");
-        if (input.Status == "Issue" && ReleaseDrawingReview.HasIssue(review, item, current.Id))
+        if (emergency && input.Status != "Pending" && string.IsNullOrWhiteSpace(input.EmergencyReason))
+            throw new PdmRuleException("请填写紧急代批原因。");
+        var activeReturn = ReleaseDrawingRevision.ActiveReturn(package, item);
+        if (input.Status == "Issue" && activeReturn is not null)
             throw new PdmConflictException("该图纸已退回，请等待设计修改并存档。");
         if (input.Status == "Pending" && StatusFor(review, item, current.Id, actor) != "Issue")
             throw new PdmRuleException("只能撤回本人对当前图纸版本的退回。");
-        if (input.Status == "Confirmed" && ReleaseDrawingReview.HasIssue(review, item, current.Id))
+        if (input.Status == "Confirmed" && activeReturn is not null)
             throw new PdmRuleException("请先完成图纸修改并存档，或由原审核人撤回退回。");
         var comment = input.Status == "Pending" ? "" : input.Comment?.Trim() ?? "";
         if (comment.Length>2000 || input.Status=="Issue" && comment.Length==0) throw new PdmRuleException("请填写2000字以内的图纸问题说明。");
@@ -145,6 +148,9 @@ public sealed class ReleaseDrawingReviewService(IPdmRepository repository, TimeP
         item.Notes.LastOrDefault(n=>n.ApprovalTaskId==taskId && n.RoundId==review.RoundId && n.Token==item.Token
             && n.Actor.Equals(actor,StringComparison.OrdinalIgnoreCase))?.Status ?? "Pending";
 
+    public static bool IsDrawingConfirmed(ReleaseDrawingReview review, ReleaseDrawingReviewItem item, Guid taskId, string actor) =>
+        review.HasPreservedConfirmation(taskId, item.Token) || StatusFor(review, item, taskId, actor) == "Confirmed";
+
     public static bool IsComplete(ReleasePackage package, ApprovalTask task, string actor)
     {
         try { RequireComplete(package,task,actor); return true; }
@@ -181,7 +187,7 @@ public sealed class ReleaseDrawingReviewService(IPdmRepository repository, TimeP
         {
             var openIssues = review.Items.Count(item => ReleaseDrawingReview.HasIssue(review, item, task.Id));
             if (openIssues > 0) throw new PdmRuleException($"当前节点有{openIssues}张图纸等待修改存档或撤回退回。");
-            var remaining=review.Items.Count(i=>i.Required && StatusFor(review,i,task.Id,actor ?? "")!="Confirmed");
+            var remaining=review.Items.Count(i=>i.Required && !IsDrawingConfirmed(review, i, task.Id, actor ?? ""));
             if (remaining>0) throw new PdmRuleException($"当前节点还有{remaining}张必审图纸未确认，请在图档页完成审核后自动流转。");
             return;
         }

@@ -14,6 +14,7 @@ const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.v
 const props = defineProps<{ task: MyApprovalTask; token: string; username: string; permissions: string[] }>()
 const emit = defineEmits<{ done: []; back: [] }>()
 const release = ref<ReleasePackageSummary>(), plan = ref<ProjectValidationPlan>(), loading = ref(true), pending = ref(false)
+const history = ref<ReleasePackageSummary[]>([])
 const error = ref(''), comment = ref(''), preview = ref(''), previewName = ref('')
 const scope = props.task.qualityAcceptance ? '/quality' : ''
 const { write: projectWritable } = useProjectCenterAccess()
@@ -30,7 +31,10 @@ async function load() {
   loading.value = true; error.value = ''
   try {
     if (props.task.kind === 'validationPlan') plan.value = await readProjectValidationPlan(props.task.projectId, props.token, scope) ?? undefined
-    else release.value = (await listReleasePackages(props.task.projectId, props.token)).find(item => item.id === props.task.releasePackageId)
+    else {
+      history.value = await listReleasePackages(props.task.projectId, props.token)
+      release.value = history.value.find(item => item.id === props.task.releasePackageId)
+    }
     if (!plan.value && !release.value) error.value = '该审批资料已变化或不可访问，请返回待办刷新。'
   } catch (cause) { error.value = userErrorMessage(cause instanceof Error ? cause.message : '审批资料读取失败，请重试。') }
   finally { loading.value = false }
@@ -77,7 +81,7 @@ onBeforeUnmount(closePreview)
     <template v-if="release">
       <h3>审批流程</h3><ol><li v-for="step in release.steps" :key="step.id">{{ step.stage }} · <PersonName :name="displayUserName(step.assignee)" /> · {{ step.detail }}<p v-if="step.comment">处理意见：{{ step.comment }}</p></li></ol>
       <p v-if="release.changeReason">变更原因：{{ release.changeReason }}</p>
-      <ReleaseDrawingReviewPanel v-if="release.drawingReview" :release="release" :token="token" :username="username" :editable="!!active" @updated="release = $event" />
+      <ReleaseDrawingReviewPanel v-if="release.drawingReview" :release="release" :history="history" :token="token" :username="username" :editable="!!active" @updated="release = $event" />
       <h3>本次审批的图档版本</h3><p v-if="!bindings.length">本次审批未绑定图档。</p>
       <article v-for="binding in bindings" :key="binding.documentId" class="mobile-record"><strong>{{ binding.fileName || binding.documentId }}</strong><p>版本 {{ binding.revision }}</p><button v-if="/\.slddrw$|\.pdf$/i.test(binding.fileName || '')" :disabled="pending" @click="showDrawing(binding)">查看此版本图纸</button></article>
       <h3>BOM审批内容（{{ items.length }}项）</h3><article v-for="(item, index) in items" :key="`${item.id}-${index}`" class="mobile-record"><strong>{{ item.drawingNumber }} · {{ item.name }}</strong><p>数量 {{ item.quantity }}</p></article>

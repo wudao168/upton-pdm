@@ -120,7 +120,7 @@ public sealed partial class PdmWorkflowService
         return captured;
     }
 
-    private async Task ValidateReleaseVersionsAsync(ReleasePackage package, CancellationToken ct)
+    private async Task ValidateReleaseVersionsAsync(ReleasePackage package, CancellationToken ct, bool allowPackagePromotion = false)
     {
         await RequireCompletePackageReleaseIndexAsync(package, package.ReferenceSnapshotId.HasValue
             ? await repository.FindReferenceSnapshotAsync(package.ReferenceSnapshotId.Value, ct) : null, ct);
@@ -132,6 +132,9 @@ public sealed partial class PdmWorkflowService
             if (!IsDrawingBomRelease(package.Scope) && bound?.ReferenceSnapshot.HasPendingStructureIndex == true)
                 throw new PdmRuleException("本次发布图档的结构或图模关联仍待补全，原生文件已保留，请补全后再发布。");
             var latest = history.FirstOrDefault();
+            if (allowPackagePromotion && bound?.Sha256 == binding.Sha256 && latest is { Status: DocumentVersionStatus.Released }
+                && latest.ReleasePackageId == package.Id && latest.SourceVersionId == binding.VersionId)
+                continue;
             if (package.DrawingReview is not null && (bound is null || bound.Sha256 != binding.Sha256
                 || latest is null || latest.Id != binding.VersionId && !MatchesReviewedVersion(bound, latest.Id, history)))
                 throw new PdmConflictException("本次审核绑定的图纸版本已变化，请核对图档及发布包冻结版本。");

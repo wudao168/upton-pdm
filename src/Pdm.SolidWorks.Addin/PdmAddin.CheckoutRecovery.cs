@@ -65,6 +65,42 @@ public sealed partial class PdmAddin
             }
     }
 
+    private async Task EnsureCheckedOutDocumentEditableAsync(string path, Guid id, Guid projectId, DateTime? checkedOutAt)
+    {
+        var model = FindLoadedDocument(path);
+        if (TryUnlockAndObserveCheckout(model, path, id, projectId)) return;
+
+        var session = checkoutSessionId;
+        var account = authenticatedUsername;
+        var client = apiClient;
+        if (!PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var original)
+            || original.ProjectId != projectId || original.DocumentId != id || !original.VersionId.HasValue)
+            throw new IOException("编辑权限已取得，但本地工作副本的版本关联需要核对：" + Path.GetFileName(path));
+
+        // Yield the SolidWorks UI thread before retrying its native write lock.
+        // This does not reload the document or clear any in-memory changes.
+        await Task.Delay(350, lifetime.Token);
+        var current = await client.GetDocumentAsync(id, lifetime.Token);
+        if (disconnecting || !ReferenceEquals(client, apiClient) || session != checkoutSessionId
+            || !string.Equals(account, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("登录或编辑会话已变化，当前图档和修改已保留，请重新核对权限。");
+        if (current == null || current.Id != id || current.ProjectId != projectId
+            || current.CheckoutSessionId != session || !string.Equals(current.CheckedOutBy, account, StringComparison.OrdinalIgnoreCase)
+            || checkedOutAt.HasValue && current.CheckedOutAt != checkedOutAt
+            || current.CheckoutLeaseExpiresAt.HasValue && current.CheckoutLeaseExpiresAt.Value.ToUniversalTime() <= DateTime.UtcNow)
+            throw new InvalidOperationException("服务器编辑权限已变化，当前图档和修改已保留，请刷新后重新获取。");
+        if (!ReferenceEquals(model, FindLoadedDocument(path)) || !PathsEqual(path, model.GetPathName())
+            || !PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding)
+            || binding.ProjectId != projectId || binding.DocumentId != id || binding.VersionId != original.VersionId)
+            throw new IOException("获取期间本地图档或版本关联已变化，当前窗口和修改已保留，请核对后重试。");
+        if (IsSolidWorksCommandActive())
+            throw new IOException("SolidWorks 正在执行命令，请完成当前操作后再核对图档编辑权限。");
+        if (!TryUnlockAndObserveCheckout(model, path, id, projectId))
+            throw new IOException(Path.GetFileName(path) + " 已取得 PLM 编辑权限，但 SolidWorks 仍未能切换为可写。"
+                + "当前窗口和修改已保留，请先保留需要的修改，并核对该文件是否仍被其他窗口或程序占用。");
+        LogOperation("已复核当前编辑会话并在原窗口恢复可写：" + Path.GetFileName(path));
+    }
+
     private async Task<string> RecoverRecordedAcquisitionsAsync()
     {
         if (!EnsureEditJournal()) return "";

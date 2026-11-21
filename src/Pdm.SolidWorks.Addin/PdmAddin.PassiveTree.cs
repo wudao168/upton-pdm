@@ -195,8 +195,7 @@ public sealed partial class PdmAddin
                 var matches = files.Where(file => file.DocumentId == node.DocumentId).Take(2).ToArray();
                 if (matches.Length == 1)
                 {
-                    var relative = matches[0].RelativePath ?? matches[0].FileName;
-                    var candidate = Path.GetFullPath(Path.Combine(context.Key, relative));
+                    var candidate = ControlledReferenceMaterializer.ManifestPath(context.Key, matches[0]);
                     if (IsPathWithinDirectory(candidate, context.Key)) node.FullPath = candidate;
                     node.OpenedVersionId = matches[0].VersionId;
                     node.LoadedDrawingVersion = matches[0].DrawingVersion;
@@ -240,7 +239,7 @@ public sealed partial class PdmAddin
                     var matches = context.Value.Files.Where(file => file.DocumentId == drawing.DocumentId).Take(2).ToArray();
                     if (matches.Length == 1)
                     {
-                        var path = Path.GetFullPath(Path.Combine(context.Key, matches[0].RelativePath ?? matches[0].FileName));
+                        var path = ControlledReferenceMaterializer.ManifestPath(context.Key, matches[0]);
                         if (IsPathWithinDirectory(path, context.Key))
                         {
                             drawing.FullPath = path;

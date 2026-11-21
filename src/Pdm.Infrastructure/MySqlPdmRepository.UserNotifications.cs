@@ -11,8 +11,10 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition("""
             SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,resolved_at,is_sender_receipt
-            FROM user_notification WHERE read_at IS NULL AND (@Recipient IS NULL OR recipient_username=@Recipient)
-            """, new { Recipient = recipient }, cancellationToken: cancellationToken));
+            FROM user_notification
+            WHERE (read_at IS NULL OR (category=@Resubmitted AND resolved_at IS NULL))
+              AND (@Recipient IS NULL OR recipient_username=@Recipient)
+            """, new { Recipient = recipient, Resubmitted = ReleaseDrawingReworkNotifications.ResubmittedCategory }, cancellationToken: cancellationToken));
         return rows.Select(MapUserNotification).ToArray();
     }
 
@@ -76,6 +78,15 @@ public sealed partial class MySqlPdmRepository
         return (await connection.QueryAsync<string>(new CommandDefinition(
             "SELECT DISTINCT recipient_username FROM user_notification WHERE source_key=@SourceKey",
             new { SourceKey = sourceKey }, cancellationToken: cancellationToken))).ToArray();
+    }
+
+    public async Task<DateTimeOffset?> FindNotificationCreatedAtAsync(string recipient, string sourceKey, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var createdAt = await connection.QuerySingleOrDefaultAsync<DateTime?>(new CommandDefinition(
+            "SELECT created_at FROM user_notification WHERE recipient_username=@Recipient AND source_key=@SourceKey",
+            new { Recipient = recipient, SourceKey = sourceKey }, cancellationToken: cancellationToken));
+        return createdAt is DateTime time ? new DateTimeOffset(DateTime.SpecifyKind(time, DateTimeKind.Utc)) : null;
     }
 
     public async Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)

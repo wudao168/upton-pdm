@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import CompanyName from './CompanyName.vue'
 import { ElMessage } from '../statusMessage'
-import { reactive, ref, watch } from 'vue'
-import { testPreviewAgent } from '../api'
+import { reactive, ref, useId, watch } from 'vue'
+import StorageDirectoryList from './StorageDirectoryList.vue'
+import PreviewConversionSettings from './PreviewConversionSettings.vue'
 import StandardStructureStorageSettings from './StandardStructureStorageSettings.vue'
 import ServerStorageSettings from './ServerStorageSettings.vue'
 import PdfTitleBlockFillSettings from './PdfTitleBlockFillSettings.vue'
@@ -11,28 +12,32 @@ import type { BomPropertyMapping, BomValidationField, EquipmentTypeDefinition, P
 
 const props = withDefaults(defineProps<{
   administrator?: boolean
+  active?: boolean
   canManageStorage?: boolean
   canManageFolders?: boolean
   settings: PdmSystemSettings
   token?: string
+  companyId?: string
   equipmentTypes: EquipmentTypeDefinition[]
   numberingOptions: ProjectNumberingOptions
   pending: boolean
   onSaveSettings: (settings: PdmSystemSettings) => Promise<PdmSystemSettings>
   onSaveEquipmentType: (input: EquipmentTypeDefinition) => Promise<EquipmentTypeDefinition>
   onUpdateCounters: (organizationId: string, currentProjectSequence: number, currentSerialSequence: number) => Promise<ProjectNumberingOptions>
-}>(), { canManageStorage: true })
+}>(), { canManageStorage: true, active: true })
 
 const activeTab = ref('storage')
+const storageId = useId()
+const projectDirectories = [
+  { key: 'vaultRoot', label: '图档存档根目录' },
+  { key: 'releaseRoot', label: '生产发包根目录' },
+  { key: 'materialAttachmentRoot', label: '料品资料存档根目录' },
+] as const
 watch(() => [props.canManageStorage, props.canManageFolders], ([storage, folders]) => {
   if (storage === false) activeTab.value = 'folder-templates'
   else if (!folders && activeTab.value === 'folder-templates') activeTab.value = 'storage'
 }, { immediate: true })
-const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] } })
-const previewConversionDraft = reactive({ mode: 'Local' as 'Local' | 'Remote', agentUrl: '', agentToken: '', timeoutMinutes: 30 })
-const selectedAgentUrls = ref<string[]>([])
-const previewAgentProbe = ref('')
-const previewAgentTesting = ref(false)
+const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutOverdueReleaseGraceHours: 12, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] } })
 const equipmentDialogOpen = ref(false)
 const equipmentDraft = reactive<EquipmentTypeDefinition>({ code: 0, name: '', isActive: true })
 const counterDrafts = ref<Array<{ id: string; name: string; project: number; serial: number }>>([])
@@ -62,6 +67,7 @@ const knownSolidWorksProperties = [
 
 watch(() => props.settings, settings => Object.assign(storageDraft, {
   ...settings,
+  checkoutOverdueReleaseGraceHours: settings.checkoutOverdueReleaseGraceHours ?? 12,
   checkoutAutoReleaseEnabled: settings.checkoutAutoReleaseEnabled ?? true,
   checkoutIdleReleaseMinutes: settings.checkoutIdleReleaseMinutes ?? 30,
   checkoutReleaseCountdownSeconds: settings.checkoutReleaseCountdownSeconds ?? 60,
@@ -72,63 +78,6 @@ watch(() => props.settings, settings => Object.assign(storageDraft, {
     electrical: [...settings.validationRules.electrical],
   },
 }), { immediate: true, deep: true })
-watch(() => props.settings.previewConversion, conversion => {
-  selectedAgentUrls.value = (conversion?.servers ?? []).filter(server => !server.disabled).map(server => server.agentUrl)
-  previewConversionDraft.mode = conversion?.localExecutionAllowed === false || conversion?.mode === 'Remote' ? 'Remote' : 'Local'
-  previewConversionDraft.agentUrl = conversion?.agentUrl ?? ''
-  previewConversionDraft.agentToken = conversion?.agentToken ?? ''
-  previewConversionDraft.timeoutMinutes = conversion?.timeoutMinutes ?? 30
-}, { immediate: true, deep: true })
-
-const previewConversionPayload = () => ({
-  servers: (props.settings.previewConversion?.servers ?? []).map(server => {
-    const updated = server.agentUrl.replace(/\/+$/, '') === props.settings.previewConversion?.agentUrl.replace(/\/+$/, '')
-    ? { ...server, agentUrl: previewConversionDraft.agentUrl.trim().replace(/\/+$/, ''), agentToken: previewConversionDraft.agentToken.trim(), timeoutMinutes: Number(previewConversionDraft.timeoutMinutes) || 30 }
-    : server
-    return selectedAgentUrls.value.includes(server.agentUrl) ? { ...updated, disabled: false } : { ...updated, disabled: true }
-  }),
-  mode: previewConversionDraft.mode,
-  agentUrl: previewConversionDraft.agentUrl.trim().replace(/\/+$/, ''),
-  agentToken: previewConversionDraft.agentToken.trim(),
-  timeoutMinutes: Number(previewConversionDraft.timeoutMinutes) || 30,
-})
-
-async function testPreviewAgentConnection() {
-  if (!props.token) { ElMessage.warning('登录状态已失效，请重新登录后再测试'); return }
-  previewAgentTesting.value = true
-  previewAgentProbe.value = ''
-  try {
-    const config = previewConversionPayload()
-    const targets = config.mode === 'Remote' && config.servers.length ? config.servers.filter(server => !server.disabled) : [config]
-    if (!targets.length) { previewAgentProbe.value = '请先勾选要测试的转图服务器。'; return }
-    const results = await Promise.all(targets.map(async target => {
-      const result = await testPreviewAgent({ ...config, agentUrl: target.agentUrl, agentToken: target.agentToken, timeoutMinutes: target.timeoutMinutes }, props.token!)
-      return { ...result, message: ('name' in target ? target.name + ' · ' : '') + result.message }
-    }))
-    previewAgentProbe.value = results.map(result => result.message).join('；')
-    if (results.every(result => result.ok)) ElMessage.success('所选转图服务器连接正常')
-    else ElMessage.warning('部分转图服务器连接失败，请查看测试结果')
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '转图服务器测试失败'
-    previewAgentProbe.value = message
-    ElMessage.error(message)
-  } finally {
-    previewAgentTesting.value = false
-  }
-}
-
-async function savePreviewConversion() {
-  if (previewConversionDraft.mode === 'Remote' && !/^https?:\/\/.+/i.test(previewConversionPayload().agentUrl)) {
-    ElMessage.warning('请填写转图服务器地址，例如 http://192.168.2.50:5199')
-    return
-  }
-  try {
-    await props.onSaveSettings({ ...storageDraft, previewConversion: previewConversionPayload() })
-    ElMessage.success('图纸转换设置已保存')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '图纸转换设置保存失败')
-  }
-}
 watch(() => props.numberingOptions.organizations, organizations => {
   counterDrafts.value = organizations.map(item => ({ id: item.id, name: item.name, project: item.currentProjectSequence, serial: item.currentSerialSequence }))
 }, { immediate: true, deep: true })
@@ -183,9 +132,9 @@ function mappingSource(mapping: BomPropertyMapping) {
 }
 
 async function saveCheckoutPolicy() {
-  const ordered = [storageDraft.checkoutReminderHours, storageDraft.checkoutStrongReminderHours, storageDraft.checkoutOverdueHours]
-  if (ordered.some(value => !Number.isInteger(value) || value < 1) || ordered.some((value, index) => index > 0 && value <= ordered[index - 1])) {
-    ElMessage.warning('提醒、强提醒和超时时间必须为依次增大的整数')
+  const durations = [storageDraft.checkoutOverdueHours, storageDraft.checkoutOverdueReleaseGraceHours ?? 12]
+  if (durations.some(value => !Number.isInteger(value) || value < 1 || value > 720)) {
+    ElMessage.warning('占用提醒和提醒后宽限须分别填写1至720之间的整数小时')
     return
   }
   try {
@@ -254,8 +203,13 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       </el-tab-pane>
       <el-tab-pane v-if="canManageStorage !== false" label="存档位置" name="storage" class="pdm-storage-location-pane">
         <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>项目文件夹规则</h2><p>主项目号作为容器；主项目和各子项目均存放在对应主项目号目录下。</p></div></header>
-          <div class="pdm-settings-form pdm-settings-grid--four"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-1</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-1</small></label><label>料品资料存档根目录<input v-model="storageDraft.materialAttachmentRoot" placeholder="例如 D:\PLM\MaterialAttachments"><small>目录变更只影响新上传附件，历史附件仍从原位置下载。</small></label></div>
+          <header class="pdm-manager-heading"><h2>项目文件夹规则</h2></header>
+          <StorageDirectoryList label="项目存档目录">
+            <tr v-for="field in projectDirectories" :key="field.key">
+              <th scope="row"><label :for="`${storageId}-${field.key}`">{{ field.label }}</label></th>
+              <td><input :id="`${storageId}-${field.key}`" v-model="storageDraft[field.key]" class="pdm-table-input"></td>
+            </tr>
+          </StorageDirectoryList>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveStorage">保存存储设置</button></div>
         </section>
         <ServerStorageSettings v-if="token" :token="token" />
@@ -265,62 +219,24 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       <el-tab-pane v-if="canManageFolders && $slots.folders" label="文件夹模板" name="folder-templates" lazy>
         <slot name="folders" />
       </el-tab-pane>
-      <el-tab-pane v-if="canManageStorage !== false" label="图纸转换" name="preview-conversion">
-        <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>PDF / STEP 转图位置</h2><p>正式发布（非标件BOM+图纸、增补/变更）审批通过后，系统自动把2D工程图转PDF、零件与装配转STEP。远程任务由所选服务器中空闲的一台执行。</p></div></header>
-          <div class="pdm-settings-form pdm-settings-grid--four">
-            <label>转换方式
-              <select v-model="previewConversionDraft.mode">
-                <option v-if="settings.previewConversion?.localExecutionAllowed !== false" value="Local">本机（API服务器上的SolidWorks）</option>
-                <option value="Remote">远程转图服务器（推荐）</option>
-              </select>
-              <small>远程方式需在转图电脑上运行转图代理 Upton.Pdm.PreviewAgent.exe，并安装SolidWorks。</small>
-            </label>
-            <label>转图服务器地址
-              <input v-model="previewConversionDraft.agentUrl" :disabled="previewConversionDraft.mode !== 'Remote'" placeholder="例如 http://192.168.2.50:5199" aria-label="转图服务器地址">
-              <small>填写转图电脑的IP与代理端口；地址不要带结尾的斜杠。</small>
-            </label>
-            <label>访问令牌
-              <input type="password" v-model="previewConversionDraft.agentToken" :disabled="previewConversionDraft.mode !== 'Remote'" placeholder="与转图代理配置一致（可留空）" aria-label="转图服务器访问令牌">
-              <small>用于限制只有本PLM服务器可以调用转图代理。</small>
-            </label>
-            <label>转换超时（分钟）
-              <input v-model.number="previewConversionDraft.timeoutMinutes" type="number" min="1" max="120">
-              <small>按图档数量设置，建议30分钟；超时后本次发布中止并标记发布失败。</small>
-            </label>
-          </div>
-          <p v-if="previewAgentProbe" class="pdm-inline-info" role="status">{{ previewAgentProbe }}</p>
-          <fieldset v-if="previewConversionDraft.mode === 'Remote' && settings.previewConversion?.servers?.length" class="preview-hosts">
-            <legend>参与转图的服务器（可多选）</legend>
-            <label v-for="server in settings.previewConversion.servers" :key="server.agentUrl">
-              <input v-model="selectedAgentUrls" type="checkbox" :value="server.agentUrl">
-              {{ server.name }} · {{ server.agentUrl }}
-            </label>
-            <small v-if="!selectedAgentUrls.length">当前未选择服务器，转图任务将等待。</small>
-          </fieldset>
-          <div class="pdm-settings-actions">
-            <button type="button" class="pdm-secondary-action" :disabled="pending || previewAgentTesting" @click="testPreviewAgentConnection">{{ previewAgentTesting ? '正在测试…' : '测试连接' }}</button>
-            <button type="button" class="pdm-primary-action" :disabled="pending" @click="savePreviewConversion">保存图纸转换设置</button>
-          </div>
-        </section>
+      <el-tab-pane v-if="canManageStorage !== false" label="图纸转换" name="preview-conversion" lazy>
+        <PreviewConversionSettings v-if="token" :key="companyId" :token="token" :active="active && activeTab === 'preview-conversion'" />
       </el-tab-pane>
       <el-tab-pane v-if="canManageStorage !== false" label="PDF属性填写" name="pdf-title-block">
         <PdfTitleBlockFillSettings :settings="settings" :administrator="administrator ?? false" :pending="pending" :on-save-settings="onSaveSettings" />
       </el-tab-pane>
       <el-tab-pane v-if="canManageStorage !== false" label="编辑权限" name="checkout-policy">
         <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>自动结束编辑与离线保护</h2><p>关闭图档后先保留必要草稿。闲置且确认无修改时，由插件倒计时释放；持续离线达到回收时限后，服务器撤销旧会话。在线有未提交修改时由负责人处理，接手人使用服务器最后存档版本。</p></div></header>
+          <header class="pdm-manager-heading"><div><h2>图档编辑与自动释放</h2><p>关闭图档时，插件先保留必要的草稿，再释放编辑权限。长期占用只提醒编辑人。提醒后仍占用超过宽限期时，系统自动释放。</p></div></header>
           <div class="pdm-settings-form pdm-lock-policy-grid pdm-settings-grid--four">
             <label>插件心跳（秒）<input v-model.number="storageDraft.checkoutHeartbeatSeconds" type="number" min="30" max="600"><small>建议60秒</small></label>
             <label>编辑租约（分钟）<input v-model.number="storageDraft.checkoutLeaseMinutes" type="number" min="2" max="60"><small>建议5分钟，至少为心跳的两倍</small></label>
             <label>离线宽限（分钟）<input v-model.number="storageDraft.checkoutOfflineGraceMinutes" type="number" min="5" max="1440"><small>建议30分钟，之后可人工接管</small></label>
-            <label>首次提醒（小时）<input v-model.number="storageDraft.checkoutReminderHours" type="number" min="1" max="720"><small>建议4小时</small></label>
-            <label>强提醒（小时）<input v-model.number="storageDraft.checkoutStrongReminderHours" type="number" min="2" max="720"><small>建议8小时</small></label>
-            <label>超时标记（小时）<input v-model.number="storageDraft.checkoutOverdueHours" type="number" min="3" max="720"><small>建议24小时</small></label>
-            <label><span>启用自动释放</span><input v-model="storageDraft.checkoutAutoReleaseEnabled" type="checkbox"><small>关闭后暂停闲置释放和长期离线自动回收，人工处理仍可用。</small></label>
+            <label>占用提醒（小时）<input v-model.number="storageDraft.checkoutOverdueHours" type="number" min="1" max="720"><small>默认24小时，从获取编辑权限时起算。</small></label>
+            <label>提醒后宽限（小时）<input v-model.number="storageDraft.checkoutOverdueReleaseGraceHours" type="number" min="1" max="720"><small>默认12小时，从发出提醒时起算。</small></label>
+            <label><span>启用自动释放</span><input v-model="storageDraft.checkoutAutoReleaseEnabled" type="checkbox"><small>控制插件无修改闲置释放和长期占用到期释放。</small></label>
             <label>无修改闲置（分钟）<input v-model.number="storageDraft.checkoutIdleReleaseMinutes" type="number" min="5" max="1440"><small>建议30分钟，须由插件确认无未提交修改。</small></label>
             <label>释放倒计时（秒）<input v-model.number="storageDraft.checkoutReleaseCountdownSeconds" type="number" min="30" max="300"><small>建议60秒，可点击“继续编辑”延期。</small></label>
-            <label>持续离线回收（小时）<input v-model.number="storageDraft.checkoutForceReleaseHours" type="number" min="24" max="720"><small>建议48小时；旧会话失效，未上传修改须从原电脑恢复比对。</small></label>
           </div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveCheckoutPolicy">保存编辑权限策略</button></div>
         </section>
@@ -392,13 +308,4 @@ async function saveCounters(row: { id: string; project: number; serial: number }
 <style scoped>
 .pdm-storage-location-pane { overflow-y: auto; }
 .pdm-storage-location-pane :deep(.pdm-manager-panel) { height: auto; flex: 0 0 auto; overflow: visible; }
-.pdm-storage-location-pane :deep(.pdm-settings-form small) { white-space: normal; overflow: visible; text-overflow: clip; }
-@media (max-width: 640px) {
-  .pdm-storage-location-pane :deep(.pdm-settings-form) { grid-template-columns: minmax(0, 1fr); }
-}
-</style>
-
-<style scoped>
-.preview-hosts { display: flex; flex-wrap: wrap; gap: 10px 24px; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--el-border-color); }
-.preview-hosts label { display: inline-flex; align-items: center; gap: 6px; }
 </style>

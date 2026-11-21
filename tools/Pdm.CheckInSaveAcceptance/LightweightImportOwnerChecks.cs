@@ -23,7 +23,7 @@ internal static partial class Program
         var feature=ProxyFor("Feature",call=>call.MethodName=="get_Name"?"IMPORT-1":call.MethodName=="get_Is3DInterconnectFeature"?(object)proven:throw new Exception(call.MethodName));
         var nativeParent=ProxyFor("Component2",call=>call.MethodName=="GetModelDoc2"?null:call.MethodName=="GetPathName"?ownerPath:call.MethodName=="get_IsVirtual"?(object)false:call.MethodName=="GetParent"?null:call.MethodName=="FeatureByName"?ReadFeature():throw new Exception("禁止解析或保存："+call.MethodName));
         object ReadFeature(){queries++;return feature;}
-        object Component(string name,object parent)=>ProxyFor("Component2",call=>call.MethodName=="GetModelDoc2"?cacheModel:call.MethodName=="GetPathName"?cache:call.MethodName=="GetImportedPath"?@"Z:\history\source.stp":call.MethodName=="GetParent"?parent:call.MethodName=="get_Name2"?name:throw new Exception("禁止修改组件："+call.MethodName));
+        object Component(string name,object parent,string path=null)=>ProxyFor("Component2",call=>call.MethodName=="GetModelDoc2"?cacheModel:call.MethodName=="GetPathName"?(path??cache):call.MethodName=="GetImportedPath"?@"Z:\history\source.stp":call.MethodName=="GetParent"?parent:call.MethodName=="get_Name2"?name:call.MethodName=="get_IsVirtual"?(object)false:call.MethodName=="get_ReferencedConfiguration"?"Default":throw new Exception("禁止修改组件："+call.MethodName));
         var imported=Component("OWNER-1/IMPORT-1",nativeParent);var child=Component("OWNER-1/IMPORT-1/PART-1",imported);
         var app=ProxyFor("ISldWorks",call=>throw new Exception("不应读取打包清单或激活图档："+call.MethodName));
         object Storage(){var s=New("ImportedComponentStorage",app);Set(s,"AllowInventory",false);return s;}
@@ -31,5 +31,36 @@ internal static partial class Program
         Check((string)TreeCall(storage,"FindOwner",child,root)==ownerPath&&queries==1,"内部子件继承同一已确认归属，缓存一次特征证明");
         proven=false;Check(TreeCall(Storage(),"FindOwner",child,root)==null,"缺少原生证明时仍保持待核对，不盲目归到总装");
         Check(File.ReadAllText(ownerPath)=="owner"&&File.ReadAllText(rootPath)=="root","归属核对不解析、重建、改名或写入原生文件");
+
+        var configuration=ProxyFor("Configuration",call=>call.MethodName=="get_Name"?"Default":throw new Exception(call.MethodName));
+        var manager=ProxyFor("ConfigurationManager",call=>call.MethodName=="get_ActiveConfiguration"?configuration:throw new Exception(call.MethodName));
+        bool MatchCheckout(string path,object occurrence)
+        {
+            var model=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>
+            {
+                switch(call.MethodName)
+                {
+                    case "GetPathName":return path;
+                    case "get_ConfigurationManager":return manager;
+                    case "GetComponents":return new[]{occurrence};
+                    default:throw new Exception("获取校验不得修改装配："+call.MethodName);
+                }
+            }).GetTransparentProxy();
+            var id=Guid.NewGuid();var json=new System.Web.Script.Serialization.JavaScriptSerializer();
+            var manifest=json.Deserialize(json.Serialize(new { rootDocumentId=id,files=new[]{new{documentId=id,
+                fileName=Path.GetFileName(path),relativePath=Path.GetFileName(path),configuration="Default"}} }),Type("ControlledOpenManifestDto"));
+            var snapshot=json.Deserialize(json.Serialize(new { fileName=Path.GetFileName(path),configuration="Default",
+                children=new[]{new { fileName=Path.GetFileName(cache),configuration="Default",kind=0,
+                    status=(int)Enum.Parse(Type("CadReferenceStatus"),"Virtual") }} }),Type("DocumentReferenceNodeDto"));
+            return (bool)TreeCallStatic("PdmAddin","WorkingReuseLoadedContextForEditMatches",model,Path.GetDirectoryName(path),
+                manifest,snapshot,null,null,null,null,null,null,false,null,null,app,null);
+        }
+        proven=true;
+        Check(MatchCheckout(ownerPath,imported),"获取时按原生特征核实归属，即使 SolidWorks IsVirtual 为 false，仍与存档内部实例一致");
+        Check(!MatchCheckout(rootPath,imported),"导入归属指向其他持久装配时不能按当前装配的内部实例通过");
+        Check(!MatchCheckout(ownerPath,Component("OWNER-1/IMPORT-1",nativeParent,Path.Combine(output,"IMPORT.SLDASM"))),
+            "真实外部同名模型不能借用导入归属");
+        proven=false;
+        Check(!MatchCheckout(ownerPath,imported),"仅有导入缓存名和存档记录时，获取仍需原生归属证明");
     }
 }

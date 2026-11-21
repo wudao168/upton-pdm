@@ -484,20 +484,17 @@ internal static partial class Program
         Call(pane, "SetTree", root);
         Set(nested, "CurrentRevision", "W99"); Set(nested, "CheckedOutBy", "stale-user");
         Call(pane, "UpdateSelected", nested);
-        var detail = ((Label)Field(pane, "selectedMeta")).Text;
-        Assert(detail.Contains("随父装配") && !detail.Contains("W99") && !detail.Contains("未归档") && !detail.Contains("未检出"),
-            "embedded details show an independent version or checkout requirement: " + detail);
+        Assert((string)Static("PdmTaskPaneControl", "VersionText", nested) == "随父装配"
+            && ((string)Call(pane, "WorkStateText", nested)).Contains("嵌入式·随父装配保存"),
+            "embedded tree columns show an independent version or checkout requirement");
         foreach (var node in new[] { nested, first, second })
         {
             Set(node, "ImportedSourcePath", Path.Combine(directory, "YIHEDA_CDL21D150P", "CDL21-D150-P.stp"));
             Set(node, "DisplayName", "CDL21导入组件");
         }
         Call(pane, "SetTree", root); Call(pane, "UpdateSelected", nested);
-        var importedDetail = ((Label)Field(pane, "selectedMeta")).Text;
-        Assert(importedDetail.Contains("核对有效链接") && importedDetail.Contains("CDL21-D150-P.stp")
-            && importedDetail.Contains("待确认保存归属") && !importedDetail.Contains("保存在所属装配体内")
-            && !importedDetail.Contains("存储：所属父装配体内") && !importedDetail.Contains("W99"),
-            "IC import was presented as verified self-contained embedded data");
+        Assert(((string)Call(pane, "WorkStateText", nested)).Contains("导入组件·待确认保存归属"),
+            "tree status presented the imported component as verified parent-owned data");
         Assert((string)Static("PdmTaskPaneControl", "VersionText", nested) == "随总装核对",
             "imported cache shows an independent or embedded archive version");
         pane.GetType().GetField("authenticatedUsername", Members).SetValue(pane, "tester");
@@ -523,7 +520,8 @@ internal static partial class Program
         foreach (var node in new[] { nested, first, second }) Set(node,"ImportedStorageOwnerPath",Path.GetFullPath(Path.Combine(directory,"ROOT.SLDASM")));
         Call(pane,"UpdateSelected",nested);
         Assert((string)Static("PdmTaskPaneControl","VersionText",nested)=="随父装配"
-            && ((Label)Field(pane,"selectedMeta")).Text.Contains("不单独登记或升版"),"persisted imports were not presented as parent-owned content");
+            && ((string)Call(pane, "WorkStateText", nested)).Contains("导入组件·随父装配保存"),
+            "tree columns did not present the persisted import as parent-owned content");
         }
         finally { SynchronizationContext.SetSynchronizationContext(previousContext); }
     }

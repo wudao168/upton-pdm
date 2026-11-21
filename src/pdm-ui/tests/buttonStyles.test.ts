@@ -41,7 +41,7 @@ it('扫码流程图节点和标签关闭按钮不显示操作按钮的方框', (
 })
 
 it('全局表格、树、侧栏和分组折叠控件去掉操作外框，菜单触发按钮保持业务样式', async () => {
-  install('<button class="el-table__expand-icon" aria-expanded="false"></button><button class="pdm-tree-toggle">›</button><button class="pdm-category-sidebar__toggle">‹</button><button aria-expanded="true">分组标题</button><button>展开全部</button><button class="pdm-theme-trigger" aria-expanded="false">主题</button><button aria-haspopup="menu" aria-expanded="false">操作</button>')
+  install('<button class="el-table__expand-icon" aria-expanded="false"></button><button class="pdm-tree-toggle">›</button><button class="pdm-category-sidebar__toggle">‹</button><button aria-expanded="true">分组标题</button><button>展开全部</button><button class="pdm-theme-trigger" aria-label="切换深浅色主题"><svg aria-hidden="true"></svg></button><button aria-haspopup="menu" aria-expanded="false">操作</button>')
   const buttons = [...document.querySelectorAll('button')]
   for (const button of buttons.slice(0, 5)) { expect(button.dataset.pdmFoldControl).toBe('true'); expect(button.dataset.pdmButtonKind).toBeUndefined() }
   for (const button of buttons.slice(5)) { expect(button.dataset.pdmFoldControl).toBeUndefined() }

@@ -125,7 +125,8 @@ public sealed record UpdateSystemSettingsRequest(
     bool? CheckoutAutoReleaseEnabled = null,
     int? CheckoutIdleReleaseMinutes = null,
     int? CheckoutReleaseCountdownSeconds = null,
-    PdfTitleBlockFillSettings? PdfTitleBlockFill = null);
+    PdfTitleBlockFillSettings? PdfTitleBlockFill = null,
+    int? CheckoutOverdueReleaseGraceHours = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
 
@@ -277,6 +278,7 @@ public sealed record CancelArchiveRegistrationRequest(Guid SessionId);
 public sealed record EditSessionHeartbeatRequest(string MachineName, IReadOnlyList<Guid> DocumentIds);
 
 public sealed record EditLockActionRequest(string Reason);
+public sealed record ForceEditReleaseRequest(string Reason, Guid? SessionId = null, DateTimeOffset? CheckedOutAt = null);
 public sealed record EmergencyEditReleaseRequest(Guid SessionId, DateTimeOffset CheckedOutAt, string Reason);
 public sealed record AutoEditReleaseRequest(Guid SessionId, DateTimeOffset CheckedOutAt, Guid BaseVersionId, string Sha256);
 public sealed record CloseEditRequest(Guid SessionId, DateTimeOffset CheckedOutAt, string Sha256, bool DraftPreserved);

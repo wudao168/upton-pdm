@@ -12,6 +12,7 @@ public sealed partial class PdmAddin
 {
     private readonly Queue<Action> queuedControlledOpens = new Queue<Action>();
     private readonly HashSet<string> queuedControlledOpenKeys = new HashSet<string>();
+    private const string QueuedOpenReminder = "当前操作完成后将自动打开所选PLM图档；重复请求已合并，无需再次点击。";
 
     private int OnAssemblyDeleteSelectionPreNotify()
     {
@@ -107,7 +108,7 @@ public sealed partial class PdmAddin
                 queuedControlledOpenKeys.Remove(key);
                 BeginControlledOpenCore(projectId, documentId, mode, versionId, checkoutDocumentId, ids, referencePath);
             });
-        taskPaneControl?.SetCheckoutReminder("当前操作完成后将自动打开所选PLM图档；重复请求已合并，无需再次点击。", false);
+        taskPaneControl?.SetCheckoutReminder(QueuedOpenReminder, false);
         LogOperation("[A10] PLM打开请求已排队 document=" + documentId + " queued=" + queuedControlledOpens.Count);
     }
 
@@ -117,6 +118,8 @@ public sealed partial class PdmAddin
             || Volatile.Read(ref controlledOpenInProgress) != 0 || Volatile.Read(ref openOperationInProgress) != 0
             || Volatile.Read(ref workspaceOperationInProgress) != 0 || IsSolidWorksCommandActive()
             || queuedControlledOpens.Count == 0) return;
-        queuedControlledOpens.Dequeue()();
+        var next = queuedControlledOpens.Dequeue();
+        if (queuedControlledOpens.Count == 0) taskPaneControl.ClearCheckoutReminder(QueuedOpenReminder);
+        next();
     }
 }

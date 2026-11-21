@@ -10,10 +10,10 @@ namespace Upton.Pdm.SolidWorks;
 
 public sealed partial class PdmAddin
 {
-    private IModelDoc2[] DrawingOpenCollisions(ControlledOpenManifestDto manifest)
+    private IModelDoc2[] DrawingOpenCollisions(ControlledOpenManifestDto manifest, IModelDoc2[] loaded = null)
     {
         var names = new HashSet<string>(manifest.Files.Select(file => file.FileName), StringComparer.OrdinalIgnoreCase);
-        return ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+        return (loaded ?? ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>()).ToArray())
             .Where(model => names.Contains(Path.GetFileName(model.GetPathName())) || names.Contains(model.GetTitle())).ToArray();
     }
 
@@ -27,16 +27,32 @@ public sealed partial class PdmAddin
     private async Task<bool> TryOpenDrawingInLoadedContextAsync(ControlledOpenManifestDto requested, bool acquirePermission)
     {
         if (DocumentKindFromPath(requested.RootRelativePath) != CadDocumentKind.Drawing) return false;
-        var collisions = DrawingOpenCollisions(requested);
-        if (collisions.Length == 0) return false;
-        var context = controlledOpenManifests.Where(pair => pair.Value.ProjectId == requested.ProjectId
+        var loaded = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>()).ToArray();
+        var collisions = DrawingOpenCollisions(requested, loaded);
+        var modelIds = requested.Files.Where(file => DocumentKindFromPath(file.FileName) is CadDocumentKind.Part or CadDocumentKind.Assembly)
+            .Select(file => file.DocumentId).ToArray();
+        // Lightweight occurrences do not have a loaded model document. Their
+        // open assembly's manifest still owns the physical working copies.
+        var loadedPaths = new HashSet<string>(loaded.Select(model => model.GetPathName()), StringComparer.OrdinalIgnoreCase);
+        var candidates = controlledOpenManifests.Where(pair => pair.Value.ProjectId == requested.ProjectId
             && !IsReadOnlyPreviewPath(pair.Key) && !IsHistoricalDerivedPath(pair.Key)
-            && collisions.All(model => requested.Files.Any(file => pair.Value.Files.Any(existing => existing.DocumentId == file.DocumentId
-                && PathsEqual(model.GetPathName(), Path.Combine(pair.Key, existing.RelativePath ?? existing.FileName))))))
-            .OrderByDescending(pair => pair.Value.Files.Count).FirstOrDefault();
+            && (collisions.Length > 0
+                ? collisions.All(model => requested.Files.Any(file => FindWorkingManifestFile(pair, file.DocumentId, model.GetPathName()) != null))
+                : modelIds.Length > 0 && DocumentKindFromPath(pair.Value.RootRelativePath) == CadDocumentKind.Assembly
+                    && loadedPaths.Contains(ManagedCadPaths.Resolve(pair.Key, pair.Value.RootRelativePath))
+                    && modelIds.All(id => pair.Value.Files.Any(file => file.DocumentId == id))))
+            .ToArray();
+        if (collisions.Length == 0 && candidates.Length > 1)
+        {
+            var activePath = (application.ActiveDoc as IModelDoc2)?.GetPathName();
+            candidates = candidates.Where(pair => IsPathWithinDirectory(activePath, pair.Key)).ToArray();
+            if (candidates.Length != 1)
+                throw new InvalidOperationException("多个已打开装配包含这张工程图的模型，请切换到所需装配体后重新打开工程图。");
+        }
+        var context = candidates.OrderByDescending(pair => pair.Value.Files.Count).FirstOrDefault();
         if (context.Value == null)
         {
-            EnsureDrawingOpenHasNoConflictingWindows(requested);
+            if (collisions.Length > 0) EnsureDrawingOpenHasNoConflictingWindows(requested);
             return false;
         }
         var unresolvedWarnings = (requested.Warnings ?? new List<string>())
@@ -54,10 +70,10 @@ public sealed partial class PdmAddin
             var existing = context.Value.Files.FirstOrDefault(candidate => candidate.DocumentId == file.DocumentId);
             var isContext = existing != null && contextIds.Contains(file.DocumentId);
             var source = existing ?? file;
-            var path = Path.GetFullPath(Path.Combine(context.Key, source.RelativePath ?? source.FileName));
+            var path = ControlledReferenceMaterializer.ManifestPath(context.Key, source);
             if (!IsPathWithinDirectory(path, context.Key)
                 || context.Value.Files.Any(candidate => candidate.DocumentId != file.DocumentId
-                    && PathsEqual(path, Path.Combine(context.Key, candidate.RelativePath ?? candidate.FileName)))
+                    && PathsEqual(path, ControlledReferenceMaterializer.ManifestPath(context.Key, candidate)))
                 || existing != null && (!string.Equals(existing.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
                     || !isContext && (existing.VersionId != file.VersionId || !WorkingConfigurationMatches(existing, file))))
             {
@@ -81,7 +97,7 @@ public sealed partial class PdmAddin
                 }
                 var model = FindLoadedDocument(path);
                 var verified = ControlledReferenceMaterializer.TryReadVerifiedCopyHash(path, source, out var workingHash);
-                if (!verified || model?.GetSaveFlag() == true && !model.IsOpenedReadOnly())
+                if (!verified || !isContext && model?.GetSaveFlag() == true && !model.IsOpenedReadOnly())
                 {
                     if (documents == null) documents = (await apiClient.GetDocumentsAsync(requested.ProjectId, lifetime.Token)).ToDictionary(item => item.Id);
                     documents.TryGetValue(file.DocumentId, out var document);
@@ -91,14 +107,14 @@ public sealed partial class PdmAddin
                     if (!verified && workingHash != null) retainedHashes[file.DocumentId] = workingHash;
                 }
             }
-            if (isContext) LogOperation("工程图打开复用已核对的装配环境，未切换父装配版本或配置：" + source.FileName);
             files.Add(new ControlledOpenFileDto { DocumentId = file.DocumentId, VersionId = isContext ? source.VersionId : file.VersionId,
                 FileName = file.FileName, RelativePath = source.RelativePath ?? source.FileName, Configuration = isContext ? source.Configuration : file.Configuration,
                 Revision = isContext ? source.Revision : file.Revision, Sha256 = source.Sha256, FileLength = source.FileLength,
                 NativeIsolation = source.NativeIsolation, IsNativeIsolated = source.IsNativeIsolated, IsRoot = file.DocumentId == requested.RootDocumentId });
         }
+        if (contextIds.Count > 0) LogOperation("工程图打开保留已核对的装配环境，未切换、保存或解锁环境图档；数量=" + contextIds.Count);
         var root = files.Single(file => file.IsRoot);
-        var rootPath = Path.GetFullPath(Path.Combine(context.Key, root.RelativePath));
+        var rootPath = ControlledReferenceMaterializer.ManifestPath(context.Key, root);
         if (!string.Equals(NormalizeDirectory(Path.GetDirectoryName(rootPath)), NormalizeDirectory(context.Key),
             StringComparison.OrdinalIgnoreCase)) throw DrawingContextMismatch(root.FileName);
         if (missingDrawing != null)

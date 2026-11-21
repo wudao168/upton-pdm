@@ -5,10 +5,12 @@ import { listProjectFolders, listReleasePackages } from '../api'
 import { releasePreviewUnfinished } from '../releasePreviewState'
 import { emergencyReleaseEditLock as emergencyReleaseEditLockRequest } from '../api'
 import { heartbeatSession, logoutSession } from '../api'
+import { deactivateUser as deactivateUserRequest, deleteUser as deleteUserRequest } from '../api'
 import { readMaterialNotificationPermission } from '../api'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { loadBomSummary } from '../api'
+import { canViewProjectTab } from '../projectCenterAccess'
 import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as previewProjectCopyRequest } from '../api'
 import { transferApproval } from '../api'
 import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
@@ -57,7 +59,7 @@ function bomPropertyMappingsFromLegacy(settings: PdmSystemSettings) {
     solidWorksProperty: mapping.mappingEditable ? values[mapping.pdmPropertyKey] ?? mapping.solidWorksProperty : mapping.solidWorksProperty,
   }))
 }
-const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设计审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['正式补充', '物料问题 / 交期不满足', '物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 物料漏买', '图纸问题 / 图纸漏下', '图纸问题 / 图纸错误', '设计问题 / 设计变更', '设计问题 / 设计错误', '客户原因 / 客户需求变更', '客户原因 / 客户信息输入错误', '客户原因 / 客户未及时确认', '客户原因 / 客户未及时提供产品', '其他'], formalSupplementPolicies: { standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } } }
+const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutOverdueReleaseGraceHours: 12, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设计审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['正式补充', '物料问题 / 交期不满足', '物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 物料漏买', '图纸问题 / 图纸漏下', '图纸问题 / 图纸错误', '设计问题 / 设计变更', '设计问题 / 设计错误', '客户原因 / 客户需求变更', '客户原因 / 客户信息输入错误', '客户原因 / 客户未及时确认', '客户原因 / 客户未及时提供产品', '其他'], formalSupplementPolicies: { standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } } }
 const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
 
 const emptyProject: ProjectSummary = {
@@ -335,10 +337,12 @@ export function usePdmWorkspace() {
   let persistentSession: AuthSession | null = null
   let sessionRenewal: Promise<boolean> | null = null
   let projectDocumentRefreshPending = false
+  let projectDocumentRefreshSequence = 0
   let reloadRequestSequence = 0
+  let confirmedBomDeleteSequence = 0
   const loadedProjectTabs = reactive(new Set<string>())
   const projectTabLoadedAt = new Map<string, number>()
-  const pendingProjectTabs = new Map<string, Promise<void>>()
+  const pendingProjectTabs = new Map<string, Promise<boolean>>()
   const projectTabReadVersions = new Map<string, number>()
   let activeProjectTab = 'overview'
   let projectPageActive = true
@@ -719,12 +723,61 @@ export function usePdmWorkspace() {
     }
   }
 
+  async function refreshCurrentBom() {
+    try {
+      return await ensureProjectTab('bom', true, true)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 401) handleSessionExpired()
+      throw error
+    }
+  }
+
+  async function refreshAfterBomRecycle(projectId: string, result: string) {
+    if (project.value.id !== projectId) return
+    try {
+      await refreshCurrentBom()
+    } catch (error) {
+      throw new Error(result + '。' + messageFrom(error))
+    }
+  }
+
+  function applyConfirmedBomDeletes(itemIds: string[], returnedItems: BomItem[]) {
+    const requestedIds = new Set(itemIds)
+    const deleted = new Map(returnedItems.flatMap(item =>
+      item.id && requestedIds.has(item.id) && item.manuallyExcluded ? [[item.id, item] as const] : []))
+    if (!deleted.size) return
+
+    ++confirmedBomDeleteSequence
+    for (const category of [standardBom, nonStandardBom, unclassifiedBom, electricalBom]) {
+      let changed = false
+      const updated = category.value.map(item => {
+        if (item.manuallyExcluded || !item.id) return item
+        const ids = item.summaryItemIds?.length ? item.summaryItemIds : [item.id]
+        const confirmation = deleted.get(ids[0]!)
+        // An aggregate with surviving instances needs the refreshed server projection.
+        if (!confirmation || !ids.every(id => deleted.has(id))) return item
+        changed = true
+        return { ...item, manuallyExcluded: true, pendingRemoval: false, pendingClassification: false,
+          manualUnmatched: false, manuallyRetained: false,
+          reconciliationStatus: confirmation.reconciliationStatus,
+          reconciliationNote: confirmation.reconciliationNote,
+          reconciliationUpdatedBy: confirmation.reconciliationUpdatedBy,
+          reconciliationUpdatedAt: confirmation.reconciliationUpdatedAt,
+          deletedAt: confirmation.deletedAt, deletedBy: confirmation.deletedBy, deleteReason: confirmation.deleteReason }
+      })
+      if (changed) category.value = updated
+    }
+  }
+
   async function batchDeleteBomItems(itemIds: string[], reason: string) {
     operationPending.value = true
     operationError.value = ''
     try {
-      await batchDeleteBomItemsRequest(project.value.id, itemIds, reason, accessToken)
-      await reload()
+      const projectId = project.value.id, token = accessToken
+      const updated = await batchDeleteBomItemsRequest(projectId, itemIds, reason, token)
+      if (project.value.id !== projectId || token !== accessToken) return
+      applyConfirmedBomDeletes(itemIds, updated)
+      await refreshAfterBomRecycle(projectId, '所选物料已移入回收站')
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -737,8 +790,9 @@ export function usePdmWorkspace() {
     operationPending.value = true
     operationError.value = ''
     try {
-      await batchRestoreBomItemsRequest(project.value.id, itemIds, mode, accessToken)
-      await reload()
+      const projectId = project.value.id
+      await batchRestoreBomItemsRequest(projectId, itemIds, mode, accessToken)
+      await refreshAfterBomRecycle(projectId, '所选物料已恢复')
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -751,8 +805,9 @@ export function usePdmWorkspace() {
     operationPending.value = true
     operationError.value = ''
     try {
-      await permanentlyDeleteManualBomItemsRequest(project.value.id, itemIds, accessToken)
-      await reload()
+      const projectId = project.value.id
+      await permanentlyDeleteManualBomItemsRequest(projectId, itemIds, accessToken)
+      await refreshAfterBomRecycle(projectId, '所选物料已彻底删除')
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -1275,15 +1330,35 @@ export function usePdmWorkspace() {
     finally { operationPending.value = false }
   }
 
-  async function forceReleaseEditLock(documentId: string, reason: string) {
+  async function refreshReleasedEditLock(documentId: string, token: string, company: string, expected?: { sessionId: string; checkedOutAt: string }) {
+    if (accessToken !== token || activeCompanyId.value !== company) return
+    editLocks.value = editLocks.value.filter(lock => lock.documentId !== documentId
+      || (expected && (lock.sessionId !== expected.sessionId || lock.checkedOutAt !== expected.checkedOutAt)))
+    try {
+      const locks = await requestEditLocks()
+      if (accessToken === token && activeCompanyId.value === company) editLocks.value = locks
+    } catch {
+      // 已释放的权限从本地列表移除，其他记录在下一次刷新时同步。
+    }
+  }
+
+  async function forceReleaseEditLock(documentId: string, reason: string, expected?: { sessionId: string; checkedOutAt: string }) {
+    const token = accessToken, company = activeCompanyId.value
     operationPending.value = true
-    try { await forceReleaseEditLockRequest(documentId, reason, accessToken); editLocks.value = await requestEditLocks() }
+    try {
+      await forceReleaseEditLockRequest(documentId, reason, token, expected)
+      await refreshReleasedEditLock(documentId, token, company, expected)
+    }
     finally { operationPending.value = false }
   }
 
   async function emergencyReleaseEditLock(documentId: string, sessionId: string, checkedOutAt: string, reason: string) {
+    const token = accessToken, company = activeCompanyId.value
     operationPending.value = true
-    try { await emergencyReleaseEditLockRequest(documentId, sessionId, checkedOutAt, reason, accessToken); editLocks.value = await requestEditLocks() }
+    try {
+      await emergencyReleaseEditLockRequest(documentId, sessionId, checkedOutAt, reason, token)
+      await refreshReleasedEditLock(documentId, token, company, { sessionId, checkedOutAt })
+    }
     finally { operationPending.value = false }
   }
 
@@ -1451,6 +1526,7 @@ export function usePdmWorkspace() {
     if (!accessToken) return
     const wasReady = ready.value
     const requestSequence = ++reloadRequestSequence
+    const bomDeleteSequence = confirmedBomDeleteSequence
     loadedProjectTabs.clear()
     projectTabLoadedAt.clear()
     pendingProjectTabs.clear()
@@ -1538,8 +1614,10 @@ export function usePdmWorkspace() {
       const data = await loadProjectWorkspace(selectedProject.id, accessToken, sourceDataRequestedProjectId.value === selectedProject.id, currentPermissions.value, tabs)
       if (requestSequence !== reloadRequestSequence) return
       const previousSelectedId = keepSelection ? selectedId.value : ''
-      moduleErrors.value = data.moduleErrors
-      for (const tab of tabs ?? ['documents', 'files', 'bom', 'release']) if (!data.moduleErrors.some(error => error.tab === tab)) { loadedProjectTabs.add(tab); projectTabLoadedAt.set(tab, Date.now()) }
+      const keepCurrentBom = keepSelection && bomDeleteSequence !== confirmedBomDeleteSequence && data.project.canReadContent
+        && canViewProjectTab(data.project.effectiveProjectPermissions ?? currentPermissions.value, 'bom')
+      moduleErrors.value = keepCurrentBom ? [...moduleErrors.value.filter(error => error.tab === 'bom'), ...data.moduleErrors.filter(error => error.tab !== 'bom')] : data.moduleErrors
+      for (const tab of tabs ?? ['documents', 'files', 'bom', 'release']) if (!(keepCurrentBom && tab === 'bom') && !data.moduleErrors.some(error => error.tab === tab)) { loadedProjectTabs.add(tab); projectTabLoadedAt.set(tab, Date.now()) }
       project.value = data.project
       if (!refreshGlobal) projects.value = projects.value.map(candidate => candidate.id === data.project.id ? { ...candidate, ...data.project } : candidate)
       projectFolders.value = data.folders
@@ -1547,13 +1625,15 @@ export function usePdmWorkspace() {
       documentRelations.value = data.documentRelations
       root.value = data.root
       hasDocuments.value = data.hasDocuments
-      standardBom.value = data.standardBom
-      nonStandardBom.value = data.nonStandardBom
-      unclassifiedBom.value = data.unclassifiedBom
-      electricalBom.value = data.electricalBom
-      bomSourceData.value = data.bomSourceData
-      bomEmptyDeclarations.value = data.bomEmptyDeclarations
-      bomVersions.value = data.bomVersions
+      if (!keepCurrentBom) {
+        standardBom.value = data.standardBom
+        nonStandardBom.value = data.nonStandardBom
+        unclassifiedBom.value = data.unclassifiedBom
+        electricalBom.value = data.electricalBom
+        bomSourceData.value = data.bomSourceData
+        bomEmptyDeclarations.value = data.bomEmptyDeclarations
+        bomVersions.value = data.bomVersions
+      }
       bomBaselines.value = data.bomBaselines
       drawingReviews.value = data.drawingReviews
       materialCodeApplications.value = data.materialCodeApplications
@@ -1608,14 +1688,15 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function refreshOpenProjectDocuments() {
+  async function refreshOpenProjectDocuments(force = false) {
     if (!projectPageActive || activeProjectTab !== 'documents' || document.hidden) return
-    if (!accessToken || !ready.value || !project.value.id || loading.value || operationPending.value || projectDocumentRefreshPending) return
-    const projectId = project.value.id
+    if (!accessToken || !ready.value || !project.value.id || loading.value || operationPending.value || (projectDocumentRefreshPending && !force)) return
+    const projectId = project.value.id, token = accessToken, company = activeCompanyId.value
+    const sequence = ++projectDocumentRefreshSequence
     projectDocumentRefreshPending = true
     try {
-      const data = await loadProjectDocumentWorkspace(projectId, accessToken)
-      if (project.value.id !== projectId) return
+      const data = await loadProjectDocumentWorkspace(projectId, token)
+      if (project.value.id !== projectId || accessToken !== token || activeCompanyId.value !== company || sequence !== projectDocumentRefreshSequence) return
       const previousSelectedId = selectedId.value
       projectTabLoadedAt.set('documents', Date.now())
       managedDocuments.value = data.documents
@@ -1627,9 +1708,9 @@ export function usePdmWorkspace() {
           || data.documents.some(document => `document-${document.id}` === previousSelectedId))
       if (!selectedStillExists) selectedId.value = documentFilter.value === 'drawing' ? '' : data.root.id
     } catch (error) {
-      if (error instanceof PdmApiError && error.status === 401) handleSessionExpired()
+      if (accessToken === token && error instanceof PdmApiError && error.status === 401) handleSessionExpired()
     } finally {
-      projectDocumentRefreshPending = false
+      if (sequence === projectDocumentRefreshSequence) projectDocumentRefreshPending = false
     }
   }
 
@@ -1790,6 +1871,26 @@ export function usePdmWorkspace() {
     operationPending.value = true
     try { return await resetUserPasswordRequest(username, accessToken) }
     finally { operationPending.value = false }
+  }
+
+  async function deactivateUser(username: string) {
+    operationPending.value = true
+    try {
+      const saved = await deactivateUserRequest(username, accessToken)
+      const updated = organizationDirectory.value.users.map(user => user.username === username ? { ...user, isActive: saved.isActive } : user)
+      organizationDirectory.value = { ...organizationDirectory.value, users: updated }
+      users.value = updated
+    } finally { operationPending.value = false }
+  }
+
+  async function deleteUser(username: string) {
+    operationPending.value = true
+    try {
+      await deleteUserRequest(username, accessToken)
+      const updated = organizationDirectory.value.users.filter(user => user.username !== username)
+      organizationDirectory.value = { ...organizationDirectory.value, users: updated }
+      users.value = updated
+    } finally { operationPending.value = false }
   }
 
   async function updateOrganizationUnitManagers(unitId: string, primaryManager: string, collaborativeManagers: string[]) {
@@ -1954,33 +2055,49 @@ export function usePdmWorkspace() {
     return [tab]
   }
 
-  async function ensureProjectTab(tab: string, refresh = false) {
-    activeProjectTab = tab
+  async function ensureProjectTab(tab: string, refresh = false, preserveBomOnReadFailure = false) {
+    if (!preserveBomOnReadFailure) activeProjectTab = tab
     const modules = projectTabModules(tab).filter(item => ['documents', 'files', 'bom', 'release'].includes(item) && (refresh || !loadedProjectTabs.has(item) || Date.now() - (projectTabLoadedAt.get(item) ?? 0) > 30000))
     if (!project.value.id || (!modules.length && !refresh)) return
-    const id = project.value.id, generation = reloadRequestSequence
+    const id = project.value.id, generation = reloadRequestSequence, token = accessToken
+    const bomDeleteSequence = confirmedBomDeleteSequence
     const key = `${id}:${tab}`
     const existing = pendingProjectTabs.get(key)
     if (existing && !refresh) return await existing
     const version = (projectTabReadVersions.get(key) ?? 0) + 1
     projectTabReadVersions.set(key, version)
     const pending = (async () => {
-      const data = await loadProjectWorkspace(id, accessToken, sourceDataRequestedProjectId.value === id, currentPermissions.value, modules, refresh ? undefined : project.value)
-      if (generation !== reloadRequestSequence || project.value.id !== id || projectTabReadVersions.get(key) !== version) return
+      const data = await loadProjectWorkspace(id, token, sourceDataRequestedProjectId.value === id, currentPermissions.value, modules, refresh ? undefined : project.value)
+      if (token !== accessToken || generation !== reloadRequestSequence || project.value.id !== id || projectTabReadVersions.get(key) !== version) return false
+      if (modules.includes('bom') && bomDeleteSequence !== confirmedBomDeleteSequence && data.project.canReadContent
+        && canViewProjectTab(data.project.effectiveProjectPermissions ?? currentPermissions.value, 'bom')) return false
       if (refresh) { project.value = data.project; projects.value = projects.value.map(item => item.id === id ? { ...item, ...data.project } : item) }
       if (!data.project.canReadContent) { loadedProjectTabs.clear(); modules.splice(0, modules.length, 'documents', 'files', 'bom', 'release') }
-      moduleErrors.value = [...moduleErrors.value.filter(error => !modules.includes(error.tab)), ...data.moduleErrors]
+      const bomErrors = preserveBomOnReadFailure ? data.moduleErrors.filter(error => error.tab === 'bom' || error.tab === 'release') : []
+      const retained = new Set<string>()
+      for (const module of ['bom', 'release']) {
+        const errors = bomErrors.filter(error => error.tab === module)
+        if (loadedProjectTabs.has(module) && data.project.canReadContent && canViewProjectTab(data.project.effectiveProjectPermissions ?? currentPermissions.value, module)
+          && errors.length && errors.every(error => error.status === undefined || error.status >= 500 || error.status === 408 || error.status === 429)) retained.add(module)
+      }
+      moduleErrors.value = [...moduleErrors.value.filter(error => !modules.includes(error.tab)), ...data.moduleErrors.filter(error => !retained.has(error.tab))]
       if (modules.includes('documents')) { managedDocuments.value = data.documents; documentRelations.value = data.documentRelations; root.value = data.root; hasDocuments.value = data.hasDocuments; drawingReviews.value = data.drawingReviews; if (!findNode(data.root, selectedId.value) && !data.documents.some(document => `document-${document.id}` === selectedId.value)) selectedId.value = documentFilter.value === 'drawing' ? '' : data.root.id }
       if (modules.includes('files')) projectFolders.value = data.folders
-      if (modules.includes('bom')) { standardBom.value = data.standardBom; nonStandardBom.value = data.nonStandardBom; unclassifiedBom.value = data.unclassifiedBom; electricalBom.value = data.electricalBom; bomEmptyDeclarations.value = data.bomEmptyDeclarations; bomVersions.value = data.bomVersions; bomSourceData.value = data.bomSourceData }
-      if (modules.includes('release')) { bomBaselines.value = data.bomBaselines; materialCodeApplications.value = data.materialCodeApplications; releasePackages.value = data.releasePackages }
+      if (modules.includes('bom') && !retained.has('bom')) { standardBom.value = data.standardBom; nonStandardBom.value = data.nonStandardBom; unclassifiedBom.value = data.unclassifiedBom; electricalBom.value = data.electricalBom; bomEmptyDeclarations.value = data.bomEmptyDeclarations; bomVersions.value = data.bomVersions; bomSourceData.value = data.bomSourceData }
+      if (modules.includes('release') && !retained.has('release')) { bomBaselines.value = data.bomBaselines; materialCodeApplications.value = data.materialCodeApplications; releasePackages.value = data.releasePackages }
       for (const item of modules) {
-        if (data.moduleErrors.some(error => error.tab === item)) { loadedProjectTabs.delete(item); projectTabLoadedAt.delete(item) }
-        else { loadedProjectTabs.add(item); projectTabLoadedAt.set(item, Date.now()) }
+        if (data.moduleErrors.some(error => error.tab === item)) {
+          if (!retained.has(item)) loadedProjectTabs.delete(item)
+          projectTabLoadedAt.delete(item)
+        } else { loadedProjectTabs.add(item); projectTabLoadedAt.set(item, Date.now()) }
       }
+      if (preserveBomOnReadFailure && (!data.project.canReadContent || !canViewProjectTab(data.project.effectiveProjectPermissions ?? currentPermissions.value, 'bom')))
+        throw new Error('当前账号没有该项目的BOM查看权限。')
+      if (bomErrors.length) throw new Error('BOM刷新失败，请重试。' + bomErrors.map(error => error.module + '：' + error.message).join('；'))
+      return true
     })()
     pendingProjectTabs.set(key, pending)
-    try { await pending } finally { if (pendingProjectTabs.get(key) === pending) pendingProjectTabs.delete(key) }
+    try { return await pending } finally { if (pendingProjectTabs.get(key) === pending) pendingProjectTabs.delete(key) }
   }
 
   function closeProject() {
@@ -2254,6 +2371,8 @@ export function usePdmWorkspace() {
     updateOrganizationMemberships,
     saveUser,
     resetUserPassword,
+    deactivateUser,
+    deleteUser,
     updateOrganizationUnitManagers,
     updateProject,
     updateProjectExecutionUnit,
@@ -2292,6 +2411,7 @@ export function usePdmWorkspace() {
     resolveBomItem,
     retainBomItems,
     batchUpdateBomItems,
+    refreshCurrentBom,
     batchDeleteBomItems,
     batchRestoreBomItems,
     permanentlyDeleteManualBomItems,
@@ -2330,6 +2450,7 @@ export function usePdmWorkspace() {
     requestEditLockRelease,
     forceReleaseEditLock,
     emergencyReleaseEditLock,
+    refreshOpenProjectDocuments,
     resetRequestedPassword,
     loadProjectAuditEntries,
     loadStorageStatus,

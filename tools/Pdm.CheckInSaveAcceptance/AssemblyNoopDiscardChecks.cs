@@ -21,7 +21,29 @@ internal static partial class Program
   bindings.SetValue(null,Path.Combine(directory,"bindings"));resolver.SetValue(null,new Func<string>(()=>directory));
   try
   {
-   foreach(var mode in new[]{"old-addresses","child-dirty","pending-retry","foreign-source","wrong-version","server-denied","unconfirmed-release","saved-edit","rewrite-failure","no-pending-proof"})
+   var observedNode=LinkedNode(directory,"已有只读保存标记.SLDASM","Assembly");
+   var observedPath=(string)Get(observedNode,"FullPath");
+   var observedId=(Guid)Get(observedNode,"DocumentId");
+   var observedProject=Guid.NewGuid();
+   var observedVersion=Guid.NewGuid();
+   TreeCheck((bool)TreeCallStatic("PdmDocumentIdentityStore","TryWriteControlledVersion",observedPath,observedId,
+    observedProject,observedVersion,"V1",WorkingReuseHash(observedPath),new FileInfo(observedPath).Length),"记录真实检出基准");
+   var checkPlugin=New("PdmAddin");
+   var swType=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
+   var memory=new Model(swType.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),observedPath,true,new List<string>());
+   var observedModel=memory.GetTransparentProxy();
+   TreeCheck((bool)TreeCall(checkPlugin,"TryUnlockAndObserveCheckout",observedModel,observedPath,observedId,observedProject)
+    && !memory.ReadOnly,"只读装配原位转为可写");
+   TreeCheck((bool)TreeCall(checkPlugin,"MatchesUnchangedCheckout",observedModel,observedPath,observedId,observedProject,observedVersion),
+    "获取前已有保存标记，未编辑时允许保留内存原位放弃");
+   TreeCallStatic("PdmAddin","EnsureDocumentOpenedReadOnly",observedModel,observedPath,true);
+   TreeCheck(memory.ReadOnly && memory.Dirty,"只读转换保留原有内存标记，没有保存或重开");
+   memory.Modify(false);
+   TreeCheck(!(bool)TreeCall(checkPlugin,"MatchesUnchangedCheckout",observedModel,observedPath,observedId,observedProject,observedVersion),
+    "获取后的非几何修改即使不变更更新戳也不能按无修改放弃");
+   TreeCall(checkPlugin,"ForgetUnchangedCheckout",observedPath);
+   Console.WriteLine("PASS: 原位放弃区分获取前保存标记与获取后实际修改");
+   foreach(var mode in new[]{"old-addresses","latest-context","wrong-source-context","child-dirty","pending-retry","foreign-source","wrong-version","server-denied","unconfirmed-release","saved-edit","rewrite-failure","no-pending-proof"})
    {
     var folder=Path.Combine(directory,mode,"View");Directory.CreateDirectory(folder);
     var json=new JavaScriptSerializer();var manifest=json.Deserialize(File.ReadAllText(Path.Combine(capture,"real-working-manifest.json")),Type("ControlledOpenManifestDto"));
@@ -41,6 +63,11 @@ internal static partial class Program
     var plugin=New("PdmAddin");var session=(Guid)Field(plugin,"checkoutSessionId");var root=New("CadTreeNode");
     Set(root,"DocumentId",rootId);Set(root,"FullPath",rootPath);Set(root,"FileName",Get(rootFile,"FileName"));Set(root,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));Set(root,"WorkState",Enum.Parse(Type("CadWorkState"),"Editable"));Set(root,"CheckedOutBy","tester");Set(root,"CheckoutSessionId",session);
     SetField(plugin,"currentTree",root);SetField(plugin,"currentProjectId",project);SetField(plugin,"authenticatedUsername","tester");
+    if(mode=="latest-context"||mode=="wrong-source-context")
+    {
+     Set(manifest,"UsesLatestModelReferences",true);
+     ((IDictionary)Field(plugin,"controlledOpenManifests")).Add(mode=="latest-context"?folder:Path.Combine(directory,"other-workspace"),manifest);
+    }
     var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;var modelType=interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
     var rootLoaded=!pending;var rootReadOnly=false;var rootDirty=changed;var closes=0;var opens=0;var rewrites=0;var dependencyReads=0;var unexpected=new List<string>();var rewritten=false;
     var models=new Dictionary<string,object>(StringComparer.OrdinalIgnoreCase);var componentModels=new List<Tuple<object,string>>();var components=new List<object>();
@@ -106,7 +133,7 @@ internal static partial class Program
      var shouldFail=new[]{"foreign-source","wrong-version","server-denied","unconfirmed-release","rewrite-failure","no-pending-proof"}.Contains(mode);
      if((failure!=null)!=shouldFail)throw new Exception("总装放弃结果异常 "+mode+" closes="+closes+" downloads="+handler.Downloads,failure);
      if(!changed&&!mode.Equals("no-pending-proof")&&(closes!=0||opens!=0||rewrites!=0||handler.Downloads!=0))throw new Exception("未操作总装仍被关闭、重新下载或改写引用 "+mode);
-     if(mode=="old-addresses"||mode=="child-dirty"||mode=="pending-retry")
+     if(mode=="old-addresses"||mode=="latest-context"||mode=="wrong-source-context"||mode=="child-dirty"||mode=="pending-retry")
      {
       if(dependencyReads!=0||!File.ReadAllBytes(rootPath).SequenceEqual(canonical)||(!pending&&!rootReadOnly))throw new Exception("旧引用字符串仍触发恢复或原窗口未原位只读 "+mode);
      }
@@ -151,7 +178,13 @@ internal static partial class Program
     if(mode=="server-denied")return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"message\":\"服务器尚未确认释放权限\"}")});
     value=new{id=Get(manifest,"RootDocumentId"),projectId=Get(manifest,"ProjectId"),kind=0,checkedOutBy=mode=="unconfirmed-release"?"tester":null,checkoutSessionId=mode=="unconfirmed-release"?(Guid?)session:null,drawingVersion="V5",publishedVersion="A"};
    }
-   else if(path.EndsWith("/open-manifest"))value=manifest;
+   else if(path.EndsWith("/open-manifest"))
+   {
+    var body=(IDictionary<string,object>)new JavaScriptSerializer().DeserializeObject(request.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+    if(!Equals(body["useLatestModelReferences"],mode=="latest-context"))
+     throw new Exception("工作路径的引用版本策略未被正确复用："+mode);
+    value=manifest;
+   }
    else if(path.EndsWith("/document-relations"))value=new object[0];
    else if(path.EndsWith("/file")){Downloads++;return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(canonical)});}
    else{OtherWrites++;throw new Exception("Unexpected business request "+path);}

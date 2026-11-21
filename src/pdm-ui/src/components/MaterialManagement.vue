@@ -47,6 +47,7 @@ import {
   listMaterialSyncBatches,
   importMaterials,
   materialAttachmentObjectUrl,
+  PdmApiError,
   previewMaterialImport,
   queryU9Material,
   refreshMaterialInventory,
@@ -144,7 +145,7 @@ const materialPageLoading = ref(false)
 const categories = ref<MaterialCategory[]>([])
 const tasks = ref<MaterialSyncTask[]>([])
 type SyncTaskSelectionTable = { clearSelection: () => void }
-const syncTaskSelectionTable = ref<SyncTaskSelectionTable | null>(null)
+const syncTaskSelectionTables = ref<SyncTaskSelectionTable[]>([])
 const selectedSyncTasks = ref<MaterialSyncTask[]>([])
 const batchSyncingTasks = ref(false)
 type MaterialCodeApprovalRow = Omit<MaterialCodeApplication, 'applicationType'> & {
@@ -166,7 +167,12 @@ const masterApprovalMaterials = computed(() => {
   return pendingMasterMaterials.value.filter(item => item.approvalStatus === 'Draft' && !item.isArchived
     && !applicationMaterials.has(item.id) && !item.sourceBomItemId)
 })
-const codeApprovalView = ref<'pending' | 'history'>('pending')
+const codeApprovalWorkTabs = [
+  { name: 'pending', label: '当前处理', title: '料号审批与U9C同步' },
+  { name: 'nonstandard', label: '非标件审批', title: '非标件料号审批与U9C同步' },
+] as const
+type CodeApprovalWorkTab = typeof codeApprovalWorkTabs[number]['name']
+const codeApprovalView = ref<CodeApprovalWorkTab | 'history'>('pending')
 watch([activeTab, codeApprovalView], clearGlobalStatus, { flush: 'sync' })
 const workflowPageSize = 50
 const pendingApprovalPage = ref(1)
@@ -174,7 +180,6 @@ const pendingSyncPage = ref(1)
 const historyWorkflowPage = ref(1)
 const decidingApplicationId = ref<string | null>(null)
 const selectedCodeApplications = ref<MaterialCodeApprovalRow[]>([])
-const selectedCodeWorkflowRows = ref<MaterialCodeWorkflowRow[]>([])
 const batchDecidingApplications = ref(false)
 const approvalProgressText = ref('')
 const syncProgressText = ref('')
@@ -464,14 +469,22 @@ const currentCodeWorkflowRows = computed<MaterialCodeWorkflowRow[]>(() => {
     return workflowRowMaterialCode(left).localeCompare(workflowRowMaterialCode(right), undefined, { numeric: true })
   })
 })
-const pagedCurrentCodeWorkflowRows = computed(() => currentCodeWorkflowRows.value.slice(
+const categoryKinds = computed(() => new Map(categories.value.map(category => [category.code, category.pdmKind])))
+const currentCodeWorkflowRowsByTab = computed(() => {
+  const rows: Record<CodeApprovalWorkTab, MaterialCodeWorkflowRow[]> = { pending: [], nonstandard: [] }
+  for (const row of currentCodeWorkflowRows.value) {
+    const category = row.syncTask?.categoryCode || row.approval?.categoryCode
+    const kind = row.syncTask?.materialKind ?? row.approval?.masterMaterial?.kind ?? categoryKinds.value.get(category ?? '')
+    rows[kind === 'NonStandard' ? 'nonstandard' : 'pending'].push(row)
+  }
+  return rows
+})
+const visibleCodeWorkflowRows = computed(() => codeApprovalView.value === 'history' ? [] : currentCodeWorkflowRowsByTab.value[codeApprovalView.value])
+const pagedCurrentCodeWorkflowRows = computed(() => visibleCodeWorkflowRows.value.slice(
   (pendingApprovalPage.value - 1) * workflowPageSize,
   pendingApprovalPage.value * workflowPageSize,
 ))
-watch(() => pendingCodeApplicationRows.value.length, total => {
-  pendingApprovalPage.value = Math.min(pendingApprovalPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
-})
-watch(() => currentCodeWorkflowRows.value.length, total => {
+watch(() => visibleCodeWorkflowRows.value.length, total => {
   pendingApprovalPage.value = Math.min(pendingApprovalPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
 })
 watch(() => historyCodeWorkflowRows.value.length, total => {
@@ -540,6 +553,7 @@ async function emergencyCodeApplication(application: MaterialCodeApprovalRow, ap
     await load()
     ElMessage.success('当前料号审批节点已处理')
   } catch (error) {
+    if (error instanceof PdmApiError && error.status === 409) await loadCodeApplications()
     if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '紧急代批失败，请刷新后重试')
   } finally { decidingApplicationId.value = null }
 }
@@ -550,7 +564,10 @@ function workflowRowStatusType(row: MaterialCodeWorkflowRow) {
 function workflowRowDescription(row: MaterialCodeWorkflowRow) {
   if (row.syncTask) return syncTaskError(row.syncTask) || '同步完成。'
   if (row.approval?.status === 'Pending') return '待审批后生成同步任务。'
-  if (row.approval?.status === 'Withdrawn') return '申请人已撤回。'
+  if (row.approval?.status === 'Withdrawn') {
+    const comment = row.approval.decisionComment?.trim()
+    return comment && comment !== '申请人撤回' ? comment : '申请人已撤回。'
+  }
   if (row.approval?.status === 'Rejected') return row.approval.decisionComment || '已退回。'
   return '已批准，等待同步任务。'
 }
@@ -558,7 +575,6 @@ function workflowRowHistoryTime(row: MaterialCodeWorkflowRow) {
   return row.syncTask?.updatedAt || row.approval?.decidedAt || row.approval?.requestedAt || ''
 }
 function setWorkflowSelection(rows: MaterialCodeWorkflowRow[]) {
-  selectedCodeWorkflowRows.value = rows
   selectedCodeApplications.value = rows.flatMap(row => row.approval && canSelectCodeApplication(row.approval) ? applicationsForApprovalRow(row.approval) : [])
   selectedSyncTasks.value = rows.flatMap(row => row.syncTask && canSelectSyncTask(row.syncTask) ? [row.syncTask] : [])
 }
@@ -1063,8 +1079,7 @@ async function loadCodeApplications() {
     pendingMasterMaterials.value = masters
     tasks.value = syncTasks
     codeApplicationsLoaded.value = true
-    selectedCodeApplications.value = []
-    selectedSyncTasks.value = []
+    clearWorkflowSelection()
   }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '料号审批加载失败') }
   finally { codeApplicationsLoading.value = false }
@@ -1072,13 +1087,19 @@ async function loadCodeApplications() {
 
 watch(activeTab, value => { void loadTabData(value) })
 watch(codeApprovalView, () => {
+  pendingApprovalPage.value = 1
+  clearWorkflowSelection()
+})
+
+function clearWorkflowSelection() {
+  syncTaskSelectionTables.value[0]?.clearSelection()
   selectedCodeApplications.value = []
   selectedSyncTasks.value = []
-})
+}
 
 function changePendingApprovalPage(page: number) {
   pendingApprovalPage.value = page
-  selectedCodeApplications.value = []
+  clearWorkflowSelection()
 }
 
 function showSyncResult(level: WorkflowResultLevel, title: string, summary: string, details: string[] = []) {
@@ -1133,6 +1154,7 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
   if (approved) { try { comment = await requiredApprovalOpinion(targets) } catch { return } }
   decidingApplicationId.value = application.id
   let succeeded = 0
+  let refreshAfterConflict = false
   const failures: string[] = []
   const automationWarnings: string[] = []
   try {
@@ -1146,10 +1168,12 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
           automationWarnings.push(`${bomHeaderLabels[target.bomHeaderKind ?? ''] || target.applicationName || target.id}：${result.automation.message}`)
       } catch (error) {
+        refreshAfterConflict ||= error instanceof PdmApiError && error.status === 409
         failures.push(`${bomHeaderLabels[target.bomHeaderKind ?? ''] || target.applicationName || target.id}：${error instanceof Error ? error.message : '处理失败'}`)
       }
     }
     if (succeeded) await load()
+    else if (refreshAfterConflict) await loadCodeApplications()
     showApprovalResult(approved, targets.length, succeeded, failures, automationWarnings)
   } finally {
     decidingApplicationId.value = null
@@ -1224,6 +1248,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
   if (approved) { try { comment = await requiredApprovalOpinion(targets) } catch { return } }
   batchDecidingApplications.value = true
   let succeeded = 0
+  let refreshAfterConflict = false
   const failures: string[] = []
   const automationWarnings: string[] = []
   try {
@@ -1237,11 +1262,13 @@ async function decideSelectedCodeApplications(approved: boolean) {
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
           automationWarnings.push(`${application.projectCode || application.applicationName || application.id}：${result.automation.message}`)
       } catch (error) {
+        refreshAfterConflict ||= error instanceof PdmApiError && error.status === 409
         failures.push(`${application.projectCode || application.applicationName || application.id}：${error instanceof Error ? error.message : '处理失败'}`)
       }
     }
 
     if (succeeded) await load()
+    else if (refreshAfterConflict) await loadCodeApplications()
     showApprovalResult(approved, targets.length, succeeded, failures, automationWarnings)
   } finally {
     batchDecidingApplications.value = false
@@ -1730,7 +1757,7 @@ async function executeSelectedTasks() {
   } finally {
     batchSyncingTasks.value = false
     selectedSyncTasks.value = []
-    syncTaskSelectionTable.value?.clearSelection()
+    syncTaskSelectionTables.value[0]?.clearSelection()
     syncProgressText.value = ''
   }
 }
@@ -1876,10 +1903,10 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
         <template #label><span class="material-tab-label">料号审批<em v-if="canReceiveNotices && currentWorkCount">{{ currentWorkCount }}</em></span></template>
         <div class="material-code-approval-workflow">
           <el-tabs v-model="codeApprovalView" class="material-code-approval-subtabs">
-          <el-tab-pane name="pending">
-            <template #label><span class="material-code-approval-subtab-label">当前处理 <em v-if="canReceiveNotices">{{ currentWorkCount }}</em></span></template>
-            <section class="material-code-workflow-stage material-code-workflow-stage--unified" aria-label="料号审批与U9C同步">
-              <div class="material-code-workflow-stage__title"><strong>料号审批与U9C同步</strong><span>每条申请仅显示一次；批准后可在同一行同步或重试。</span></div>
+          <el-tab-pane v-for="tab in codeApprovalWorkTabs" :key="tab.name" :name="tab.name">
+            <template #label><span class="material-code-approval-subtab-label">{{ tab.label }} <em v-if="canReceiveNotices">{{ currentCodeWorkflowRowsByTab[tab.name].length }}</em></span></template>
+            <section v-if="codeApprovalView === tab.name" class="material-code-workflow-stage material-code-workflow-stage--unified" :aria-label="tab.title">
+              <div class="material-code-workflow-stage__title"><strong>{{ tab.title }}</strong><span>每条申请仅显示一次；批准后可在同一行同步或重试。</span></div>
               <p class="material-code-approval-note">表头料号的进度与失败原因见项目BOM多级总览。</p>
               <section class="material-step-feedback material-code-workflow-feedback material-approval-feedback material-sync-feedback" aria-label="审批与同步状态及结果">
                 <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': approvalProgressText || syncProgressText }">{{ approvalProgressText || syncProgressText || '空闲' }}</span></div>
@@ -1891,7 +1918,7 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
                 <span v-if="canDecideMaterialCode || canApprove">已选 {{ selectedCodeApplications.length }} 项待审批、{{ selectedExecutableSyncTasks.length }} 项可同步</span>
               </div>
               <div class="material-code-approval-table-shell">
-                <el-table ref="syncTaskSelectionTable" class="material-code-approval-table material-code-approval-table--pending material-sync-table material-code-sync-table--pending material-code-workflow-table" :data="pagedCurrentCodeWorkflowRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待处理记录" @selection-change="setWorkflowSelection">
+                <el-table ref="syncTaskSelectionTables" class="material-code-approval-table material-code-approval-table--pending material-sync-table material-code-sync-table--pending material-code-workflow-table" :data="pagedCurrentCodeWorkflowRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待处理记录" @selection-change="setWorkflowSelection">
                   <el-table-column v-if="canDecideMaterialCode || canApprove" type="selection" width="38" :selectable="canSelectCodeWorkflowRow" />
                   <el-table-column label="申请类型" width="76"><template #default="{ row }">{{ workflowRowTypeLabel(row) }}</template></el-table-column>
                   <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ workflowRowSourceLabel(row) }}</template></el-table-column>
@@ -1912,7 +1939,7 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
                   <el-table-column label="操作" width="150"><template #default="{ row }"><template v-if="row.approval?.status === 'Pending'"><el-button v-if="row.approval.masterMaterial ? canApprove : (row.approval.canDecide ?? canDecideMaterialCode)" link type="primary" :loading="decidingApplicationId === row.approval.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row.approval, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row.approval)" link type="danger" :disabled="decidingApplicationId === row.approval.id || batchDecidingApplications" @click="decideCodeApplication(row.approval, false)">退回</el-button><el-button v-if="row.approval.canEmergencyDecide && !row.approval.canDecide" link type="warning" :disabled="!!decidingApplicationId || batchDecidingApplications" @click="emergencyCodeApplication(row.approval, true)">紧急代批</el-button><el-button v-if="row.approval.canEmergencyDecide && !row.approval.canDecide" link type="danger" :disabled="!!decidingApplicationId || batchDecidingApplications" @click="emergencyCodeApplication(row.approval, false)">紧急代退回</el-button></template><template v-else-if="row.syncTask"><el-button link type="primary" @click="showPreview(row.syncTask)">查看请求</el-button><el-button v-if="canExecuteSyncTask(row.syncTask)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.syncTask.id" @click="executeTask(row.syncTask)">{{ syncTaskActionLabel(row.syncTask) }}</el-button></template><span v-else>—</span></template></el-table-column>
                 </el-table>
               </div>
-              <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination material-code-workflow-pagination" :page-size="workflowPageSize" :total="currentCodeWorkflowRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />
+              <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination material-code-workflow-pagination" :page-size="workflowPageSize" :total="visibleCodeWorkflowRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />
             </section>
           </el-tab-pane>
           <el-tab-pane name="history">

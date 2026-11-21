@@ -5,6 +5,46 @@ namespace Upton.Pdm.Application;
 /// <summary>仅首次迁移使用旧角色规则，运行时不调用此处决定权限。</summary>
 public static class AuthorizationMigration
 {
+    private static readonly string[] UserManagementPermissions = [PermissionCodes.UserDeactivate, PermissionCodes.UserDelete];
+
+    public static AuthorizationSettings EnableUserManagementDefaults(AuthorizationSettings settings)
+    {
+        if (settings.UserManagementDefaultsApplied) return settings;
+        return settings with
+        {
+            UserManagementDefaultsApplied = true,
+            Templates = settings.Templates.Select(role => role.RoleCode == nameof(UserRole.Administrator)
+                ? role with { Grants = [..role.Grants, ..UserManagementPermissions
+                    .Where(code => !role.Grants.Any(grant => grant.Permission == code))
+                    .Select(code => new AuthorizationGrant(code, ["company"]))] }
+                : role).ToArray()
+        };
+    }
+
+    public static AuthorizationSettings EnableDocumentReleaseDefaults(AuthorizationSettings settings)
+    {
+        if (settings.DocumentReleaseDefaultsApplied) return settings;
+        return settings with
+        {
+            DocumentReleaseDefaultsApplied = true,
+            Templates = settings.Templates.Select(role =>
+            {
+                var scope = role.RoleCode switch
+                {
+                    nameof(UserRole.BusinessUnitManager) => "division-manager",
+                    "MechanicalManager" => "division-member",
+                    _ => null
+                };
+                if (scope is null) return role;
+                const string permission = PermissionCodes.DocumentLockEmergencyRelease;
+                var current = role.Grants.FirstOrDefault(grant => grant.Permission == permission);
+                if (current?.Scopes.Contains(scope) == true) return role;
+                var grant = new AuthorizationGrant(permission, [.. (current?.Scopes ?? []), scope]);
+                return role with { Grants = [.. role.Grants.Where(item => item.Permission != permission), grant] };
+            }).ToArray()
+        };
+    }
+
     // Only the new permission is seeded once. Existing prerequisites and later revocations are preserved.
     public static AuthorizationSettings EnableAiWebDefaults(AuthorizationSettings settings) => settings.AiWebDefaultsApplied ? settings : settings with
     {
@@ -36,7 +76,7 @@ public static class AuthorizationMigration
     public static AuthorizationSettings Create(RolePermissionDirectory directory, ProjectPermissionSettings positions)
     {
         positions = positions.Normalize();
-        var added = AuthorizationActions.Definitions.Select(p => p.Code).ToHashSet();
+        var added = AuthorizationActions.Definitions.Select(p => p.Code).Concat(UserManagementPermissions).ToHashSet();
         var templates = new List<AuthorizationTemplate>();
         foreach (var role in directory.Roles)
         {

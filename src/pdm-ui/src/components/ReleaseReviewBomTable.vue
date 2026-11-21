@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import type { ReleasePackageSummary } from '../types'
-defineProps<{ rows: ReleasePackageSummary['nonStandardBomSnapshot']; multiplier?: number; label: string }>()
+import type { BomItem } from '../types'
+defineProps<{ rows: { item: BomItem; quantity: number }[]; netChange?: boolean; label: string }>()
 </script>
 
 <template>
   <table class="release-review-bom-table pdm-fit-columns" :aria-label="label">
     <colgroup><col style="width:83.333333%"><col style="width:16.666667%"></colgroup>
-    <thead><tr><th>物料 / 型号</th><th>总量</th></tr></thead>
-    <tbody><tr v-for="(row,index) in rows" :key="row.id || index"><td>{{ row.name }}<small>{{ row.specification || row.drawingNumber }}</small></td><td>{{ Number(row.quantity) * (multiplier ?? 1) }}</td></tr></tbody>
+    <thead><tr><th>物料 / 型号</th><th>{{ netChange ? '需求净变更' : '总量' }}</th></tr></thead>
+    <tbody><tr v-for="(row,index) in rows" :key="row.item.id || index"><td>{{ row.item.name }}<small>{{ row.item.specification || row.item.drawingNumber }}</small></td><td>{{ netChange && row.quantity > 0 ? '+' + row.quantity : row.quantity }}</td></tr></tbody>
   </table>
 </template>
 

@@ -49,6 +49,7 @@
     <Compile Include="..\Pdm.Client.Shared\DesktopAuthHandoffStore.cs" Link="DesktopAuthHandoffStore.cs" />
     <Compile Include="..\Pdm.Domain\CadPropertyCardSnapshot.cs" Link="CadPropertyCardSnapshot.cs" />
     <Compile Include="..\Pdm.Domain\ArchiveWarningPolicy.cs" Link="ArchiveWarningPolicy.cs" />
+    <Compile Include="..\Pdm.Domain\DocumentMetadataLimits.cs" Link="DocumentMetadataLimits.cs" />
     <Compile Include="..\Pdm.Domain\ReferenceCycleGroups.cs" Link="ReferenceCycleGroups.cs" />
     <Compile Include="..\Pdm.Domain\DrawingRevision.cs" Link="DrawingRevision.cs" />
     <Compile Include="..\Pdm.Domain\StandardStructureRules.cs" Link="StandardStructureRules.cs" />

@@ -869,6 +869,47 @@ public sealed partial class MySqlPdmRepository
         return true;
     }
 
+    public Task<ReleasePackage> ResumeFailedReleasePreviewAsync(ReleasePackage approved, DateTimeOffset queuedAt, CancellationToken cancellationToken) =>
+        RetryPublishTransactionAsync(() => ResumeFailedReleasePreviewOnceAsync(approved, queuedAt, cancellationToken), cancellationToken);
+
+    private async Task<ReleasePackage> ResumeFailedReleasePreviewOnceAsync(ReleasePackage approved, DateTimeOffset queuedAt, CancellationToken ct)
+    {
+        if (!approved.CanResumePreviewRetry) throw new PdmConflictException("发布包缺少完整审批或冻结转图来源。");
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        // Lock this project’s package rows in a common order. The retry must not race a
+        // withdrawal, duplicate retry or the publication of a competing package.
+        var packages = await connection.QueryAsync<ReleasePackageRow>(new CommandDefinition(
+            """
+            SELECT id, row_version, state, release_scope, published_at,
+                (SELECT snapshot.root_document_id FROM reference_snapshot snapshot
+                 WHERE snapshot.id=package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId
+            FROM release_package package WHERE project_id=@ProjectId ORDER BY id FOR UPDATE
+            """, new { approved.ProjectId }, transaction, cancellationToken: ct));
+        var current = packages.SingleOrDefault(package => package.Id == approved.Id);
+        if (current?.State != "PublishFailed" || current.RowVersion != approved.RowVersion)
+            throw new PdmConflictException("发布包状态已变化，请刷新后重试。");
+        if (packages.Any(other => other.Id != approved.Id && ReleasePreviewPolicy.ConflictsWithFailedRetry(approved,
+                Enum.Parse<ReleaseScope>(other.ReleaseScope), Enum.Parse<ReleasePackageState>(other.State), other.ScopeRootDocumentId,
+                other.PublishedAt is { } published ? new DateTimeOffset(DateTime.SpecifyKind(published, DateTimeKind.Utc)) : null)))
+            throw new PdmConflictException("同一BOM发布范围有其他在途发布包或更新的正式发布，请核对后再试。");
+        var changed = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE release_package
+            SET state='Publishing', publish_error=NULL, preview_state='Pending', preview_error=NULL, preview_attempts=0,
+                preview_updated_at=@QueuedAt, row_version=row_version+1
+            WHERE id=@Id AND row_version=@RowVersion AND state='PublishFailed' AND published_at IS NULL
+                AND EXISTS (SELECT 1 FROM approval_task WHERE release_package_id=@Id)
+                AND NOT EXISTS (SELECT 1 FROM approval_task WHERE release_package_id=@Id
+                    AND (decision_value IS NULL OR decision_value<>'Approved' OR decided_at IS NULL))
+            """, new { approved.Id, approved.RowVersion, QueuedAt = queuedAt.UtcDateTime }, transaction, cancellationToken: ct));
+        if (changed != 1) throw new PdmConflictException("发布包状态已变化，请刷新后重试。");
+        var updated = await FindReleasePackageAsync(connection, transaction, approved.Id, ct)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        await transaction.CommitAsync(ct);
+        return updated;
+    }
+
     public async Task MarkPublishFailedAsync(Guid releasePackageId, string error, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -908,8 +949,8 @@ public sealed partial class MySqlPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
             """
-            INSERT INTO pdm_user(id,username,display_name,password_hash,role,assigned_role_code,company_id,cross_company_view,is_active,row_version,created_at)
-            VALUES (@Id,@Username,@DisplayName,@PasswordHash,@Role,@RoleCode,@CompanyId,@CrossCompanyView,@IsActive,1,@CreatedAt)
+            INSERT INTO pdm_user(id,username,display_name,password_hash,role,assigned_role_code,company_id,cross_company_view,is_active,token_version,row_version,created_at)
+            VALUES (@Id,@Username,@DisplayName,@PasswordHash,@Role,@RoleCode,@CompanyId,@CrossCompanyView,@IsActive,@TokenVersion,1,@CreatedAt)
             """,
             new
             {
@@ -922,6 +963,7 @@ public sealed partial class MySqlPdmRepository
                 user.CompanyId,
                 user.CrossCompanyView,
                 user.IsActive,
+                user.TokenVersion,
                 CreatedAt = timeProvider.GetUtcNow().UtcDateTime
             },
             transaction,
@@ -938,10 +980,17 @@ public sealed partial class MySqlPdmRepository
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken)
+    public async Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken, ManagedUserEditActor? editActor = null)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = editActor is null
+            ? await connection.BeginTransactionAsync(cancellationToken)
+            : await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, cancellationToken);
+        if (editActor is not null)
+        {
+            var (settings, accounts) = await ReadUserAdministrationStateAsync(connection, transaction, cancellationToken);
+            UserAccountAdministration.RequireEdit(settings, accounts, editActor, username, role, roleCode, roleCodes, isActive);
+        }
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE pdm_user SET display_name=@DisplayName,role=@Role,assigned_role_code=@RoleCode,is_active=@IsActive,token_version=token_version+1,row_version=row_version+1 WHERE username=@Username",
             new { Username = username, DisplayName = displayName, Role = role.ToString(), RoleCode = roleCode, IsActive = isActive },

@@ -24,12 +24,12 @@ internal static partial class Program
   }
   object Copy(object value)=>json.Deserialize(json.Serialize(value),value.GetType());
   var baseline=Manifest(214);
-  foreach(var mode in new[]{"same","project","root-version","child-version","source-hash","length","configuration","relative-path","document-id","duplicate","missing","readonly-base","readonly-result"})
+  foreach(var mode in new[]{"same","project","root-version","child-version","source-hash","length","part-inventory-configuration","root-configuration","relative-path","document-id","duplicate","missing","readonly-base","readonly-result"})
   {
    var next=Copy(baseline);var files=(IList)Get(next,"Files");var file=files[13];
-   switch(mode){case "project":Set(next,"ProjectId",Guid.NewGuid());break;case "root-version":Set(next,"RootVersionId",Guid.NewGuid());break;case "child-version":Set(file,"VersionId",Guid.NewGuid());break;case "source-hash":Set(file,"Sha256",new string('B',64));break;case "length":Set(file,"FileLength",999L);break;case "configuration":Set(file,"Configuration","Changed");break;case "relative-path":Set(file,"RelativePath","other/"+Get(file,"FileName"));break;case "document-id":Set(file,"DocumentId",Guid.NewGuid());break;case "duplicate":files[13]=files[12];break;case "missing":files.RemoveAt(13);break;case "readonly-base":case "readonly-result":Set(next,"ForEdit",false);break;}
+   switch(mode){case "project":Set(next,"ProjectId",Guid.NewGuid());break;case "root-version":Set(next,"RootVersionId",Guid.NewGuid());break;case "child-version":Set(file,"VersionId",Guid.NewGuid());break;case "source-hash":Set(file,"Sha256",new string('B',64));break;case "length":Set(file,"FileLength",999L);break;case "part-inventory-configuration":Set(file,"Configuration","Other instance");break;case "root-configuration":Set(files[0],"Configuration","Changed");break;case "relative-path":Set(file,"RelativePath","other/"+Get(file,"FileName"));break;case "document-id":Set(file,"DocumentId",Guid.NewGuid());break;case "duplicate":files[13]=files[12];break;case "missing":files.RemoveAt(13);break;case "readonly-base":case "readonly-result":Set(next,"ForEdit",false);break;}
    var before=mode=="readonly-base"?next:baseline;var after=mode=="readonly-base"?baseline:next;
-   if((bool)match.Invoke(null,new[]{before,after})!=(mode=="same"||mode=="readonly-base"))throw new Exception("Incorrect 214-file working baseline decision: "+mode);
+   if((bool)match.Invoke(null,new[]{before,after})!=(mode=="same"||mode=="readonly-base"||mode=="part-inventory-configuration"))throw new Exception("Incorrect 214-file working baseline decision: "+mode);
    Console.WriteLine("PASS: working baseline "+mode);
   }
   if(!string.IsNullOrWhiteSpace(evidenceRoot))
@@ -147,10 +147,13 @@ internal static partial class Program
    var ids=names.ToDictionary(name=>name,name=>Guid.NewGuid());var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
    var rootManager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),call=>call.MethodName=="get_ActiveConfiguration"?new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),cfg=>cfg.MethodName=="get_Name"?"Default":throw new Exception(cfg.MethodName)).GetTransparentProxy():throw new Exception(call.MethodName)).GetTransparentProxy();
    var json=new JavaScriptSerializer();
-   foreach(var mode in new[]{"separate-instance-trees","swapped-children","wrong-instance-configuration","wrong-loaded-path","suppressed-instance","shallow-parent-exact-complete","shallow-parent-wrong-membership","legacy-exact-empty","legacy-exact-empty-loaded-external","legacy-exact-empty-readonly-dirty"})
+   foreach(var mode in new[]{"separate-instance-trees","swapped-children","wrong-instance-configuration","wrong-loaded-path","suppressed-instance","shallow-parent-exact-complete","shallow-parent-wrong-membership","legacy-exact-empty","legacy-exact-empty-loaded-external","legacy-exact-empty-readonly-dirty",
+       "pending-owner-exact", "pending-owner-needs-exact", "pending-owner-config", "pending-owner-changed-bytes", "pending-owner-local-edit", "indexed-parent-disagrees"})
    {
-    var wrongModelScopeReads=0;var dirty=mode=="legacy-exact-empty-readonly-dirty";
-    var sub=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{switch(call.MethodName){case "GetPathName":return paths["SUB.SLDASM"];case "GetSaveFlag":return dirty;case "IsOpenedReadOnly":return true;default:wrongModelScopeReads++;throw new Exception("Must not read or change shared ModelDoc active configuration/subtree: "+call.MethodName);}}).GetTransparentProxy();
+    var wrongModelScopeReads=0;var dirty=mode=="legacy-exact-empty-readonly-dirty"||mode=="pending-owner-local-edit";
+    var pendingOwner=mode.StartsWith("pending-owner-",StringComparison.Ordinal);
+    var partialOccurrence=pendingOwner||mode=="indexed-parent-disagrees";
+    var sub=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{switch(call.MethodName){case "GetPathName":return paths["SUB.SLDASM"];case "GetSaveFlag":return dirty;case "IsOpenedReadOnly":return mode!="pending-owner-local-edit";default:wrongModelScopeReads++;throw new Exception("Must not read or change shared ModelDoc active configuration/subtree: "+call.MethodName);}}).GetTransparentProxy();
     object Leaf(string name,string configuration)
     {
      var filePath=paths.ContainsKey(name)?paths[name]:Path.Combine(folder,"external",name);
@@ -159,18 +162,25 @@ internal static partial class Program
      return new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{switch(call.MethodName){case "GetPathName":return filePath;case "get_ReferencedConfiguration":return configuration;case "get_IsVirtual":return false;case "GetModelDoc2":return unloaded?null:model;default:throw new Exception("Leaf component mutation "+call.MethodName);}}).GetTransparentProxy();
     }
     var a=Leaf("A.SLDPRT","A");var b=Leaf("B.SLDPRT","B");var external=Leaf("OLD-EXTERNAL.SLDPRT","Default");
-    var components=new[]{"C1","C2"}.Select(config=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{switch(call.MethodName){case "GetPathName":return paths["SUB.SLDASM"];case "get_ReferencedConfiguration":return mode=="wrong-instance-configuration"&&config=="C1"?"C3":config;case "get_IsVirtual":return false;case "GetModelDoc2":return sub;case "GetSuppression":return mode=="suppressed-instance"&&config=="C1"?0:2;case "GetChildren":if(config=="C2")return new[]{b};if(mode=="suppressed-instance")return new object[0];if(mode.StartsWith("legacy-"))return new[]{external};return new[]{mode=="swapped-children"?b:a};default:throw new Exception("Instance mutation "+call.MethodName);}}).GetTransparentProxy()).ToArray();
+    var components=new[]{"C1","C2"}.Select(config=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{switch(call.MethodName){case "GetPathName":return paths["SUB.SLDASM"];case "get_ReferencedConfiguration":return mode=="wrong-instance-configuration"&&config=="C1"?"C3":config;case "get_IsVirtual":return false;case "GetModelDoc2":return sub;case "GetSuppression":return mode=="suppressed-instance"&&config=="C1"?0:2;case "GetChildren":if(config=="C2")return new[]{b};if(mode=="suppressed-instance")return new object[0];if(mode.StartsWith("legacy-"))return new[]{external};if(partialOccurrence)return new[]{a,b};return new[]{mode=="swapped-children"?b:a};default:throw new Exception("Instance mutation "+call.MethodName);}}).GetTransparentProxy()).ToArray();
     var root=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{switch(call.MethodName){case "GetPathName":return paths["ROOT.SLDASM"];case "get_ConfigurationManager":return rootManager;case "GetComponents":return components;case "GetType":return 2;default:throw new Exception("Root mutation "+call.MethodName);}}).GetTransparentProxy();
-    object Node(string name,string configuration,object[] children)=>new{documentId=ids[name],fileName=name,kind=name.EndsWith("SLDASM")?0:1,configuration,children};
+    object Node(string name,string configuration,object[] children,bool structureIndexPending=false)=>new{documentId=ids[name],fileName=name,kind=name.EndsWith("SLDASM")?0:1,configuration,children,structureIndexPending};
     var aSnapshot=Node("A.SLDPRT","A",new object[0]);var bSnapshot=Node("B.SLDPRT","B",new object[0]);
     var shallow=mode.StartsWith("shallow-")||mode.StartsWith("legacy-");
-    var snapshot=json.Deserialize(json.Serialize(Node("ROOT.SLDASM","Default",new[]{Node("SUB.SLDASM","C1",shallow?new object[0]:new[]{aSnapshot}),Node("SUB.SLDASM","C2",new[]{bSnapshot})})),Type("DocumentReferenceNodeDto"));
+    var snapshot=json.Deserialize(json.Serialize(Node("ROOT.SLDASM","Default",new[]{Node("SUB.SLDASM","C1",shallow?new object[0]:new[]{aSnapshot},pendingOwner),Node("SUB.SLDASM","C2",new[]{bSnapshot})})),Type("DocumentReferenceNodeDto"));
     var manifest=New("ControlledOpenManifestDto");Set(manifest,"RootDocumentId",ids["ROOT.SLDASM"]);var files=(IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);
     foreach(var name in names){var file=New("ControlledOpenFileDto");Set(file,"DocumentId",ids[name]);Set(file,"VersionId",Guid.NewGuid());Set(file,"FileName",name);Set(file,"RelativePath",name);Set(file,"Sha256",WorkingReuseHash(paths[name]));Set(file,"FileLength",new FileInfo(paths[name]).Length);files.Add(file);}Set(manifest,"Files",files);
     var dictionary=(IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(Guid),Type("DocumentReferenceNodeDto")));dictionary.Add(ids["ROOT.SLDASM"],snapshot);
     if(shallow){var ownChildren=mode.StartsWith("legacy-")?new object[0]:new[]{mode=="shallow-parent-wrong-membership"?bSnapshot:aSnapshot};dictionary.Add(ids["SUB.SLDASM"],json.Deserialize(json.Serialize(Node("SUB.SLDASM","C1",ownChildren)),Type("DocumentReferenceNodeDto")));}
-    var accepted=(bool)Type("PdmAddin").GetMethod("WorkingReuseLoadedContextMatchesCore",Flags).Invoke(null,new[]{root,(object)folder,manifest,snapshot,dictionary,null});
-    var expected=mode=="separate-instance-trees"||mode=="suppressed-instance"||mode=="shallow-parent-exact-complete"||mode=="legacy-exact-empty";
+    if(partialOccurrence&&mode!="pending-owner-needs-exact")
+        dictionary.Add(ids["SUB.SLDASM"],json.Deserialize(json.Serialize(Node("SUB.SLDASM",mode=="pending-owner-config"?"C3":"C1",new[]{aSnapshot,bSnapshot},true)),Type("DocumentReferenceNodeDto")));
+    var needed=new HashSet<Guid>();
+    var baseline=File.ReadAllBytes(paths["SUB.SLDASM"]);
+    if(mode=="pending-owner-changed-bytes")File.AppendAllText(paths["SUB.SLDASM"]," changed");
+    var accepted=(bool)Type("PdmAddin").GetMethod("WorkingReuseLoadedContextMatchesCore",Flags).Invoke(null,new[]{root,(object)folder,manifest,snapshot,dictionary,needed});
+    if(mode=="pending-owner-changed-bytes")File.WriteAllBytes(paths["SUB.SLDASM"],baseline);
+    if((mode=="pending-owner-needs-exact")!=needed.SetEquals(new[]{ids["SUB.SLDASM"]}))throw new Exception("Pending occurrence did not request the exact owner snapshot: "+mode);
+    var expected=mode=="separate-instance-trees"||mode=="suppressed-instance"||mode=="shallow-parent-exact-complete"||mode=="legacy-exact-empty"||mode=="pending-owner-exact";
     if(accepted!=expected||wrongModelScopeReads!=0)throw new Exception("Incorrect actual occurrence verification: "+mode);
     Console.WriteLine("PASS: occurrence-specific configuration/paths "+mode+" without reading shared model active subtree");
    }
@@ -231,7 +241,12 @@ internal static partial class Program
      }
      loadedModels.Add(model); // Root last exposes repeated full-document scans.
     }
-    SetField(plugin,"application",new Proxy(appType,call=>{if(call.MethodName=="GetDocuments"){documentEnumerations++;return loadedModels.ToArray();}throw new Exception("Must not open, close or activate CAD: "+call.MethodName);}).GetTransparentProxy());
+    SetField(plugin,"application",new Proxy(appType,call=>{
+     if(call.MethodName=="GetDocuments"){documentEnumerations++;return loadedModels.ToArray();}
+     if(call.MethodName=="GetRunningCommandInfo"&&mode=="refused-unlock")
+      return new System.Runtime.Remoting.Messaging.ReturnMessage(null,new object[]{0,"",false},3,call.LogicalCallContext,call);
+     throw new Exception("Must not open, close or activate CAD: "+call.MethodName);
+    }).GetTransparentProxy());
     var snapshot=new{documentId=id,fileName="PART.SLDPRT",kind=1,configuration="Default",children=new object[0]};
     var canonicalHash=new string('B',64);var archivedVersion=new{id=version,sha256=canonicalHash,fileLength=1234L,propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",hash}},referenceSnapshot=snapshot};
     if(mode.StartsWith("postarchive-"))
@@ -312,6 +327,7 @@ internal static partial class Program
    }
    else if(path.EndsWith("/document-relations"))value=new object[0];else if(path.EndsWith("/document-operation-rules"))value=new{disabledRuleIds=new string[0]};
    else if(path.EndsWith("/checkout")){Checkouts++;Set(document,"CheckedOutBy","tester");Set(document,"CheckoutSessionId",session);value=document;}
+   else if(path.EndsWith("/"+Get(document,"Id"))&&request.Method==HttpMethod.Get&&mode=="refused-unlock")value=document;
    else throw new Exception("Unexpected API call "+path);
    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(new JavaScriptSerializer().Serialize(value))});
   }

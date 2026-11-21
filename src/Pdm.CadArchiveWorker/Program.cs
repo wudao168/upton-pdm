@@ -28,22 +28,36 @@ internal static class Program
         var retryPath = Path.Combine(Path.GetDirectoryName(result), "native-preview-retry.json");
         var archiveReady = false;
         var nativeFailed = false;
+        var readSavedProperties = false;
         var attempt = 0;
         try
         {
             var request = Json.Deserialize<Request>(File.ReadAllText(args[0]));
-            var input = Path.GetFullPath(request.Directory); var work = Path.Combine(Path.GetDirectoryName(result), "work");
-            if (!input.StartsWith(Path.GetDirectoryName(result) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("后台解析输入目录越界。");
-            if (!IsNativeDocument(request.RootPath))
-                throw new InvalidOperationException("根图档必须是SolidWorks零件、装配体或工程图；伴随文件只能随图档存档。");
+            readSavedProperties = request.ReadSavedProperties;
+            var job = Path.GetDirectoryName(result);
+            var work = Path.Combine(job, "work");
             var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var inputPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            archiveReady = request.ArchiveBeforePreviews && CoreReady(result);
-            if (!archiveReady) PrepareInputs(input, work, hashes, inputPaths);
-            var root = Path.GetFullPath(Path.Combine(work, Path.GetFileName(request.RootPath)));
-            if (!root.StartsWith(work + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !archiveReady && !File.Exists(root))
-                throw new InvalidOperationException("所选根图档不存在。");
+            string root = null;
+            if (readSavedProperties)
+            {
+                if (!string.Equals(result, Path.Combine(job, "result.json"), StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(Path.GetFullPath(args[0]), Path.Combine(job, "reader-request.json"), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("独立属性读取任务路径无效，未打开图档。");
+            }
+            else
+            {
+                var input = Path.GetFullPath(request.Directory);
+                if (!input.StartsWith(job + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("后台解析输入目录越界。");
+                if (!IsNativeDocument(request.RootPath))
+                    throw new InvalidOperationException("根图档必须是SolidWorks零件、装配体或工程图；伴随文件只能随图档存档。");
+                archiveReady = request.ArchiveBeforePreviews && CoreReady(result);
+                if (!archiveReady) PrepareInputs(input, work, hashes, inputPaths);
+                root = Path.GetFullPath(Path.Combine(work, Path.GetFileName(request.RootPath)));
+                if (!root.StartsWith(work + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !archiveReady && !File.Exists(root))
+                    throw new InvalidOperationException("所选根图档不存在。");
+            }
             if (archiveReady)
             {
                 attempt = File.Exists(retryPath) ? 1 : ReadAttempts(attemptsPath) + 1;
@@ -51,7 +65,7 @@ internal static class Program
                 PreviewState(result, previewsResult, null, true);
                 if (File.Exists(retryPath)) File.Delete(retryPath);
             }
-            var independent = PdmAddin.StartNativeArchiveSession(Path.GetDirectoryName(result), (id, started) =>
+            var independent = PdmAddin.StartNativeArchiveSession(job, (id, started) =>
             {
                 var created = Process.GetProcessById(id);
                 if (created.StartTime.ToUniversalTime().Ticks != started)
@@ -62,6 +76,8 @@ internal static class Program
                     { Id = owned.Id, Started = started, WorkerId = worker.Id, WorkerStarted = worker.StartTime.ToUniversalTime().Ticks }));
             });
             if (independent != null) app = (SldWorks)independent;
+            else if (readSavedProperties)
+                throw new InvalidOperationException("未能确认独立属性读取会话，未打开同名图档。");
             else
             {
                 var before = Process.GetProcessesByName("SLDWORKS").Select(p => p.Id).ToHashSet();
@@ -87,6 +103,13 @@ internal static class Program
             }
             if (loadedAddin != null && Marshal.IsComObject(loadedAddin)) Marshal.ReleaseComObject(loadedAddin);
             app.Visible = false; app.UserControl = false;
+            if (readSavedProperties)
+            {
+                if (!PdmAddin.TryReadNativeArchiveSavedPropertiesJob(app, job, out var savedProperties))
+                    throw new InvalidOperationException("未找到与独立属性读取会话匹配的任务。");
+                Atomic(result, savedProperties);
+                return 0;
+            }
             Action<string> progress = stage =>
             {
                 try { Atomic(Path.Combine(Path.GetDirectoryName(result), "native-progress.json"), Json.Serialize(new { Stage = stage })); }
@@ -110,7 +133,9 @@ internal static class Program
             catch (InvalidOperationException) { }
             File.WriteAllText(result + ".diagnostic.txt", error + nativeExit);
             var message = error is InvalidOperationException && error.Message.Any(c => c >= '\u4e00' && c <= '\u9fff')
-                ? error.Message : nativeFailed
+                ? error.Message : readSavedProperties
+                    ? "独立会话未能读取所选图档的属性，本批尚未上传。请检查共享路径及读取权限后重试，技术原因已记入诊断日志。"
+                    : nativeFailed
                     ? archiveReady ? "专用预览会话发生异常，原生存档已保留，可重试生成预览。"
                         : "SolidWorks 专用处理会话发生异常，本次处理未完成，原图档和窗口已保留；具体图档及原因已记录。"
                     : "后台图档解析未完成，上传文件已保留，请核对设计树内文件后重试。";
@@ -349,7 +374,14 @@ internal static class Program
         }
         Atomic(previewPath, Json.Serialize(value));
     }
-    private sealed class Request { public string Directory { get; set; } public string RootPath { get; set; } public bool Previews { get; set; } public bool ArchiveBeforePreviews { get; set; } }
+    private sealed class Request
+    {
+        public string Directory { get; set; }
+        public string RootPath { get; set; }
+        public bool Previews { get; set; }
+        public bool ArchiveBeforePreviews { get; set; }
+        public bool ReadSavedProperties { get; set; }
+    }
     private sealed class ResultStatus { public bool Success { get; set; } public bool PreviewsPending { get; set; } }
     private sealed class PreviewAttempts { public int Attempts { get; set; } }
     private sealed class NativeOwner { public int Id { get; set; } public long Started { get; set; } public int WorkerId { get; set; } public long WorkerStarted { get; set; } }

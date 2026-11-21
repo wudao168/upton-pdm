@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
@@ -55,6 +56,47 @@ public sealed class EditCollaborationApiTests
     }
 
     [Fact]
+    public async Task SelectedLockAndOfflineReleaseUseDocumentAccessAndRejectOldGeneration()
+    {
+        var clock = new EditClock();
+        await using var baseFactory = new PdmApiFactory();
+        await using var factory = baseFactory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<TimeProvider>(clock)));
+        using var client = factory.CreateClient();
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var tokenIssuer = factory.Services.GetRequiredService<ITokenIssuer>();
+        var manager = (await repository.FindUserAsync("admin", default))!;
+        var viewer = (await repository.FindUserAsync("viewer", default))!;
+        var managerToken = tokenIssuer.Issue(manager, TimeSpan.FromHours(1));
+        var viewerToken = tokenIssuer.Issue(viewer, TimeSpan.FromHours(1));
+        var project = (await repository.ListProjectsAsync(default)).First();
+        var document = await repository.RegisterDocumentAsync(new(project.Id, "API-OFFLINE", "离线释放", "API-OFFLINE.SLDPRT", DocumentKind.Part), "engineer", default);
+        var session = Guid.NewGuid();
+        var first = await repository.CheckoutAsync(document.Id, "engineer", session, "测试电脑", clock.Now.AddMinutes(5), default);
+        clock.Now = clock.Now.AddMinutes(31);
+        var lookup = $"/api/edit-locks?documentId={document.Id}";
+        var release = $"/api/documents/{document.Id}/force-release";
+        var input = new { sessionId = session, checkedOutAt = first.CheckedOutAt, reason = "核实离线占用" };
+
+        client.DefaultRequestHeaders.Authorization = new("Bearer", viewerToken);
+        Assert.Empty((await client.GetFromJsonAsync<EditLockSummary[]>(lookup))!);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(release, input)).StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new("Bearer", managerToken);
+        var selected = Assert.Single((await client.GetFromJsonAsync<EditLockSummary[]>(lookup))!);
+        Assert.True(selected.CanForceRelease);
+        Assert.Equal(first.CheckedOutAt, selected.CheckedOutAt);
+        Assert.Empty((await client.GetFromJsonAsync<EditLockSummary[]>("/api/edit-locks?documentId=无效"))!);
+        Assert.Empty((await client.GetFromJsonAsync<EditLockSummary[]>($"/api/edit-locks?documentId={Guid.NewGuid()}"))!);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(release, new { input.sessionId, input.reason })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(release, input)).StatusCode);
+        var next = await repository.CheckoutAsync(document.Id, "engineer", session, "测试电脑", clock.Now.AddMinutes(5), default);
+        clock.Now = clock.Now.AddMinutes(31);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync(release, input)).StatusCode);
+        Assert.Equal(next.CheckedOutAt, (await repository.FindDocumentAsync(document.Id, default))!.CheckedOutAt);
+    }
+
+    [Fact]
     public async Task IdleEndpointPreservesDisabledPolicyAndRejectsWrongBase()
     {
         await using var factory = new PdmApiFactory();
@@ -80,5 +122,11 @@ public sealed class EditCollaborationApiTests
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync(path, new { sessionId = session, saved.Document.CheckedOutAt, baseVersionId = Guid.NewGuid(), sha256 = saved.Version.Sha256 })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(path, input)).StatusCode);
         Assert.Null((await repository.FindDocumentAsync(document.Id, default))!.CheckoutSessionId);
+    }
+
+    private sealed class EditClock : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
     }
 }

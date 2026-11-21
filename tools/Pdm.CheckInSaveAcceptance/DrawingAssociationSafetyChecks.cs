@@ -35,6 +35,29 @@ internal static partial class Program
         var count=reads;
         Check(Disproved(part,false)&&reads==count,"后台设计树复用证据，不调用原生依赖扫描");
         Check(!Disproved(model,false),"保留真正直接引用的装配体关系");
+        var manifest=New("ControlledOpenManifestDto");
+        var files=(System.Collections.IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);
+        var ids=new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        var paths=new[] { drawing, model, part };
+        for(var i=0;i<paths.Length;i++)
+        {
+            var file=New("ControlledOpenFileDto");
+            Set(file,"DocumentId",ids[i]);
+            Set(file,"FileName",Path.GetFileName(paths[i]));
+            files.Add(file);
+        }
+        Set(manifest,"Files",files);
+        ((System.Collections.IDictionary)Field(plugin,"controlledOpenManifests")).Add(output+Path.DirectorySeparatorChar,manifest);
+        var relations=Array.CreateInstance(Type("DocumentModelDrawingRelationDto"),2);
+        for(var i=0;i<2;i++)
+        {
+            var relation=New("DocumentModelDrawingRelationDto");
+            Set(relation,"DrawingDocumentId",ids[0]);
+            Set(relation,"ModelDocumentId",ids[i+1]);
+            relations.SetValue(relation,i);
+        }
+        var filtered=((System.Collections.IEnumerable)TreeCall(plugin,"FilterDrawingRelations",relations,output,true,null)).Cast<object>().ToArray();
+        Check(filtered.Length==1&&Equals(Get(filtered[0],"ModelDocumentId"),ids[1]),"工作目录尾部分隔符差异不影响直接模型证据核对");
         TreeCall(plugin,"OnDrawingAssociationChanged");
         Check(!Disproved(part,false),"工程图编辑后旧证据失效");
         Disproved(part,true);File.AppendAllText(drawing,"updated");

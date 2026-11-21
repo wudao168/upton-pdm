@@ -4,7 +4,7 @@ import { ElMessage } from '../statusMessage'
 import { listReleasePreviewItems } from '../api'
 import { userErrorMessage } from '../userErrorMessage'
 import { useProjectCenterAccess } from '../projectCenterAccess'
-import { requiresReleasePreview, releasePreviewNeedsAttention, releasePreviewStateLabel, releasePreviewStateTag } from '../releasePreviewState'
+import { canRetryReleasePreview, requiresReleasePreview, releasePreviewNeedsAttention, releasePreviewStateLabel, releasePreviewStateTag } from '../releasePreviewState'
 import { releaseFailureMessage, releasePublishingMessage } from '../releaseFailureMessage'
 import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult, ReleaseScope } from '../types'
 
@@ -187,7 +187,7 @@ function visibleChangeNumber(release: ReleasePackageSummary) {
           </button>
           <small v-if="release.state === '发布失败'" class="pdm-release-failure-reason">失败原因：{{ releaseFailureMessage(release.publishError) }}</small>
           <small v-if="release.state === '发布中'" class="pdm-release-publishing-reason">{{ releasePublishingMessage(release) }}<template v-if="release.previewUpdatedAt"> 最近转图状态更新：{{ new Date(release.previewUpdatedAt).toLocaleString('zh-CN', { hour12: false }) }}</template></small>
-          <button v-if="canManageRelease && requiresReleasePreview(release) && release.state === '发布中' && ['Pending', 'WaitingForServer', 'Failed'].includes(release.previewState ?? '')" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
+          <button v-if="canManageRelease && canRetryReleasePreview(release)" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
           <small v-if="retryRequestedId === release.id" class="pdm-release-retry-feedback" role="status">{{ pending ? '正在提交重试请求…' : '已请求重试。当前状态每5秒自动读取；提交失败时请查看顶部提示。' }}</small>
           </div>
         </div>

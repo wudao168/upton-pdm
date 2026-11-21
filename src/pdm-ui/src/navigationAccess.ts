@@ -3,10 +3,12 @@ type PermissionCheck = (permission: string) => boolean
 
 const productionOperations = ['production.assign', 'production.schedule', 'production.execute', 'production.inspect', 'production.issue', 'production.capacity.manage', 'production.drawing.manage', 'production.scan.manage']
 
+export const userAccountPermissions = { deactivate: 'system.user.deactivate', delete: 'system.user.delete' } as const
+
 const systemTabs = {
   ai: ['ai.settings.manage'],
   u9: ['settings.customer.manage', 'settings.storage.manage', 'stock.settings.manage'],
-  users: ['settings.organization.manage', 'system.role.view'],
+  users: ['settings.organization.manage', 'system.role.view', ...Object.values(userAccountPermissions)],
   settings: ['settings.storage.manage', 'settings.folder.manage'],
   approval: ['settings.storage.manage'],
   'production-scan': ['production.scan.manage'],

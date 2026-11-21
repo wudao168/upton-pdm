@@ -95,26 +95,32 @@ internal static class ControlledCacheMaintenance
         => InspectCore(root, protectedPaths, checkedOut, true);
     internal static ControlledCacheUsage InspectCapacity(string root)
         => InspectCore(root, Array.Empty<string>(), Array.Empty<Guid>(), false);
+    private static string[] MaintenanceRoots(string root) => PdmDocumentIdentityStore.IncludeMachineCompactCache(root)
+        ? new[] { root, ManagedCadPaths.CompactWorkspaceRoot }
+        : new[] { root };
+
     private static ControlledCacheUsage InspectCore(string root, IReadOnlyCollection<string> protectedPaths, IReadOnlyCollection<Guid> checkedOut, bool inspectReclaimable)
     {
         lock (Sync)
         {
             var usage = new ControlledCacheUsage { ReclaimableBytesKnown = inspectReclaimable };
-            foreach (var directory in Directories(root))
+            foreach (var storageRoot in MaintenanceRoots(root))
             {
-                try { usage.UsedBytes += Files(directory, root).Sum(path => new FileInfo(path).Length); }
-                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException) { usage.SkippedItems++; }
-            }
-            foreach (var entry in Entries(root))
-            {
-                usage.ManagedItems++;
-                // Automatic capacity checks only need file lengths. Hashing every
-                // cached assembly on every open competes with CAD interaction.
-                // Candidates actually removed below still receive full verification.
-                if (!inspectReclaimable) continue;
-                if (CanRemove(root, entry, protectedPaths, checkedOut))
-                    usage.ReclaimableBytes += Files(entry.Directory, root).Sum(path => new FileInfo(path).Length);
-                else usage.SkippedItems++;
+                foreach (var directory in Directories(storageRoot))
+                {
+                    try { usage.UsedBytes += Files(directory, storageRoot).Sum(path => new FileInfo(path).Length); }
+                    catch (Exception error) when (error is IOException || error is UnauthorizedAccessException) { usage.SkippedItems++; }
+                }
+                foreach (var entry in Entries(storageRoot))
+                {
+                    usage.ManagedItems++;
+                    // Automatic capacity checks only need file lengths. Candidates
+                    // actually removed still receive full content verification.
+                    if (!inspectReclaimable) continue;
+                    if (CanRemove(storageRoot, entry, protectedPaths, checkedOut))
+                        usage.ReclaimableBytes += Files(entry.Directory, storageRoot).Sum(path => new FileInfo(path).Length);
+                    else usage.SkippedItems++;
+                }
             }
             return usage;
         }
@@ -125,32 +131,34 @@ internal static class ControlledCacheMaintenance
         lock (Sync)
         {
             if (isBusy == null || isBusy()) throw new InvalidOperationException("当前有图档操作正在进行，暂不清理缓存。请待操作完成后重试。");
-            var entries = Entries(root).OrderBy(entry => entry.LastUsedUtc).ToArray();
+            var entries = MaintenanceRoots(root).SelectMany(storageRoot => Entries(storageRoot)
+                .Select(entry => (StorageRoot: storageRoot, Entry: entry))).OrderBy(item => item.Entry.LastUsedUtc).ToArray();
             var usage = InspectCore(root, protectedPaths, checkedOut, manual); long freed = 0; int occupied = 0;
-            foreach (var entry in entries)
+            foreach (var (storageRoot, entry) in entries)
             {
                 if (isBusy()) break;
-                var obsolete = entry.Kind == "snapshot" && entries.Any(other => other.Kind == "working"
-                    && other.Manifest.ProjectId == entry.Manifest.ProjectId && other.Manifest.RootDocumentId == entry.Manifest.RootDocumentId);
+                var obsolete = entry.Kind == "snapshot" && entries.Any(other => other.Entry.Kind == "working"
+                    && other.Entry.Manifest.ProjectId == entry.Manifest.ProjectId
+                    && other.Entry.Manifest.RootDocumentId == entry.Manifest.RootDocumentId);
                 if (!manual && !obsolete && usage.UsedBytes - freed <= limitBytes) continue;
-                if (!CanRemove(root, entry, protectedPaths, checkedOut)) continue;
+                if (!CanRemove(storageRoot, entry, protectedPaths, checkedOut)) continue;
                 var handles = new List<FileStream>();
                 try
                 {
-                    var paths = Files(entry.Directory, root).ToArray();
+                    var paths = Files(entry.Directory, storageRoot).ToArray();
                     // Hold every main stream against concurrent CAD loading/writing until removal.
                     foreach (var path in paths) handles.Add(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Delete));
-                    if (isBusy() || !CanRemove(root, entry, protectedPaths, checkedOut, handles)) continue;
+                    if (isBusy() || !CanRemove(storageRoot, entry, protectedPaths, checkedOut, handles)) continue;
                     foreach (var path in paths)
                     {
-                        Ordinary(path, root); var length = new FileInfo(path).Length;
+                        Ordinary(path, storageRoot); var length = new FileInfo(path).Length;
                         File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
                         try { File.Delete(path); freed += length; }
                         catch { if (File.Exists(path)) File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly); throw; }
                     }
                     foreach (var handle in handles) handle.Dispose(); handles.Clear();
-                    RemoveEmpty(entry.Directory, root);
-                    File.Delete(Path.Combine(IndexRoot(root), Key(entry.Directory) + ".json"));
+                    RemoveEmpty(entry.Directory, storageRoot);
+                    File.Delete(Path.Combine(IndexRoot(storageRoot), Key(entry.Directory) + ".json"));
                 }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
                 { occupied++; PluginDiagnosticLog.Record("安全清理缓存", "占用或归属变化，停止处理该副本：" + error); }
@@ -221,18 +229,29 @@ internal static class ControlledCacheMaintenance
                 { var folder = Path.Combine(project, name); if (Directory.Exists(folder)) candidates.Add(folder); }
             }
         }
+        var compact = ManagedCadPaths.CompactContainer(root);
+        if (Directory.Exists(compact))
+        {
+            Ordinary(compact, root);
+            foreach (var project in Directory.GetDirectories(compact))
+            {
+                if ((File.GetAttributes(project) & FileAttributes.ReparsePoint) != 0) continue;
+                foreach (var entry in Directory.GetDirectories(project))
+                    if (ManagedCadPaths.IsCompactProjectEntry(root, entry)) candidates.Add(entry);
+            }
+        }
         return candidates.Distinct(StringComparer.OrdinalIgnoreCase).Where(path => !candidates.Any(parent =>
             !string.Equals(parent, path, StringComparison.OrdinalIgnoreCase) && Within(path, parent))).ToArray();
     }
     private static bool Owned(string root, string directory)
     {
         if (string.IsNullOrEmpty(directory) || !Within(directory, root)) return false;
+        if (ManagedCadPaths.IsCompactProjectEntry(root, directory)) return true;
         var relative = Path.GetFullPath(directory).Substring(Path.GetFullPath(root).TrimEnd('\\', '/').Length + 1).Split('\\', '/');
         return relative.Length >= 4 && (relative[0] == ".uplm" && relative[1] == "Snapshots"
             || relative[0] == "View" && (relative[2] == "装配工作区" || relative[2] == "图档缓存"));
     }
-    private static bool Within(string path, string root) => !string.IsNullOrWhiteSpace(path)
-        && Path.GetFullPath(path).StartsWith(Path.GetFullPath(root).TrimEnd('\\', '/') + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    private static bool Within(string path, string root) => ManagedCadPaths.IsWithin(path, root);
     private static void Ordinary(string path, string root)
     {
         if (!string.Equals(Path.GetFullPath(path), Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase) && !Within(path, root))

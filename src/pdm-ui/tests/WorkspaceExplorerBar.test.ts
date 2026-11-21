@@ -47,9 +47,23 @@ describe('WorkspaceExplorerBar', () => {
   })
 
   it('blocks SolidWorks commands when the desktop bridge is unavailable', () => {
-    const wrapper = mount(WorkspaceExplorerBar, { props: { project, selected, desktopAvailable: false } })
+    const wrapper = mount(WorkspaceExplorerBar, { props: { project, selected, desktopAvailable: false, canReleaseEditPermission: true } })
     const buttons = wrapper.findAll('button')
 
     expect(buttons[0].attributes()).toHaveProperty('disabled')
+    expect(buttons).toHaveLength(1)
+  })
+
+  it('shows the release command beside the trust badge when the selected document can be released', async () => {
+    const wrapper = mount(WorkspaceExplorerBar, { props: { project, selected, desktopAvailable: true, canReleaseEditPermission: true } })
+    const release = wrapper.get('.pdm-workspace-explorer__trust + button')
+    expect(release.text()).toBe('释放权限')
+    await release.trigger('click')
+    expect(wrapper.emitted('releaseEditPermission')).toEqual([[]])
+
+    await wrapper.setProps({ releasePending: true })
+    expect(release.attributes()).toHaveProperty('disabled')
+    await wrapper.setProps({ canReleaseEditPermission: false })
+    expect(wrapper.find('.pdm-workspace-explorer__trust + button').exists()).toBe(false)
   })
 })

@@ -234,66 +234,24 @@ internal static class ArchiveNativeProcessWorkspace
     internal static async Task<ArchiveNativeCopyWorkspace> CreateAsync(ISldWorks caller, IEnumerable<string> inventory,
         IReadOnlyDictionary<string, string> requested, Action<string> report, CancellationToken token)
     {
-        var executable = Path.Combine(Path.GetDirectoryName(typeof(PdmAddin).Assembly.Location), "Upton.Pdm.CadArchiveWorker.exe");
-        if (!File.Exists(executable)) throw new InvalidOperationException("独立归档组件缺失，尚未上传任何文件。请完整更新 SolidWorks 插件后重试。");
-        var job = Path.Combine(Jobs, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(job);
-        var callerId = caller.GetProcessID();
-        var solidWorksExecutable = caller.GetExecutablePath();
-        if (Directory.Exists(solidWorksExecutable)) solidWorksExecutable = Path.Combine(solidWorksExecutable, "SLDWORKS.exe");
-        var request = new Request { JobId = Path.GetFileName(job), CallerSolidWorksId = callerId,
-            SolidWorksExecutable = solidWorksExecutable,
-            Inventory = inventory.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            Requested = requested.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase) };
+        token.ThrowIfCancellationRequested();
+        var job = Path.Combine(Jobs, Guid.NewGuid().ToString("N"));
+        var request = CreateRequest(caller, job);
+        request.Inventory = inventory.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        request.Requested = requested.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         var retained = false;
         try
         {
-            token.ThrowIfCancellationRequested();
-            File.WriteAllText(Path.Combine(job, RequestName), Json().Serialize(request));
-            var input = Path.Combine(job, "input"); Directory.CreateDirectory(input);
+            Directory.CreateDirectory(job);
+            var input = Path.Combine(job, "input");
+            Directory.CreateDirectory(input);
             var root = requested.First();
             File.Copy(root.Value, Path.Combine(input, Path.GetFileName(root.Key)));
-            var workerRequest = Path.Combine(job, "reader-request.json"); var responsePath = Path.Combine(job, "result.json");
-            File.WriteAllText(workerRequest, Json().Serialize(new { Directory = input, RootPath = Path.GetFileName(root.Key), Previews = false }));
-            using (var process = Process.Start(new ProcessStartInfo(executable, "\"" + workerRequest + "\" \"" + responsePath + "\"")
-            { WorkingDirectory = Path.GetDirectoryName(executable), UseShellExecute = false, CreateNoWindow = true }))
-            {
-                if (process == null) throw new InvalidOperationException("独立归档进程未能启动，尚未上传，原窗口已保留。");
-                var workerStart = process.StartTime.ToUniversalTime().Ticks;
-                string previous = null;
-                try
-                {
-                    while (!process.HasExited)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        var current = ReadProgress(job);
-                        if (current != null && current != previous) { previous = current; report?.Invoke(current); }
-                        await Task.Delay(200, token);
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    File.WriteAllText(Path.Combine(job, "cancel"), "取消本次独立归档");
-                    await StopOwnedReaderAsync(process, workerStart, callerId, job);
-                    throw;
-                }
-                var diagnostic = responsePath + ".diagnostic.txt";
-                if (File.Exists(diagnostic)) PluginDiagnosticLog.Record("独立归档诊断", File.ReadAllText(diagnostic));
-                var nativeDiagnostic = Path.Combine(job, "native-diagnostics.txt");
-                if (File.Exists(nativeDiagnostic))
-                {
-                    var details = File.ReadAllText(nativeDiagnostic);
-                    for (var offset = 0; offset < details.Length; offset += 3500)
-                        PluginDiagnosticLog.Record("原生存档诊断", details.Substring(offset, Math.Min(3500, details.Length - offset)));
-                }
-                if (!File.Exists(responsePath)) throw new InvalidOperationException("独立归档进程未返回完整结果，尚未上传。原窗口已保留，请查看诊断日志。");
-                var response = Json().Deserialize<Response>(File.ReadAllText(responsePath));
-                if (process.ExitCode != 0 || !response.Success)
-                    throw new InvalidOperationException(!string.IsNullOrWhiteSpace(response.Error) && response.Error.Any(c => c >= '\u4e00' && c <= '\u9fff')
-                        ? response.Error : "独立归档未完成，尚未上传。原图档和窗口已保留，请查看诊断日志。");
-                var files = ValidateResult(job, request, response);
-                retained = true;
-                return ArchiveNativeCopyWorkspace.Attach(job, files);
-            }
+            var response = await RunWorkerAsync(job, request,
+                new { Directory = input, RootPath = Path.GetFileName(root.Key), Previews = false }, report, token);
+            var files = ValidateResult(job, request, response);
+            retained = true;
+            return ArchiveNativeCopyWorkspace.Attach(job, files);
         }
         finally
         {
@@ -301,6 +259,207 @@ internal static class ArchiveNativeProcessWorkspace
             if (!retained) DeleteJob(job);
         }
     }
+
+    internal static async Task<IReadOnlyDictionary<string, string>> ReadSavedPropertiesAsync(ISldWorks caller, string source,
+        int documentKind, string[] configurations, string sourceHash, Action<string> report, CancellationToken token)
+    {
+        var saved = await ReadSavedFileAsync(caller, source, documentKind, configurations, sourceHash, report, token, false);
+        if (saved.Properties == null) throw new InvalidOperationException("独立属性读取未返回本次图档的属性。");
+        return new Dictionary<string, string>(saved.Properties, StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static async Task<ArchivedMissingOccurrence[]> ReadSavedOccurrencesAsync(ISldWorks caller, string source,
+        string configuration, string sourceHash, CancellationToken token)
+    {
+        var saved = await ReadSavedFileAsync(caller, source, (int)CadDocumentKind.Assembly, new[] { configuration }, sourceHash, null, token, true);
+        if (saved.Occurrences == null || !string.Equals(saved.ReaderSourceSha256, sourceHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("未能从指定的存档原件核对该配置的直属实例。");
+        return saved.Occurrences;
+    }
+
+    private static async Task<SavedPropertyResult> ReadSavedFileAsync(ISldWorks caller, string source,
+        int documentKind, string[] configurations, string sourceHash, Action<string> report, CancellationToken token, bool readOccurrences)
+    {
+        token.ThrowIfCancellationRequested();
+        var job = Path.Combine(Jobs, Guid.NewGuid().ToString("N"));
+        var request = CreateRequest(caller, job);
+        request.SavedPropertyRead = new SavedPropertyRead
+        {
+            Source = Path.GetFullPath(source), DocumentKind = documentKind,
+            Configurations = configurations ?? Array.Empty<string>(), SourceSha256 = sourceHash, ReadOccurrences = readOccurrences
+        };
+        // An encrypted share can expose different bytes to the CAD application
+        // and its worker. Pin the selected source while each checks its own view.
+        using var sourceLease = ProtectSavedPropertySource(request.SavedPropertyRead.Source);
+        CheckInUploadHashes.VerifySource(request.SavedPropertyRead.Source, sourceHash, token);
+        try
+        {
+            Directory.CreateDirectory(job);
+            var response = await RunWorkerAsync(job, request, new { ReadSavedProperties = true }, report, token, TimeSpan.FromMinutes(4));
+            var saved = response.SavedProperties;
+            if (saved == null || !PdmAddin.PathsEqual(saved.Source, request.SavedPropertyRead.Source)
+                || !string.Equals(saved.SourceSha256, sourceHash, StringComparison.OrdinalIgnoreCase)
+                || !ValidSha256(saved.ReaderSourceSha256))
+                throw new InvalidOperationException("独立属性读取结果与本次图档或源文件不一致，尚未上传。");
+            CheckInUploadHashes.VerifySource(request.SavedPropertyRead.Source, sourceHash, token);
+            if (!string.Equals(saved.ReaderSourceSha256, sourceHash, StringComparison.OrdinalIgnoreCase))
+                PluginDiagnosticLog.Record("独立属性读取", "源图档按两个进程各自可见的内容完成核对；已核对原路径：" + saved.Source);
+            return saved;
+        }
+        finally
+        {
+            ArchiveNativeJournalScope.Recover(job);
+            DeleteJob(job);
+        }
+    }
+
+    internal static bool TryReadSavedProperties(ISldWorks app, string job, out string result)
+    {
+        result = null;
+        if (!IsJob(job) || !File.Exists(Path.Combine(job, RequestName))) return false;
+        var request = Json().Deserialize<Request>(File.ReadAllText(Path.Combine(job, RequestName)));
+        var read = request?.SavedPropertyRead;
+        if (read == null) return false;
+        if (request.JobId != Path.GetFileName(job) || request.CallerSolidWorksId == app.GetProcessID()
+            || CurrentReader(job, app.GetProcessID()) == null || !ValidSavedPropertyRead(read))
+            throw new InvalidOperationException("无法核对独立属性读取任务的会话、图档路径或源文件，尚未上传。");
+        app.UserControlBackground = true;
+        var previousCommand = app.CommandInProgress;
+        try
+        {
+            app.CommandInProgress = true;
+            WriteProgress(job, Path.GetFileName(read.Source));
+            var readerHash = ArchiveFileFingerprint.Read(read.Source);
+            var saved = new SavedPropertyResult { Source = read.Source, SourceSha256 = read.SourceSha256, ReaderSourceSha256 = readerHash };
+            if (read.ReadOccurrences)
+            {
+                if (read.DocumentKind != (int)CadDocumentKind.Assembly || read.Configurations.Length != 1
+                    || !string.Equals(readerHash, read.SourceSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("待核对的存档装配体、配置或文件内容不一致。");
+                saved.Occurrences = PdmAddin.ReadArchivedAssemblyOccurrences(app, read.Source, read.Configurations[0]);
+            }
+            else
+            {
+                var values = PdmAddin.ReadNativeArchiveSavedProperties(app, read.Source, read.DocumentKind, read.Configurations, readerHash);
+                saved.Properties = values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            }
+            WriteProgress(job, Path.GetFileName(read.Source));
+            var response = new Response
+            {
+                Success = true,
+                JobId = request.JobId,
+                SavedProperties = saved
+            };
+            result = Json().Serialize(response);
+            return true;
+        }
+        catch
+        {
+            File.WriteAllText(Path.Combine(job, "native-diagnostics.txt"), PluginDiagnosticLog.Snapshot());
+            throw;
+        }
+        finally
+        {
+            try { app.CommandInProgress = previousCommand; }
+            catch (COMException error) { PluginDiagnosticLog.Record("专用会话恢复", "批量调用状态未恢复；原始处理结果保留：" + error); }
+        }
+    }
+
+    private static FileStream ProtectSavedPropertySource(string path)
+    {
+        try { return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); }
+        catch (IOException error)
+        {
+            throw new InvalidOperationException("暂时无法保护本次待读取的源图档。本批尚未上传，请确认共享目录可访问且图档未在保存后重试：" + path, error);
+        }
+    }
+
+    private static bool ValidSha256(string hash) => hash != null && hash.Length == 64 && hash.All(Uri.IsHexDigit);
+
+    private static bool ValidSavedPropertyRead(SavedPropertyRead read)
+    {
+        if (string.IsNullOrWhiteSpace(read.Source) || !Path.IsPathRooted(read.Source)
+            || !string.Equals(Path.GetFullPath(read.Source), read.Source, StringComparison.OrdinalIgnoreCase)
+            || read.Configurations == null || read.Configurations.Any(string.IsNullOrWhiteSpace)
+            || !ValidSha256(read.SourceSha256))
+            return false;
+        var extension = (CadDocumentKind)read.DocumentKind switch
+        {
+            CadDocumentKind.Part => ".sldprt",
+            CadDocumentKind.Assembly => ".sldasm",
+            CadDocumentKind.Drawing => ".slddrw",
+            _ => null
+        };
+        return extension != null && string.Equals(Path.GetExtension(read.Source), extension, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Request CreateRequest(ISldWorks caller, string job)
+    {
+        var solidWorksExecutable = caller.GetExecutablePath();
+        if (Directory.Exists(solidWorksExecutable)) solidWorksExecutable = Path.Combine(solidWorksExecutable, "SLDWORKS.exe");
+        return new Request
+        {
+            JobId = Path.GetFileName(job), CallerSolidWorksId = caller.GetProcessID(),
+            SolidWorksExecutable = solidWorksExecutable
+        };
+    }
+
+    private static async Task<Response> RunWorkerAsync(string job, Request request, object workerInput, Action<string> report,
+        CancellationToken token, TimeSpan? timeout = null)
+    {
+        token.ThrowIfCancellationRequested();
+        var executable = Path.Combine(Path.GetDirectoryName(typeof(PdmAddin).Assembly.Location), "Upton.Pdm.CadArchiveWorker.exe");
+        if (!File.Exists(executable)) throw new InvalidOperationException("独立归档组件缺失，尚未上传任何文件。请完整更新 SolidWorks 插件后重试。");
+        File.WriteAllText(Path.Combine(job, RequestName), Json().Serialize(request));
+        var workerRequest = Path.Combine(job, "reader-request.json");
+        var responsePath = Path.Combine(job, "result.json");
+        File.WriteAllText(workerRequest, Json().Serialize(workerInput));
+        using (var process = Process.Start(new ProcessStartInfo(executable, "\"" + workerRequest + "\" \"" + responsePath + "\"")
+        { WorkingDirectory = Path.GetDirectoryName(executable), UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden }))
+        {
+            if (process == null) throw new InvalidOperationException("独立归档进程未能启动，尚未上传，原窗口已保留。");
+            var workerStart = process.StartTime.ToUniversalTime().Ticks;
+            var timer = Stopwatch.StartNew();
+            string previous = null;
+            try
+            {
+                while (!process.HasExited)
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (timeout.HasValue && timer.Elapsed >= timeout.Value)
+                        throw new TimeoutException("独立属性读取超时，尚未上传。请稍后重试，原窗口已保留。");
+                    var current = ReadProgress(job);
+                    if (current != null && current != previous) { previous = current; report?.Invoke(current); }
+                    await Task.Delay(200, token);
+                }
+            }
+            catch
+            {
+                File.WriteAllText(Path.Combine(job, "cancel"), "取消本次独立归档");
+                await StopOwnedReaderAsync(process, workerStart, request.CallerSolidWorksId, job);
+                throw;
+            }
+            token.ThrowIfCancellationRequested();
+            var diagnostic = responsePath + ".diagnostic.txt";
+            if (File.Exists(diagnostic)) PluginDiagnosticLog.Record("独立归档诊断", File.ReadAllText(diagnostic));
+            var nativeDiagnostic = Path.Combine(job, "native-diagnostics.txt");
+            if (File.Exists(nativeDiagnostic))
+            {
+                var details = File.ReadAllText(nativeDiagnostic);
+                for (var offset = 0; offset < details.Length; offset += 3500)
+                    PluginDiagnosticLog.Record("原生存档诊断", details.Substring(offset, Math.Min(3500, details.Length - offset)));
+            }
+            if (!File.Exists(responsePath)) throw new InvalidOperationException("独立归档进程未返回完整结果，尚未上传。原窗口已保留，请查看诊断日志。");
+            var response = Json().Deserialize<Response>(File.ReadAllText(responsePath));
+            if (process.ExitCode != 0 || response?.Success != true)
+                throw new InvalidOperationException(!string.IsNullOrWhiteSpace(response?.Error) && response.Error.Any(c => c >= '\u4e00' && c <= '\u9fff')
+                    ? response.Error : "独立归档未完成，尚未上传。原图档和窗口已保留，请查看诊断日志。");
+            if (response.JobId != request.JobId)
+                throw new InvalidOperationException("独立归档结果与本次任务不一致，尚未上传。");
+            return response;
+        }
+    }
+
 
     private static IReadOnlyList<ArchiveNativeCopyWorkspace.FileCopy> ValidateResult(string job, Request request, Response response)
     {
@@ -385,6 +544,23 @@ internal static class ArchiveNativeProcessWorkspace
         public string SolidWorksExecutable { get; set; }
         public string[] Inventory { get; set; }
         public Dictionary<string, string> Requested { get; set; }
+        public SavedPropertyRead SavedPropertyRead { get; set; }
+    }
+    internal sealed class SavedPropertyRead
+    {
+        public bool ReadOccurrences { get; set; }
+        public string Source { get; set; }
+        public int DocumentKind { get; set; }
+        public string[] Configurations { get; set; }
+        public string SourceSha256 { get; set; }
+    }
+    internal sealed class SavedPropertyResult
+    {
+        public ArchivedMissingOccurrence[] Occurrences { get; set; }
+        public string Source { get; set; }
+        public string SourceSha256 { get; set; }
+        public string ReaderSourceSha256 { get; set; }
+        public Dictionary<string, string> Properties { get; set; }
     }
     internal sealed class Response
     {
@@ -392,6 +568,7 @@ internal static class ArchiveNativeProcessWorkspace
         public string JobId { get; set; }
         public string Error { get; set; }
         public List<CompletedFile> Files { get; set; } = new List<CompletedFile>();
+        public SavedPropertyResult SavedProperties { get; set; }
     }
     internal sealed class CompletedFile
     {
@@ -420,6 +597,9 @@ internal static class ArchiveNativeProcessWorkspace
 
 public partial class PdmAddin
 {
+    public static bool TryReadNativeArchiveSavedPropertiesJob(ISldWorks app, string job, out string result)
+        => ArchiveNativeProcessWorkspace.TryReadSavedProperties(app, job, out result);
+
     public static ISldWorks CurrentNativeArchiveSession(string job, int processId)
         => ArchiveNativeProcessWorkspace.CurrentReader(job, processId);
 }

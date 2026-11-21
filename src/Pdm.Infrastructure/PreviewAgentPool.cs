@@ -19,8 +19,8 @@ public static class PreviewAgentPool
     public static async Task<Lease> AcquireAsync(PreviewConversionSettings settings, string task,
         HttpClient client, CancellationToken cancellationToken, bool waitForServer = true, IReadOnlySet<string>? excluded = null)
     {
-        var servers = settings.Servers.Count > 0 ? settings.Servers
-            : [new PreviewAgentServer(settings.AgentUrl, settings.AgentUrl, settings.AgentToken, settings.TimeoutMinutes)];
+        var servers = settings.GetConfiguredServers().Where(server => !server.Disabled).ToArray();
+        if (servers.Length == 0) throw new PreviewServerUnavailableException("暂时没有已启用的远程转图服务器，等待启用后重试。");
         var requestId = Guid.NewGuid();
         Waiting[requestId] = task;
         try
@@ -33,6 +33,7 @@ public static class PreviewAgentPool
                     var url = server.AgentUrl.Trim().TrimEnd('/');
                     if (excluded?.Contains(url) == true || IsCooling(url)) continue;
                     if (!Active.TryAdd(url, task)) continue;
+                    var leased = false;
                     try
                     {
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -44,11 +45,23 @@ public static class PreviewAgentPool
                             if (health.RootElement.TryGetProperty("workerExists", out var exists) && exists.ValueKind == JsonValueKind.True
                                 && (!health.RootElement.TryGetProperty("accepting", out var accepting) || accepting.ValueKind != JsonValueKind.False)
                                 && (!health.RootElement.TryGetProperty("busy", out var busy) || busy.ValueKind != JsonValueKind.True))
-                                return new Lease(url, settings with { AgentUrl = url, AgentToken = server.AgentToken, TimeoutMinutes = server.TimeoutMinutes });
+                            {
+                                leased = true;
+                                return new Lease(server.Name, url, settings with
+                                {
+                                    AgentUrl = url,
+                                    AgentToken = server.AgentToken,
+                                    TimeoutMinutes = server.TimeoutMinutes
+                                });
+                            }
                         }
                     }
-                    catch (Exception exception) when (exception is HttpRequestException || exception is OperationCanceledException || exception is JsonException) { }
-                    Active.TryRemove(url, out _);
+                    catch (Exception exception) when (!cancellationToken.IsCancellationRequested &&
+                        exception is (HttpRequestException or OperationCanceledException or JsonException or InvalidOperationException)) { }
+                    finally
+                    {
+                        if (!leased) Active.TryRemove(url, out _);
+                    }
                 }
                 if (!waitForServer) throw new PreviewServerUnavailableException("转图服务器离线、忙碌或转换程序尚未就绪，等待恢复后自动重试。");
                 await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
@@ -57,8 +70,9 @@ public static class PreviewAgentPool
         finally { Waiting.TryRemove(requestId, out _); }
     }
 
-    public sealed class Lease(string url, PreviewConversionSettings settings) : IDisposable
+    public sealed class Lease(string name, string url, PreviewConversionSettings settings) : IDisposable
     {
+        public string Name { get; } = name;
         public PreviewConversionSettings Settings { get; } = settings;
         private int released;
         public void Dispose() { if (Interlocked.Exchange(ref released, 1) == 0) Active.TryRemove(url, out _); }

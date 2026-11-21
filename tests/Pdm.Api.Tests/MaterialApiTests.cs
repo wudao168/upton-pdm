@@ -81,6 +81,7 @@ public sealed partial class MaterialApiTests : IClassFixture<PdmApiFactory>
         approved.EnsureSuccessStatusCode();
         using var result = JsonDocument.Parse(await approved.Content.ReadAsStringAsync());
         var task = result.RootElement.GetProperty("task");
+        Assert.Equal(rows[0].Kind.ToString(), task.GetProperty("materialKind").GetString());
         Assert.Equal(rows[0].Name, task.GetProperty("materialName").GetString());
         Assert.Equal(rows[0].Specification, task.GetProperty("specification").GetString());
         Assert.Equal(rows[0].Brand, task.GetProperty("brand").GetString());
@@ -90,6 +91,7 @@ public sealed partial class MaterialApiTests : IClassFixture<PdmApiFactory>
         Assert.DoesNotContain(refreshed.RootElement.EnumerateArray(), item => item.GetProperty("id").GetString() == rows[0].Id.ToString());
         using var tasks = JsonDocument.Parse(await client.GetStringAsync("/api/material-sync-tasks"));
         var reloaded = Assert.Single(tasks.RootElement.EnumerateArray(), item => item.GetProperty("id").GetString() == task.GetProperty("id").GetString());
+        Assert.Equal(rows[0].Kind.ToString(), reloaded.GetProperty("materialKind").GetString());
         Assert.Equal(rows[0].Specification, reloaded.GetProperty("specification").GetString());
         Assert.Equal(rows[0].Brand, reloaded.GetProperty("brand").GetString());
     }

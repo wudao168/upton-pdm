@@ -30,6 +30,7 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
             notices.Where(item => ReleaseCategories.Contains(item.Category) && item.ReleasePackageId is not null).ToArray(), ct)).ToDictionary(item => item.Notification.Id);
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
         var drawingCache = new Dictionary<Guid, DrawingReviewPackage?>();
+        var reworkPackages = new Dictionary<Guid, ReleasePackage?>();
         var planCache = new Dictionary<Guid, ProjectPlan?>();
         var applicationCache = new Dictionary<Guid, ProjectApplication?>();
         var userCache = new Dictionary<string, UserAccount?>(StringComparer.OrdinalIgnoreCase);
@@ -44,7 +45,15 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
             { decisions[notice.Id] = new(notice, false, "账号已停用或未获准接收业务消息"); continue; }
 
             var key = notice.SourceKey.Split(':');
-            if (notice.Category.StartsWith("DrawingReview", StringComparison.Ordinal) && TryId(key, 1, out var drawingId))
+            if (ReleaseDrawingReworkNotifications.IsDrawingReworkCategory(notice.Category) && notice.ReleasePackageId is Guid packageId)
+            {
+                if (!reworkPackages.TryGetValue(packageId, out var package))
+                    reworkPackages[packageId] = package = await repository.FindReleasePackageAsync(packageId, ct);
+                if (!ReleaseDrawingReworkNotifications.IsPending(notice, package))
+                    decisions[notice.Id] = new(notice, true, notice.Category == ReleaseDrawingReworkNotifications.ResubmittedCategory
+                        ? "该图纸已复审、再次退回或审批节点已变化" : "图纸已存档复审、已撤回退回或审批已结束");
+            }
+            else if (notice.Category.StartsWith("DrawingReview", StringComparison.Ordinal) && TryId(key, 1, out var drawingId))
             {
                 if (!drawingCache.TryGetValue(drawingId, out var drawing)) drawingCache[drawingId] = drawing = await repository.FindDrawingReviewPackageAsync(drawingId, ct);
                 if (drawing is null)
@@ -155,11 +164,19 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
                     decisions[notice.Id] = new(notice, true, "本轮验证计划已结束或被新版本替代");
             }
             else if (notice.Category == "EditLockWaiting") decisions[notice.Id] = new(notice, false, "编辑申请回执保留在跟踪记录，不作为新的办理事项");
-            else if (notice.Category is "EditLockRequested" or "EditLockEscalated" or "EditLockHandoff")
+            else if (notice.Category is "EditLockRequested" or "EditLockEscalated" or "EditLockHandoff" or "EditLockOverdue")
             {
                 var index = key[0] == "edit-request" ? 2 : 1;
                 if (!TryId(key, index, out var documentId)) continue;
                 if (!documentCache.TryGetValue(documentId, out var document)) documentCache[documentId] = document = await repository.FindDocumentAsync(documentId, ct);
+                if (notice.Category == "EditLockOverdue")
+                {
+                    if (document?.CheckedOutBy is null
+                        || !document.CheckedOutBy.Equals(notice.Recipient, StringComparison.OrdinalIgnoreCase)
+                        || notice.SourceKey != EditLockOverdueReminder.SourceKey(document))
+                        decisions[notice.Id] = new(notice, true, "本轮占用提醒已结束或由当前提醒规则替代");
+                    continue;
+                }
                 if (document is null) continue;
                 var sessionIndex = index + 1;
                 var oldSession = TryId(key, sessionIndex, out var session) && document.CheckoutSessionId != session;

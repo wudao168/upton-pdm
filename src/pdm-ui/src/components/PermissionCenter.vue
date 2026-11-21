@@ -491,6 +491,7 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
 
         <section v-if="tab === 'templates'" class="authorization-pane" aria-label="权限模块">
           <h3>按导航分类</h3>
+          <input v-model="permissionSearch" type="search" aria-label="搜索权限" placeholder="搜索权限" />
           <p class="authorization-note">已授权／权限项</p>
           <nav class="authorization-list authorization-categories" aria-label="权限分类">
             <button type="button" class="authorization-pick" :aria-pressed="!activeCategory" @click="selectCategory('')">
@@ -556,12 +557,6 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
               <h3>{{ categoryPath }} · 权限设置</h3>
               <p v-if="template" class="authorization-note">{{ template.name }}</p>
             </div>
-            <input
-              v-model="permissionSearch"
-              type="search"
-              aria-label="搜索权限"
-              placeholder="权限名称／页面"
-            />
           </div>
           <template v-if="template">
             <div class="authorization-filters authorization-template-fields">
@@ -975,7 +970,6 @@ watch(() => [props.token, props.companyId], () => { void load() }, { immediate: 
 .authorization-check {
   white-space: nowrap;
 }
-.authorization-detail-head input,
 .authorization-result-filters input {
   width: min(200px, 100%);
 }

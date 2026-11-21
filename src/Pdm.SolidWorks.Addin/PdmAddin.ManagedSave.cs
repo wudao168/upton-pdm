@@ -56,12 +56,24 @@ public sealed partial class PdmAddin
                 return false;
             }
             managedSaveInProgress = true;
+            var load = node.Kind == CadDocumentKind.Assembly && Volatile.Read(ref nativeFileOpenInProgress) == 0
+                ? new AssemblyReferenceLoad(document, path, forReuse: false) : null;
+            assemblyReferenceLoad = load;
+            var saved = false;
             try
             {
                 SaveManagedDocumentScope(document, node);
+                saved = true;
+                if (load?.Observed.Count > 0)
+                    load.References.UnionWith(EnumerateTree(node).Where(child => child != node).Select(child => child.FullPath));
                 InvalidateCurrentTreeCache(); ScheduleTreeRefresh(forceScan: false);
             }
-            finally { managedSaveInProgress = false; EndWorkspaceOperation(); }
+            finally
+            {
+                FinishAssemblyReferenceOperation(load, saved);
+                managedSaveInProgress = false;
+                EndWorkspaceOperation();
+            }
         }
         catch (Exception error)
         {
@@ -84,6 +96,7 @@ public sealed partial class PdmAddin
                 .Where(model => !PathsEqual(model.GetPathName(), root.FullPath))
                 .GroupBy(model => model.GetPathName(), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+            assemblyReferenceLoad?.References.UnionWith(loaded.Keys);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var child in EnumerateTree(root).Reverse().Where(node => node.Kind != CadDocumentKind.Drawing))
             {

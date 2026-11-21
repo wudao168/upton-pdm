@@ -98,6 +98,117 @@ public sealed class DocumentVersionTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DrawingNumberLengthIsValidatedBeforeRegistration(bool reserveForArchive)
+    {
+        var repository = CreateRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("QA-DRAWING-NUMBER-REG", "图号登记", "admin", "vault", "release"), "admin", default);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var context = reserveForArchive ? new Application.ArchiveRegistrationContext(Guid.NewGuid(), Guid.NewGuid(), "QA") : null;
+        var drawingNumber = DrawingNumberWith255Characters();
+        var command = new Application.RegisterDocumentCommand(project.Id, drawingNumber + "甲", "零件", "PART.SLDPRT",
+            DocumentKind.Part, SourceSha256: new string('A', 64));
+
+        var error = await Assert.ThrowsAsync<Application.PdmRuleException>(() =>
+            workflow.RegisterDocumentAsync(command, "admin", UserRole.Administrator, default, context));
+        Assert.Contains("图号不能超过255个字符", error.Message);
+        Assert.Contains("当前为256个字符", error.Message);
+        Assert.Contains(command.FileName, error.Message);
+
+        var name = new string('名', 299) + "\U00020001";
+        var validCommand = command with { DrawingNumber = $" {drawingNumber} ", Name = $" {name} " };
+        var nameError = await Assert.ThrowsAsync<Application.PdmRuleException>(() =>
+            workflow.RegisterDocumentAsync(validCommand with { Name = $" {name}甲 " }, "admin", UserRole.Administrator, default, context));
+        Assert.Contains("图档名称不能超过300个字符", nameError.Message);
+        Assert.Contains("当前为301个字符", nameError.Message);
+        Assert.Contains(command.FileName, nameError.Message);
+
+        if (reserveForArchive)
+        {
+            var longFileName = new string('件', 254) + ".SLDPRT";
+            var fileNameError = await Assert.ThrowsAsync<Application.PdmRuleException>(() =>
+                workflow.RegisterDocumentAsync(validCommand with { FileName = longFileName }, "admin", UserRole.Administrator, default, context));
+            Assert.Contains("文件名", fileNameError.Message);
+            Assert.Contains("260", fileNameError.Message);
+        }
+        Assert.Empty(await repository.ListDocumentsAsync(project.Id, default));
+
+        var document = await workflow.RegisterDocumentAsync(validCommand, "admin", UserRole.Administrator, default, context);
+        Assert.Equal(drawingNumber, document.DrawingNumber);
+        Assert.Equal(name, document.Name);
+
+        if (reserveForArchive)
+        {
+            var pending = await repository.FindPendingArchiveDocumentAsync(document.Id, default);
+            Assert.Equal(drawingNumber, pending?.Command.DrawingNumber);
+            Assert.Empty(await repository.ListDocumentsAsync(project.Id, default));
+        }
+        else
+        {
+            Assert.Equal(drawingNumber, Assert.Single(await repository.ListDocumentsAsync(project.Id, default)).DrawingNumber);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FirstCheckInUsesTheValidatedDrawingNumberAndFileIdentity(bool useBatch)
+    {
+        var repository = CreateRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("QA-DRAWING-NUMBER-COMMIT", "图号存档", "admin", "vault", "release"), "admin", default);
+        var storage = new RecordingFileStorage();
+        var workflow = new Application.PdmWorkflowService(repository, storage, new NoOpPublisher(), TimeProvider.System);
+        var batch = Guid.NewGuid();
+        var session = Guid.NewGuid();
+        var document = await ArchiveBatchTests.Register(repository, project, "PART", DocumentKind.Part, session);
+        var drawingNumber = DrawingNumberWith255Characters();
+        var commit = ArchiveBatchTests.Commit(project, document, ArchiveBatchTests.Node(document), 'A');
+
+        async Task<Application.DocumentCheckInResult> CheckInAsync(string updatedDrawingNumber)
+        {
+            if (useBatch)
+            {
+                var input = new Application.ArchiveBatchInput(document.Id, commit.File, commit.Properties, commit.ReferenceSnapshot,
+                    "图号存档", false, null, updatedDrawingNumber, " 新名称 ", $" {document.FileName} ");
+                var receipt = await workflow.CheckInBatchAsync(batch, "drawing-number", "admin", UserRole.Administrator, session, [input], default);
+                return Assert.Single(receipt.Results);
+            }
+
+            return await workflow.CheckInAsync(document.Id, "admin", UserRole.Administrator, session, commit.File, "图号存档",
+                commit.Properties, commit.ReferenceSnapshot, false, false, default, updatedDrawingNumber, " 新名称 ", $" {document.FileName} ");
+        }
+
+        Task PreflightAsync(string number, string name) => workflow.PreflightCheckInAsync(document.Id, "admin", UserRole.Administrator,
+            session, commit.Properties, commit.ReferenceSnapshot, false, default, number, name, $" {document.FileName} ");
+
+        var preflightError = await Assert.ThrowsAsync<Application.PdmRuleException>(() => PreflightAsync($" {drawingNumber}甲 ", "新名称"));
+        Assert.Contains("图号不能超过255个字符", preflightError.Message);
+        Assert.Contains("当前为256个字符", preflightError.Message);
+        Assert.Contains(document.FileName, preflightError.Message);
+        var error = await Assert.ThrowsAsync<Application.PdmRuleException>(() => CheckInAsync($" {drawingNumber}甲 "));
+        Assert.Equal(preflightError.Message, error.Message);
+
+        var name = new string('名', 299) + "\U00020001";
+        var nameError = await Assert.ThrowsAsync<Application.PdmRuleException>(() => PreflightAsync(drawingNumber, $" {name}甲 "));
+        Assert.Contains("图档名称不能超过300个字符", nameError.Message);
+        Assert.Contains("当前为301个字符", nameError.Message);
+        await PreflightAsync($" {drawingNumber} ", $" {name} ");
+        Assert.Empty(storage.VerifiedFiles);
+        Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, default));
+        Assert.Null(await repository.FindArchiveBatchAsync(batch, default));
+
+        var result = await CheckInAsync($" {drawingNumber} ");
+        Assert.True(result.VersionCreated);
+        Assert.Equal(drawingNumber, result.Document.DrawingNumber);
+        Assert.Equal("新名称", result.Document.Name);
+        Assert.Equal(document.FileName, result.Document.FileName);
+        Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, default));
+    }
+
+    private static string DrawingNumberWith255Characters() => "QA-" + new string('图', 251) + "\U00020000";
+
+    [Theory]
     [InlineData(DocumentKind.Drawing)]
     [InlineData(DocumentKind.Assembly)]
     public async Task HistoricalRestoreUsesAtomicReferencesReceiptAndDurableFollowup(DocumentKind kind)
@@ -309,7 +420,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task EditReleaseNotifiesAllWaitingUsersWithoutDuplicateRequests()
+    public async Task EditReleaseKeepsUniqueRequestReceiptsWithoutCompletionNotifications()
     {
         var repository = CreateRepository(TimeProvider.System);
         await PermissionTestUsers.Ensure(repository, ("waiter1", UserRole.Administrator), ("waiter2", UserRole.Administrator));
@@ -323,12 +434,14 @@ public sealed class DocumentVersionTests
             await workflow.RequestEditLockReleaseAsync(document.Id, actor, UserRole.Administrator, "我需要编辑", CancellationToken.None);
         var heartbeat = await workflow.HeartbeatEditSessionAsync(session, "admin", UserRole.Administrator, "WS-A", [document.Id], CancellationToken.None);
         Assert.Contains(document.Id, heartbeat.ReleaseRequestedDocumentIds);
+        Assert.Equal(24, heartbeat.Settings.CheckoutReminderHours);
+        Assert.Equal(36, heartbeat.Settings.CheckoutStrongReminderHours);
         await workflow.CloseEditAsync(document.Id, "admin", UserRole.Administrator, session, checkout.CheckedOutAt!.Value, "draft", true, CancellationToken.None);
         foreach (var actor in new[] { "waiter1", "waiter2" })
         {
             var notifications = await repository.ListUserNotificationsAsync(actor, 100, CancellationToken.None);
             Assert.Single(notifications, item => item.Category == "EditLockWaiting");
-            Assert.Single(notifications, item => item.Category == "EditLockAvailable");
+            Assert.DoesNotContain(notifications, item => item.Category is "EditLockAvailable" or "EditLockReleased");
         }
     }
 

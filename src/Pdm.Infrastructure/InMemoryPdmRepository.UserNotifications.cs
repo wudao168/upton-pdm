@@ -10,7 +10,8 @@ public sealed partial class InMemoryPdmRepository
     public Task<IReadOnlyList<UserNotification>> ListUnreadUserNotificationsAsync(string? recipient, CancellationToken cancellationToken)
     {
         lock (gate) return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
-            .Where(item => item.ReadAt is null && (recipient is null || item.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase))).ToArray());
+            .Where(item => (item.ReadAt is null || item.Category == ReleaseDrawingReworkNotifications.ResubmittedCategory && item.ResolvedAt is null)
+                && (recipient is null || item.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase))).ToArray());
     }
 
     public Task ResolveUserNotificationAsync(Guid notificationId, string recipient, DateTimeOffset resolvedAt, CancellationToken cancellationToken)
@@ -75,6 +76,12 @@ public sealed partial class InMemoryPdmRepository
     {
         lock (gate) return Task.FromResult<IReadOnlyList<string>>(userNotifications.Values
             .Where(item => item.SourceKey == sourceKey).Select(item => item.Recipient).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+    }
+
+    public Task<DateTimeOffset?> FindNotificationCreatedAtAsync(string recipient, string sourceKey, CancellationToken cancellationToken)
+    {
+        lock (gate) return Task.FromResult(userNotifications.Values.FirstOrDefault(item =>
+            item.SourceKey == sourceKey && item.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase))?.CreatedAt);
     }
 
     public Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)

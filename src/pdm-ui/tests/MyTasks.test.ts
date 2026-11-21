@@ -4,6 +4,24 @@ import MyTasks from '../src/components/MyTasks.vue'
 import type { MyApprovalTask, UserNotification } from '../src/types'
 
 describe('MyTasks', () => {
+  it('发布审批抄送保留服务端项目和审批结果标题及完整正文，普通消息沿用原样式', () => {
+    const copy: UserNotification = { id: 'copy', recipient: 'engineer', category: 'ApprovalNodeCopy',
+      title: 'P700017 · P700017-2 · 机械主管批准 · 审批通过',
+      content: '主项目：P700017；子项目：P700017-2；发布包：RP-001\n请按冻结发布内容安排后续工作。',
+      projectId: 'child-project', releasePackageId: 'release-copy', sourceKey: 'approval-copy:task:1', createdAt: '2026-11-19T06:00:00Z' }
+    const ordinary = { ...copy, id: 'ordinary', category: 'System', title: '普通系统消息', content: '原有消息内容', projectId: undefined, releasePackageId: undefined }
+    const wrapper = mount(MyTasks, { props: { tasks: [], notifications: [copy, ordinary], locks: [], materialCodeTasks: [], passwordResetTasks: [],
+      pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    expect(wrapper.findAll('.pdm-task-copy-title')).toHaveLength(1)
+    expect(wrapper.get('.pdm-task-copy-title').text()).toBe(copy.title)
+    expect(wrapper.get('.pdm-task-copy-title').attributes('title')).toBe(copy.title)
+    const copyRow = wrapper.findAll('tbody tr').find(row => row.text().includes(copy.title))!
+    expect(copyRow.findAll('td')[2]!.attributes('title')).toBe(copy.content)
+    expect(copyRow.findAll('td')[2]!.text()).toContain('发布包：RP-001')
+    const ordinaryRow = wrapper.findAll('tbody tr').find(row => row.text().includes(ordinary.title))!
+    expect(ordinaryRow.findAll('td')[1]!.classes()).not.toContain('pdm-task-copy-title')
+    wrapper.unmount()
+  })
   it.each(['', 'zhangsan'])('密码重置申请缺少姓名或误填账号时不展示账号：%s', displayName => {
     const wrapper = mount(MyTasks, { props: { tasks: [], locks: [], materialCodeTasks: [],
       passwordResetTasks: [{ id: 'reset', username: 'zhangsan', displayName, requestedAt: '2026-11-11T00:00:00Z' }],
@@ -72,6 +90,34 @@ describe('MyTasks', () => {
     expect(wrapper.get('tbody').text()).toContain('其他发布包')
     expect(wrapper.get('tbody').text()).toContain('发布审批已退回')
     wrapper.unmount()
+  })
+
+  it('图纸新版复审提醒替换当前节点原有消息并可定位图纸', async () => {
+    const task: MyApprovalTask = { id: 'c70eb155-55cb-48b7-bbf2-fb8d47dba981', projectId: 'project-1',
+      projectCode: 'P700017-15', projectName: '0012', releasePackageId: 'release-1', releasePackageNumber: 'RP-001',
+      stage: 'MechanicalSupervisor', packageState: 'Approval', createdAt: '2026-11-17T06:08:51Z' }
+    const original: UserNotification = { id: 'original', recipient: 'manager', category: 'ReleaseApprovalPending',
+      title: 'BOM发布待审批', content: '待您审批', projectId: task.projectId, releasePackageId: task.releasePackageId,
+      sourceKey: 'old', createdAt: task.createdAt }
+    const documentId = '3fb9526d-0d10-42fe-acb9-fabdf7c69ded'
+    const reminder: UserNotification = { ...original, id: 'resume', category: 'ReleaseDrawingResubmitted',
+      title: '退回图纸已重新存档，待复审', content: '70003340.M0.02-001.SLDDRW · V2',
+      sourceKey: ['release-drawing-resubmitted', documentId.replaceAll('-', ''), 'pkg', 'round', task.id.replaceAll('-', ''), 'version'].join(':'),
+      createdAt: '2026-11-17T08:03:00Z', readAt: '2026-11-17T08:04:00Z' }
+    const wrapper = mount(MyTasks, { props: { tasks: [task], notifications: [original, reminder], locks: [],
+      materialCodeTasks: [], passwordResetTasks: [], pending: false, onRequestRelease: vi.fn(),
+      onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    try {
+      expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+      expect(wrapper.get('tbody tr').text()).toContain(reminder.title)
+      expect(wrapper.get('tbody tr').text()).toContain(reminder.content)
+      expect(wrapper.get('tbody .pdm-text-action').text()).toBe('查看图纸')
+      await wrapper.get('tbody .pdm-text-action').trigger('click')
+      expect(wrapper.emitted('openNotification')).toEqual([[reminder]])
+      await wrapper.setProps({ notifications: [original, { ...reminder, resolvedAt: '2026-11-17T08:05:00Z' }] })
+      expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+      expect(wrapper.get('tbody tr').text()).toContain('BOM发布审批')
+    } finally { wrapper.unmount() }
   })
 
   it('发送回执保留在历史中并显示已发送，自己被指派的事项继续计入待办', async () => {
@@ -330,11 +376,11 @@ describe('MyTasks', () => {
     })
 
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
-    expect(wrapper.get('[aria-label="待办类型"]').text()).toContain('全部待办（4）')
+    expect(wrapper.get('[aria-label="待办类型"]').text()).toContain('全部待办（3）')
     expect(wrapper.text()).toContain('P700001 BOM发布审批')
     expect(wrapper.text()).toContain('P700001 BOM料号审批')
     expect(wrapper.text()).toContain('申请人 姓名待补充')
-    expect(wrapper.text()).toContain('P700001 · 气密设备')
+    expect(wrapper.text()).not.toContain('P700001 · 气密设备')
     expect(wrapper.text()).toContain('张三 密码重置申请')
 
     await wrapper.get('[role="tab"][aria-selected="false"]:nth-of-type(4)').trigger('click')
@@ -381,6 +427,7 @@ describe('MyTasks', () => {
         ownedByCurrentUser: false, canRequestRelease: true, canForceRelease: false, releaseRequestedBy: 'someone-else' }],
       onRequestRelease, onForceRelease: vi.fn(), onResetPassword: vi.fn(),
     } })
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '编辑权限（1）')!.trigger('click')
     await wrapper.findAll('button').find(button => button.text() === '我需要编辑')!.trigger('click')
     await flushPromises()
     expect(onRequestRelease).toHaveBeenCalledExactlyOnceWith('document-1', '需要继续编辑该图档，请在完成后关闭图档。')
@@ -411,7 +458,11 @@ describe('MyTasks', () => {
       },
     })
 
-    expect(wrapper.get('[role="tab"]:nth-of-type(4)').text()).toBe('编辑权限（2）')
+    expect(wrapper.get('[role="tab"]:first-of-type').text()).toBe('全部待办（0）')
+    const lockTab = wrapper.get('[role="tab"]:nth-of-type(4)')
+    expect(lockTab.text()).toBe('编辑权限（2）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(0)
+    await lockTab.trigger('click')
     expect(wrapper.findAll('tbody tr')).toHaveLength(2)
     expect(wrapper.text()).toContain('P700001-1 · 机架')
     expect(wrapper.text()).toContain('2 个图档')

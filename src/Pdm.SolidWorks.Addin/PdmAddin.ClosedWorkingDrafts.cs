@@ -20,11 +20,12 @@ public sealed partial class PdmAddin
             .GroupBy(entry => entry.DocumentId).Select(group => group.OrderByDescending(entry => entry.SavedAtUtc)
                 .ThenByDescending(entry => entry.CheckedOutAt).First()).ToArray();
         if (entries.Length == 0) return Array.Empty<DocumentDto>();
-        var projectDirectory = ControlledWorkspaceManager.ProjectViewDirectory(controlledWorkspace.WorkspaceRoot, manifest.ProjectCode);
+        var workspace = controlledWorkspace.WorkspaceRoot;
         foreach (var entry in entries)
         {
             var file = files[entry.DocumentId];
-            if (!IsPathWithinDirectory(entry.SourcePath, projectDirectory) || !PdmDocumentIdentityStore.IsControlledWorkspacePath(entry.SourcePath)
+            if (!PdmDocumentIdentityStore.IsProjectWorkspacePath(workspace, manifest.ProjectCode, entry.SourcePath)
+                || !PdmDocumentIdentityStore.IsControlledWorkspacePath(entry.SourcePath)
                 || !string.Equals(Path.GetFileName(entry.SourcePath), file.FileName, StringComparison.OrdinalIgnoreCase)
                 || entry.BaseVersionId != file.VersionId || !editJournal.HasVerifiedDraft(entry)
                 || entry.SessionId != checkoutSessionId && EditDraftJournal.OwnerProcessRunning(entry))
@@ -49,9 +50,11 @@ public sealed partial class PdmAddin
                 targetIds.Add(relation.DrawingDocumentId);
         }
         var directory = controlledWorkspace.UseRecoveryWorkingDirectory(manifest);
-        ControlledCacheMaintenance.RequireOrdinaryPath(directory, controlledWorkspace.WorkspaceRoot);
+        var directoryRoot = PdmDocumentIdentityStore.FindManagedWorkspaceRoot(workspace, directory)
+            ?? throw new InvalidDataException("草稿恢复路径不属于受控目录，已保留本地草稿。");
+        ControlledCacheMaintenance.RequireOrdinaryPath(directory, directoryRoot);
         foreach (var file in manifest.Files)
-            ControlledCacheMaintenance.RequireOrdinaryPath(ControlledWorkspaceManager.PlannedFilePath(directory, file), controlledWorkspace.WorkspaceRoot);
+            ControlledCacheMaintenance.RequireOrdinaryPath(ControlledWorkspaceManager.PlannedFilePath(directory, file), directoryRoot);
         ControlledOpenBoundary.RequireLoadedSources(application, Path.Combine(directory, manifest.RootRelativePath), manifest);
         var leaseRecords = editJournal.ReadAll();
         foreach (var id in targetIds)
@@ -65,7 +68,8 @@ public sealed partial class PdmAddin
                         && record.ProjectId == manifest.ProjectId && record.SessionId == document.CheckoutSessionId
                         && record.BaseVersionId == file.VersionId && !record.DiscardPending
                         && document.CheckedOutAt.HasValue && record.CheckedOutAt.ToUniversalTime() == document.CheckedOutAt.Value.ToUniversalTime()
-                        && IsPathWithinDirectory(record.SourcePath, projectDirectory) && !EditDraftJournal.OwnerProcessRunning(record))))
+                        && PdmDocumentIdentityStore.IsProjectWorkspacePath(workspace, manifest.ProjectCode, record.SourcePath)
+                        && !EditDraftJournal.OwnerProcessRunning(record))))
                 throw new InvalidOperationException("恢复所需图档正在其他会话编辑或身份不一致，草稿已保留，请稍后重试：" + file.FileName);
             if (FindLoadedDocument(ControlledWorkspaceManager.PlannedFilePath(directory, file)) != null)
                 throw new InvalidOperationException("恢复目标图档仍在窗口中打开，原窗口和草稿已保留，请保存并关闭该图档后重试：" + file.FileName);

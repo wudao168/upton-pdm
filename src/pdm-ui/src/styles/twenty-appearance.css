@@ -112,9 +112,6 @@
 :root body .pdm-sidebar .pdm-nav-item > svg.pdm-menu-icon { color:var(--pdm-nav-icon-color, var(--pdm-theme-accent)) !important; }
 :root[data-pdm-color-scheme="dark"] body .pdm-sidebar .pdm-nav-item > svg.pdm-menu-icon { filter:brightness(1.25) saturate(1.08); }
 :root[data-pdm-color-scheme="dark"] body .pdm-sidebar__brand-logo { filter:brightness(0) invert(1); }
-:root[data-pdm-color-scheme] body .pdm-theme-menu { min-width:160px; }
-:root[data-pdm-color-scheme] body .pdm-theme-menu .el-dropdown-menu__item { display:flex; gap:10px; }
-:root[data-pdm-color-scheme] body .pdm-theme-menu .el-dropdown-menu__item > svg:last-child:not(:first-child) { margin-inline-start:auto; }
 :root[data-pdm-color-scheme="dark"] body :is(.pdm-app-shell, .pdm-shell-content, .pdm-main, .pdm-navigation-page) { color:var(--pdm-text); }
 :root[data-pdm-color-scheme="dark"] body :is(.pdm-panel, .pdm-project-manager, .pdm-task-message-panel, .wr-panel, .pdm-overview-card, .pdm-overview-status, .pdm-overview-team, .pdm-overview-timeline, .pdm-overview-team__table-wrap, .pdm-project-context, .pdm-project-sidebar, .pdm-budget__section, .pdm-manager-panel, .pdm-preview-empty) { background:var(--pdm-surface) !important; color:var(--pdm-text); }
 :root[data-pdm-color-scheme="dark"] body :is(.pdm-project-sidebar__context, .pdm-project-detail__header) { background:var(--pdm-surface) !important; }

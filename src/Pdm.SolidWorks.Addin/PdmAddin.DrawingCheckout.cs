@@ -69,8 +69,7 @@ public sealed partial class PdmAddin
                 localEdits.TryGetValue(id, out var recorded);
                 if (!WorkingReuseDraftMatches(node.FullPath, target.Item2, document, recorded, checkoutSessionId, authenticatedUsername))
                     throw new InvalidOperationException("工程图恢复记录尚未与当前路径和版本对应，已保留窗口、修改及权限，未切换上层装配体。");
-                SetFileReadOnly(node.FullPath, false);
-                EnsureLoadedDocumentEditable(node.FullPath);
+                await EnsureCheckedOutDocumentEditableAsync(node.FullPath, id, projectId, document.CheckedOutAt);
                 LogOperation("工程图原位获取完成 document=" + id + " path=" + node.FullPath + " alreadyOwned=" + !created + " reopened=0 replaced=0");
             }
             catch

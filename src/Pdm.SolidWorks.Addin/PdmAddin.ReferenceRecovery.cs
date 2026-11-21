@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -51,18 +51,7 @@ public sealed partial class PdmAddin
         var imported = new Dictionary<string, CadTreeNode>(StringComparer.OrdinalIgnoreCase);
         var materialized = new Dictionary<string, Dictionary<string, CadTreeNode>>(StringComparer.OrdinalIgnoreCase);
         var packageOwners = new Dictionary<string, Dictionary<string, CadTreeNode>>(StringComparer.OrdinalIgnoreCase);
-        string importRoot = null;
-        string ImportRoot()
-        {
-            if (importRoot == null)
-            {
-                var projectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code ?? projectId.ToString("N");
-                importRoot = Path.Combine(ControlledWorkspaceManager.ProjectViewDirectory(controlledWorkspace.WorkspaceRoot, projectCode),
-                    "引用补齐", Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(importRoot);
-            }
-            return importRoot;
-        }
+        var importBatchId = Guid.NewGuid().ToString("N");
         void Bind(CadTreeNode owner, string source, CadTreeNode target, bool recovered = false)
         {
             var unchangedControlled = target.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadArchiveMetadata(target.FullPath, projectId, out var baseline)
@@ -228,8 +217,10 @@ public sealed partial class PdmAddin
                 CadTreeNode target;
                 if (chosen.Item3 == null)
                 {
-                    var folder = Path.Combine(ImportRoot(), Guid.NewGuid().ToString("N")); Directory.CreateDirectory(folder);
-                    var destination = Path.Combine(folder, Path.GetFileName(path));
+                    var leaf = Path.GetFileName(path);
+                    var folder = ChooseArchiveReferenceImportDirectory(projectId, importBatchId, new[] { leaf });
+                    var destination = ManagedCadPaths.Resolve(folder, leaf);
+                    Directory.CreateDirectory(folder);
                     CopyArchiveReferenceBytes(chosen.Item1, destination, chosen.Item2);
                     target = NewRecoveredReferenceNode(destination, chosen.Item1, owner);
                     if (PdmDocumentIdentityStore.TryReadArchiveMetadata(chosen.Item1, projectId, out var localBinding) && localBinding.ProjectId == projectId)
@@ -255,7 +246,7 @@ public sealed partial class PdmAddin
                         : "standard:" + candidate.StandardRevision.Id;
                     if (!materialized.TryGetValue(packageKey, out var package))
                     {
-                        package = await MaterializeArchiveReferenceAsync(candidate, projectId, ImportRoot(), token);
+                        package = await MaterializeArchiveReferenceAsync(candidate, projectId, importBatchId, token);
                         materialized[packageKey] = package;
                         foreach (var file in package.Values)
                         {
@@ -371,22 +362,38 @@ public sealed partial class PdmAddin
         return result;
     }
 
+    private string ChooseArchiveReferenceImportDirectory(Guid projectId, string importBatchId, IEnumerable<string> files)
+    {
+        var workspace = controlledWorkspace.WorkspaceRoot;
+        var projectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code ?? projectId.ToString("N");
+        var folderId = Guid.NewGuid().ToString("N");
+        var identity = projectId.ToString("N") + ":" + importBatchId + ":" + folderId;
+        var preferred = Path.Combine(ControlledWorkspaceManager.ProjectViewDirectory(workspace, projectCode),
+            "引用补齐", importBatchId, folderId);
+        return ManagedCadPaths.ChooseDirectory(preferred,
+            new[] { ManagedCadPaths.CompactDirectory(workspace, "a", identity, projectCode),
+                ManagedCadPaths.CompactDirectory(ManagedCadPaths.CompactWorkspaceRoot, "a", identity, projectCode) },
+            files);
+    }
+
     private async Task<Dictionary<string, CadTreeNode>> MaterializeArchiveReferenceAsync(ArchiveRemoteReference candidate,
-        Guid projectId, string root, CancellationToken token)
+        Guid projectId, string importBatchId, CancellationToken token)
     {
         var result = new Dictionary<string, CadTreeNode>(StringComparer.OrdinalIgnoreCase);
-        var folder = Path.Combine(root, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(folder);
         if (candidate.Document != null)
         {
             var manifest = await apiClient.CreateControlledOpenManifestAsync(candidate.Document.Id, candidate.Version.Id, false, false, token);
             if (manifest.Files.Any(file => string.IsNullOrWhiteSpace(file.FileName) || Path.GetFileName(file.FileName) != file.FileName)
                 || manifest.Files.GroupBy(file => file.FileName, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() != 1))
                 throw new InvalidDataException("PLM引用包包含越界文件名或同名冲突，尚未收集或上传任何图档。");
+            var folder = ChooseArchiveReferenceImportDirectory(projectId, importBatchId, manifest.Files.Select(file => file.FileName));
             var source = await controlledWorkspace.PrepareReadOnlyAsync(manifest, false, token);
+            Directory.CreateDirectory(folder);
             foreach (var file in manifest.Files)
             {
                 var from = ControlledReferenceMaterializer.LocalPath(Path.GetDirectoryName(source), file);
-                var target = Path.Combine(folder, file.FileName); CopyArchiveReferenceBytes(from, target, ArchiveFileFingerprint.Read(from));
+                var target = ManagedCadPaths.Resolve(folder, file.FileName);
+                CopyArchiveReferenceBytes(from, target, ArchiveFileFingerprint.Read(from));
                 var node = NewRecoveredReferenceNode(target, from, new CadTreeNode());
                 if (manifest.ProjectId == projectId)
                 {
@@ -402,11 +409,15 @@ public sealed partial class PdmAddin
             }
         }
         else
-            foreach (var file in PdmApiClient.StandardReferenceSourceFiles(candidate.StandardRevision))
+        {
+            var files = PdmApiClient.StandardReferenceSourceFiles(candidate.StandardRevision).ToArray();
+            var folder = ChooseArchiveReferenceImportDirectory(projectId, importBatchId, files.Select(file => file.FileName));
+            foreach (var file in files)
             {
                 var path = await apiClient.DownloadStandardReferenceAsync(candidate.StandardRevision.Id, file, folder, token);
                 result.Add(file.FileName, NewRecoveredReferenceNode(path, path, new CadTreeNode()));
             }
+        }
         return result;
     }
 }

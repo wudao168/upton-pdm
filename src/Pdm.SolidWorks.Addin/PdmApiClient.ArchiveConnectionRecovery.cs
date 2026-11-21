@@ -8,7 +8,7 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed partial class PdmApiClient
 {
-    private TimeSpan archiveRecoveryWindow = TimeSpan.FromMinutes(5);
+    private TimeSpan archiveRecoveryWindow = TimeSpan.FromSeconds(600);
     private Func<TimeSpan, CancellationToken, Task> archiveRecoveryDelay = Task.Delay;
 
     internal sealed class ArchiveConnectionTimeoutException : InvalidOperationException

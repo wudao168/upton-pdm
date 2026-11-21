@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { previousReleaseBaseline } from '../frozenBomChanges'
 import ColumnSettingsList from './ColumnSettingsList.vue'
 import { orderColumns, useColumnSettings } from '../columnSettings'
 import { buildBomConfigurationGroups, type ConfigurationRow } from '../bomConfigurationGroups'
@@ -11,7 +12,7 @@ import MoreActions from './MoreActions.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, download: projectDownload, export: projectExport } = useProjectCenterAccess()
 import { vQuantity } from '../quantityInput'
-import { bomRevisionLabel, packageRevisionLabel, drawingRevisionHint } from '../drawingRevision'
+import { bomRevisionLabel, packageRevisionLabel, drawingRevisionHint, classifyVersionAlignment, isWorkRevision } from '../drawingRevision'
 import { readTablePreference, tablePreferenceVersion, writeTablePreference } from '../tablePreferences'
 import { materialStockPlan } from '../materialStockPlans'
 import RawDrawerPanel from './RawDrawerPanel.vue'
@@ -153,7 +154,7 @@ const structureIndexPending = computed(() => {
   return pending(props.referenceRoot)
 })
 const emit = defineEmits<{
-  releaseReviewDocuments: [releasePackageId: string]
+  releaseReviewDocuments: [releasePackageId: string, documentId?: string]
   releasePreviewAttention: [projectId: string, hasIssue: boolean]
   save: [kind: BomKind, items: BomItem[]]
   saveMultiplier: [kind: BomKind, multiplier: number, expectedMultiplier: number]
@@ -195,18 +196,26 @@ const canManageCurrentRelease = computed(() => kind.value === 'Standard' || kind
   ? props.canManageMechanicalRelease
   : props.canManageRelease)
 const currentDrawingReviewCandidates = ref<DrawingReviewCandidate[]>([])
+let drawingReviewRequest = 0
 watch(() => props.drawingReviewCandidates, candidates => { currentDrawingReviewCandidates.value = [...candidates] }, { immediate: true })
 async function refreshCurrentDrawingReviewCandidates() {
   const projectId = props.projectId
   const token = props.token
+  const request = ++drawingReviewRequest
   if (!projectId || !token) return
   try {
-    currentDrawingReviewCandidates.value = await listDrawingReviewCandidates(projectId, token)
+    const candidates = await listDrawingReviewCandidates(projectId, token)
+    if (request === drawingReviewRequest && projectId === props.projectId && token === props.token)
+      currentDrawingReviewCandidates.value = candidates
   } catch {
     // Keep the last known status; release submission still has a server-side drawing-review gate.
   }
 }
-watch([() => props.projectId, () => props.token], () => { void refreshCurrentDrawingReviewCandidates() }, { immediate: true })
+watch([() => props.projectId, () => props.token, () => props.nonStandard], ([projectId, token], previous) => {
+  const contextChanged = projectId !== previous?.[0] || token !== previous?.[1]
+  if (contextChanged && previous?.[0]) currentDrawingReviewCandidates.value = []
+  if (contextChanged || kind.value === 'NonStandard') void refreshCurrentDrawingReviewCandidates()
+}, { immediate: true })
 // 属性回写产生的版本只写入属性、零件几何未变，对比发布时据此把它与真实修改区分开。
 const propertyWritebackVersions = ref<CadPropertyWritebackVersion[]>([])
 const propertyWritebackRevisions = computed(() => new Set(propertyWritebackVersions.value
@@ -1261,19 +1270,7 @@ const previousReleaseVersion = computed(() => {
   if (!selected) return latestReleasedVersion.value
   return categoryVersions.value.find(version => version.state === 'Released' && version.versionNumber < selected.versionNumber)
 })
-const previousReleaseBaselinePackage = computed(() => {
-  const scopes = kind.value === 'Standard' ? ['StandardFormal','StandardSupplement']
-    : kind.value === 'NonStandard' ? ['NonStandardWithDrawing','NonStandardSupplement'] : ['ElectricalFormal','ElectricalSupplement']
-  const selected = selectedReleasePackage.value
-  const time = selected?.publishedAt
-  return props.releasePackages.filter(item => item.state === '已发布' && scopes.includes(item.scope) && item.id !== selected?.id
-    && (!time || Date.parse(item.publishedAt || item.createdAt || '') < Date.parse(time)
-      || Date.parse(item.publishedAt || item.createdAt || '') === Date.parse(time)
-        && (!selected?.publishedAt || Date.parse(item.createdAt || '') < Date.parse(selected.createdAt || '')
-          || item.createdAt === selected.createdAt && item.number.localeCompare(selected.number) < 0)))
-    .sort((left,right) => Date.parse(right.publishedAt || '') - Date.parse(left.publishedAt || '')
-      || Date.parse(right.createdAt || '') - Date.parse(left.createdAt || '') || right.number.localeCompare(left.number))[0]
-})
+const previousReleaseBaselinePackage = computed(() => previousReleaseBaseline(kind.value, selectedReleasePackage.value, props.releasePackages))
 const previousReleaseVersionItems = computed(() => {
   const release = previousReleaseBaselinePackage.value
   return release ? kind.value === 'Standard' ? release.standardBomSnapshot : kind.value === 'NonStandard'
@@ -1820,6 +1817,16 @@ const modelDocumentsById = computed(() => new Map(props.documents
   .filter(document => document.kind === 'Assembly' || document.kind === 'Part')
   .map(document => [document.id, document])))
 
+function drawingRevisionNotice(row: BomItem) {
+  if (kind.value !== 'NonStandard' || selectedVersionId.value !== 'current' || releaseComparisonActive.value
+    || row.manuallyExcluded || row.pendingRemoval || row.manualUnmatched || !row.sourceDocumentId) return ''
+  const document = modelDocumentsById.value.get(row.sourceDocumentId)
+  if (!document || document.deletedAt || document.purgedAt || document.storedVersionCount === 0) return ''
+  const latest = document.revision
+  return isWorkRevision(latest) && classifyVersionAlignment(latest, row.revision) === 'StructureStale'
+    ? '图档已更新 ' + row.revision + ' → ' + latest + '，BOM 待核对' : ''
+}
+
 function drawingNameFor(row: BomItem) {
   if (!row.sourceDocumentId) return ''
   const fileName = modelDocumentsById.value.get(row.sourceDocumentId)?.fileName?.trim() ?? ''
@@ -1972,7 +1979,7 @@ async function confirmIssueMasterValue(field: 'brand' | 'specification') {
 }
 
 function openIssueDetails(row: EditableBomRow) {
-  if (shouldShowReconciliation(row)) issueDetailRow.value = row
+  if (shouldShowReconciliation(row) || drawingRevisionNotice(row)) issueDetailRow.value = row
 }
 
 function rowKindLabel(row: BomItem) {
@@ -5163,6 +5170,10 @@ async function submitBatchUpdate() {
               <span v-if="row.engineeringKitCode" class="pdm-bom-kit-source" :title="`${row.engineeringKitCode} / V${String(row.engineeringKitVersionNumber ?? 1).padStart(2, '0')}`">{{ row.engineeringKitCode }}</span>
               <span v-if="!row._quickEntry && !isWearPartView && materialStockPlan(row.drawingNumber)" v-stocked-material.highlight="row.drawingNumber" class="pdm-bom-cell-value">常备件</span>
               <span v-if="isWearPartView" class="pdm-bom-cell-value">{{ bomSourceLabel(row) }}</span>
+              <button v-else-if="!row._quickEntry && drawingRevisionNotice(row)" type="button"
+                class="pdm-bom-issue-button is-warning pdm-bom-drawing-revision-notice"
+                :title="drawingRevisionNotice(row)" :aria-label="drawingRevisionNotice(row)"
+                @click.stop="openIssueDetails(row)">图档已更新</button>
               <div v-else-if="!row._quickEntry && shouldShowReconciliation(row)" class="pdm-bom-reconciliation" :title="reconciliationDescription(row)">
                 <button v-if="!(row.manualUnmatched && (canEditCurrentView && !row._configurationChild))" type="button" class="pdm-bom-issue-button pdm-bom-source" :class="reconciliationIssueTone(row)" :aria-label="`查看问题详情：${reconciliationIssueLabel(row)}`" @click="openIssueDetails(row)">{{ reconciliationIssueLabel(row) }}</button>
                 <div v-if="row.manualUnmatched && (canEditCurrentView && !row._configurationChild)" class="pdm-bom-reconciliation-actions">
@@ -5196,7 +5207,10 @@ async function submitBatchUpdate() {
 
         </div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭问题详情" @click="issueDetailRow = null">×</button></header></template>
         <div class="pdm-bom-issue-body">
-          <div class="pdm-bom-issue-summary"><span :class="reconciliationIssueTone(issueDetailRow)">{{ reconciliationIssueLabel(issueDetailRow) }}</span><p>{{ reconciliationDescription(issueDetailRow) }}</p></div>
+          <div v-if="drawingRevisionNotice(issueDetailRow)" class="pdm-bom-issue-summary">
+            <span>图档已更新</span><p>{{ drawingRevisionNotice(issueDetailRow) }}</p>
+          </div>
+          <div v-if="shouldShowReconciliation(issueDetailRow)" class="pdm-bom-issue-summary"><span :class="reconciliationIssueTone(issueDetailRow)">{{ reconciliationIssueLabel(issueDetailRow) }}</span><p>{{ reconciliationDescription(issueDetailRow) }}</p></div>
           <div v-if="issueComparisons(issueDetailRow).length" class="pdm-bom-issue-comparisons">
             <div v-for="comparison in issueComparisons(issueDetailRow)" :key="`${comparison.basis}-${comparison.field}`" class="pdm-bom-issue-comparison">
               <strong>{{ comparison.field }}<small class="pdm-bom-issue-basis">{{ comparison.basisLabel }}</small></strong>
@@ -5483,7 +5497,7 @@ async function submitBatchUpdate() {
           <p v-if="!categoryReleasePackages.length">当前BOM尚无发布记录。</p>
         </aside>
         <ReleaseCenter
-          @review-documents="id => { releaseDrawerOpen = false; emit('releaseReviewDocuments', id) }"
+          @review-documents="(id, documentId) => { releaseDrawerOpen = false; emit('releaseReviewDocuments', id, documentId) }"
           :release-package="selectedReleasePackage"
           :project-id="projectId"
           :standard-items="standardRows"

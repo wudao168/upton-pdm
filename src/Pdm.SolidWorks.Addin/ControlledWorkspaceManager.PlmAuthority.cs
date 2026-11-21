@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -31,12 +31,14 @@ internal sealed partial class ControlledWorkspaceManager
         foreach (var root in ServerWorkspaceRoots)
         {
             token.ThrowIfCancellationRequested();
-            var target = historical
-                ? Path.Combine(root, ".uplm", "Derived", SafeSegment(manifest.ProjectCode), Guid.NewGuid().ToString("N"))
-                : Path.Combine(ProjectViewDirectory(root, manifest.ProjectCode), "装配工作区",
-                    "plm-" + Guid.NewGuid().ToString("N"));
+            var jobId = Guid.NewGuid().ToString("N");
+            var preferred = historical
+                ? Path.Combine(root, ".uplm", "Derived", SafeSegment(manifest.ProjectCode), jobId)
+                : Path.Combine(ProjectViewDirectory(root, manifest.ProjectCode), "装配工作区", "plm-" + jobId);
+            var target = preferred;
             try
             {
+                target = ChooseManifestDirectory(manifest, preferred, historical ? "d" : "w", jobId);
                 Directory.CreateDirectory(target);
                 foreach (var file in manifest.Files)
                 {
@@ -74,7 +76,16 @@ internal sealed partial class ControlledWorkspaceManager
         IEnumerable<ControlledOpenFileDto> requested = null)
     {
         var files = (requested ?? manifest.Files).ToArray();
-        var cachedDirectories = ControlledCacheMaintenance.FindDirectories(workspaceRoot, manifest.ProjectId, Guid.Empty);
+        var cachedDirectories = new List<string>();
+        try { cachedDirectories.Add(WorkingDirectory(manifest)); }
+        catch (Exception error) when (error is IOException || error is InvalidDataException || error is InvalidOperationException)
+        {
+            PluginDiagnosticLog.Record("受控缓存", "工作副本无法复用，将按已确认的服务端版本取回：" + error);
+        }
+        if (verifiedSnapshotDirectories.TryGetValue(manifest.RootDocumentId, out var snapshot)) cachedDirectories.Add(snapshot);
+        cachedDirectories.AddRange(ServerWorkspaceRoots.SelectMany(root =>
+            ControlledCacheMaintenance.FindDirectories(root, manifest.ProjectId, Guid.Empty)));
+        var candidates = cachedDirectories.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var completed = 0;
         var report = PreparationProgress;
         using (var pending = CancellationTokenSource.CreateLinkedTokenSource(token))
@@ -85,7 +96,7 @@ internal sealed partial class ControlledWorkspaceManager
                 await slots.WaitAsync(pending.Token).ConfigureAwait(false);
                 try
                 {
-                    if (!TryCopyCachedVersion(manifest, file, target, cachedDirectories))
+                    if (!TryCopyCachedVersion(file, target, candidates))
                         await apiClient.DownloadControlledOpenFileAsync(file, target, pending.Token).ConfigureAwait(false);
                     BindWorkspaceFile(target, target, manifest, file);
                     var count = Interlocked.Increment(ref completed);
@@ -99,14 +110,11 @@ internal sealed partial class ControlledWorkspaceManager
         }
     }
 
-    private bool TryCopyCachedVersion(ControlledOpenManifestDto manifest, ControlledOpenFileDto file, string target,
-        IReadOnlyCollection<string> cachedDirectories)
+    private static bool TryCopyCachedVersion(ControlledOpenFileDto file, string target, IReadOnlyCollection<string> candidates)
     {
-        var candidates = new List<string> { WorkingDirectory(manifest) };
-        if (verifiedSnapshotDirectories.TryGetValue(manifest.RootDocumentId, out var snapshot)) candidates.Add(snapshot);
-        candidates.AddRange(cachedDirectories);
-        foreach (var directory in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var directory in candidates)
         {
+            if (!ManagedCadPaths.Fits(directory, ManifestRelativePath(file))) continue;
             var source = ManifestPath(directory, file);
             try
             {
@@ -135,14 +143,18 @@ internal sealed partial class ControlledWorkspaceManager
         foreach (var root in ServerWorkspaceRoots)
         {
             token.ThrowIfCancellationRequested();
-            var target = Path.Combine(root, ".uplm", "Snapshots", SafeSegment(manifest.ProjectCode),
-                historical ? "ReadOnly" : "Latest", "server-" + Guid.NewGuid().ToString("N"));
+            var jobId = Guid.NewGuid().ToString("N");
+            var preferred = Path.Combine(root, ".uplm", "Snapshots", SafeSegment(manifest.ProjectCode),
+                historical ? "ReadOnly" : "Latest", "server-" + jobId);
+            var target = preferred;
             try
             {
+                target = ChooseManifestDirectory(manifest, preferred, historical ? "r" : "l", jobId);
                 Directory.CreateDirectory(target);
                 await DownloadManifestFilesAsync(manifest, target, token).ConfigureAwait(false);
                 if (!ValidateWorkspace(target, manifest.Files)) throw new IOException("重新取回的PLM副本校验失败。");
                 SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
+                RecordWorkspace(target, manifest, "snapshot");
                 return ResolveRootPath(target, manifest);
             }
             catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)

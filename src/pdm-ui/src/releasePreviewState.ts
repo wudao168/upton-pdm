@@ -21,14 +21,22 @@ export function releasePreviewUnfinished(release: ReleasePackageSummary) {
     && ['Pending', 'WaitingForServer', 'Running', 'Failed'].includes(release.previewState ?? '')
 }
 
+export function canRetryReleasePreview(release: ReleasePackageSummary) {
+  if (!requiresReleasePreview(release)) return false
+  if (release.state === '发布失败') return release.canResumePreviewRetry === true
+  return ['发布中', '已发布'].includes(release.state) && ['Pending', 'WaitingForServer', 'Failed'].includes(release.previewState ?? '')
+}
+
 export function releasePreviewNeedsAttention(release: ReleasePackageSummary) {
-  return requiresReleasePreview(release) && (release.previewState === 'Failed'
+  return requiresReleasePreview(release) && (release.state === '发布失败' || release.previewState === 'Failed'
     || ['Pending', 'WaitingForServer'].includes(release.previewState ?? '') && (release.previewAttempts ?? 0) >= 5)
 }
 
 /** 转图（发布预览生成）状态：与发布解耦后单独展示、单独重试。 */
 export function releasePreviewStateLabel(releasePackage: ReleasePackageSummary) {
   if (!requiresReleasePreview(releasePackage)) return ''
+  if (releasePackage.state === '发布失败')
+    return releasePackage.canResumePreviewRetry ? '发布已中断，可重试转图并继续发布' : '发布失败，自动转图已停止'
   if (releasePackage.previewState !== 'Succeeded' && (releasePackage.previewAttempts ?? 0) >= 5)
     return `自动重试已暂停（已尝试 ${releasePackage.previewAttempts}/5 次）`
   return ({

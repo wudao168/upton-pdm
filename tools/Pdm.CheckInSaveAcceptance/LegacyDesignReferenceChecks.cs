@@ -19,6 +19,7 @@ internal static partial class Program
     features[index]=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Feature",true),call=>{
      if(call.MethodName=="GetID")return current+1;
      if(call.MethodName=="get_Name")return "Feature"+current;
+     if(call.MethodName=="GetTypeName2")return "RefPlane";
      if(call.MethodName=="GetFirstSubFeature")return null;
      if(call.MethodName=="GetNextFeature")return current+1<features.Length?features[current+1]:null;
      if(call.MethodName=="get_Is3DInterconnectFeature")return false;
@@ -40,8 +41,11 @@ internal static partial class Program
     var output=(object[])call.Args.Clone();output[0]=paths;output[4]=states.ToArray();
     return new ReturnMessage(null,output,output.Length,call.LogicalCallContext,call);
    }).GetTransparentProxy();
+   var manager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.FeatureManager",true),call=>
+    call.MethodName=="GetFeatures"?features:call.MethodName=="GetFeatureCount"?features.Length:throw new Exception(call.MethodName)).GetTransparentProxy();
    var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>
     call.MethodName=="GetType"?1:call.MethodName=="get_Extension"?extension:call.MethodName=="FirstFeature"?features[0]
+    :call.MethodName=="get_FeatureManager"?manager
     :call.MethodName=="GetPathName"?@"C:\controlled\OWNER.SLDPRT":call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
    var controlled=new Dictionary<string,string>{{"CURRENT.SLDASM",@"C:\controlled\CURRENT.SLDASM"}};var notes=new List<string>();
    var changed=(bool)Type("NativeDesignDependencies").GetMethod("Relocate",Flags).Invoke(null,new object[]{model,controlled,notes});

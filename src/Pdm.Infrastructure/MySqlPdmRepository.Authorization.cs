@@ -14,9 +14,9 @@ public sealed partial class MySqlPdmRepository
         return await ReadAuthorizationSettingsAsync(connection, ct);
     }
 
-    private async Task<AuthorizationSettings?> ReadAuthorizationSettingsAsync(MySqlConnection connection, CancellationToken ct)
+    private async Task<AuthorizationSettings?> ReadAuthorizationSettingsAsync(MySqlConnection connection, CancellationToken ct, MySqlTransaction? transaction = null)
     {
-        var json = await connection.ExecuteScalarAsync<string?>(new CommandDefinition("SELECT setting_value FROM pdm_system_setting WHERE setting_key='authorization_center_v1'", cancellationToken: ct));
+        var json = await connection.ExecuteScalarAsync<string?>(new CommandDefinition("SELECT setting_value FROM pdm_system_setting WHERE setting_key='authorization_center_v1'", transaction: transaction, cancellationToken: ct));
         return json is null ? null : JsonSerializer.Deserialize<AuthorizationSettings>(json, jsonOptions)
             ?? throw new PdmRuleException("权限配置读取失败，请联系管理员恢复权限配置备份。");
     }
@@ -38,8 +38,10 @@ public sealed partial class MySqlPdmRepository
                     new { Value = JsonSerializer.Serialize(migrated, jsonOptions) }, cancellationToken: ct));
                 continue;
             }
-            if (stored.RolesUnified && stored.DingTalkSelfBindingDefaultsApplied && stored.AiWebDefaultsApplied) return stored;
-            var upgraded = AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(stored));
+            if (stored.RolesUnified && stored.DingTalkSelfBindingDefaultsApplied && stored.AiWebDefaultsApplied
+                && stored.UserManagementDefaultsApplied && stored.DocumentReleaseDefaultsApplied) return stored;
+            var defaults = AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(stored));
+            var upgraded = AuthorizationMigration.EnableDocumentReleaseDefaults(AuthorizationMigration.EnableUserManagementDefaults(defaults));
             try { return await CommitAuthorizationSettingsAsync(upgraded, stored.Revision, !stored.RolesUnified, ct); }
             catch (PdmConflictException)
             {
@@ -62,12 +64,22 @@ public sealed partial class MySqlPdmRepository
             "SELECT setting_value FROM pdm_system_setting WHERE setting_key='authorization_center_v1' FOR UPDATE", transaction: transaction, cancellationToken: ct));
         var previous = JsonSerializer.Deserialize<AuthorizationSettings>(json!, jsonOptions)!;
         if (previous.Revision != expectedRevision) throw new PdmConflictException("权限配置已被其他人修改，请刷新后重新核对。");
+        var existingSubjects = previous.Assignments.Select(assignment => assignment.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var newSubjects = settings.Assignments.Select(assignment => assignment.Username)
+            .Where(username => !existingSubjects.Contains(username)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        // 删除账号也先锁定此配置。授权保存时再次核对新引用，避免提交已被删除的人员。
+        if (newSubjects.Length > 0 && await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "SELECT COUNT(*) FROM pdm_user WHERE username IN @Usernames", new { Usernames = newSubjects },
+                transaction, cancellationToken: ct)) != newSubjects.Length)
+            throw new PdmConflictException("授权人员已发生变化，请刷新人员列表后重新选择。");
         var saved = (updateRoles ? AuthorizationPolicy.BindRoles(settings) : settings) with
         {
             Revision = expectedRevision + 1,
             RolesUnified = previous.RolesUnified || updateRoles,
             DingTalkSelfBindingDefaultsApplied = previous.DingTalkSelfBindingDefaultsApplied || settings.DingTalkSelfBindingDefaultsApplied,
-            AiWebDefaultsApplied = previous.AiWebDefaultsApplied || settings.AiWebDefaultsApplied
+            AiWebDefaultsApplied = previous.AiWebDefaultsApplied || settings.AiWebDefaultsApplied,
+            UserManagementDefaultsApplied = previous.UserManagementDefaultsApplied || settings.UserManagementDefaultsApplied,
+            DocumentReleaseDefaultsApplied = previous.DocumentReleaseDefaultsApplied || settings.DocumentReleaseDefaultsApplied
         };
         if (updateRoles) await SyncAuthorizationRolesAsync(connection, transaction, previous, saved, ct);
         await connection.ExecuteAsync(new CommandDefinition(

@@ -92,7 +92,7 @@ public sealed partial class PdmAddin
                     ?? ValidateControlledLoadedSources(opened, path, manifest, application, missingComponents, !requireDrawingModels);
                 verifyBoundary(missingComponents);
                 var expected = new HashSet<string>(manifest.Files.Select(file =>
-                    Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), file.RelativePath ?? file.FileName))), StringComparer.OrdinalIgnoreCase);
+                    ControlledReferenceMaterializer.ManifestPath(Path.GetDirectoryName(path), file)), StringComparer.OrdinalIgnoreCase);
                 expected.UnionWith(manifest.RetainedLocalReferences.Values.SelectMany(record => record.Paths));
                 foreach (var loaded in (application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
                 {
@@ -115,47 +115,54 @@ public sealed partial class PdmAddin
                 try { if (manifest.RetainedLocalReferences.Count == 0 && !(missingComponents?.Count > 0)) ControlledReferenceMaterializer.RememberVerifiedOpen(path, manifest); }
                 catch (Exception cacheError) { LogDiagnostic("保存已核对的引用准备记录，本次打开已完成", cacheError); }
                 ReportMissingComponentsOnOpen(missingComponents, "已打开", path);
+                if (documentType == (int)swDocumentTypes_e.swDocASSEMBLY && !wasLoaded && !beforeOpen.Contains(path)
+                    && !IsReadOnlyPreviewPath(path) && !IsHistoricalDerivedPath(path))
+                    RememberReadOnlyAssemblyOpen(opened, path, manifest);
                 return opened;
             }
             catch (Exception error)
             {
-                // Only this attempt's new root can be closed. A failed check must
-                // never close a pre-existing user window or another same-name file.
                 if (wasLoaded) throw;
-                var title = opened.GetTitle();
-                if (!PathsEqual(opened.GetPathName(), path)
-                    || ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
-                        .Any(other => string.Equals(other.GetTitle(), title, StringComparison.OrdinalIgnoreCase)
-                            && !PathsEqual(other.GetPathName(), path)))
-                    throw new IOException("实际加载来源尚未核对，已保留同名窗口，请核对图档所在目录后重试。", error);
-                application.CloseDoc(title);
-                if (FindLoadedDocument(path) != null)
-                    throw new IOException("本次打开的只读窗口尚未关闭，未重试引用定位。", error);
-                if (!nativeFirst || attempt > 0 || !(error is InvalidOperationException)) throw;
-                // Release only models loaded by this failed attempt, so the reference
-                // API can repair closed copies. Every pre-existing user document stays open.
-                var remaining = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>()).ToArray();
-                foreach (var model in remaining.Where(model => !beforeOpen.Contains(model.GetPathName())))
-                {
-                    if (model.GetSaveFlag())
-                        throw new IOException("新加载的文件出现未保存内容，已保留窗口及内容，未自动关闭重试。", error);
-                    var titleToClose = model.GetTitle();
-                    if (remaining.Any(other => beforeOpen.Contains(other.GetPathName())
-                        && string.Equals(other.GetTitle(), titleToClose, StringComparison.OrdinalIgnoreCase)))
-                        throw new IOException("新加载文件与原有窗口同名，原窗口及文件均已保留，未继续自动重试。", error);
-                    application.CloseDoc(titleToClose);
-                }
+                var retry = nativeFirst && attempt == 0 && error is InvalidOperationException;
+                CloseRejectedControlledOpen(opened, path, beforeOpen, error, retry);
+                if (!retry) throw;
                 LogDiagnostic("原生打开的引用来源未通过，回退到逐文件定位后重试", error);
             }
         }
         throw new IOException("受控装配体打开未完成，请检查引用图档后重试。");
     }
 
+    private void CloseRejectedControlledOpen(IModelDoc2 opened, string path, ISet<string> beforeOpen, Exception error,
+        bool closeNewDependencies)
+    {
+        var title = opened.GetTitle();
+        if (beforeOpen.Contains(path) || !PathsEqual(opened.GetPathName(), path)
+            || ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+                .Any(other => string.Equals(other.GetTitle(), title, StringComparison.OrdinalIgnoreCase)
+                    && !PathsEqual(other.GetPathName(), path)))
+            throw new IOException("实际加载来源尚未核对，已保留原有窗口，请核对图档所在目录后重试。", error);
+        application.CloseDoc(title);
+        if (FindLoadedDocument(path) != null)
+            throw new IOException("本次打开的只读窗口尚未关闭，请核对引用占用后重试。", error);
+        if (!closeNewDependencies) return;
+        var remaining = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>()).ToArray();
+        foreach (var model in remaining.Where(model => !beforeOpen.Contains(model.GetPathName())))
+        {
+            if (model.GetSaveFlag())
+                throw new IOException("新加载的文件出现未保存内容，已保留窗口及内容，请核对后重试。", error);
+            var titleToClose = model.GetTitle();
+            if (remaining.Any(other => !ReferenceEquals(other, model)
+                && string.Equals(other.GetTitle(), titleToClose, StringComparison.OrdinalIgnoreCase)))
+                throw new IOException("新加载的文件存在同名窗口，已保留文件和窗口，请核对所在目录后重试。", error);
+            application.CloseDoc(titleToClose);
+        }
+    }
+
     private void ReportMissingComponentsOnOpen(ISet<string> missingComponents, string completed = "已打开", string rootPath = null)
     {
         rootPath = rootPath ?? (application?.ActiveDoc as IModelDoc2)?.GetPathName() ?? currentTree?.FullPath;
         var context = controlledOpenManifests.FirstOrDefault(pair => pair.Value.Files.Any(file =>
-            PathsEqual(ControlledReferenceMaterializer.LocalPath(pair.Key, file), rootPath)));
+            PathsEqual(ControlledReferenceMaterializer.ManifestPath(pair.Key, file), rootPath)));
         if (context.Value != null)
         {
             var manifest = context.Value;
@@ -166,7 +173,7 @@ public sealed partial class PdmAddin
                     issues.Add(new OpenReferenceIssueDto { InstancePath = manifest.RootRelativePath, FileName = Path.GetFileName(path),
                         OriginalPath = path, Reason = "缺失引用已压缩，未加载。" });
             manifest.ReferenceIssues = OpenReferenceFindings.Merge(issues);
-            try { OpenReferenceFindings.Save(Path.Combine(context.Key, manifest.RootRelativePath), manifest.RootVersionId, manifest.ReferenceIssues); }
+            try { OpenReferenceFindings.Save(ManagedCadPaths.Resolve(context.Key, manifest.RootRelativePath), manifest.RootVersionId, manifest.ReferenceIssues); }
             catch (Exception error) { LogDiagnostic("保留缺件诊断清单", error); }
             if (currentTree != null && PathsEqual(currentTree.FullPath, rootPath)) currentTree.OpenReferenceIssues = manifest.ReferenceIssues;
         }
@@ -194,10 +201,16 @@ public sealed partial class PdmAddin
             var version = history.FirstOrDefault(item => item.Id == node.OpenedVersionId)
                 ?? history.FirstOrDefault(item => item.Revision?.Display == node.CurrentRevision);
             if (version == null) continue; // Never substitute the latest version for an unknown saved reference.
-            var directory = Path.Combine(WorkspaceSettingsStore.GetWorkspaceRoot(), ".uplm", "ArchiveReferences",
-                "plm-" + Guid.NewGuid().ToString("N"));
+            var workspace = WorkspaceSettingsStore.GetWorkspaceRoot();
+            var copyId = Guid.NewGuid().ToString("N");
+            var identity = projectId.ToString("N") + ":" + copyId;
+            var leaf = Path.GetFileName(node.FileName);
+            var directory = ManagedCadPaths.ChooseDirectory(Path.Combine(workspace, ".uplm", "ArchiveReferences", "plm-" + copyId),
+                new[] { ManagedCadPaths.CompactDirectory(workspace, "a", identity),
+                    ManagedCadPaths.CompactDirectory(ManagedCadPaths.CompactWorkspaceRoot, "a", identity) },
+                new[] { leaf });
+            var target = ManagedCadPaths.Resolve(directory, leaf);
             Directory.CreateDirectory(directory);
-            var target = Path.Combine(directory, Path.GetFileName(node.FileName));
             if (!File.Exists(target))
             {
                 var stage = await apiClient.DownloadVersionToWorkspaceStageAsync(group.Key.Id, version.Id,
@@ -237,6 +250,7 @@ public sealed partial class PdmAddin
         var expected = ControlledOpenBoundary.Paths(directory, manifest);
         var failures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var validatedDependencies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var deferredAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var verifiedCopies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var embeddedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -301,7 +315,7 @@ public sealed partial class PdmAddin
             {
                 var actual = ArchiveReferencePath.Resolve(path, directory, "核对未加载组件引用", rootPath);
                 if (isLocal && pending.Matches(actual)) local = actual;
-                else if (requireExactPath && !PathsEqual(actual, local))
+                else if ((requireExactPath || isLocal && pending.RequireExactDeferredPath) && !PathsEqual(actual, local))
                     failures.Add(name + "：关联模型尚未定位到当前受控工作区：" + fileName);
             }
             // Unloaded occurrences expose a saved path. Verify the controlled bytes here
@@ -347,15 +361,24 @@ public sealed partial class PdmAddin
         {
             if (embedded || string.IsNullOrWhiteSpace(path)) return;
             var full = ArchiveReferencePath.Resolve(path, directory, "核对PLM实际加载来源", rootPath);
-            if (manifest.RetainedLocalReferences.TryGetValue(Path.GetFileName(full), out var pending) && pending.Matches(full)) return;
+            if (manifest.RetainedLocalReferences.TryGetValue(Path.GetFileName(full), out var pending))
+            {
+                if (!pending.Matches(full)) failures.Add(name + "：实际加载的文件路径或内容与已核对副本不一致：" + full);
+                return;
+            }
             if (!expected.TryGetValue(Path.GetFileName(full), out var local)
                 || !string.Equals(full, local, StringComparison.OrdinalIgnoreCase))
                 failures.Add(name + "；实际来源：" + full);
         }
-        void Visit(IModelDoc2 model, string importedOwner = null)
+        void ValidateDependencies(IModelDoc2 model)
+        {
+            if (model != null && validatedDependencies.Add(model.GetPathName() ?? model.GetTitle()))
+                NativeDesignDependencies.Validate(model, expected);
+        }
+        void Visit(IModelDoc2 model)
         {
             if (model == null || !visited.Add(model.GetPathName() ?? model.GetTitle())) return;
-            NativeDesignDependencies.Validate(model, expected);
+            ValidateDependencies(model);
             if (model.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY && model is IAssemblyDoc assembly)
             {
                 var imported = new ImportedComponentStorage(app);
@@ -365,7 +388,6 @@ public sealed partial class PdmAddin
                     var path = loaded?.GetPathName();
                     if (string.IsNullOrWhiteSpace(path)) path = component.GetPathName();
                     var embedded = component.IsVirtual;
-                    string componentOwner = null;
                     if (!embedded && IsSolidWorksTemporaryVirtualComponentPath(path))
                         for (var parent = component.GetParent(); parent != null; parent = parent.GetParent())
                             if (parent.IsVirtual) { embedded = true; break; }
@@ -373,21 +395,17 @@ public sealed partial class PdmAddin
                     {
                         var owner = imported.FindOwner(component, model);
                         embedded = !string.IsNullOrWhiteSpace(owner) && expected.Values.Contains(owner, StringComparer.OrdinalIgnoreCase);
-                        if (embedded) componentOwner = owner;
-                        else if (!string.IsNullOrWhiteSpace(importedOwner) && NativeArchiveManifest.IsInterconnectCachePath(model.GetPathName()))
-                        {
-                            // Re-rooting an imported container loses its outer instance
-                            // parent. Its verified native owner still carries its IC children.
-                            embedded = true;
-                            componentOwner = importedOwner;
-                        }
                     }
                     if (loaded != null) Check(path, component.Name2, embedded);
                     else CheckDeferred(path, component.Name2, embedded, missingComponents != null
                         && !expected.ContainsKey(Path.GetFileName(path) ?? string.Empty)
                         && CanOmitUnloadedComponent(component, path, embedded));
                     if (embedded && !string.IsNullOrWhiteSpace(path)) embeddedSources.Add(path);
-                    Visit(loaded, componentOwner);
+                    // GetComponents(false) already contains every occurrence in this
+                    // root's configuration. Re-rooting each loaded child inspects that
+                    // document's active configuration instead of the assembly instance,
+                    // and repeats the subtree scan. Check its design sources only.
+                    ValidateDependencies(loaded);
                 }
             }
             if (model.GetType() == (int)swDocumentTypes_e.swDocDRAWING && model is IDrawingDoc drawing)

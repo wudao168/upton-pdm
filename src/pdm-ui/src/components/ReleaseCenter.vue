@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { changedRows, frozenBomChanges, frozenMaterialKey, frozenNetChange, frozenSummaryKey, itemKey, releaseInstanceIds, releaseQuantity } from '../frozenBomChanges'
 import PersonName from './PersonName.vue'
 import ApprovalNoteEditor from './ApprovalNoteEditor.vue'
 import { canSignNode } from '../approvalParticipants'
+import { drawingHasActiveReturn } from '../drawingReviewStatus'
 import SearchField from './SearchField.vue'
 import { releaseEarlyCredits, releaseMaterialKey, releaseUnitCode } from '../releaseEarlyCredits'
 import { u9UnitName } from '../u9Units'
@@ -23,7 +25,7 @@ import { releaseFailureMessage, releasePublishingMessage } from '../releaseFailu
 import { computed, ref, useId, watch } from 'vue'
 import { addReleaseItemComment, downloadGeneratedFile, getBomInstances, getProjectExportMetadata, listApprovalTransferCandidates, listReleaseItemComments, readProjectPlan } from '../api'
 import { createProductionBomWorkbook } from '../productionBomWorkbook'
-import { requiresReleasePreview, releasePreviewNeedsAttention, releasePreviewStateLabel } from '../releasePreviewState'
+import { canRetryReleasePreview, requiresReleasePreview, releasePreviewNeedsAttention, releasePreviewStateLabel } from '../releasePreviewState'
 import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingDeliveryOverride, DrawingPriority, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ProjectPlan, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import type { DocumentNode } from '../types'
@@ -60,7 +62,7 @@ const props = withDefaults(defineProps<{
   drawingReviews?: DrawingReviewPackage[]
 }>(), { projectId: '', standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
 const emit = defineEmits<{
-  reviewDocuments: [releasePackageId: string]
+  reviewDocuments: [releasePackageId: string, documentId?: string]
   create: [input: CreateReleasePackageInput]
   updateDraft: [releasePackageId: string, input: UpdateReleasePackageDraftInput]
   deleteDraft: [releasePackageId: string]
@@ -201,6 +203,13 @@ const transferCandidates = ref<ApprovalTransferCandidate[]>([])
 const transferCandidatesLoading = ref(false)
 const transferError = ref('')
 const currentTask = computed(() => props.releasePackage?.steps.find(step => step.id !== 'production-release' && step.status === 'current'))
+const returnedDrawings = computed(() => {
+  const release = props.releasePackage
+  const review = release?.drawingReview
+  const task = currentTask.value
+  if (!release || !review || !task || !['审批中', '工艺审核', '待批准'].includes(release.state)) return []
+  return review.items.filter(item => drawingHasActiveReturn(item, review, release.steps))
+})
 const releaseWorkflowLabel = computed(() => {
   const releasePackage = props.releasePackage
   if (releasePackage?.scope === 'Nameplate') return '设计人员填写设备信息，硬件填写电源并确认发布'
@@ -226,7 +235,8 @@ const releaseBomRevisionLabel = computed(() => {
   }
   return `标准件：${bomVersionLabel(releasePackage.standardBomRevision) || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${bomVersionLabel(releasePackage.electricalBomRevision) || '未发布'}`
 })
-const canPrepare = computed(() => !props.releasePackage || ['草稿', '已退回', '发布失败'].includes(props.releasePackage.state))
+const canPrepare = computed(() => !props.releasePackage || ['草稿', '已退回'].includes(props.releasePackage.state)
+  || props.releasePackage.state === '发布失败' && !props.releasePackage.canResumePreviewRetry)
 const isSupplement = computed(() => isSupplementScope(scope.value))
 const releaseColumnWidths = computed(() => {
   const weights = [1, 1, 2, 2, 2, 1, 1, 1, 1, 1, ...(isSupplement.value ? [2] : []), ...(deliveryScope.value ? [1, 2] : [])]
@@ -286,7 +296,6 @@ const itemCommentTarget = ref<FrozenDisplayRow | null>(null)
 const itemCommentText = ref('')
 const itemCommentSaving = ref(false)
 type FrozenDisplayRow = { key: string; materialKey: string; item: BomItem; sourceItems: BomItem[]; change?: string; details?: string[]; previousQuantity?: number; earlyCredit?: number; quantityDelta?: number }
-const releaseQuantity = (value: number) => Number(value.toFixed(8))
 const releaseInstances = ref<BomItem[]>([])
 const releaseInstancesLoading = ref(false)
 const releaseInstancesError = ref('')
@@ -413,8 +422,6 @@ const formalRowPublishTitle = (row: { item: BomItem; longLeadPublishedQuantity: 
   isFormalRowFullyPublished(row)
     ? `该物料已发布${row.longLeadPublishedQuantity}/${Number(row.item.quantity) * Number(wholeSetMultiplier.value)}，本次不再新增下发。`
     : `该物料已发布${row.longLeadPublishedQuantity}/${Number(row.item.quantity) * Number(wholeSetMultiplier.value)}，本次正式发布只新增下发${row.remainingQuantity}。`
-const releaseInstanceIds = (item: BomItem): string[] => item.summaryItemIds?.length
-  ? item.summaryItemIds : item.id ? [item.id] : []
 let releaseInstanceRequest = 0
 watch([scope, needsReleaseInstances, () => props.projectId, () => props.token, () => availableReleaseItems.value.map(item => `${releaseInstanceIds(item).join(',')}:${item.quantity}:${item.summaryFingerprint ?? ''}`).join(';')], async () => {
   const request = ++releaseInstanceRequest
@@ -449,68 +456,6 @@ const pagedFormalReleaseRows = computed(() => {
   const start = (formalPage.value - 1) * releasePageSize
   return formalReleaseRows.value.slice(start, start + releasePageSize)
 })
-const itemKey = (item: BomItem) => `${(item.drawingNumber || `${item.name}|${item.specification}`).trim().toLocaleLowerCase()}|${item.unit?.trim().toLocaleLowerCase() ?? ''}`
-const comparedFields: Array<{ key: keyof BomItem; label: string }> = [
-  { key: 'kind', label: '分类' }, { key: 'unit', label: '单位' }, { key: 'drawingNumber', label: '物料编码' },
-  { key: 'name', label: '名称' }, { key: 'specification', label: '型号' }, { key: 'remark', label: '备注' },
-  { key: 'brand', label: '品牌' }, { key: 'material', label: '材质' }, { key: 'surfaceTreatment', label: '表面处理' },
-  { key: 'heatTreatment', label: '热处理' }, { key: 'weight', label: '重量' }, { key: 'quantity', label: '数量' }, { key: 'revision', label: '版本' },
-]
-const fieldValue = (item: BomItem, key: keyof BomItem) => String(item[key] ?? '').trim()
-const itemSignature = (item: BomItem) => JSON.stringify(comparedFields.map(field => fieldValue(item, field.key)))
-function isFormalRevisionPromotion(previous: string, current: string) {
-  const work = /^(?:([A-Z]+)-)?W1$/i.exec(previous)
-  return Boolean(work && current.toUpperCase() === (work[1]?.toUpperCase() ?? 'A'))
-}
-function changedRows(current: BomItem[], previous: BomItem[], multiplier = 1, previousMultiplier = 1) {
-  const remaining = new Set(previous)
-  const matches = new Map<BomItem, BomItem>()
-  const sameContext = (item: BomItem, old: BomItem) => (item.engineeringKitReferenceId ?? '') === (old.engineeringKitReferenceId ?? '')
-  // Reserve stable identities first, so repeated material codes cannot consume another instance's baseline.
-  for (const item of current) {
-    const match = [...remaining].find(old => Boolean(item.id) && old.id === item.id)
-    if (match) { matches.set(item, match); remaining.delete(match) }
-  }
-  for (const item of current.filter(row => !matches.has(row))) {
-    const match = [...remaining].find(old => Boolean(item.releaseTrackingId) && old.releaseTrackingId === item.releaseTrackingId)
-    if (match) { matches.set(item, match); remaining.delete(match) }
-  }
-  // 汇总代表实例或料号可能在重新提取后改变，来源模型和配置仍能识别同一零件。
-  for (const item of current.filter(row => !matches.has(row) && row.summaryItemIds?.length)) {
-    const candidates = [...remaining].filter(old => sameContext(item, old) && Boolean(item.sourceDocumentId) && old.sourceDocumentId === item.sourceDocumentId
-      && old.sourceConfiguration === item.sourceConfiguration && old.unit === item.unit)
-    if (candidates.length === 1 && current.filter(row => !matches.has(row) && row.sourceDocumentId === item.sourceDocumentId
-      && row.sourceConfiguration === item.sourceConfiguration && row.unit === item.unit).length === 1) {
-      matches.set(item, candidates[0]!); remaining.delete(candidates[0]!)
-    }
-  }
-  for (const item of current.filter(row => !matches.has(row))) {
-    const match = [...remaining].find(old => sameContext(item, old) && Boolean(item.sourceDocumentId && item.sourceInstancePath)
-      && old.sourceDocumentId === item.sourceDocumentId && old.sourceInstancePath === item.sourceInstancePath
-      && old.sourceConfiguration === item.sourceConfiguration)
-      ?? [...remaining].find(old => sameContext(item, old) && itemSignature(old) === itemSignature(item))
-    if (match) { matches.set(item, match); remaining.delete(match) }
-  }
-  for (const item of current.filter(row => !matches.has(row))) {
-    const candidates = [...remaining].filter(old => sameContext(item, old) && itemKey(old) === itemKey(item))
-    if (candidates.length === 1 && current.filter(row => !matches.has(row) && sameContext(item, row) && itemKey(row) === itemKey(item)).length === 1) {
-      matches.set(item, candidates[0]!); remaining.delete(candidates[0]!)
-    }
-  }
-  const rows: Array<{ item: BomItem; previousItem?: BomItem; change: string; details: string[] }> = []
-  for (const item of current) {
-    const old = matches.get(item)
-    if (!old) { rows.push({ item, change: '新增', details: ['上一发布版不存在此项'] }); continue }
-    const value = (row: BomItem, key: keyof BomItem, factor: number) => key === 'quantity' ? String(releaseQuantity(Number(row.quantity) * factor)) : fieldValue(row, key)
-    const details = comparedFields.filter(field => value(old, field.key, previousMultiplier) !== value(item, field.key, multiplier)
-      && !(field.key === 'revision' && isFormalRevisionPromotion(fieldValue(old, field.key), fieldValue(item, field.key))))
-      .map(field => `${field.label}：${value(old, field.key, previousMultiplier) || '—'} → ${value(item, field.key, multiplier) || '—'}`)
-    if (multiplier !== previousMultiplier) details.unshift(`整套倍率：×${previousMultiplier} → ×${multiplier}`)
-    if (details.length) rows.push({ item, previousItem: old, change: '修改', details })
-  }
-  rows.push(...[...remaining].map(item => ({ item, previousItem: item, change: '删除', details: ['当前发布范围已移除此项'] })))
-  return rows
-}
 const retainedSupplementItems = computed(() => (props.releaseItems.length ? props.releaseItems : props.standardItems)
   .filter(item => !item.manuallyExcluded && !item.pendingRemoval && (item.releaseConfirmation || item.releaseExcluded)))
 const previousSupplementItems = computed(() => (props.releaseItems.length ? props.releaseItems : props.standardItems).some(item => item.summaryItemIds?.length)
@@ -649,17 +594,6 @@ const frozenItems = computed(() => {
   if (isNonStandardScope(props.releasePackage.scope)) return props.releasePackage.nonStandardBomSnapshot
   return props.releasePackage.standardBomSnapshot
 })
-const frozenMaterialKey = (item: BomItem) => {
-  const materialCode = item.drawingNumber?.trim().toLocaleLowerCase()
-  return materialCode ? `material:${issueMaterialKey(item).toLocaleLowerCase()}` : `item:${item.id?.toLocaleLowerCase() ?? ''}`
-}
-const frozenSummaryKey = (item: BomItem) => {
-  if (item.drawingNumber?.trim() || !item.sourceDocumentId) return frozenMaterialKey(item)
-  return ['document', item.sourceDocumentId, item.sourceConfiguration, item.kind, item.unit,
-    item.name, item.specification, item.brand, item.material, item.surfaceTreatment,
-    item.weight, item.remark, item.revision]
-    .map(value => String(value ?? '').trim().toLocaleLowerCase()).join('|')
-}
 const frozenSummaryRows = computed<FrozenDisplayRow[]>(() => {
   const grouped = new Map<string, FrozenDisplayRow>()
   frozenItems.value.forEach((item, index) => {
@@ -682,54 +616,9 @@ const isFrozenSupplement = computed(() => Boolean(props.releasePackage && isSupp
 const isFrozenFormal = computed(() => Boolean(props.releasePackage && ['StandardFormal', 'NonStandardWithDrawing', 'ElectricalFormal'].includes(props.releasePackage.scope)))
 const supportsFrozenExport = computed(() => isFrozenSupplement.value || isFrozenFormal.value || Boolean(props.releasePackage && isLongLeadScope(props.releasePackage.scope)))
 const showFrozenChanges = computed(() => isFrozenSupplement.value && !frozenShowFullBom.value)
-function summarizeFrozenItems(items: BomItem[]) {
-  const groups = new Map<string, BomItem>()
-  for (const item of items) {
-    const key = frozenSummaryKey(item)
-    const existing = groups.get(key)
-    if (existing) {
-      existing.quantity = Number(existing.quantity) + Number(item.quantity)
-      existing.summaryItemIds!.push(...releaseInstanceIds(item))
-    } else groups.set(key, { ...item, summaryItemIds: [...releaseInstanceIds(item)] })
-  }
-  return [...groups.values()].map(item => ({ ...item, engineeringKitReferenceId: undefined }))
-}
-function frozenScopedChanges(rows: ReturnType<typeof changedRows>, items: BomItem[], previous: BomItem[]) {
-  const selected = new Set(props.releasePackage?.selectedBomItemIds ?? [])
-  const removed = new Set(props.releasePackage?.confirmedRemovedBomItemIds ?? [])
-  const result = rows.filter(row => !row.item.releaseConfirmation && (!selected.size && !removed.size
-    || releaseInstanceIds(row.item).some(id => selected.has(id))
-    || releaseInstanceIds(row.previousItem ?? row.item).some(id => removed.has(id))))
-  if (props.releasePackage?.scope === 'NonStandardSupplement') {
-    for (const item of items) {
-      if (item.releaseConfirmation || !releaseInstanceIds(item).some(id => selected.has(id))
-        || result.some(row => row.item === item)) continue
-      result.push({ item, previousItem: previous.find(old => frozenSummaryKey(old) === frozenSummaryKey(item)),
-        change: '修改', details: ['图纸纳入本次发布（以冻结版本为准）'] })
-    }
-  }
-  return result
-}
 // 导出比较实际发布总量，分别使用两次发布的倍率，不读取当前工作区或分页行。
-const frozenExportChanges = computed(() => {
-  const multiplier = props.releasePackage?.wholeSetMultiplier ?? 1
-  const previousMultiplier = props.previousVersionMultiplier ?? 1
-  const previousItems = summarizeFrozenItems(props.previousVersionItems)
-  const previous = new Map(previousItems
-    .map(item => [frozenSummaryKey(item), item]))
-  const items = summarizeFrozenItems(frozenItems.value)
-  const rows = items.flatMap(item => {
-    const key = frozenSummaryKey(item)
-    const old = previous.get(key)
-    previous.delete(key)
-    return changedRows([item], old ? [old] : [], multiplier, previousMultiplier)
-  })
-  return frozenScopedChanges([...rows, ...changedRows([], [...previous.values()], multiplier, previousMultiplier)], items, previousItems)
-    .map(row => ({...row,
-      item: {...row.item,quantity:releaseQuantity(Number(row.item.quantity) * (row.change === '删除' ? previousMultiplier : multiplier))},
-      previousItem: row.previousItem ? {...row.previousItem,quantity:releaseQuantity(Number(row.previousItem.quantity) * previousMultiplier)} : undefined,
-    }))
-})
+const frozenExportChanges = computed(() => props.releasePackage
+  ? frozenBomChanges(props.releasePackage, frozenItems.value, props.previousVersionItems, props.previousVersionMultiplier ?? 1) : [])
 const frozenEarlyCredits = computed(() => props.releasePackage ? releaseEarlyCredits(props.releasePackage, props.releasePackages) : new Map<string, number>())
 const earlyCreditFor = (item: BomItem, removed = false) => removed ? 0 : frozenEarlyCredits.value.get(issueMaterialKey(item)) ?? 0
 const frozenExportRowCount = computed(() => isFrozenSupplement.value ? frozenExportChanges.value.length : frozenSummaryRows.value.length)
@@ -777,7 +666,7 @@ const frozenChangeRows = computed<FrozenDisplayRow[]>(() => frozenExportChanges.
   item: { ...row.item, quantity: row.change === '删除' ? 0 : Number(row.item.quantity) },
   previousQuantity: Number(row.previousItem?.quantity ?? 0),
   earlyCredit: earlyCreditFor(row.item, row.change === '删除'),
-  quantityDelta: releaseQuantity((row.change === '删除' ? 0 : Number(row.item.quantity)) - Number(row.previousItem?.quantity ?? 0) - earlyCreditFor(row.item, row.change === '删除')),
+  quantityDelta: frozenNetChange(row, earlyCreditFor(row.item, row.change === '删除')),
   sourceItems: (row.change === '删除' ? props.previousVersionItems : frozenItems.value)
     .filter(item => row.item.summaryItemIds?.some(id => releaseInstanceIds(item).includes(id))),
 })))
@@ -1175,10 +1064,10 @@ async function saveItemComment() {
 <template>
   <section class="pdm-panel pdm-manager-panel release-center" aria-label="审批与生产发包">
     <div v-if="releasePackage" class="pdm-release-overview-strip">
-      <p v-if="releasePackage && requiresReleasePreview(releasePackage) && releasePackage.previewState && releasePackage.previewState !== 'None'" class="pdm-release-preview-state" :class="{ 'is-attention': releasePreviewNeedsAttention(releasePackage) }" :role="releasePreviewNeedsAttention(releasePackage) ? 'alert' : 'status'">
+      <p v-if="releasePackage && requiresReleasePreview(releasePackage) && (releasePackage.state === '发布失败' || releasePackage.previewState && releasePackage.previewState !== 'None')" class="pdm-release-preview-state" :class="{ 'is-attention': releasePreviewNeedsAttention(releasePackage) }" :role="releasePreviewNeedsAttention(releasePackage) ? 'alert' : 'status'">
         <strong>图纸转换（STEP/PDF）：{{ releasePreviewStateLabel(releasePackage) }}</strong>
         <span v-if="releasePackage.previewError && releasePackage.previewState !== 'Running'">{{ releaseFailureMessage(releasePackage.previewError) }}</span>
-        <button v-if="canManage && !['Succeeded', 'Running'].includes(releasePackage.previewState)" type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryPreview', releasePackage.id)">重试转图</button>
+        <button v-if="canManage && canRetryReleasePreview(releasePackage)" type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryPreview', releasePackage.id)">重试转图</button>
         <small v-if="releasePreviewNeedsAttention(releasePackage) && !canManage">请联系项目经理处理。</small>
       </p>
       <ReleaseExecutionPanel v-if="releasePackage && token" :package-id="releasePackage.id" :token="token" :can-manage="canManage" :preview-applicable="requiresReleasePreview(releasePackage)" />
@@ -1370,7 +1259,17 @@ async function saveItemComment() {
       <p v-if="releasePackage.changeReason" class="pdm-release-change-reason"><strong>{{ isSupplementScope(releasePackage.scope) ? '变更原因' : '备注' }}：</strong>{{ releasePackage.changeReason }}</p>
 
       <section v-if="releasePackage.drawingReview" class="pdm-decision-box">
-        <p>本次图纸与BOM在图档页审核。当前节点全部完成后自动流转，最后批准后系统继续发布。</p>
+        <template v-if="returnedDrawings.length">
+          <p class="pdm-inline-warning" role="status">
+            {{ returnedDrawings.length }} 张图纸待修改。请查看退回意见，修改后提交存档并生成新版本，系统会按本次发布的审批流程自动安排复审。
+          </p>
+          <ul aria-label="待修改图纸">
+            <li v-for="drawing in returnedDrawings" :key="drawing.documentId">
+              <button type="button" class="pdm-text-action" @click="emit('reviewDocuments', releasePackage.id, drawing.documentId)">{{ drawing.fileName }}</button>
+            </li>
+          </ul>
+        </template>
+        <p v-else>本次图纸与BOM在图档页审核。当前节点全部完成后自动流转，最后批准后系统继续发布。</p>
         <button type="button" class="pdm-primary-action" @click="emit('reviewDocuments', releasePackage.id)">图档审核</button>
         <button v-if="canHandleCurrentTask && currentTask && !currentTask.participants?.policy?.disableTransfer && (currentTask.participants?.members.length ?? 1) === 1" type="button" :disabled="pending" @click="openTransfer">转交</button>
       </section>
@@ -1399,7 +1298,7 @@ async function saveItemComment() {
               <tr v-for="(row, index) in pagedFrozenRows" :key="row.key">
                 <td class="is-release-centered">{{ (frozenPage - 1) * releasePageSize + index + 1 }}</td>
                 <td class="is-release-centered" v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td>
-                <td class="pdm-frozen-item-name" v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}<small class="pdm-release-unit">{{ releaseUnitLabel(row.item) }}</small></td>
+                <td class="pdm-frozen-item-name" v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td>
                 <td>{{ row.item.specification || '—' }}</td>
                 <td class="is-release-centered" :title="packageRevisionHint(row.item, releasePackage)"><span class="pdm-frozen-cell-detail">{{ packageRevisionLabel(row.item, releasePackage) }}</span></td>
                 <td class="is-release-centered" :title="row.item.brand || undefined"><span class="pdm-frozen-cell-detail">{{ row.item.brand || '—' }}</span></td>
@@ -1463,7 +1362,6 @@ async function saveItemComment() {
 </template>
 
 <style scoped>
-.pdm-release-frozen-table .pdm-release-unit { display: inline; margin-inline-start: 4px; color: var(--pdm-muted); font-size: 11px; }
 .pdm-release-details{flex-shrink:0;margin-bottom:4px}.pdm-release-details>summary{box-sizing:border-box;height:32px;padding:0 6px;color:var(--pdm-text-soft);font-weight:600;line-height:32px;cursor:pointer}.pdm-release-details[open]>summary{margin-bottom:6px}
 .pdm-release-frozen-table .pdm-release-delivery{font-variant-numeric:tabular-nums}
 .pdm-inline-info{margin:0 0 8px;padding:7px 10px;border:1px solid var(--pdm-green-border);border-radius:6px;background:var(--pdm-green-soft);color:var(--pdm-green);white-space:normal}

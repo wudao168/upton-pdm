@@ -44,13 +44,27 @@ public sealed partial class Phase1ReleaseWorkflowTests
         {
             var before=package;
             var emergency = task.Assignee != "admin" && scope == ReleaseScope.NonStandardLongLead;
+            var input = new ReleaseDrawingReviewDecision(item.DocumentId, item.Token, "Confirmed", "")
+            { ApprovalTaskId = task.Id, RoundId = package.DrawingReview!.RoundId };
+            const string reason = "主设请假，由主管代审";
+            if (emergency)
+            {
+                var error = await Assert.ThrowsAsync<PdmRuleException>(() => reviewService.DecideAndAdvanceAsync(
+                    package.Id, input, "admin", UserRole.Administrator, workflow, default, emergencySubstitute: true));
+                Assert.Contains("紧急代批原因", error.Message);
+                var unchanged = (await repository.FindReleasePackageAsync(package.Id, default))!;
+                Assert.Null(unchanged.ApprovalTasks.Single(node => node.Id == task.Id).Decision);
+                Assert.DoesNotContain(unchanged.DrawingReview!.Items[0].Notes, note => note.ApprovalTaskId == task.Id);
+                await Assert.ThrowsAsync<PdmRuleException>(() => workflow.EmergencyDecideAsync(task.Id, "admin",
+                    UserRole.Administrator, ApprovalDecision.Approved, " ", default, publishImmediately: false));
+            }
             package=await reviewService.DecideAndAdvanceAsync(package.Id,
-                new(item.DocumentId,item.Token,"Confirmed","") { ApprovalTaskId=task.Id, RoundId=package.DrawingReview!.RoundId },
+                input with { EmergencyReason = emergency ? reason : null },
                 emergency ? "admin" : task.Assignee, UserRole.Administrator, workflow, default, emergencySubstitute: emergency);
             var completed = package.ApprovalTasks.Single(t=>t.Id==task.Id);
             Assert.Equal(ApprovalDecision.Approved, completed.Decision);
             Assert.Equal(emergency, completed.IsEmergencySubstitute);
-            Assert.Null(completed.EmergencyReason);
+            Assert.Equal(emergency ? reason : null, completed.EmergencyReason);
             await Assert.ThrowsAsync<PdmConflictException>(()=>reviewService.DecideAndAdvanceAsync(before.Id,
                 new(item.DocumentId,item.Token,"Confirmed","重复提交") { ApprovalTaskId=task.Id },task.Assignee,UserRole.Administrator,workflow,default));
         }

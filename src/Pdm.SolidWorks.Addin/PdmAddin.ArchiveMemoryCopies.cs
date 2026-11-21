@@ -24,6 +24,7 @@ public sealed partial class PdmAddin
         internal long SourceLength;
         internal int Revision, CapturedRevision, Stamp, Operation;
         internal bool Closed;
+        internal bool SourceSavedToDisk;
         internal DocumentVersionDto CommittedVersion;
         internal Guid CommittedDocumentId;
         internal string CommittedUser, CommittedScope;
@@ -93,7 +94,7 @@ public sealed partial class PdmAddin
             finally
             {
                 unsubscribe = null; heldCopy?.Dispose(); heldCopy = null;
-                if (!string.IsNullOrWhiteSpace(CopyPath) && File.Exists(CopyPath)
+                if (!SourceSavedToDisk && !string.IsNullOrWhiteSpace(CopyPath) && File.Exists(CopyPath)
                     && (CommittedVersion == null || !string.Equals(CommittedVersion.Sha256, CopyHash, StringComparison.OrdinalIgnoreCase)))
                 {
                     try
@@ -127,9 +128,17 @@ public sealed partial class PdmAddin
     {
         foreach (var pair in archiveMemoryCopies.Where(pair => all || pair.Value.Closed).ToArray())
         { archiveMemoryCopies.Remove(pair.Key); pair.Value.Dispose(); }
+        foreach (var pair in unchangedCheckoutAssemblies.Where(pair => all || pair.Value.State.Closed).ToArray())
+            ForgetUnchangedCheckout(pair.Key);
     }
 
-    private async Task<bool> PrepareCurrentMemoryCopiesAsync(IReadOnlyList<BatchOperationItem> selected, CancellationToken token)
+    private static bool CanCaptureCurrentArchiveMemory(CadTreeNode node) =>
+        (node.Kind is CadDocumentKind.Part or CadDocumentKind.Assembly or CadDocumentKind.Drawing)
+        && node.HistoricalRepair == null && node.Role != CadReferenceRole.ExternalFileDependency
+        && node.Status != CadReferenceStatus.Virtual && !node.IsStoredImport;
+
+    private async Task<bool> PrepareCurrentMemoryCopiesAsync(IReadOnlyList<BatchOperationItem> selected, CancellationToken token,
+        IReadOnlyDictionary<string, string> inspectedSourceHashes = null)
     {
         var changed = false;
         var reads = new ArchiveReadContext(this);
@@ -137,9 +146,7 @@ public sealed partial class PdmAddin
         {
             token.ThrowIfCancellationRequested();
             var node = item.Node;
-            if (node.HistoricalRepair != null || node.Role == CadReferenceRole.ExternalFileDependency
-                || node.Status == CadReferenceStatus.Virtual || node.IsStoredImport
-                || node.Kind != CadDocumentKind.Part && node.Kind != CadDocumentKind.Assembly && node.Kind != CadDocumentKind.Drawing) continue;
+            if (!CanCaptureCurrentArchiveMemory(node)) continue;
             // Lightweight/context-loaded documents can be returned by the exact-path
             // lookup before they appear in GetDocuments. They still own unsaved edits.
             var model = reads.FindLoaded(node.FullPath) ?? application.GetOpenDocumentByName(node.FullPath) as IModelDoc2;
@@ -149,8 +156,12 @@ public sealed partial class PdmAddin
             if (node.IsRenamePendingSave)
                 throw new InvalidOperationException("图档改名尚未保存，不能在存档时自动改写原文件，请先完成改名：" + node.FileName);
             var copy = MemoryCopy(node);
+            if (!model.GetSaveFlag() && SavedArchiveSourceMatches(node)) continue;
             if (!model.GetSaveFlag() && !node.RequiresModelUpdate && copy == null) continue;
             var hash = await Task.Run(() => ComputeFileHash(node.FullPath), token);
+            if (inspectedSourceHashes != null && inspectedSourceHashes.TryGetValue(node.FullPath, out var inspectedHash)
+                && !string.Equals(inspectedHash, hash, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("图档在检查后发生变化，本批尚未上传，请核对源文件后重试：" + node.FileName);
             if (copy != null && copy.Operation == archiveMemoryOperation && copy.SourceHash != null
                 && !string.Equals(copy.SourceHash, hash, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("源文件在存档期间发生变化，未覆盖原文件或继续提交：" + node.FileName);
@@ -251,6 +262,28 @@ public sealed partial class PdmAddin
             throw new ArchiveMemoryChangedException(node.FileName);
     }
 
+    private bool IsOwnCommittedMemoryCopy(ArchiveMemoryCopy copy, Guid? documentId) =>
+        copy?.CommittedVersion != null && documentId == copy.CommittedDocumentId
+        && copy.CommittedUser == authenticatedUsername && copy.CommittedScope == apiClient?.EditJournalScope;
+
+    private Guid? PreparedMemoryArchiveBase(PreparedArchiveFile file, DocumentVersionDto latest)
+    {
+        if (!file.MemorySnapshot) return null;
+        var copy = MemoryCopy(file.Node);
+        if (copy == null || !copy.MatchesMemory() || !PathsEqual(file.UploadCopyPath, copy.CopyPath)
+            || !string.Equals(file.SourceHash, copy.SourceHash, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(file.UploadCopySha256, copy.CopyHash, StringComparison.OrdinalIgnoreCase))
+            throw new ArchiveMemoryChangedException(file.Node.FileName);
+        if (!IsOwnCommittedMemoryCopy(copy, file.Node.DocumentId)) return null;
+        if (copy.CommittedVersion.Id != latest?.Id
+            || !string.Equals(copy.CommittedVersion.Sha256, latest.Sha256, StringComparison.OrdinalIgnoreCase)
+            || copy.CommittedVersion.FileLength != latest.FileLength)
+            throw new InvalidOperationException("已提交的内存版本与服务器当前版本不一致，原文件和修改均已保留：" + file.Node.FileName);
+        // The physical working file can intentionally still be the earlier
+        // version. The verified copy and the in-session receipt establish this base.
+        return copy.CommittedVersion.Id;
+    }
+
     private sealed class ArchiveMemoryChangedException : InvalidOperationException
     {
         internal ArchiveMemoryChangedException(string fileName)
@@ -264,8 +297,7 @@ public sealed partial class PdmAddin
         foreach (var node in nodes.Where(node => !node.IsReadOnlyPreview && !node.IsHistoricalPreview))
         {
             var copy = MemoryCopy(node);
-            if (copy?.CommittedVersion == null || node.DocumentId != copy.CommittedDocumentId
-                || copy.CommittedUser != authenticatedUsername || copy.CommittedScope != apiClient?.EditJournalScope || !copy.CanUseCommittedBase()
+            if (!IsOwnCommittedMemoryCopy(copy, node.DocumentId) || !copy.CanUseCommittedBase()
                 || !localHashes.TryGetValue(node.FullPath, out var diskHash)
                 || !string.Equals(diskHash, copy.SourceHash, StringComparison.OrdinalIgnoreCase)
                     && !string.Equals(diskHash, copy.CopyHash, StringComparison.OrdinalIgnoreCase)) continue;

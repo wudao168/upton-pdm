@@ -34,9 +34,12 @@ internal sealed partial class ControlledWorkspaceManager
     {
         var directory = WorkingDirectory(manifest);
         if (!string.Equals(directory, conflict.Directory, StringComparison.OrdinalIgnoreCase)
-            || !IsWithin(directory, workspaceRoot)) throw new IOException("备份目录与当前工作区不一致，未更新文件。");
+            || !ServerWorkspaceRoots.Any(root => ManagedCadPaths.IsWithin(directory, root)))
+            throw new IOException("备份目录与当前工作区不一致，未更新文件。");
+        var conflictIds = new HashSet<Guid>(conflict.Files.Select(file => file.DocumentId));
         var backup = new WorkspaceCacheBackup { WorkingDirectory = directory, ManifestKey = CacheManifestKey(manifest),
-            RecoveryDirectory = RecoveryDirectory("open-conflict"), Files = conflict.Files.ToList() };
+            RecoveryDirectory = RecoveryDirectory("open-conflict", directory, ManifestPaths(manifest.Files.Where(file => conflictIds.Contains(file.DocumentId)))),
+            Files = conflict.Files.ToList() };
         foreach (var file in backup.Files)
         {
             token.ThrowIfCancellationRequested();
@@ -81,9 +84,9 @@ internal sealed partial class ControlledWorkspaceManager
     {
         if (protectedPaths == null || version == null || string.IsNullOrWhiteSpace(uploadCopy) || !File.Exists(uploadCopy)
             || new FileInfo(uploadCopy).Length != version.FileLength || ComputeSha256(uploadCopy) != version.Sha256) return false;
-        var project = ProjectViewDirectory(workspaceRoot, projectCode);
-        var target = IsWithin(source, project) ? Path.GetFullPath(source)
-            : Path.Combine(project, "图档缓存", documentId.ToString("N"), Path.GetFileName(source));
+        var fileName = Path.GetFileName(source);
+        var target = PdmDocumentIdentityStore.IsProjectWorkspacePath(workspaceRoot, projectCode, source) ? Path.GetFullPath(source)
+            : PdmAddin.ArchivedProjectCachePath(workspaceRoot, projectCode, documentId, fileName);
         if (!File.Exists(target) || protectedPaths.Any(path => string.Equals(path, target, StringComparison.OrdinalIgnoreCase))) return false;
         if (!PdmDocumentIdentityStore.TryReadLocalMetadata(target, out var binding)
             || binding.DocumentId != documentId || binding.ProjectId != projectId) return false;
@@ -93,7 +96,13 @@ internal sealed partial class ControlledWorkspaceManager
         if (sameSource && before != sourceHash) return false;
         var confirmedSource = sameSource && before == sourceHash;
         if (!confirmedSource && before != binding.Sha256 && before != binding.ResolvedReferenceSha256) return false;
-        var backup = Path.Combine(workspaceRoot, ".uplm", "Recovery", "cache-sync-" + Guid.NewGuid().ToString("N"), Path.GetFileName(source));
+        var job = "cache-sync-" + Guid.NewGuid().ToString("N");
+        var root = PdmDocumentIdentityStore.ManagedWorkspaceRoots(workspaceRoot).OrderByDescending(path => path.Length)
+            .First(path => ManagedCadPaths.IsWithin(target, path));
+        var backupDirectory = ManagedCadPaths.ChooseDirectory(Path.Combine(root, ".uplm", "Recovery", job),
+            new[] { ManagedCadPaths.CompactDirectory(root, "s", job) }, new[] { fileName });
+        ControlledCacheMaintenance.RequireOrdinaryPath(backupDirectory, root);
+        var backup = ManagedCadPaths.Resolve(backupDirectory, fileName);
         var attributes = File.GetAttributes(target);
         Directory.CreateDirectory(Path.GetDirectoryName(backup));
         CopyFileAtomically(target, backup);

@@ -9,15 +9,17 @@ const lock: EditLockSummary = {
   connectionState: 'Active', attentionLevel: 'Normal', ownedByCurrentUser: false, canRequestRelease: true, canForceRelease: false,
   canEmergencyRelease: true, sessionId: 'original-session',
 }
-function mountTasks(locks: EditLockSummary[], onEmergencyRelease = vi.fn().mockResolvedValue(undefined)) {
-  return { onEmergencyRelease, wrapper: mount(MyTasks, {
+async function mountTasks(locks: EditLockSummary[], onEmergencyRelease = vi.fn().mockResolvedValue(undefined)) {
+  const wrapper = mount(MyTasks, {
     props: { tasks: [], locks, materialCodeTasks: [], passwordResetTasks: [], pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(), onEmergencyRelease },
     global: { stubs: { ElDialog: { props: ['modelValue', 'title'], template: '<div v-if="modelValue" role="dialog"><h2>{{ title }}</h2><slot/><slot name="footer"/></div>' } } },
-  }) }
+  })
+  await wrapper.findAll('[role="tab"]').find(tab => tab.text().startsWith('编辑权限'))!.trigger('click')
+  return { onEmergencyRelease, wrapper }
 }
 describe('图档协作接管', () => {
   it('有授权时可接管在线会话，提交具体会话和获取时间并要求原因', async () => {
-    const { wrapper, onEmergencyRelease } = mountTasks([lock])
+    const { wrapper, onEmergencyRelease } = await mountTasks([lock])
     await wrapper.findAll('button').find(button => button.text() === '紧急接管')!.trigger('click')
     expect(wrapper.get('[role=dialog]').text()).toContain('未上传修改需要在原电脑另存')
     await wrapper.get('[role=dialog]').findAll('button').find(button => button.text() === '确认释放')!.trigger('click')
@@ -28,9 +30,9 @@ describe('图档协作接管', () => {
     expect(onEmergencyRelease).toHaveBeenCalledExactlyOnceWith('doc', 'original-session', lock.checkedOutAt, '项目负责人确认交接')
     wrapper.unmount()
   })
-  it('没有紧急接管授权或缺少会话信息时不显示该操作', () => {
+  it('没有紧急接管授权或缺少会话信息时不显示该操作', async () => {
     for (const value of [{ ...lock, canEmergencyRelease: false }, { ...lock, sessionId: undefined }]) {
-      const { wrapper } = mountTasks([value])
+      const { wrapper } = await mountTasks([value])
       expect(wrapper.findAll('button').some(button => button.text() === '紧急接管')).toBe(false)
       wrapper.unmount()
     }

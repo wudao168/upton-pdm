@@ -135,7 +135,7 @@ public sealed class EngineeringKitService(
             NormalizeCodes(catalog?.StandardCodes, "标准代码"),
             NormalizeCodes(catalog?.CategoryCodes, "分类代码"));
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
-        await repository.UpdateSystemSettingsAsync(settings with { EngineeringKitOptions = normalized }, cancellationToken);
+        await repository.UpdateSystemSettingsAsync(settings with { EngineeringKitOptions = normalized }, cancellationToken, preservePreviewConversion: true);
         await AuditAsync(actor, "engineering-kit.options.update", Guid.Empty, $"标准代码{normalized.StandardCodes.Count}项、分类代码{normalized.CategoryCodes.Count}项", cancellationToken);
         return normalized;
     }

@@ -88,11 +88,17 @@ try
         Console.WriteLine("Prepared isolated archive performance fixture " + database);
         return;
     }
-    await DeferredReferenceImmutableChecks.RunAsync(repo, builder.ConnectionString);
-    if (args.Contains("--deferred-references-only")) { passed = true; return; }
-    await LargeReferenceSnapshotChecks.RunAsync(repo, builder.ConnectionString);
-    if (args.Contains("--reference-sort-only")) { passed = true; return; }
-    foreach (var failure in new[] { "missing-reference", "base-version", "drawing-failure", "omitted-file", "foreign-session", "cancel", "success" })
+    var longDrawingNumberOnly = args.Contains("--long-drawing-number-only");
+    if (!longDrawingNumberOnly)
+    {
+        await DeferredReferenceImmutableChecks.RunAsync(repo, builder.ConnectionString);
+        if (args.Contains("--deferred-references-only")) { passed = true; return; }
+        await LargeReferenceSnapshotChecks.RunAsync(repo, builder.ConnectionString);
+        if (args.Contains("--reference-sort-only")) { passed = true; return; }
+    }
+    var registrationCases = longDrawingNumberOnly ? new[] { "success" }
+        : new[] { "missing-reference", "base-version", "drawing-failure", "omitted-file", "foreign-session", "cancel", "success" };
+    foreach (var failure in registrationCases)
     {
         var project = await repo.CreateProjectAsync(new("QA-PENDING-" + Guid.NewGuid().ToString("N"), "登记回滚测试", "qa", "vault", "release"), "qa", default);
         await repo.EnsureProjectFolderTreeAsync(project.Id, default);
@@ -100,7 +106,10 @@ try
         var session = Guid.NewGuid(); var batch = Guid.NewGuid(); var context = new ArchiveRegistrationContext(batch, session, "QA");
         var rootCommand = new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly, folder.Id, SourceSha256: new string('A',64));
         var rootDocument = await repo.ReserveArchiveDocumentAsync(rootCommand, "qa", context, default);
-        var drawingCommand = new RegisterDocumentCommand(project.Id, "DRAWING", "工程图", "DRAWING.SLDDRW", DocumentKind.Drawing, folder.Id, rootDocument.Id, new string('B',64));
+        var longDrawingNumber = new string('图', 254) + "\U00020000";
+        var longRootDrawingNumber = new string('装', 254) + "\U00020001";
+        var drawingNumber = failure == "success" ? longDrawingNumber : "DRAWING";
+        var drawingCommand = new RegisterDocumentCommand(project.Id, drawingNumber, "工程图", "DRAWING.SLDDRW", DocumentKind.Drawing, folder.Id, rootDocument.Id, new string('B',64));
         var drawing = await repo.ReserveArchiveDocumentAsync(drawingCommand, "qa", context, default);
         Require((await repo.ReserveArchiveDocumentAsync(rootCommand, "qa", context, default)).Id == rootDocument.Id, "reserve replay changed ID");
         Require((await repo.ListDocumentsAsync(project.Id, default)).Count == 0, "preflight leaked official registrations");
@@ -110,7 +119,9 @@ try
         if (failure == "missing-reference") rootTree = rootTree with { Children = [Node(drawing) with { Kind = DocumentKind.Part, DocumentId = null }] };
         var rootCommit = Commit(project, rootDocument, rootTree, 'C', true);
         if (failure == "base-version") rootCommit = rootCommit with { ExpectedVersionId = Guid.NewGuid() };
-        ArchiveBatchFile[] files = [new(rootDocument.Id, rootCommit), new(drawing.Id, Commit(project,drawing,Node(drawing) with { Children = [Node(rootDocument)] }, 'D'))];
+        if (failure == "success") rootCommit = rootCommit with { DrawingNumber = longRootDrawingNumber };
+        var drawingCommit = Commit(project, drawing, Node(drawing) with { Children = [Node(rootDocument)] }, 'D');
+        ArchiveBatchFile[] files = [new(rootDocument.Id, rootCommit), new(drawing.Id, drawingCommit)];
         if (failure == "drawing-failure") files[1] = files[1] with { Commit = files[1].Commit with { ExpectedVersionId = Guid.NewGuid() } };
         if (failure == "omitted-file") files = files.Take(1).ToArray();
         if (failure == "cancel") await repo.CancelArchiveRegistrationAsync(batch,"qa",session,default);
@@ -118,11 +129,38 @@ try
         {
             var receipt = await repo.CheckInBatchVersionsAsync(batch, "pending-request", "qa", failure == "foreign-session" ? Guid.NewGuid() : session, files, default);
             Require(failure == "success", "expected registration transaction failure");
-            Require((await repo.ListDocumentsAsync(project.Id, default)).Count == 2, "successful batch registrations missing");
-            Require((await repo.ListDocumentRelationsAsync(project.Id, default)).Count == 1, "successful drawing relation missing");
-            Require((await repo.ListDocumentVersionsAsync(drawing.Id,default)).Count == 1, "successful drawing version missing");
-            var replay = await repo.CheckInBatchVersionsAsync(batch,"pending-request","qa",session,files,default);
-            Require(replay.Results[0].Version!.Id == receipt.Results[0].Version!.Id,"pending replay duplicated versions");
+            var official = await repo.ListDocumentsAsync(project.Id, default);
+            Require(official.Count == 2, "successful batch registrations missing");
+            Require(official.Single(document => document.Id == drawing.Id).DrawingNumber == longDrawingNumber,
+                "正式存档未完整保留带扩展汉字的 255 字符图号");
+            Require(official.Single(document => document.Id == rootDocument.Id).DrawingNumber == longRootDrawingNumber,
+                "正式存档未完整保留提交时新写入的 255 字符总装图号");
+            var relations = await repo.ListDocumentRelationsAsync(project.Id, default);
+            Require(relations.Count == 1 && relations.Single() == new DocumentModelDrawingRelation(rootDocument.Id, drawing.Id),
+                "长图号工程图的模型关联不正确");
+            var drawingResult = receipt.Results.Single(result => result.Document.Id == drawing.Id);
+            var rootResult = receipt.Results.Single(result => result.Document.Id == rootDocument.Id);
+            Require(drawingResult.VersionCreated && drawingResult.Document.DrawingNumber == longDrawingNumber,
+                "存档回执未完整保留长图号");
+            Require(rootResult.VersionCreated && rootResult.Document.DrawingNumber == longRootDrawingNumber,
+                "存档回执未完整保留更新后的总装图号");
+            Require((await repo.ListDocumentVersionsAsync(drawing.Id, default)).Single().Id == drawingResult.Version?.Id,
+                "长图号工程图版本与回执不一致");
+
+            var replay = await repo.CheckInBatchVersionsAsync(batch, "pending-request", "qa", session, files, default);
+            var replayedDrawing = replay.Results.Single(result => result.Document.Id == drawing.Id);
+            var replayedRoot = replay.Results.Single(result => result.Document.Id == rootDocument.Id);
+            Require(replay.Results.Count == 2 && replay.BatchId == batch && replay.ProjectId == project.Id
+                && replayedDrawing.Version?.Id == drawingResult.Version?.Id
+                && replayedDrawing.Document.DrawingNumber == longDrawingNumber
+                && replayedRoot.Version?.Id == rootResult.Version?.Id
+                && replayedRoot.Document.DrawingNumber == longRootDrawingNumber
+                && (await repo.ListDocumentVersionsAsync(drawing.Id, default)).Count == 1,
+                "重放长图号存档回执时数据不一致或重复生成版本");
+            var savedReceipt = await repo.FindArchiveBatchAsync(batch, default);
+            Require(savedReceipt?.Results.Single(result => result.Document.Id == drawing.Id).Document.DrawingNumber == longDrawingNumber,
+                "已持久化的存档回执未完整保留长图号");
+            await VerifyDrawingNumberColumnsAsync(builder.ConnectionString);
             await repo.CancelArchiveRegistrationAsync(batch,"qa",session,default);
             Require((await repo.ListDocumentsAsync(project.Id, default)).Count == 2,"cancel after commit removed official documents");
         }
@@ -137,6 +175,7 @@ try
         }
         Console.WriteLine("PASS MySQL pending registration " + failure);
     }
+    if (longDrawingNumberOnly) { passed = true; return; }
     foreach (var failure in new[] { "permission", "missing-reference", "base-version", "success" })
     {
         Console.WriteLine("Running fixture " + failure);
@@ -227,6 +266,24 @@ finally
     else Console.WriteLine("Retained failed isolated fixture for diagnosis: " + database);
 }
 static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
+static async Task VerifyDrawingNumberColumnsAsync(string connectionString)
+{
+    await using var connection = new MySqlConnection(connectionString);
+    await connection.OpenAsync();
+    var columns = await connection.QueryAsync<string>(
+        """
+        SELECT CONCAT(table_name, '.', column_name)
+        FROM information_schema.columns
+        WHERE table_schema=DATABASE() AND data_type='varchar'
+          AND character_maximum_length=255 AND character_set_name='utf8mb4'
+          AND ((is_nullable='NO' AND column_name='drawing_number' AND table_name IN ('document','bom_item','drawing_review_item'))
+            OR (is_nullable='YES' AND table_name='bom_item' AND column_name='parent_drawing_number'))
+        """);
+    Require(new HashSet<string>(columns, StringComparer.Ordinal).SetEquals(
+        ["document.drawing_number", "bom_item.drawing_number", "bom_item.parent_drawing_number", "drawing_review_item.drawing_number"]),
+        "图档、BOM 与工程图审核图号列的字符容量、字符集或空值约定不一致");
+    Console.WriteLine("PASS MySQL 255-character drawing number survives commit, relation and idempotent receipt");
+}
 static async Task VerifyReceiptMigration(string connectionString)
 {
     await using var connection = new MySqlConnection(connectionString);

@@ -96,6 +96,8 @@ public static class PermissionCodes
     public const string DingTalkSelfBind = "account.dingtalk.bind";
     public const string RoleSettingsView = "system.role.view";
     public const string RoleSettingsEdit = "system.role.edit";
+    public const string UserDeactivate = "system.user.deactivate";
+    public const string UserDelete = "system.user.delete";
     public const string ProjectPermissionSettingsView = "system.project-permission.view";
     public const string ProjectPermissionSettingsEdit = "system.project-permission.edit";
     public const string AuditView = "audit.view";
@@ -143,7 +145,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.DocumentRecycle, "管理受控图档回收站", "项目内容", "将未发布且无受控引用的图档移入回收站，并可在30天内恢复；已发布图档只能作废。", Sensitive: true),
         new(PermissionCodes.DocumentLockRequestRelease, "催办并申请释放编辑权限", "项目内容"),
         new(PermissionCodes.DocumentLockForceRelease, "强制释放超时编辑权限", "项目内容", "仅限本人负责项目，系统管理员不受项目岗位限制。", Sensitive: true),
-        new(PermissionCodes.DocumentLockEmergencyRelease, "紧急接管在线图档", "项目内容", "仅授权项目负责人或系统管理员使用，必须填写原因；存档处理中及审核锁不可接管。", Sensitive: true),
+        new(PermissionCodes.DocumentLockEmergencyRelease, "紧急接管在线图档", "项目内容", "在权限中心授权范围内释放其他人员的在线或离线编辑权限，须填写原因。存档处理中及审核锁不可释放。", Sensitive: true),
         new(PermissionCodes.BomEdit, "维护BOM相关数据", "项目内容", "料品、BOM表头料号与关联配置维护；三类BOM明细的编辑权限见下面两个分类权限。"),
         new(PermissionCodes.BomMechanicalEdit, "维护标准件与非标件BOM", "项目内容", "维护项目标准件BOM和非标件BOM明细（默认给机械工程师、机械经理、技术助理、调试工程师）。", Sensitive: true),
         new(PermissionCodes.BomElectricalEdit, "维护电气件BOM", "项目内容", "维护项目电气件BOM明细（默认给电气工程师、硬件工程师）。", Sensitive: true),

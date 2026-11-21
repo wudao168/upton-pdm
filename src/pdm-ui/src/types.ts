@@ -355,6 +355,12 @@ export interface PdmUser {
   crossCompanyView?: boolean
   accessibleCompanyIds?: string[]
 }
+export interface ManagedPdmUser extends PdmUser {
+  canDeactivate: boolean
+  deactivateReason?: string | null
+  canDelete: boolean
+  deleteReason?: string | null
+}
 export interface SavePdmUserInput {
   username: string
   displayName: string
@@ -402,6 +408,7 @@ export interface PdmSystemSettings {
   checkoutReminderHours: number
   checkoutStrongReminderHours: number
   checkoutOverdueHours: number
+  checkoutOverdueReleaseGraceHours?: number
   checkoutForceReleaseHours: number
   checkoutAutoReleaseEnabled?: boolean
   checkoutIdleReleaseMinutes?: number
@@ -429,6 +436,15 @@ export interface PdmSystemSettings {
 /** 图纸转换（2D转PDF、3D转STEP）的执行位置：Local=API服务器本机，Remote=独立转图电脑上的转图代理。 */
 export type PreviewConversionMode = 'Local' | 'Remote'
 export interface PreviewConversionSettings { localExecutionAllowed?: boolean | null; mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number; servers?: { name: string; agentUrl: string; agentToken: string; timeoutMinutes: number; companyId?: string | null; disabled?: boolean }[] }
+export interface PreviewServer { name: string; agentUrl: string; hasToken: boolean; timeoutMinutes: number; disabled: boolean }
+export type PreviewServerInput = Omit<PreviewServer, 'hasToken'> & { originalUrl?: string; agentToken?: string }
+export interface PreviewServerStatus {
+  agentUrl: string
+  connected: boolean
+  workerReady: boolean
+  checkedAt: string
+  message: string
+}
 export interface PreviewAgentProbeResult { ok: boolean; message: string; machine?: string | null; workerExists?: boolean | null; workerPath?: string | null }
 export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
 export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
@@ -1140,6 +1156,7 @@ export interface ReleasePackageSummary {
   previewState?: string | null
   previewError?: string | null
   previewAttempts?: number
+  canResumePreviewRetry?: boolean
   previewUpdatedAt?: string | null
   changeNumber?: string
   changeReason?: string
@@ -1179,6 +1196,7 @@ export interface ReleaseDrawingReview {
   nodeDriven?: boolean
   revision: number
   archivedItems?: ReleaseDrawingReview['items']
+  preservedConfirmations?: Record<string, string[]>
   items: Array<{
     documentId: string; versionId: string; sha256: string; fileName: string; token: string; bomItemIds: string[]
     required: boolean; status: 'Pending' | 'Confirmed' | 'Issue'
@@ -1894,6 +1912,7 @@ export interface MaterialCategoryRule {
 export interface MaterialSyncTask {
   id: string
   materialId: string
+  materialKind?: MaterialKind | null
   operation: 'Create' | 'Update' | 'SetAvailability'
   status: MaterialSyncStatus
   correlationId: string

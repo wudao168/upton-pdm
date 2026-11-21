@@ -48,10 +48,10 @@ public sealed partial class PdmAddin
                             paths.Add(Path.GetFullPath(Path.Combine(Path.GetDirectoryName(model.FullPath), Path.GetFileName(name))));
                             foreach (var context in controlledOpenManifests.Where(pair => pair.Value.ProjectId == project.Key
                                 && pair.Value.Files.Any(file => file.DocumentId == model.DocumentId
-                                    && PathsEqual(model.FullPath, Path.Combine(pair.Key, file.RelativePath ?? file.FileName)))))
+                                    && PathsEqual(model.FullPath, ControlledReferenceMaterializer.ManifestPath(pair.Key, file)))))
                                 foreach (var file in context.Value.Files.Where(file => file.DocumentId == id))
                                 {
-                                    var candidate = Path.GetFullPath(Path.Combine(context.Key, file.RelativePath ?? file.FileName));
+                                    var candidate = ControlledReferenceMaterializer.ManifestPath(context.Key, file);
                                     if (IsPathWithinDirectory(candidate, context.Key)) paths.Add(candidate);
                                 }
                         }

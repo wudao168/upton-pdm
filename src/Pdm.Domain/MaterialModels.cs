@@ -351,6 +351,7 @@ public sealed record MaterialSyncTask(
     DateTimeOffset UpdatedAt)
 {
     public string? MaterialCode { get; init; }
+    public MaterialKind? MaterialKind { get; init; }
     public string? MaterialName { get; init; }
     public string? Specification { get; init; }
     public string? Brand { get; init; }

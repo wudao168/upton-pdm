@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { projectReleaseAttention, requiresReleasePreview, releasePreviewUnfinished, releasePreviewNeedsAttention, releasePreviewStateLabel, releasePreviewStateTag } from '../src/releasePreviewState'
+import { canRetryReleasePreview, projectReleaseAttention, requiresReleasePreview, releasePreviewUnfinished, releasePreviewNeedsAttention, releasePreviewStateLabel, releasePreviewStateTag } from '../src/releasePreviewState'
 import type { ReleasePackageSummary } from '../src/types'
 
 const release = (scope = 'NonStandardSupplement', previewState = 'Pending', previewAttempts = 0) => ({ scope, previewState, previewAttempts, locksDocuments: true } as ReleasePackageSummary)
@@ -17,6 +17,16 @@ it('非标件长交期不锁图档也显示转图状态', () => {
   expect(requiresReleasePreview(longLead)).toBe(true)
   expect(releasePreviewUnfinished(longLead)).toBe(true)
   expect(releasePreviewStateTag(longLead)).toBe('待转图')
+})
+
+it('发布失败以服务端恢复能力为准，残留排队状态不显示为自动排队', () => {
+  const failed = { ...release(), state: '发布失败' }
+  expect(canRetryReleasePreview(failed)).toBe(false)
+  expect(releasePreviewStateLabel(failed)).toBe('发布失败，自动转图已停止')
+  expect(canRetryReleasePreview({ ...failed, canResumePreviewRetry: true })).toBe(true)
+  expect(releasePreviewStateLabel({ ...failed, canResumePreviewRetry: true })).toContain('可重试转图')
+  expect(canRetryReleasePreview({ ...failed, state: '审批中', canResumePreviewRetry: true })).toBe(false)
+  expect(canRetryReleasePreview({ ...failed, state: '发布中' })).toBe(true)
 })
 
 it('巡检误留Pending但次数耗尽时按暂停处理，不再承诺后台自动重试', () => {

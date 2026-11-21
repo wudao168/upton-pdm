@@ -24,6 +24,7 @@ internal sealed class ProjectBrowserControl : UserControl
         BackColor = Color.FromArgb(47, 109, 224),
         ForeColor = Color.White
     };
+    private readonly ColumnStyle browseGapColumn = new ColumnStyle(SizeType.Absolute, 6);
     private readonly ColumnStyle browseButtonColumn;
     private float requestedBrowseButtonWidth = 96;
     private IReadOnlyList<ProjectDto> projects = Array.Empty<ProjectDto>();
@@ -66,7 +67,7 @@ internal sealed class ProjectBrowserControl : UserControl
             Padding = Padding.Empty
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
+        layout.ColumnStyles.Add(browseGapColumn);
 
         browseButtonColumn = new ColumnStyle(SizeType.Absolute, requestedBrowseButtonWidth);
         layout.ColumnStyles.Add(browseButtonColumn);
@@ -101,6 +102,9 @@ internal sealed class ProjectBrowserControl : UserControl
     public bool ConfirmExistingArchiveTarget { get; set; }
 
     public string SelectedProjectDisplay => ProjectSelectionText(selection);
+
+    internal int MinimumProjectDisplayWidth => (int)Math.Ceiling(requestedBrowseButtonWidth + browseGapColumn.Width)
+        + TextRenderer.MeasureText(selection == null ? "P000000-00" : selectedProject.Text, selectedProject.Font).Width + 10;
 
     public string SelectedProjectConfirmationCode => selection == null
         ? string.Empty

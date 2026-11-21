@@ -23,6 +23,86 @@ public sealed class AuthorizationCenterApiTests
     private static AuthorizationTemplate Template(string key, params string[] codes) => new(key, key, "", codes.Select(c => new AuthorizationGrant(c, ["company"])).ToArray());
 
     [Fact]
+    public async Task AccountActionsEnforceCompanyGrantAndReferencesAtTheEndpoint()
+    {
+        await using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var admin = (await repository.FindUserAsync("admin", default))!;
+        var company = admin.CompanyId!.Value;
+        const string unused = "qa-account-unused";
+        const string referenced = "qa-account-referenced";
+        const string foreign = "qa-account-other-company";
+
+        Login(client, admin.Username, nameof(UserRole.Administrator));
+        var created = await client.PostAsJsonAsync("/api/users", new
+        {
+            username = unused, displayName = "未引用账号", password = "AccountTest123", role = nameof(UserRole.Engineer), isActive = true
+        });
+        Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync());
+        await repository.CreateUserAsync(new(Guid.NewGuid(), referenced, "有授权账号", "unused", UserRole.Engineer, true, CompanyId: company), default);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), foreign, "其他公司账号", "unused", UserRole.Engineer, true, CompanyId: Guid.NewGuid()), default);
+        var original = await repository.GetAuthorizationSettingsAsync(default);
+        var template = original.Templates.First(item => item.IsActive && item.RoleCode == nameof(UserRole.Engineer));
+        var assignment = new AuthorizationAssignment(Guid.NewGuid(), referenced, template.Key, company, "company");
+        await repository.SaveAuthorizationSettingsAsync(original with { Assignments = [..original.Assignments, assignment] }, original.Revision, default);
+
+        var quickUsers = await client.GetFromJsonAsync<JsonElement>("/api/users?includeAccountOperations=true&checkDeleteReferences=false");
+        var quickUnused = quickUsers.EnumerateArray().Single(user => user.GetProperty("username").GetString() == unused);
+        Assert.True(quickUnused.GetProperty("canDeactivate").GetBoolean());
+        Assert.False(quickUnused.GetProperty("canDelete").GetBoolean());
+
+        var users = await client.GetFromJsonAsync<JsonElement>("/api/users?includeAccountOperations=true");
+        JsonElement Row(string name) => users.EnumerateArray().Single(user => user.GetProperty("username").GetString() == name);
+        Assert.True(Row(unused).GetProperty("canDelete").GetBoolean());
+        Assert.True(Row(referenced).GetProperty("canDeactivate").GetBoolean());
+        Assert.False(Row(referenced).GetProperty("canDelete").GetBoolean());
+        Assert.Contains("授权", Row(referenced).GetProperty("deleteReason").GetString());
+        Assert.False(Row(admin.Username).GetProperty("canDeactivate").GetBoolean());
+        Assert.False((await client.DeleteAsync($"/api/users/{referenced}")).IsSuccessStatusCode);
+        Assert.False((await client.DeleteAsync($"/api/users/{foreign}")).IsSuccessStatusCode);
+        Assert.False((await client.PutAsync($"/api/users/{foreign}/deactivate", null)).IsSuccessStatusCode);
+        Assert.False((await client.PutAsync($"/api/users/{admin.Username}/deactivate", null)).IsSuccessStatusCode);
+
+        Login(client, "engineer");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"/api/users/{unused}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync($"/api/users/{referenced}/deactivate", null)).StatusCode);
+
+        Login(client, admin.Username, nameof(UserRole.Administrator));
+        var before = (await repository.FindUserAsync(referenced, default))!;
+        var stopped = await client.PutAsync($"/api/users/{referenced}/deactivate", null);
+        Assert.True(stopped.IsSuccessStatusCode, await stopped.Content.ReadAsStringAsync());
+        var after = (await repository.FindUserAsync(referenced, default))!;
+        Assert.False(after.IsActive);
+        Assert.True(after.TokenVersion > before.TokenVersion);
+        Assert.Equal(before.EffectiveRoleCodes, after.EffectiveRoleCodes);
+        Assert.Contains(assignment, (await repository.GetAuthorizationSettingsAsync(default)).Assignments);
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/users/{unused}")).StatusCode);
+        Assert.Null(await repository.FindUserAsync(unused, default));
+
+        var current = await repository.GetAuthorizationSettingsAsync(default);
+        var revoked = current with
+        {
+            Templates = current.Templates.Select(role => role with
+            {
+                Grants = role.Grants.Where(grant => grant.Permission is not (PermissionCodes.UserDeactivate or PermissionCodes.UserDelete)).ToArray()
+            }).ToArray()
+        };
+        await repository.SaveAuthorizationSettingsAsync(revoked, current.Revision, default);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"/api/users/{referenced}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync($"/api/users/{referenced}/deactivate", null)).StatusCode);
+
+        const string editTarget = "qa-account-edit-target";
+        await repository.CreateUserAsync(new(Guid.NewGuid(), editTarget, "编辑停用校验", "unused", UserRole.Engineer, true, CompanyId: company), default);
+        var legacyStop = await client.PutAsJsonAsync($"/api/users/{editTarget}", new
+        {
+            displayName = "编辑停用校验", role = nameof(UserRole.Engineer), isActive = false
+        });
+        Assert.Equal(HttpStatusCode.Forbidden, legacyStop.StatusCode);
+        Assert.True((await repository.FindUserAsync(editTarget, default))!.IsActive);
+    }
+
+    [Fact]
     public async Task SavedConfigurationControlsEndpointsPreviewAndRevocationWithoutRelogin()
     {
         await using var factory = new PdmApiFactory();

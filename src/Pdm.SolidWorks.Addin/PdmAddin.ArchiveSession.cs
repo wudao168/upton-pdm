@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -34,6 +35,59 @@ public sealed partial class PdmAddin
                 return selection;
             });
         using (var form = create()) return ArchiveSelection.Read(form, form.ShowDialog(taskPaneControl));
+    }
+
+    private async Task ValidateArchiveScopeMetadataAsync(IReadOnlyList<BatchOperationItem> items, Guid projectId, CancellationToken token)
+    {
+        ValidateArchiveMetadataBeforePreparation(items, checkPendingRegistration: false);
+        var workspace = Upton.Pdm.LocalSettings.WorkspaceSettingsStore.GetWorkspaceRoot();
+        var project = projectId.ToString("N");
+        var namedFiles = items.Where(item => ChecksArchiveMetadata(item.Node) && !string.IsNullOrWhiteSpace(item.Node.FileName))
+            .Select(item => item.Node.FileName).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (namedFiles.Length > 0)
+            ManagedCadPaths.ChooseDirectory(null, PdmDocumentIdentityStore.ManagedWorkspaceRoots(workspace)
+                .Select(root => ManagedCadPaths.CompactDirectory(root, "w", project, project)), namedFiles);
+
+        var candidates = items.Where(item => ChecksArchiveMetadata(item.Node)
+            && GetPendingRegistrationMetadataIssue(item.Node) != null).ToArray();
+        if (candidates.Length == 0) return;
+
+        // A same-name match can reuse an existing identity. The normal registration
+        // preflight checks its content before deciding whether these fields are sent.
+        var existingNames = new HashSet<string>((await apiClient.GetDocumentsAsync(projectId, token))
+            .Select(document => document.FileName), StringComparer.OrdinalIgnoreCase);
+        ValidateArchiveMetadataBeforePreparation(candidates.Where(item => !existingNames.Contains(item.Node.FileName)).ToArray());
+    }
+
+    private static bool ChecksArchiveMetadata(CadTreeNode node) =>
+        node.Status != CadReferenceStatus.Virtual && !node.IsOutsideNativeFileScope;
+
+    private static string GetPendingRegistrationMetadataIssue(CadTreeNode node)
+    {
+        if (node.DocumentId.HasValue) return null;
+        var (drawingNumber, name) = PdmApiClient.GetRegistrationMetadata(node);
+        return DocumentMetadataLimits.GetIssue(drawingNumber, name);
+    }
+
+    private static void ValidateArchiveMetadataBeforePreparation(IReadOnlyList<BatchOperationItem> items,
+        IReadOnlyDictionary<string, BatchDocumentIdentity> identities = null, bool checkPendingRegistration = true)
+    {
+        var failures = new List<string>();
+        foreach (var item in items)
+        {
+            var node = item.Node;
+            if (!ChecksArchiveMetadata(node)) continue;
+
+            var issue = DocumentMetadataLimits.GetArchiveFileNameIssue(node.FileName);
+            if (checkPendingRegistration) issue += GetPendingRegistrationMetadataIssue(node);
+            if (identities != null && node.FullPath != null && identities.TryGetValue(node.FullPath, out var identity))
+                issue += DocumentMetadataLimits.GetIssue(identity.DrawingNumber, identity.Name);
+            if (string.IsNullOrEmpty(issue)) continue;
+
+            failures.Add(node.FileName + "：" + issue);
+            ArchiveSession.Current?.TrackFile(node, "未提交：" + issue);
+        }
+        ThrowArchivePreflightFailures(failures);
     }
 
     private async Task ValidateArchiveInputsBeforePreparationAsync(IReadOnlyList<BatchOperationItem> items, Guid projectId, CancellationToken token)

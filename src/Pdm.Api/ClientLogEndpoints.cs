@@ -53,8 +53,7 @@ public static class ClientLogEndpoints
             var credential = context.Request.Headers["X-Pdm-Agent-Token"].ToString();
             if (string.IsNullOrWhiteSpace(credential) || credential.Length > 512) return Results.Unauthorized();
             var settings = (await repository.GetSystemSettingsAsync(ct)).PreviewConversion;
-            var servers = settings.Servers.Count > 0 ? settings.Servers
-                : settings.Mode == PreviewConversionMode.Remote ? [new PreviewAgentServer(settings.AgentUrl, settings.AgentUrl, settings.AgentToken, settings.TimeoutMinutes)] : [];
+            var servers = settings.GetConfiguredServers();
             var digest = SHA256.HashData(Encoding.UTF8.GetBytes(credential));
             var matched = servers.Where(server => !string.IsNullOrWhiteSpace(server.AgentToken)
                 && CryptographicOperations.FixedTimeEquals(digest, SHA256.HashData(Encoding.UTF8.GetBytes(server.AgentToken)))).ToArray();

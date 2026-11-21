@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
@@ -11,6 +12,61 @@ namespace Upton.Pdm.SolidWorks;
 public sealed partial class PdmAddin
 {
     private readonly HashSet<string> completedDiscardPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (Guid Document, Guid Project, Guid Version, Guid Session, ArchiveMemoryCopy State)>
+        unchangedCheckoutAssemblies = new Dictionary<string, (Guid, Guid, Guid, Guid, ArchiveMemoryCopy)>(StringComparer.OrdinalIgnoreCase);
+
+    private bool TryUnlockAndObserveCheckout(IModelDoc2 model, string path, Guid documentId, Guid projectId)
+    {
+        ArchiveMemoryCopy state = null;
+        Guid version = Guid.Empty;
+        try
+        {
+            if (DocumentKindFromPath(path) == CadDocumentKind.Assembly && model is IAssemblyDoc && model.IsOpenedReadOnly()
+                && PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding)
+                && binding.DocumentId == documentId && binding.ProjectId == projectId && binding.VersionId.HasValue)
+            {
+                version = binding.VersionId.Value;
+                state = new ArchiveMemoryCopy(model, path);
+            }
+        }
+        catch (Exception error) when (error is COMException || error is InvalidOperationException || error is InvalidComObjectException)
+        { LogDiagnostic("读取装配获取前状态", error); }
+
+        try
+        {
+            if (!TryMakeDocumentWritable(model, path)) return false;
+            if (state != null)
+            {
+                ForgetUnchangedCheckout(path);
+                // The synchronous read-only transition can itself set a save flag.
+                // Record the native state after the transition and before any edit.
+                try
+                {
+                    state.Stamp = model.GetUpdateStamp();
+                    state.CapturedRevision = state.Revision;
+                    unchangedCheckoutAssemblies.Add(path, (documentId, projectId, version, checkoutSessionId, state));
+                    state = null;
+                }
+                catch (Exception error) when (error is COMException || error is InvalidComObjectException)
+                { LogDiagnostic("读取装配获取后状态", error); }
+            }
+            return true;
+        }
+        finally { state?.Dispose(); }
+    }
+
+    private bool MatchesUnchangedCheckout(IModelDoc2 loaded, string path, Guid? documentId, Guid? projectId, Guid? versionId)
+        => unchangedCheckoutAssemblies.TryGetValue(path, out var captured)
+            && captured.Document == documentId && captured.Project == projectId && captured.Version == versionId
+            && captured.Session == checkoutSessionId && ReferenceEquals(captured.State.Model, loaded)
+            && captured.State.MatchesNativeState();
+
+    private void ForgetUnchangedCheckout(string path)
+    {
+        if (!unchangedCheckoutAssemblies.TryGetValue(path, out var captured)) return;
+        unchangedCheckoutAssemblies.Remove(path);
+        captured.State.Dispose();
+    }
 
     private async Task DiscardSelectedWorkingFilesAsync(IReadOnlyList<CadTreeNode> requestedNodes)
     {
@@ -60,8 +116,7 @@ public sealed partial class PdmAddin
                 ControlledOpenManifestDto combined = null;
                 foreach (var target in project)
                 {
-                    var next = await apiClient.CreateControlledOpenManifestAsync(target.Item1.DocumentId.Value, null, false, false, lifetime.Token,
-                        allowMissingComponents: true);
+                    var next = await ReadDiscardRecoveryManifestAsync(target.Item1, project.Key);
                     if (next.ProjectId != project.Key || !next.Files.Any(file => file.DocumentId == target.Item1.DocumentId))
                         throw new InvalidOperationException("服务器恢复清单与所选图档或项目不一致。");
                     if (combined != null && combined.Files.Join(next.Files, left => left.DocumentId, right => right.DocumentId,
@@ -98,15 +153,29 @@ public sealed partial class PdmAddin
             + (linkedWarnings.Count == 0 ? string.Empty : "\r\n配套工程图：" + string.Join("；", linkedWarnings)), linkedWarnings.Count > 0);
     }
 
+    private Task<ControlledOpenManifestDto> ReadDiscardRecoveryManifestAsync(CadTreeNode node, Guid projectId)
+    {
+        // Preserve the verified working copy's reference policy while restoring
+        // the discarded document to the server version. The stored snapshot may
+        // intentionally describe older child versions than this workspace uses.
+        var current = controlledOpenManifests.FirstOrDefault(context => context.Value.ProjectId == projectId
+            && FindWorkingManifestFile(context, node.DocumentId, node.FullPath) != null);
+        return apiClient.CreateControlledOpenManifestAsync(node.DocumentId.Value, null, false, false, lifetime.Token,
+            allowMissingComponents: true, useLatestModelReferences: current.Value?.UsesLatestModelReferences == true);
+    }
+
     private bool DiscardNeedsWindowRestore(CadTreeNode node)
     {
         if (string.IsNullOrWhiteSpace(node?.FullPath) || !File.Exists(node.FullPath)) return false;
-        if (FindLoadedDocument(node.FullPath)?.GetSaveFlag() == true) return true;
-        var file = controlledOpenManifests.SelectMany(context => context.Value.Files
-            .Where(item => item.DocumentId == node.DocumentId && PathsEqual(node.FullPath,
-                ControlledReferenceMaterializer.LocalPath(context.Key, item)))).FirstOrDefault();
+        var loaded = FindLoadedDocument(node.FullPath);
+        var hasBinding = PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var binding);
+        if (loaded?.GetSaveFlag() == true && (!hasBinding
+            || !MatchesUnchangedCheckout(loaded, node.FullPath, node.DocumentId, binding.ProjectId, binding.VersionId))) return true;
+        var file = controlledOpenManifests
+            .Where(context => !hasBinding || context.Value.ProjectId == binding.ProjectId)
+            .Select(context => FindWorkingManifestFile(context, node.DocumentId, node.FullPath)).FirstOrDefault(match => match != null);
         if (file != null) return !ControlledReferenceMaterializer.TryReadVerifiedCopyHash(node.FullPath, file, out _);
-        return !PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var binding)
+        return !hasBinding
             || binding.DocumentId != node.DocumentId || string.IsNullOrWhiteSpace(binding.Sha256)
             || !string.Equals(ComputeFileHash(node.FullPath), string.IsNullOrWhiteSpace(binding.ResolvedReferenceSha256)
                 ? binding.Sha256 : binding.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase);
@@ -229,30 +298,39 @@ public sealed partial class PdmAddin
             }
             var expectedBinding = ValidateDiscardBinding(entry);
             var loaded = FindLoadedDocument(entry.SourcePath);
-            if (loaded?.GetSaveFlag() == true || !ControlledReferenceMaterializer.TryReadVerifiedCopyHash(entry.SourcePath, file, out var verifiedHash)) { changed.Add(group); continue; }
-            if (!KeepUnchangedAssemblyWorkingReferences(loaded, entry.SourcePath, file, manifest, group, verifiedHash))
+            var canPreserveMemory = loaded?.GetSaveFlag() != true
+                || MatchesUnchangedCheckout(loaded, entry.SourcePath, file.DocumentId, manifest.ProjectId, file.VersionId);
+            if (!canPreserveMemory || !ControlledReferenceMaterializer.TryReadVerifiedCopyHash(entry.SourcePath, file, out var verifiedHash))
+            { changed.Add(group); continue; }
+            if (!KeepUnchangedAssemblyWorkingReferences(loaded, entry.SourcePath, file, manifest, group, verifiedHash)
+                && !await KeepUnchangedPartWorkingReferencesAsync(loaded, entry, file, manifest, verifiedHash, expectedBinding))
             {
                 var referencePlan = PlanDiscardWorkingReferences(entry.SourcePath, entry.SourcePath, manifest, selectedWorkingPaths);
                 if (referencePlan.Any(pair => !PathsEqual(pair.Key, pair.Value))) { changed.Add(group); continue; }
             }
             // Nothing was edited: release only this actual working file in place.
+            var keepExistingSaveFlag = MatchesUnchangedCheckout(loaded, entry.SourcePath, file.DocumentId, manifest.ProjectId, file.VersionId);
             SetFileReadOnly(entry.SourcePath, true, "当前工作文件已匹配存档，放弃编辑后原地只读");
-            if (loaded != null) EnsureDocumentOpenedReadOnly(loaded, entry.SourcePath);
+            if (loaded != null) EnsureDocumentOpenedReadOnly(loaded, entry.SourcePath, keepExistingSaveFlag);
             CompleteDiscardBinding(group, file, manifest.ProjectId, verifiedHash, expectedBinding);
+            ForgetUnchangedCheckout(entry.SourcePath);
             LogOperation("Discard working unchanged completed path=" + entry.SourcePath);
         }
         if (changed.Count == 0) return;
         var paths = new HashSet<string>(changed.Select(group => group.Key), StringComparer.OrdinalIgnoreCase);
         var closing = DiscardAffectedDocuments(paths);
-        var staging = Path.Combine(Path.GetTempPath(), "UPLM", "discard-restore", Guid.NewGuid().ToString("N"));
+        var stagingId = Guid.NewGuid().ToString("N");
+        var staging = Path.Combine(Path.GetTempPath(), "UPLM", "discard-restore", stagingId);
         var restoreFiles = new Dictionary<Guid, string>();
         // Fetch canonical bytes, never a cached Snapshot whose references may point
         // into that Snapshot directory. No user window is closed until validation.
         foreach (var entry in changed.Select(group => group.First()).GroupBy(entry => entry.DocumentId).Select(group => group.First()))
         {
             var file = manifest.Files.Single(item => item.DocumentId == entry.DocumentId);
-            restoreFiles[entry.DocumentId] = await apiClient.DownloadControlledOpenFileAsync(file,
-                Path.Combine(staging, entry.DocumentId.ToString("N")), lifetime.Token);
+            var key = entry.DocumentId.ToString("N");
+            var directory = ManagedCadPaths.ChooseStagingDirectory(Path.Combine(staging, key),
+                stagingId + ":" + key, new[] { file.RelativePath ?? file.FileName });
+            restoreFiles[entry.DocumentId] = await apiClient.DownloadControlledOpenFileAsync(file, directory, lifetime.Token);
         }
         var references = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var group in changed)
@@ -378,18 +456,54 @@ public sealed partial class PdmAddin
         var missing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         ValidateControlledLoadedSources(loaded, path, manifest, application, missing);
         ReportMissingComponentsOnOpen(missing, "已核对恢复文件");
+        VerifyDiscardLoadedReferenceBindings(path, manifest);
+        LogOperation("未修改总装原位放弃，已核对实际加载来源，不按旧引用地址重写文件 path=" + path + " files=" + manifest.Files.Count);
+        return true;
+    }
+
+    private async Task<bool> KeepUnchangedPartWorkingReferencesAsync(IModelDoc2 loaded, LocalEditDraft entry,
+        ControlledOpenFileDto file, ControlledOpenManifestDto manifest, string verifiedHash, PdmControlledFileMetadata binding)
+    {
+        if (loaded == null || loaded.GetType() != (int)swDocumentTypes_e.swDocPART
+            || manifest.RootDocumentId != file.DocumentId || binding.VersionId != file.VersionId
+            || entry.BaseVersionId != file.VersionId || entry.UnsavedChanges || loaded.GetSaveFlag()
+            || !string.Equals(entry.DiskSha256, verifiedHash, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var path = entry.SourcePath;
+        var version = (await apiClient.GetVersionsAsync(file.DocumentId, lifetime.Token, 1)).FirstOrDefault();
+        if (!WorkingReuseSnapshotVersionMatches(file, version) || version.DocumentId != file.DocumentId
+            || version.ReferenceSnapshot.Kind != (int)CadDocumentKind.Part)
+            return false;
+        var evidence = new Dictionary<Guid, DocumentVersionDto> { [file.DocumentId] = version };
+        var required = await ReadRequiredOperationFileIdsAsync(manifest, evidence);
+        var scope = WithWorkingFiles(manifest, manifest.Files.Where(reference => required.Contains(reference.DocumentId)).ToArray());
+        var directory = Path.GetDirectoryName(path);
+        if (!ReferenceEquals(FindLoadedDocument(path), loaded) || loaded.GetSaveFlag()
+            || !WorkingReuseBindingMatches(path, manifest.ProjectId, file)
+            || !string.Equals(ComputeFileHash(path), verifiedHash, StringComparison.OrdinalIgnoreCase)
+            || !WorkingReuseLoadedContextForEditMatches(loaded, directory, scope, version.ReferenceSnapshot,
+                evidence.ToDictionary(item => item.Key, item => item.Value.ReferenceSnapshot), null, null, standalonePart: true))
+            return false;
+        ControlledOpenBoundary.RequireLoadedSources(application, path, scope);
+        ValidateControlledLoadedSources(loaded, path, scope, application);
+        VerifyDiscardLoadedReferenceBindings(path, scope);
+        LogOperation("未修改零件原位放弃，已核对存档与实际加载来源 path=" + path + " files=" + scope.Files.Count);
+        return true;
+    }
+
+    private void VerifyDiscardLoadedReferenceBindings(string path, ControlledOpenManifestDto manifest)
+    {
         var directory = Path.GetDirectoryName(path);
         var loadedPaths = new HashSet<string>(((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
             .Select(model => model.GetPathName()).Where(value => !string.IsNullOrWhiteSpace(value)), StringComparer.OrdinalIgnoreCase);
         foreach (var reference in manifest.Files)
         {
-            var expected = ControlledReferenceMaterializer.LocalPath(directory, reference);
+            var expected = ControlledReferenceMaterializer.ManifestPath(directory, reference);
             if (loadedPaths.Contains(expected) && (!PdmDocumentIdentityStore.TryReadLocalMetadata(expected, out var binding)
                 || binding.DocumentId != reference.DocumentId || binding.ProjectId != manifest.ProjectId || binding.VersionId != reference.VersionId))
-                throw new IOException("总装内容未修改，但实际引用的版本关联需要核对，已保留原窗口及文件，未重写引用：" + reference.FileName);
+                throw new IOException("图档内容未修改，但实际引用的版本关联需要核对，已保留原窗口及文件，未重写引用：" + reference.FileName);
         }
-        LogOperation("未修改总装原位放弃，已核对实际加载来源，不按旧引用地址重写文件 path=" + path + " files=" + manifest.Files.Count);
-        return true;
     }
 
     private static PdmControlledFileMetadata ValidateDiscardBinding(LocalEditDraft entry)

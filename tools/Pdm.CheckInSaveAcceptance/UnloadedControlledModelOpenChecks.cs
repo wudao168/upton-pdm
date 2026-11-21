@@ -18,7 +18,8 @@ internal static partial class Program
   SetField(notifications,"blockedControlledOpenMessage","后续独立拦截");
   Check((string)Field(notifications,"blockedControlledOpenMessage")=="后续独立拦截","后续真正的新拦截仍然保留");
   foreach(var mode in new[]{"part","assembly","dirty-owner","stale-version","stale-config","tampered-child","tampered-dependency","owner-binding","different-project","no-loaded-owner","missing-inactive-owner","missing-loaded-owner","ambiguous","original-open",
-      "reference-loaded","reference-unloaded","reference-occurrence-config","reference-different-dependency-version","reference-other-path","reference-denied","reference-race","explicit-latest-conflict"})
+      "reference-loaded","reference-unloaded","reference-unloaded-owned","reference-unloaded-revoked","reference-native-config-conflict","reference-occurrence-config","reference-different-dependency-version","reference-other-path","reference-denied","reference-race","explicit-latest-conflict",
+      "reference-working-assembly","reference-working-assembly-race"})
   {
    var folder=Path.Combine(output,"View","unloaded-"+mode);Directory.CreateDirectory(folder);
    var project=Guid.NewGuid();var plugin=New("PdmAddin");var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
@@ -29,10 +30,12 @@ internal static partial class Program
     var file=New("ControlledOpenFileDto");Set(file,"DocumentId",Guid.NewGuid());Set(file,"VersionId",Guid.NewGuid());Set(file,"FileName",name);Set(file,"RelativePath",name);Set(file,"Configuration","Default");Set(file,"Sha256",WorkingReuseHash(path));Set(file,"FileLength",new FileInfo(path).Length);Set(file,"Revision","W1");
     identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)path,Get(file,"DocumentId"),project,Get(file,"VersionId"),"W1",Get(file,"Sha256"),Get(file,"FileLength")});return file;
    }
-   var parent=FileEntry("OWNER.SLDASM");var target=FileEntry(mode=="assembly"?"CHILD.SLDASM":"CHILD.SLDPRT");var dependency=FileEntry("DEPENDENCY.SLDPRT");
+   var workingAssembly=mode.StartsWith("reference-working-assembly");
+   var parent=FileEntry("OWNER.SLDASM");var target=FileEntry(mode=="assembly"||workingAssembly?"CHILD.SLDASM":"CHILD.SLDPRT");var dependency=FileEntry("DEPENDENCY.SLDPRT");
    var parentPath=Path.Combine(folder,(string)Get(parent,"FileName"));var targetPath=Path.Combine(folder,(string)Get(target,"FileName"));
    if(mode=="missing-loaded-owner"){File.SetAttributes(parentPath,FileAttributes.Normal);File.Delete(parentPath);}
    var owner=New("ControlledOpenManifestDto");Set(owner,"ProjectId",mode=="different-project"?Guid.NewGuid():project);Set(owner,"RootDocumentId",Get(parent,"DocumentId"));Set(owner,"RootRelativePath",Get(parent,"FileName"));Set(owner,"RootVersionId",Get(parent,"VersionId"));
+   Set(owner,"UsesLatestModelReferences",workingAssembly);
    var ownerFiles=(IList)Activator.CreateInstance(Property(owner,"Files").PropertyType);Set(owner,"Files",ownerFiles);ownerFiles.Add(parent);ownerFiles.Add(target);ownerFiles.Add(dependency);
    var requested=New("ControlledOpenManifestDto");Set(requested,"ProjectId",project);Set(requested,"RootDocumentId",Get(target,"DocumentId"));Set(requested,"RootVersionId",Get(target,"VersionId"));Set(requested,"RootRelativePath",Get(target,"FileName"));
    var requestedFiles=(IList)Activator.CreateInstance(Property(requested,"Files").PropertyType);Set(requested,"Files",requestedFiles);
@@ -44,14 +47,28 @@ internal static partial class Program
    if(mode=="tampered-child"||mode=="tampered-dependency")
    {var path=mode=="tampered-child"?targetPath:Path.Combine(folder,(string)Get(dependency,"FileName"));File.SetAttributes(path,FileAttributes.Normal);File.AppendAllText(path," altered");}
    if(mode=="owner-binding")identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)parentPath,Get(parent,"DocumentId"),project,Guid.NewGuid(),"W2",Get(parent,"Sha256"),Get(parent,"FileLength")});
-   var configuration=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),call=>call.MethodName=="get_Name"?"Default":throw new Exception(call.MethodName)).GetTransparentProxy();
+   var configuration=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),call=>call.MethodName=="get_Name"?(mode=="reference-native-config-conflict"?"Other":"Default"):throw new Exception(call.MethodName)).GetTransparentProxy();
    var manager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),call=>call.MethodName=="get_ActiveConfiguration"?configuration:throw new Exception(call.MethodName)).GetTransparentProxy();
    var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="ListExternalFileReferences2"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var readOnly=true;var leaseReads=0;var unlocks=0;
+   var leaseCase=mode=="reference-unloaded-owned"||mode=="reference-unloaded-revoked";
+   var session=(Guid)Field(plugin,"checkoutSessionId");var clock=DateTime.UtcNow;
+   var checkedAt=new DateTime(clock.Ticks-clock.Ticks%TimeSpan.TicksPerMillisecond,DateTimeKind.Utc);
+   if(leaseCase)
+   {
+    var draft=New("LocalEditDraft");Set(draft,"DocumentId",Get(target,"DocumentId"));Set(draft,"ProjectId",project);
+    Set(draft,"SessionId",session);Set(draft,"CheckedOutAt",checkedAt);Set(draft,"BaseVersionId",Get(target,"VersionId"));
+    Set(draft,"BaseSha256",Get(target,"Sha256"));Set(draft,"SourcePath",targetPath);
+    ((IDictionary)Field(plugin,"localEdits")).Add(Get(target,"DocumentId"),draft);
+    SetField(plugin,"authenticatedUsername","tester");
+   }
    object Model(string path)=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{
-    switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return Path.GetFileName(path);case "GetType":return path.EndsWith("SLDASM")?2:1;case "GetSaveFlag":return mode=="dirty-owner"&&path==parentPath;case "IsOpenedReadOnly":return true;case "get_ConfigurationManager":return manager;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;default:throw new Exception("不得修改模型："+call.MethodName);}
+    switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return Path.GetFileName(path);case "GetType":return path.EndsWith("SLDASM")?2:1;case "GetSaveFlag":return mode=="dirty-owner"&&path==parentPath;case "IsOpenedReadOnly":return path!=targetPath||readOnly;
+     case "SetReadOnlyState":if(path!=targetPath||!leaseCase)throw new Exception("不得解锁其他图档");readOnly=(bool)call.Args[0];unlocks++;return true;
+     case "get_ConfigurationManager":return manager;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;default:throw new Exception("不得修改模型："+call.MethodName);}
    }).GetTransparentProxy();
    var referenceEntry=mode.StartsWith("reference-")||mode=="explicit-latest-conflict";
-   var parentModel=Model(parentPath);var childModel=Model(targetPath);object active=parentModel;var opened=mode=="reference-loaded"||mode=="explicit-latest-conflict";var opens=0;var mutations=0;var search=false;
+   var parentModel=Model(parentPath);var childModel=Model(targetPath);object active=parentModel;var opened=mode=="reference-loaded"||mode=="explicit-latest-conflict";var opens=0;var closes=0;var mutations=0;var search=false;var manifestRequests=0;
    var contexts=(IDictionary)Field(plugin,"controlledOpenManifests");contexts.Add(folder,owner);
    object otherOwner=null;
    if(mode=="ambiguous"||mode=="missing-inactive-owner")
@@ -74,6 +91,9 @@ internal static partial class Program
      case "GetDocuments":return (mode=="no-loaded-owner"?new object[0]:new[]{parentModel}).Concat(opened?new[]{childModel}:new object[0]).Concat(otherOwner==null?new object[0]:new[]{otherOwner}).Concat(mode=="original-open"?new[]{Model(Path.Combine(output,"original",(string)Get(target,"FileName")))}:new object[0]).ToArray();
      case "get_ActiveDoc":return active;
      case "OpenDoc6":Check((string)call.Args[0]==targetPath,"未加载子件从父装配工作区原路径打开："+mode);Check(((int)call.Args[2]&2)!=0,"查看未加载子件仍使用只读打开："+mode);opens++;opened=true;return childModel;
+     case "CloseDoc":
+      Check(mode=="reference-native-config-conflict"&&opened&&(string)call.Args[0]==Path.GetFileName(targetPath),"校验失败只关闭本次新开的只读子件");
+      opened=false;active=parentModel;closes++;return null;
      case "ActivateDoc3":active=childModel;return childModel;
      case "GetCurrentWorkingDirectory":case "GetSearchFolders":return "";
      case "SetCurrentWorkingDirectory":case "SetSearchFolders":return true;
@@ -87,10 +107,26 @@ internal static partial class Program
     if(!referenceEntry)return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.StringContent("[]")};
     var endpoint=request.RequestUri.AbsolutePath;
     if(endpoint.EndsWith("/document-operation-rules"))return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.StringContent("{\"disabledRuleIds\":[]}")};
+    if(leaseCase&&request.Method==System.Net.Http.HttpMethod.Get&&endpoint.EndsWith("/documents/"+Get(target,"DocumentId")))
+    {
+     leaseReads++;
+     return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new System.Net.Http.StringContent(json.Serialize(new {
+      id=Get(target,"DocumentId"),projectId=project,checkedOutBy="tester",checkedOutAt=checkedAt,checkoutSessionId=mode=="reference-unloaded-owned"?session:Guid.NewGuid()
+     }))};
+    }
     if(!endpoint.EndsWith("/open-manifest"))throw new Exception("不应下载文件或获取权限："+endpoint);
     var body=json.DeserializeObject(request.Content.ReadAsStringAsync().GetAwaiter().GetResult()) as System.Collections.Generic.Dictionary<string,object>;
+    manifestRequests++;
     var latest=mode=="explicit-latest-conflict";
-    Check(Equals(body["forEdit"],false)&&Equals(body["versionId"],latest?null:Get(target,"VersionId").ToString()),"普通打开按装配引用请求精确版本，显式最新版仍请求最新："+mode);
+    var useWorking=workingAssembly&&manifestRequests==1;
+    Check(Equals(body["forEdit"],false)&&Equals(body["versionId"],latest||useWorking?null:Get(target,"VersionId").ToString())
+        &&Equals(body["useLatestModelReferences"],latest||useWorking),"打开清单遵循所属工作区的引用规则："+mode);
+    if(mode=="reference-working-assembly-race")
+    {
+     var rootVersion=useWorking?Guid.NewGuid():(Guid)Get(target,"VersionId");
+     Set(root,"VersionId",rootVersion);Set(requested,"RootVersionId",rootVersion);
+     if(!useWorking)Set(requestedFiles[1],"VersionId",Guid.NewGuid());
+    }
     if(mode=="reference-denied")return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.Forbidden){Content=new System.Net.Http.StringContent("{\"message\":\"当前用户没有该项目图档的对应操作权限。\"}")};
     if(mode=="reference-race")Set(target,"VersionId",Guid.NewGuid());
     if(latest){Set(root,"VersionId",Guid.NewGuid());Set(root,"Revision","W2");Set(root,"Sha256",new string('B',64));Set(requested,"RootVersionId",Get(root,"VersionId"));}
@@ -110,7 +146,7 @@ internal static partial class Program
       SetField(plugin,"currentProjectId",project);
       object Node(object file,string kind,string path){var node=New("CadTreeNode");Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),kind));Set(node,"FullPath",path);Set(node,"DocumentId",Get(file,"DocumentId"));return node;}
       SetField(plugin,"currentTree",Node(parent,"Assembly",parentPath));
-      var selection=new[]{Node(target,"Part",targetPath),(object)Guid.Empty,Guid.Empty};
+      var selection=new[]{Node(target,workingAssembly?"Assembly":"Part",targetPath),(object)Guid.Empty,Guid.Empty};
       Check((bool)Type("PdmAddin").GetMethod("TryGetCurrentReferenceOpen",Flags).Invoke(plugin,selection)
           &&Equals(selection[1],project)&&Equals(selection[2],Get(root,"VersionId")),"设计树按项目和原路径选中装配清单的版本："+mode);
       var latest=mode=="explicit-latest-conflict";
@@ -118,9 +154,13 @@ internal static partial class Program
           Enum.Parse(Type("ControlledOpenMode"),latest?"LatestReadOnly":"CurrentReference"),latest?null:selection[2],null,null,false,
           latest?null:mode=="reference-other-path"?Path.Combine(folder,"other",(string)Get(target,"FileName")):targetPath);
       await task;
-      var succeeds=mode=="reference-loaded"||mode=="reference-unloaded"||mode=="reference-occurrence-config";
+      var succeeds=mode=="reference-loaded"||mode=="reference-unloaded"||mode=="reference-occurrence-config"||mode=="reference-working-assembly"||leaseCase;
       Check((bool)Get(task,"Result")==succeeds&&ReferenceEquals(active,succeeds?childModel:parentModel)
-          &&opens==(mode=="reference-unloaded"||mode=="reference-occurrence-config"?1:0),"单开装配引用仅激活或只读打开原文件，版本、路径、权限冲突受阻："+mode+" "+Field(plugin,"controlledOpenFailureMessage"));
+          &&opens==(mode=="reference-unloaded"||mode=="reference-occurrence-config"||mode=="reference-native-config-conflict"||mode=="reference-working-assembly"||leaseCase?1:0)
+          &&closes==(mode=="reference-native-config-conflict"?1:0),"单开装配引用仅激活或打开原文件，版本、路径、权限冲突受阻："+mode+" "+Field(plugin,"controlledOpenFailureMessage"));
+      if(leaseCase)Check(leaseReads==1&&unlocks==(mode=="reference-unloaded-owned"?1:0)&&readOnly==(mode=="reference-unloaded-revoked"),
+          "只为当前有效编辑会话恢复未加载子件的可写，未重复获取："+mode);
+      if(workingAssembly)Check(manifestRequests==(succeeds?1:2),"根版本发生变化时仍按所选版本校验，不加载另一版："+mode);
       if(succeeds)
       {
        SetField(plugin,"currentTree",selection[0]);

@@ -26,6 +26,7 @@ const props = defineProps<{
 
 const activeTab = ref('standard-release')
 const isExpense = (flow: ApprovalWorkflowTemplate) => flow.code.startsWith('expense-')
+const isRelease = (flow: ApprovalWorkflowTemplate) => ['standard-release', 'nonstandard-release', 'electrical-release'].includes(flow.code)
 const selectedNodes = reactive<Record<string, string>>({})
 
 function selectedNode(flow: ApprovalWorkflowTemplate) {
@@ -354,7 +355,8 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
           <fieldset v-if="step.copyOnApproval && selectedNode(flow) === 'copy:' + step.stage" class="copy-options" :disabled="pending || saving">
             <legend>{{ step.name }}通过后</legend>
             <ApprovalCopyRecipientsEditor :model-value="step.copyOnApproval.recipients??[{source:step.copyOnApproval.source,target:step.copyOnApproval.target}]" :directory="directory" :roles="roleOptions" :company-id="companyId" :disabled="pending||saving" @update:model-value="step.copyOnApproval!.recipients=$event" />
-            <label>站内消息<textarea v-model.trim="step.copyOnApproval.message" rows="3" maxlength="500" /></label>
+            <label>{{ isRelease(flow) ? '补充说明' : '站内消息' }}<textarea v-model.trim="step.copyOnApproval.message" rows="3" maxlength="500" /></label>
+            <small v-if="isRelease(flow)">发布审批抄送会自动附上项目号、子项目号（如有）、发布包号及节点或整包审批结果；此处填写补充说明。</small>
             <button type="button" class="pdm-secondary-action" @click="step.copyOnApproval = null; selectedNodes[flow.code] = step.stage">移除抄送</button>
           </fieldset>
         </template>

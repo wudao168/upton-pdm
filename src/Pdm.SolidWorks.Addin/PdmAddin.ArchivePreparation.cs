@@ -85,10 +85,12 @@ public sealed partial class PdmAddin
             token.ThrowIfCancellationRequested();
             try
             {
+                var history = histories == null ? null : histories[file.Node.DocumentId.Value];
+                var expectedBase = HistoricalArchiveBase(file.Node)
+                    ?? PreparedMemoryArchiveBase(file, history == null ? file.Latest : history.FirstOrDefault());
                 file.ReferenceSnapshot = histories == null
-                    ? await apiClient.PrepareArchiveSnapshotAsync(file.Node, plannedPaths, HistoricalArchiveBase(file.Node), token, file.ReferenceSnapshot)
-                    : await apiClient.PrepareArchiveSnapshotWithHistoryAsync(file.Node, HistoricalArchiveBase(file.Node),
-                        file.ReferenceSnapshot, histories[file.Node.DocumentId.Value], token);
+                    ? await apiClient.PrepareArchiveSnapshotAsync(file.Node, plannedPaths, expectedBase, token, file.ReferenceSnapshot)
+                    : await apiClient.PrepareArchiveSnapshotWithHistoryAsync(file.Node, expectedBase, file.ReferenceSnapshot, history, token);
                 ArchiveSession.Current?.ReportFile(0, batch.Length, file.Node.FileName, "已固定引用快照 " + (++fixedSnapshots) + "/" + batch.Length + "，准备最终校验");
                 LogOperation("Archive frozen reference snapshot prepared file=" + file.Node.FileName
                     + " base=" + file.ReferenceSnapshot.ExpectedVersionId
@@ -357,7 +359,8 @@ public sealed partial class PdmAddin
         IReadOnlyList<BatchOperationItem> selected, Guid projectId, CancellationToken token, bool saveBeforeReferenceCheck)
     {
         using var scopeTiming = ArchiveReadContext.Measure(currentTree, "完整核对本次存档范围");
-        ArchiveSession.Current?.SetStep(3, "正在核对本次选择的引用与配置…", selected.Count);
+        ArchiveSession.Current?.SetStep(3, "正在预检所选图档的字符长度、引用与配置…", selected.Count);
+        await ValidateArchiveScopeMetadataAsync(selected, projectId, token);
         await apiClient.RefreshArchiveWarningPolicyAsync(token);
         ArchiveMissingReferencePolicy.Prepare(currentTree, selected.Select(item => item.Node).ToArray());
         await apiClient.RefreshDocumentRulesAsync(token);
@@ -510,6 +513,7 @@ public sealed partial class PdmAddin
         complete = await IncludeHistoricalReferenceRepairsAsync(verified, complete, projectId, token);
         complete = complete.Where(item => selected.Any(original => MatchesSelection(item, original)))
             .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+        await ValidateArchiveScopeMetadataAsync(complete, projectId, token);
         if (saveBeforeReferenceCheck)
         {
             // Structural identity and ownership are now known. Save before reading
@@ -528,6 +532,7 @@ public sealed partial class PdmAddin
         }
         stage("提前核对原生引用的实际位置");
         complete = await RecoverPdmReferencesAsync(complete, projectId, token);
+        await ValidateArchiveScopeMetadataAsync(complete, projectId, token);
         ValidatePdmNativeDependencyPaths(complete, token);
         await CompleteCycleEvidenceAsync(complete, token);
         ArchiveSession.Current?.ReportFile(0, 0, "—", "引用读取已完成，正在核对提交依赖和文件完整性…");

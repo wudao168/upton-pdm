@@ -33,8 +33,10 @@ public sealed class ReleasePreviewCoordinator(
             var service = scope.ServiceProvider.GetRequiredService<ReleasePreviewService>();
             var settings = await scope.ServiceProvider.GetRequiredService<IPdmRepository>().GetSystemSettingsAsync(CancellationToken.None);
             var conversion = settings.PreviewConversion;
-            var timeoutMinutes = conversion?.Servers.Count > 1
-                ? conversion.Servers.GroupBy(s => s.AgentUrl.TrimEnd('/'), StringComparer.OrdinalIgnoreCase).Sum(group => group.Max(s => s.TimeoutMinutes))
+            var timeoutMinutes = conversion?.Mode == PreviewConversionMode.Remote
+                ? conversion.GetConfiguredServers().Where(server => !server.Disabled)
+                    .GroupBy(server => server.AgentUrl.Trim().TrimEnd('/'), StringComparer.OrdinalIgnoreCase)
+                    .Sum(group => group.Max(server => server.TimeoutMinutes))
                 : conversion?.TimeoutMinutes ?? DefaultTimeoutMinutes;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(applicationLifetime.ApplicationStopping);
             timeout.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes) + ExtraRunDuration);

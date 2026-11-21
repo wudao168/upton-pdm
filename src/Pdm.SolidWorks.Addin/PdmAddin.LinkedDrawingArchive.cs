@@ -31,9 +31,9 @@ public sealed partial class PdmAddin
                     if (node == null) node = new CadTreeNode { DocumentId = document.Id, FullPath = path, FileName = document.FileName,
                         Kind = CadDocumentKind.Drawing, DrawingReviewLocked = document.DrawingReviewLocked, LifecycleState = LifecycleStateName(document.State) };
                     if (!File.Exists(path)) throw new IOException("工程图尚未取回，存档时将补齐并重试。");
+                    ApplyCheckoutDocument(node, document);
                     await PrepareBatchCheckInPermissionAsync(new BatchOperationItem(node, 0), projectId, token);
-                    SetFileReadOnly(path, false);
-                    EnsureLoadedDocumentEditable(path);
+                    await EnsureCheckedOutDocumentEditableAsync(path, document.Id, projectId, node.CheckedOutAt);
                     LogOperation("随模型获取关联工程图权限：" + document.FileName);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
@@ -207,29 +207,20 @@ public sealed partial class PdmAddin
             {
                 token.ThrowIfCancellationRequested();
                 ArchiveSession.Current?.ReportFile(index, drawings.Length, node.FileName, "正在准备配套工程图编辑权限…");
+                await RefreshLinkedDrawingBeforeArchiveAsync(node, projectId, token);
                 await PrepareBatchCheckInPermissionAsync(item, projectId, token);
                 ArchiveSession.Current?.ReportFile(index, drawings.Length, node.FileName, "正在读取配套工程图视图…");
-                drawing = FindLoadedDocument(node.FullPath);
-                if (drawing == null) { drawing = OpenDrawingForArchive(node.FullPath); opened = true; }
+                drawing = ReadLinkedDrawingForArchive(node, plan, projectId, out opened);
                 if (!PathsEqual(drawing?.GetPathName(), node.FullPath))
-                    throw new IOException("未能加载对应的工程图，原文件已保留。");
-                var expected = node.ReferencedModels.Where(model => model.DocumentId.HasValue).Select(model => model.DocumentId.Value).Distinct().ToArray();
+                    throw new InvalidOperationException("未能加载对应的工程图，请核对当前窗口中的图档路径。");
+                if (node.ConfirmedArchivePaths != null && !node.ConfirmedArchivePaths.Contains(node.FullPath))
+                    node.ConfirmedArchivePaths = new HashSet<string>(node.ConfirmedArchivePaths, StringComparer.OrdinalIgnoreCase)
+                    { node.FullPath };
+                var expectedModels = node.ReferencedModels.ToArray();
+                var expected = expectedModels.Where(model => model.DocumentId.HasValue).Select(model => model.DocumentId.Value).Distinct().ToArray();
                 scanner.UpdateDrawingReferences(drawing, node);
                 ArchiveSession.Current?.ReportFile(index, drawings.Length, node.FileName, "正在按本次模型更新配套工程图…");
-                var activateErrors = 0;
-                application.ActivateDoc3(drawing.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref activateErrors);
-                if (activateErrors != 0) throw new IOException("未能激活工程图，当前图档已保留。");
-                var drawingDocument = drawing as IDrawingDoc;
-                var originalSheet = (drawingDocument?.GetCurrentSheet() as ISheet)?.GetName();
-                var sheets = drawingDocument?.GetSheetNames() as string[];
-                if (sheets == null || sheets.Length == 0) throw new IOException("未能读取工程图图纸页，请打开工程图核对。");
-                try
-                {
-                    foreach (var sheet in sheets)
-                        if (!drawingDocument.ActivateSheet(sheet) || !drawing.ForceRebuild3(false))
-                            throw new IOException("工程图视图未能完成更新，请核对图纸页：" + sheet);
-                }
-                finally { if (!string.IsNullOrWhiteSpace(originalSheet)) drawingDocument.ActivateSheet(originalSheet); }
+                RebuildLinkedDrawingSheets(drawing, node, expectedModels);
                 scanner.UpdateDrawingReferences(drawing, node);
                 if (node.StructureIndexPending || expected.Any(id => !node.ReferencedModels.Any(model => model.DocumentId == id)))
                     throw new InvalidOperationException("工程图实际视图与本次模型关联不一致，或视图尚未完整读取。请核对该工程图引用的模型；已保留文件和待更新状态。");
@@ -269,5 +260,149 @@ public sealed partial class PdmAddin
                     .Select(item => item.Node.FileName + "：" + item.Node.DrawingUpdatePendingReason)));
         return new BatchCheckInPlan(plan.Items.Where(item => !pending.Contains(item.Node.FullPath)).ToArray(),
             plan.SkippedFiles + pending.Count, plan.Preflights);
+    }
+
+    private void RebuildLinkedDrawingSheets(IModelDoc2 document, CadTreeNode node, IReadOnlyList<CadTreeNode> expectedModels)
+    {
+        bool IsActiveDrawing() => PathsEqual((application.ActiveDoc as IModelDoc2)?.GetPathName(), node.FullPath);
+        if (!IsActiveDrawing())
+        {
+            var errors = 0;
+            application.ActivateDoc3(node.FullPath, false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref errors);
+            if (!IsActiveDrawing())
+                throw new InvalidOperationException("未能激活所选工程图，请核对打开窗口中的文件路径。");
+        }
+        var drawing = (IDrawingDoc)document;
+        var original = (drawing.GetCurrentSheet() as ISheet)?.GetName();
+        var names = drawing.GetSheetNames() as string[];
+        if (string.IsNullOrWhiteSpace(original) || names == null || names.Length == 0 || names.Any(string.IsNullOrWhiteSpace))
+            throw new InvalidOperationException("未能读取工程图的图纸页，请核对该工程图。");
+
+        ISheet SelectSheet(string name)
+        {
+            if (!IsActiveDrawing()) throw new InvalidOperationException("活动工程图已切换，请重新核对所选图档。");
+            var sheet = drawing.GetCurrentSheet() as ISheet;
+            if (string.Equals(sheet?.GetName(), name, StringComparison.OrdinalIgnoreCase)) return sheet;
+            var activated = drawing.ActivateSheet(name);
+            sheet = drawing.GetCurrentSheet() as ISheet;
+            if (!IsActiveDrawing() || !string.Equals(sheet?.GetName(), name, StringComparison.OrdinalIgnoreCase))
+            {
+                LogOperation("工程图切页未完成 file=" + node.FileName + " sheet=" + name + " ActivateSheet=" + activated);
+                throw new InvalidOperationException("未能切换到工程图的“" + name + "”页，请核对该图纸页。");
+            }
+            return sheet;
+        }
+
+        var inheritedErrors = ReadLinkedModelRebuildErrors(node, expectedModels);
+        string recoveredSheet = null;
+        Exception rebuildFailure = null;
+        try
+        {
+            foreach (var name in names)
+            {
+                SelectSheet(name);
+                var rebuilt = document.ForceRebuild3(false);
+                if (!IsActiveDrawing() || !string.Equals((drawing.GetCurrentSheet() as ISheet)?.GetName(), name, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("重建期间活动图纸页发生变化，请核对“" + name + "”页后重试。");
+                if (rebuilt) continue;
+                // A drawing can return false even with a current sheet and current model views.
+                // Request the sheet-specific update, then check the resulting native state.
+                var updated = document.Extension.Rebuild((int)swRebuildOptions_e.swCurrentSheetDisp);
+                var sheet = drawing.GetCurrentSheet() as ISheet;
+                if (!IsActiveDrawing() || !string.Equals(sheet?.GetName(), name, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("更新视图期间活动图纸页发生变化，请核对“" + name + "”页后重试。");
+                VerifyRebuiltDrawingViews(drawing, name, updated, node, expectedModels);
+                recoveredSheet = name;
+            }
+        }
+        catch (Exception error) { rebuildFailure = error; throw; }
+        finally
+        {
+            try { if (IsActiveDrawing()) SelectSheet(original); }
+            catch (Exception error) when (rebuildFailure != null) { LogDiagnostic("工程图恢复原图纸页失败：" + original, error); }
+        }
+        if (recoveredSheet != null) VerifyLinkedDrawingRebuild(document.Extension, recoveredSheet, inheritedErrors);
+    }
+
+    private List<(IFeature Feature, int Code)> ReadLinkedModelRebuildErrors(CadTreeNode drawing, IReadOnlyList<CadTreeNode> expectedModels)
+    {
+        var result = new List<(IFeature Feature, int Code)>();
+        var sources = drawing.ReferencedModels.Where(model => expectedModels.Any(expected => PathsEqual(expected.FullPath, model.FullPath)))
+            .GroupBy(model => model.FullPath, StringComparer.OrdinalIgnoreCase);
+        foreach (var source in sources)
+        {
+            try
+            {
+                var model = FindLoadedDocument(source.Key);
+                if (model == null || !PathsEqual(model.GetPathName(), source.Key)) continue;
+                var errors = ReadNativeRebuildErrors(model.Extension);
+                if (errors.Count == 0) continue;
+                var configuration = model.ConfigurationManager?.ActiveConfiguration?.Name;
+                if (!string.IsNullOrWhiteSpace(configuration) && source.Any(view =>
+                    string.Equals(view.Configuration, configuration, StringComparison.OrdinalIgnoreCase))) result.AddRange(errors);
+            }
+            catch (Exception error) { LogDiagnostic("未能确认引用模型原有的重建诊断：" + source.Key, error); }
+        }
+        return result;
+    }
+
+    private static List<(IFeature Feature, int Code)> ReadNativeRebuildErrors(IModelDocExtension extension)
+    {
+        var errors = new List<(IFeature Feature, int Code)>();
+        var count = extension.GetWhatsWrongCount();
+        if (count == 0) return errors;
+        if (count < 0 || !extension.GetWhatsWrong(out var features, out var codes, out var warnings)
+            || !(warnings is bool[] flags) || flags.Length != count || !(codes is int[] numbers) || numbers.Length != count
+            || !(features is object[] items) || items.Length != count)
+            throw new InvalidOperationException("未能确认重建结果，请核对 SolidWorks 的重建诊断。");
+        for (var i = 0; i < count; i++)
+        {
+            if (!flags[i]) errors.Add((items[i] as IFeature, numbers[i]));
+        }
+        return errors;
+    }
+
+    private void VerifyLinkedDrawingRebuild(IModelDocExtension extension, string sheet, IReadOnlyList<(IFeature Feature, int Code)> inheritedErrors)
+    {
+        // Drawing diagnostics can include features from the referenced model.
+        // Match the actual pre-existing feature and error, including its severity.
+        if (extension.NeedsRebuild2 != (int)swModelRebuildStatus_e.swModelRebuildStatus_FullyRebuilt)
+            throw new InvalidOperationException("工程图仍需重建，请核对图纸页“" + sheet + "”及工程图特征。");
+        foreach (var error in ReadNativeRebuildErrors(extension))
+        {
+            if (error.Feature != null && inheritedErrors.Any(prior => prior.Code == error.Code && prior.Feature != null
+                && (ReferenceEquals(prior.Feature, error.Feature) || application.IsSame(prior.Feature, error.Feature) == (int)swObjectEquality.swObjectSame)))
+                continue;
+            var name = error.Feature?.Name;
+            throw new InvalidOperationException("工程图含有重建错误，请核对" + (string.IsNullOrWhiteSpace(name) ? "工程图特征或视图" : "特征“" + name + "”")
+                + "（SolidWorks 代码 " + error.Code + "）。");
+        }
+    }
+
+    private static void VerifyRebuiltDrawingViews(IDrawingDoc drawing, string name, bool displayUpdated,
+        CadTreeNode node, IReadOnlyList<CadTreeNode> expectedModels)
+    {
+        LogOperation("工程图视图重建核对 file=" + node.FileName + " sheet=" + name
+            + " ForceRebuild3=False displayRebuild=" + displayUpdated);
+        if (!(drawing.GetFirstView() is IView sheetView) || sheetView.Type != (int)swDrawingViewTypes_e.swDrawingSheet)
+            throw new InvalidOperationException("未能读取工程图“" + name + "”页的视图，无法确认更新结果。");
+        var views = new HashSet<IView> { sheetView };
+        var item = sheetView.GetNextView();
+        while (item != null)
+        {
+            if (!(item is IView view) || !views.Add(view))
+                throw new InvalidOperationException("未能核对工程图“" + name + "”页的视图列表。");
+            var path = (view.ReferencedDocument as IModelDoc2)?.GetPathName();
+            var config = view.ReferencedConfiguration ?? "默认";
+            if (!expectedModels.Any(model => PathsEqual(model.FullPath, path))
+                || !node.ReferencedModels.Any(model => PathsEqual(model.FullPath, path)
+                    && string.Equals(model.Configuration, config, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("工程图“" + name + "”页的“" + view.Name + "”未能核对所引用的模型或配置。");
+            if (view.IsModelOutOfDate())
+                throw new InvalidOperationException("工程图“" + name + "”页的“" + view.Name + "”仍未更新到当前模型。");
+            item = view.GetNextView();
+        }
+        if (!displayUpdated && views.Count == 1)
+            throw new InvalidOperationException("SolidWorks 未能确认工程图“" + name + "”页重建成功，请核对该页的视图和重建错误。");
     }
 }

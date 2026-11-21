@@ -1,4 +1,5 @@
 import { canViewProjectTab } from './projectCenterAccess'
+import { classifyVersionAlignment } from './drawingRevision'
 import type { BonusView, BonusSettings, BonusSettingsView, BonusPerson, BonusEvidence, BonusScore, BonusBook } from './projectBonus'
 export const getProjectBonus = (id: string, token: string) => requestJson<BonusView>(`/api/projects/${id}/bonus`, {}, token)
 export const getProjectBonusHistory = (id: string, token: string) => requestJson<BonusBook[]>(`/api/projects/${id}/bonus/history`, {}, token)
@@ -168,7 +169,7 @@ import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } f
 
 import type { BomSourceReclassificationPreview } from './types'
 import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMaterialRelationTemplateInput } from './types'
-import type { PreviewAgentProbeResult, PreviewConversionSettings } from './types'
+import type { PreviewAgentProbeResult, PreviewServer, PreviewServerInput, PreviewServerStatus } from './types'
 import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, UpdateProjectValidationPlanStandardsInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
 import { sha256Hex } from './fileHash'
 import type { NameplateTemplate, ProjectNameplate, ProjectNameplateView } from './projectNameplate'
@@ -385,7 +386,7 @@ export function setProgramTemplateArchived(templateId: string, archived: boolean
 
 export interface ProjectWorkspaceData {
   project: ProjectSummary
-  moduleErrors: Array<{ module: string; tab: 'documents' | 'files' | 'bom' | 'release'; message: string }>
+  moduleErrors: Array<{ module: string; tab: 'documents' | 'files' | 'bom' | 'release'; message: string; status?: number }>
   root: DocumentNode
   hasDocuments: boolean
   documents: ManagedDocument[]
@@ -617,6 +618,7 @@ interface ApiReleasePackage {
   previewState?: string | null
   previewError?: string | null
   previewAttempts?: number
+  canResumePreviewRetry?: boolean
   previewUpdatedAt?: string | null
   changeNumber?: string | null
   changeReason?: string | null
@@ -722,7 +724,7 @@ async function performJsonRequest<T>(path: string, init: RequestInit, token?: st
   try {
     response = await fetch(`${apiBase}${path}`, { ...init, headers, cache: 'no-store' })
   } catch {
-    recordClientDiagnostic('error', '接口连接失败', `${init.method ?? 'GET'} ${path.split('?')[0]}`, diagnosticId)
+    if (!init.signal?.aborted) recordClientDiagnostic('error', '接口连接失败', `${init.method ?? 'GET'} ${path.split('?')[0]}`, diagnosticId)
     throw new PdmApiError('无法连接 PLM 服务。请检查网络连接或联系管理员确认服务是否运行。', 0)
   }
   recordClientDiagnostic(response.status >= 500 ? 'error' : 'runtime', '接口结果', `${init.method ?? 'GET'} ${path.split('?')[0]}；状态=${response.status}；耗时=${Math.round(performance.now() - requestStarted)}毫秒`, diagnosticId)
@@ -1827,6 +1829,11 @@ export function listUsers(token: string): Promise<PdmUser[]> {
   return requestJson('/api/users', {}, token)
 }
 
+export function listUserAccountOperations(token: string, checkDeleteReferences: boolean, signal: AbortSignal): Promise<import('./types').ManagedPdmUser[]> {
+  const path = checkDeleteReferences ? '/api/users?includeAccountOperations=true' : '/api/users?includeAccountOperations=true&checkDeleteReferences=false'
+  return requestJson(path, { signal }, token, checkDeleteReferences ? 65_000 : 15_000, '请求超时，请重新打开用户设置后重试。')
+}
+
 export function createUser(input: SavePdmUserInput, token: string): Promise<PdmUser> {
   return requestJson('/api/users', {
     method: 'POST', body: JSON.stringify(input),
@@ -1841,6 +1848,14 @@ export function updateUser(input: SavePdmUserInput, token: string): Promise<PdmU
 
 export function resetUserPassword(username: string, token: string): Promise<PdmUser> {
   return requestJson(`/api/users/${encodeURIComponent(username)}/reset-password`, { method: 'PUT' }, token)
+}
+
+export function deactivateUser(username: string, token: string): Promise<PdmUser> {
+  return requestJson(`/api/users/${encodeURIComponent(username)}/deactivate`, { method: 'PUT' }, token)
+}
+
+export function deleteUser(username: string, token: string): Promise<void> {
+  return requestJson(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' }, token)
 }
 
 export async function getOrganizationDirectory(token: string): Promise<OrganizationDirectory> {
@@ -1965,10 +1980,31 @@ export function updateSystemSettings(settings: PdmSystemSettings, token: string)
   return requestJson('/api/system-settings', { method: 'PUT', body: JSON.stringify(settings) }, token)
 }
 
-export function testPreviewAgent(conversion: PreviewConversionSettings, token: string): Promise<PreviewAgentProbeResult> {
-  return requestJson('/api/system-settings/preview-agent/test', {
+const previewServersPath = '/api/system-settings/preview-servers'
+
+export function listPreviewServers(token: string): Promise<PreviewServer[]> {
+  return requestJson(previewServersPath, {}, token)
+}
+
+export function getPreviewServerStatuses(token: string, signal: AbortSignal): Promise<PreviewServerStatus[]> {
+  return requestJson(previewServersPath + '/status', { signal }, token, 15_000, '获取转图服务器连接状态超时。')
+}
+
+export function savePreviewServer(server: PreviewServerInput, token: string): Promise<PreviewServer> {
+  return requestJson(previewServersPath, {
+    method: server.originalUrl ? 'PUT' : 'POST',
+    body: JSON.stringify(server),
+  }, token)
+}
+
+export function removePreviewServer(agentUrl: string, token: string): Promise<void> {
+  return requestJson(previewServersPath + '?agentUrl=' + encodeURIComponent(agentUrl), { method: 'DELETE' }, token)
+}
+
+export function testPreviewServer(agentUrl: string, token: string): Promise<PreviewAgentProbeResult> {
+  return requestJson(previewServersPath + '/test', {
     method: 'POST',
-    body: JSON.stringify({ mode: conversion.mode, agentUrl: conversion.agentUrl, agentToken: conversion.agentToken, timeoutMinutes: conversion.timeoutMinutes }),
+    body: JSON.stringify({ agentUrl }),
   }, token)
 }
 
@@ -2141,6 +2177,8 @@ export async function batchDeleteBomItems(projectId: string, itemIds: string[], 
   const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/batch-delete`, {
     method: 'POST', body: JSON.stringify({ itemIds, reason }),
   }, token)
+  // Reads that started during the write may still contain the pre-delete rows.
+  pendingJsonReads.clear()
   return saved.map(mapBomItem)
 }
 
@@ -2610,16 +2648,17 @@ export function reuseProjectPlan(rootProjectId: string, input: { sourceProjectId
   return requestJson(`/api/projects/${rootProjectId}/plan/reuse`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
 
-export function listEditLocks(token: string): Promise<EditLockSummary[]> {
-  return requestJson('/api/edit-locks', {}, token)
+export function listEditLocks(token: string, documentId?: string, signal?: AbortSignal): Promise<EditLockSummary[]> {
+  const query = documentId ? `?documentId=${encodeURIComponent(documentId)}` : ''
+  return requestJson(`/api/edit-locks${query}`, signal ? { signal } : {}, token)
 }
 
 export function requestEditLockRelease(documentId: string, reason: string, token: string): Promise<EditLockSummary> {
   return requestJson(`/api/documents/${documentId}/request-release`, { method: 'POST', body: JSON.stringify({ reason }) }, token)
 }
 
-export function forceReleaseEditLock(documentId: string, reason: string, token: string): Promise<void> {
-  return requestJson(`/api/documents/${documentId}/force-release`, { method: 'POST', body: JSON.stringify({ reason }) }, token)
+export function forceReleaseEditLock(documentId: string, reason: string, token: string, expected?: { sessionId: string; checkedOutAt: string }): Promise<void> {
+  return requestJson(`/api/documents/${documentId}/force-release`, { method: 'POST', body: JSON.stringify({ reason, ...expected }) }, token)
 }
 
 export function emergencyReleaseEditLock(documentId: string, sessionId: string, checkedOutAt: string, reason: string, token: string): Promise<void> {
@@ -2832,7 +2871,7 @@ export async function loadProjectWorkspace(projectId: string, token: string, inc
       return await request
     } catch (error) {
       if (error instanceof PdmApiError && error.status === 401) throw error
-      moduleErrors.push({ module, tab, message: error instanceof Error ? error.message : '读取失败' })
+      moduleErrors.push({ module, tab, message: error instanceof Error ? error.message : '读取失败', status: error instanceof PdmApiError ? error.status : undefined })
       return fallback
     }
   }
@@ -3360,6 +3399,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     publishedPath: releasePackage.publishedPath ?? undefined, publishError: releasePackage.publishError ?? undefined,
     previewState: releasePackage.previewState ?? undefined, previewError: releasePackage.previewError ?? undefined,
     previewAttempts: releasePackage.previewAttempts ?? 0, previewUpdatedAt: releasePackage.previewUpdatedAt ?? undefined,
+    canResumePreviewRetry: releasePackage.canResumePreviewRetry === true,
     changeNumber: releasePackage.changeNumber ?? undefined, changeReason: releasePackage.changeReason ?? undefined,
     effectiveSerialFrom: releasePackage.effectiveSerialFrom ?? undefined, effectiveSerialTo: releasePackage.effectiveSerialTo ?? undefined,
     standardBomRevision: releasePackage.standardBomRevision ?? undefined, nonStandardBomRevision: releasePackage.nonStandardBomRevision ?? undefined,
@@ -3422,31 +3462,6 @@ function revisionDisplay(revision?: ApiRevision | null): string {
   if (revision.isReleased && revision.baseRevision) return revision.baseRevision
   const work = `W${revision.workIteration ?? 1}`
   return revision.baseRevision ? `${revision.baseRevision}-${work}` : work
-}
-
-function classifyVersionAlignment(latest: string, structure: string): DocumentNode['versionAlignment'] {
-  if (latest === '—') return 'VersionConflict'
-  if (structure === '—') return 'NotSnapshotted'
-  if (latest === structure) return 'Synced'
-
-  const latestOrder = revisionOrder(latest)
-  const structureOrder = revisionOrder(structure)
-  if (!latestOrder || !structureOrder) return 'VersionConflict'
-  if (latestOrder[0] > structureOrder[0] || (latestOrder[0] === structureOrder[0] && latestOrder[1] > structureOrder[1])) {
-    return 'StructureStale'
-  }
-  return 'VersionConflict'
-}
-
-function revisionOrder(value: string): [number, number] | null {
-  const normalized = value.trim().toUpperCase()
-  const workOnly = /^W(\d+)$/.exec(normalized)
-  if (workOnly) return [0, Number(workOnly[1])]
-
-  const released = /^([A-Z]+)(?:-W(\d+))?$/.exec(normalized)
-  if (!released) return null
-  const base = [...released[1]].reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0)
-  return [base, Number(released[2] ?? 0)]
 }
 
 function mapDocumentKind(value: number | string): DocumentKind {

@@ -180,7 +180,7 @@ internal static partial class Program
       var driver=parent==null?null:new{documentId=Get(parent,"DocumentId"),fileName="CONTEXT.SLDASM",kind=0,role=1,isContextReference=false,referenceTypeUnverified=false,children=new object[0]};
       if(mode=="context-duplicate-driver")refs.Add(driver);
       if(mode=="context-nested-driver")refs.Add(new{documentId=Guid.NewGuid(),fileName="DRIVER.SLDPRT",kind=1,children=new[]{driver}});
-      data=new[]{new{id=mode=="context-root-race"?Guid.NewGuid():Get(requestedFile,"VersionId"),sha256=Get(requestedFile,"Sha256"),fileLength=Get(requestedFile,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",(string)Get(source,"Sha256")}},referenceSnapshot=new{documentId=Get(source,"DocumentId"),fileName="PART.SLDPRT",configuration="Default",kind=1,children=refs.ToArray()}}};
+      data=new[]{new{id=mode=="context-root-race"?Guid.NewGuid():Get(requestedFile,"VersionId"),documentId=Get(requestedFile,"DocumentId"),sha256=Get(requestedFile,"Sha256"),fileLength=Get(requestedFile,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",(string)Get(source,"Sha256")}},referenceSnapshot=new{documentId=Get(source,"DocumentId"),fileName="PART.SLDPRT",configuration="Default",kind=1,children=refs.ToArray()}}};
      }
      else if(request.RequestUri.AbsolutePath.EndsWith("/documents"))data=mode=="owned-edit"||acquiring||mode=="release-acquire"||editablePromotion?new[]{checkoutDocument}:new object[0];
      else if(request.RequestUri.AbsolutePath.EndsWith("/document-operation-rules"))data=new{disabledRuleIds=new string[0]};
