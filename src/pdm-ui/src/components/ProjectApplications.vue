@@ -147,7 +147,6 @@ watch(() => [props.active, props.requestedId] as const, ([active, id]) => { if (
       <button class="pdm-secondary-action" :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</button>
       <span class="application-count">共 {{ filtered.length }} 条</span>
     </div>
-    <p class="application-hint">销售助理发起，计划管理审批后自动创建主项目。原申请及历次审批记录长期保留。</p>
     <p v-if="error" role="alert" class="application-error">{{ error }}</p>
     <div class="application-table-wrap">
       <table class="application-table" data-pdm-min-width="980">

@@ -24,6 +24,7 @@ internal static partial class Program
     new[]{"child-clean","child-readonly-dirty","child-writable-dirty","child-server-changed","prepare-lock","native-open-failure","native-invalid-source","fresh-success","dirty-fallback"})
    {
     var folder=Path.Combine(directory,mode);var original=Path.Combine(folder,"View","QA","original");Directory.CreateDirectory(original);
+    rootField.SetValue(null,new Func<string>(()=>folder));
     var childMode=mode.StartsWith("child-");var missingFallback=mode.StartsWith("missing-fallback");var missingReuse=mode.StartsWith("missing-reuse");
     var partialFailure=mode=="missing-reuse-second-denied"||mode=="missing-reuse-release-retry";
     var reuseMultiple=mode=="missing-reuse-multi"||partialFailure;var missingNativeFailure=mode=="missing-fallback-native-failure";
@@ -46,7 +47,10 @@ internal static partial class Program
     Set(manifest,"Files",files);
     var contexts=(IDictionary)Field(plugin,"controlledOpenManifests");contexts.Add(original,manifest);
     var node=New("CadTreeNode");Set(node,"FullPath",childMode?childPath:rootPath);Set(node,"FileName",childMode?"PART.SLDPRT":rootName);
-    Set(node,"DocumentId",childMode?childId:rootId);Set(node,"Configuration","Default");Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));SetField(plugin,"currentTree",node);
+    Set(node,"DocumentId",childMode?childId:rootId);Set(node,"Configuration","Default");Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),!childMode&&rootName.EndsWith(".SLDASM")?"Assembly":"Part"));SetField(plugin,"currentTree",node);
+    SetField(plugin,"currentProjectId",project);
+    var missingPath=Path.Combine(folder,"legacy","MISSING.SLDPRT");
+    if(missingOnly)NativeMissingAcquisition.InstallReader(plugin,rootPath,new[]{new NativeMissingAcquisition.Row{Path=missingPath,Instance="MISSING-1",Configuration="Default",Suppression=0}});
     var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
     var modelType=interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
     var loaded=new Dictionary<string,object>(StringComparer.OrdinalIgnoreCase);var readOnly=new Dictionary<string,bool>(StringComparer.OrdinalIgnoreCase);
@@ -67,16 +71,19 @@ internal static partial class Program
        case "GetPathName":return path;case "GetTitle":return Path.GetFileName(path);case "GetType":return path.EndsWith(".SLDASM")?2:1;
        case "GetHashCode":return path.GetHashCode();case "Equals":return ReferenceEquals(call.Args[0],loaded[path]);
        case "GetSaveFlag":return dirty.Contains(path);case "IsOpenedReadOnly":return readOnly[path];case "get_Visible":return path!=childPath||childMode;
+       case "GetUpdateStamp":return 0;
+       case "add_ModifyNotify":case "add_DestroyNotify2":case "add_FileReloadNotify":
+       case "remove_ModifyNotify":case "remove_DestroyNotify2":case "remove_FileReloadNotify":return null;
        case "get_ConfigurationManager":return manager;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;
        case "SetReadOnlyState":readOnly[path]=(bool)call.Args[0];return true;
        case "GetComponents":
         var part=mode=="native-invalid-source"&&path!=rootPath?childPath:Path.Combine(Path.GetDirectoryName(path),"PART.SLDPRT");
         var known=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),component=>{
-         switch(component.MethodName){case "GetPathName":return part;case "get_Name2":return "PART-1";case "get_ReferencedConfiguration":return "Default";case "get_IsVirtual":return false;case "GetModelDoc2":return Model(part);case "GetChildren":return new object[0];case "GetSuppression":return 3;default:throw new Exception(component.MethodName);}
+         switch(component.MethodName){case "GetPathName":return part;case "get_Name2":return "PART-1";case "get_ReferencedConfiguration":return "Default";case "get_IsVirtual":case "IsSuppressed":return false;case "GetModelDoc2":return Model(part);case "GetChildren":return new object[0];case "GetSuppression2":case "GetSuppression":return 3;default:throw new Exception(component.MethodName);}
         }).GetTransparentProxy();
         if(!missingOnly)return new[]{known};
         var missing=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),component=>{
-         switch(component.MethodName){case "GetPathName":return Path.Combine(folder,"legacy","MISSING.SLDPRT");case "get_Name2":return "MISSING-1";case "get_IsVirtual":return false;case "GetModelDoc2":return null;case "IsSuppressed":return true;case "get_ReferencedConfiguration":return "Default";default:throw new Exception(component.MethodName);}
+         switch(component.MethodName){case "GetPathName":return missingPath;case "get_Name2":return "MISSING-1";case "get_IsVirtual":return false;case "GetModelDoc2":return null;case "GetChildren":return Array.Empty<object>();case "IsSuppressed":return true;case "GetSuppression":case "GetSuppression2":return 0;case "get_ReferencedConfiguration":return "Default";default:throw new Exception(component.MethodName);}
         }).GetTransparentProxy();
         return new[]{known,missing};
        default:throw new Exception("Unexpected model mutation: "+call.MethodName);
@@ -101,7 +108,9 @@ internal static partial class Program
        if((mode=="native-open-failure"||missingNativeFailure)&&target!=rootPath&&target.EndsWith(rootName))throw new IOException("模拟原生打开失败");
        active=target;return Model(target);
       case "ActivateDoc3":active=loaded.Keys.Single(path=>Path.GetFileName(path)==(string)call.Args[0]);return loaded[active];
-      case "GetDocumentDependencies2":return mode=="prepare-lock"&&((string)call.Args[0]).EndsWith(rootName)?new[]{"PART.SLDPRT",Path.Combine(folder,"old","PART.SLDPRT")}:new string[0];
+      case "GetDocumentDependencies2":
+       if(((string)call.Args[0]).EndsWith(rootName)&&missingOnly)return new[]{Path.GetFileName(missingPath),missingPath};
+       return mode=="prepare-lock"&&((string)call.Args[0]).EndsWith(rootName)?new[]{"PART.SLDPRT",Path.Combine(folder,"old","PART.SLDPRT")}:new string[0];
       case "ReplaceReferencedDocument":sharingLock=new FileStream((string)call.Args[0],FileMode.Open,FileAccess.ReadWrite,FileShare.None);return false;
       case "GetCurrentWorkingDirectory":return "";case "GetSearchFolders":return search;
       case "SetCurrentWorkingDirectory":return true;case "SetSearchFolders":search=(string)call.Args[1];return true;
@@ -241,7 +250,7 @@ internal static partial class Program
    var path=request.RequestUri.AbsolutePath;object result;
    var id=path.Split('/').Select(part=>Guid.TryParse(part,out var parsed)?parsed:Guid.Empty).FirstOrDefault(value=>documents.ContainsKey(value));
    if(path.EndsWith("/file")){Downloads++;return new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(bytes)};}
-   if(path.EndsWith("/rules"))result=new{disabledRuleIds=new string[0]};
+   if(path.EndsWith("/document-operation-rules"))result=new{disabledRuleIds=new string[0]};
    else if(path.EndsWith("/open-manifest"))
    {
     var body=json.Deserialize<Dictionary<string,object>>(await request.Content.ReadAsStringAsync());result=json.Deserialize(json.Serialize(manifest),manifest.GetType());Set(result,"ForEdit",(bool)body["forEdit"]);

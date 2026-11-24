@@ -16,6 +16,9 @@ const y=(v:number)=>bottom.value-(v-minimum.value)/(maximum.value-minimum.value)
 const slots=computed(()=>props.kind==='scatter'?[...new Set(props.data.map(d=>d.group||d.label))]:props.data.map(d=>d.label))
 const x=(i:number)=>left+(i+.5)*plotWidth.value/Math.max(1,slots.value.length)
 const barWidth=computed(()=>Math.min(42,plotWidth.value/Math.max(1,props.data.length)*.55))
+const showsBars=computed(()=>props.kind==='columns'||props.kind==='pareto')
+const barRadius=computed(()=>barWidth.value*.35)
+const gridValues=computed(()=>[minimum.value,(minimum.value+maximum.value)/2,maximum.value])
 const total=computed(()=>props.data.reduce((s,d)=>s+Math.max(0,d.value??0),0))
 const cumulative=computed(()=>cumulativePercent(props.data.map(d=>d.value),props.cumulativeTotal))
 const seriesList=computed(()=>props.series.length?props.series:[{label:props.label,color:props.color,values:props.data.map(d=>d.value)}])
@@ -50,13 +53,14 @@ useReportChartMotion(host,()=>props.active!==false,()=>y(0),()=>[props.kind,prop
    <text x="12" y="130">0%</text><text :x="width-12" y="130" text-anchor="end">100%</text>
   </template>
   <template v-else>
-   <g v-for="n in [0,1,2]" :key="n"><line :x1="left" :x2="right" :y1="y(minimum+(maximum-minimum)*n/2)" :y2="y(minimum+(maximum-minimum)*n/2)" class="chart-grid"/><text :x="left-7" :y="y(minimum+(maximum-minimum)*n/2)+3" text-anchor="end">{{chartNumber(minimum+(maximum-minimum)*n/2)}}{{percentage?'%':''}}</text></g>
-   <line :x1="left" :x2="right" :y1="y(0)" :y2="y(0)" class="chart-axis"/>
+   <g v-for="(tick,index) in gridValues" :key="index"><line v-if="!showsBars||(index!==0&&tick!==0)" :x1="left" :x2="right" :y1="y(tick)" :y2="y(tick)" class="chart-grid"/><text :x="left-7" :y="y(tick)+3" text-anchor="end">{{chartNumber(tick)}}{{percentage?'%':''}}</text></g>
+   <line v-if="!showsBars" :x1="left" :x2="right" :y1="y(0)" :y2="y(0)" class="chart-axis"/>
    <g v-for="(label,i) in slots" :key="label"><text v-for="(line,j) in textLines(label)" :key="j" :x="x(i)" :y="height-17+j*11" text-anchor="middle">{{line}}</text></g>
-   <template v-if="kind==='columns'||kind==='pareto'">
+   <template v-if="showsBars">
     <g v-for="(d,i) in data" :key="d.key" class="chart-hit" tabindex="0" role="button" :aria-label="description(d)" @click="choose(d)" @keydown.enter.prevent="choose(d)" @keydown.space.prevent="choose(d)" @mouseenter="hover($event,description(d))" @focus="hover($event,description(d))" @blur="tip=''">
      <rect :x="x(i)-barWidth/2-5" :y="top-8" :width="barWidth+10" :height="bottom-top+8" fill="transparent"/>
-     <rect data-chart-motion="bar" v-if="d.value!=null" :x="x(i)-barWidth/2" :y="d.value>=0?y(d.value):y(0)" :width="barWidth" :height="Math.max(1,Math.abs(y(d.value)-y(0)))" rx="3" :fill="d.color||color"/>
+     <rect v-if="!empty" :x="x(i)-barWidth/2" :y="top" :width="barWidth" :height="bottom-top" :rx="barRadius" fill="currentColor" opacity=".07" aria-hidden="true"/>
+     <rect data-chart-motion="bar" v-if="d.value!=null" :x="x(i)-barWidth/2" :y="d.value>=0?y(d.value):y(0)" :width="barWidth" :height="Math.max(1,Math.abs(y(d.value)-y(0)))" :rx="barRadius" :fill="d.color||color"/>
      <text :x="x(i)" :y="(d.value!=null?Math.min(y(d.value),y(0)):bottom)-5" text-anchor="middle" class="chart-value" data-chart-motion="label">{{d.value==null?'—':chartNumber(d.value)}}</text><title>{{description(d)}}</title>
     </g>
     <template v-if="kind==='pareto'&&total>0"><path v-for="(path,i) in chartSegments(cumulative,x,v=>bottom-v/100*(bottom-top))" :key="i" :d="path" data-chart-motion="line" stroke="#98ca23" stroke-width="2" fill="none"/><circle data-chart-motion="point" v-for="(v,i) in cumulative" :key="i" :cx="x(i)" :cy="bottom-(v??0)/100*(bottom-top)" r="3" fill="#fff" stroke="#98ca23"/><text :x="right+4" :y="top+3">100%</text><text :x="right+4" :y="bottom+3">0%</text></template>

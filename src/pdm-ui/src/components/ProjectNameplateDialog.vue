@@ -26,6 +26,14 @@ const status = computed(() => view.value ? nameplateStatus(view.value.nameplate)
 const executionComplete = computed(() => !!status.value?.executionComplete)
 const ratedPower = computed(() => draft.voltage && draft.current ? `${Number((Number(draft.voltage) * Number(draft.current) / 1000).toFixed(3))} kW` : '—')
 const dimensionFields = [{ key: 'length', label: '长度' }, { key: 'width', label: '宽度' }, { key: 'height', label: '高度' }] as const
+const parameterFields = [
+  { key: 'voltage', label: '电压', unit: 'V', source: 'hardware' },
+  { key: 'frequency', label: '频率', unit: 'Hz', source: 'hardware' },
+  { key: 'current', label: '电流', unit: 'A', source: 'hardware' },
+  ...dimensionFields.map(field => ({ ...field, unit: 'mm', source: 'execution' })),
+  { key: 'weight', label: '重量', unit: 'kg', source: 'execution' },
+  { key: 'airPressure', label: '气源压力', unit: 'MPa', source: 'execution' },
+] as const
 let generation = 0
 function setView(result: ProjectNameplateView) {
   view.value = result
@@ -102,15 +110,35 @@ async function confirm() {
         <p><strong>硬件工程师：</strong>电压、频率、电流，完成后确认发布。<span>{{ status?.published ? '已填写，已确认发布' : status?.hardwareComplete ? '已填写，待确认发布' : '待填写完整' }}</span></p>
         <p v-if="view.nameplate.releasePackageId">发布包：{{ view.nameplate.releasePackageNumber }} · 硬件确认：<PersonName :name="displayName(view.nameplate.confirmedBy || '')" /></p>
       </div>
-      <NameplatePreview :name="view.name" :model="view.model" :serial-numbers="view.serialNumbers" :power-supply="view.nameplate.powerSupply" :rated-power="ratedPower" :dimensions="view.nameplate.dimensions" :air-pressure="view.nameplate.airPressure" :weight="view.nameplate.weight" :factory-date="view.nameplate.factoryDate">
+      <NameplatePreview class="nameplate-dialog-preview" :name="view.name" :model="view.model" :serial-numbers="view.serialNumbers" :power-supply="view.nameplate.powerSupply" :rated-power="ratedPower" :dimensions="view.nameplate.dimensions" :air-pressure="view.nameplate.airPressure" :weight="view.nameplate.weight" :factory-date="view.nameplate.factoryDate">
         <template v-if="editing" #powerSupply><div class="nameplate-numbers nameplate-power-inputs"><label><input :value="draft.voltage" @input="draft.voltage = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电压" :disabled="hardwareDisabled"><span>V</span></label><label><input :value="draft.frequency" @input="draft.frequency = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="频率" :disabled="hardwareDisabled"><span>Hz</span></label><label><input :value="draft.current" @input="draft.current = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电流" :disabled="hardwareDisabled"><span>A</span></label></div></template>
         <template v-if="editing" #airPressure><div class="nameplate-numbers"><label><el-input v-model="draft.airPressure" aria-label="气压" maxlength="96" :disabled="executionDisabled" /><span>MPa</span></label></div></template>
         <template v-if="editing" #dimensions><div class="nameplate-numbers nameplate-dimensions"><template v-for="field in dimensionFields" :key="field.key"><label><input :value="draft[field.key]" @input="draft[field.key] = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" :aria-label="field.label" :disabled="executionDisabled"><span>{{ field.label }} mm</span></label></template></div></template>
         <template v-if="editing" #weight><div class="nameplate-numbers"><label><input :value="draft.weight" @input="draft.weight = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="重量" :disabled="executionDisabled"><span>kg</span></label></div></template>
         <template v-if="editing" #factoryDate><el-date-picker v-model="view.nameplate.factoryDate" type="month" format="YYYY-MM" value-format="YYYY-MM-01" aria-label="出厂日期" :disabled="executionDisabled" :clearable="false" /></template>
       </NameplatePreview>
-      <p v-if="status?.published" class="nameplate-hint">铭牌已发布，内容已锁定，制造中心按该版本的铭牌内容及数量执行。</p>
-      <p v-else class="nameplate-hint">名称、型号、序列号在发布前随项目资料更新，发布后固定。额定功率按电压 × 电流 ÷ 1000 计算。铭牌采用公司统一制作标准；硬件确认后，内容和数量自动转入制造中心。{{ view.nameplate.enabled ? '请填写铭牌参数及出厂月份。' : '铭牌未启用，可启用后填写参数。' }}</p>
+      <table class="nameplate-parameter-list" aria-label="铭牌参数列表">
+        <thead><tr><th scope="col">项目</th><th scope="col">数值</th><th scope="col">单位</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">设备名称</th><td>{{ view.name || '—' }}</td><td>—</td></tr>
+          <tr><th scope="row">型号</th><td>{{ view.model || '—' }}</td><td>—</td></tr>
+          <tr><th scope="row">序列号</th><td>{{ view.serialNumbers.join('、') || '—' }}</td><td>—</td></tr>
+          <tr v-for="field in parameterFields" :key="field.key">
+            <th scope="row">{{ field.label }}</th>
+            <td>
+              <input v-if="editing && field.key === 'airPressure'" v-model="draft.airPressure" type="text" maxlength="96" aria-label="列表气源压力" :disabled="executionDisabled">
+              <input v-else-if="editing" :value="draft[field.key]" @input="draft[field.key] = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" :aria-label="'列表' + field.label" :disabled="field.source === 'hardware' ? hardwareDisabled : executionDisabled">
+              <span v-else>{{ field.key === 'airPressure' ? view.nameplate.airPressure.replace(/\s*MPa$/i, '') || '—' : draft[field.key] || '—' }}</span>
+            </td>
+            <td>{{ field.unit }}</td>
+          </tr>
+          <tr><th scope="row">额定功率</th><td>{{ ratedPower.replace(/ kW$/, '') }}</td><td>kW</td></tr>
+          <tr><th scope="row">出厂日期</th><td>
+            <el-date-picker v-if="editing" v-model="view.nameplate.factoryDate" type="month" format="YYYY-MM" value-format="YYYY-MM-01" aria-label="列表出厂日期" :disabled="executionDisabled" :clearable="false" />
+            <span v-else>{{ view.nameplate.factoryDate?.slice(0, 7) || '—' }}</span>
+          </td><td>—</td></tr>
+        </tbody>
+      </table>
     </template>
     <template #footer><el-button :disabled="saving" @click="visible = false">关闭</el-button><el-button v-if="view?.canEdit && !editing" type="primary" @click="startEditing">编辑铭牌</el-button><el-button v-if="editing" :disabled="saving" @click="load">取消编辑</el-button><el-button v-if="view?.canEdit && editing" type="primary" :loading="saving" @click="save">{{ view.canEditExecution && view.canEditHardware ? '保存铭牌' : view.canEditExecution ? '保存执行信息' : '保存硬件信息' }}</el-button><el-button v-if="view?.canConfirm" type="primary" :loading="saving" :disabled="!executionComplete || !view.nameplate.enabled" @click="confirm">确认并发布</el-button></template>
   </el-dialog>
@@ -138,5 +166,13 @@ async function confirm() {
   .nameplate-power-inputs label,.nameplate-dimensions label{flex-direction:row;align-items:center;text-align:left;gap:4px}
   .nameplate-power-inputs label>span,.nameplate-dimensions label>span{min-width:20px}
 }
-.nameplate-hint{font-size:12px;color:var(--pdm-muted);line-height:1.6}
+.nameplate-dialog-preview :deep(.nameplate-preview){height:400px;box-sizing:border-box;display:flex;flex-direction:column;overflow:auto}
+.nameplate-dialog-preview :deep(.nameplate-brand){min-height:56px;flex-shrink:0}
+.nameplate-dialog-preview :deep(.nameplate-table){flex:1}
+.nameplate-parameter-list{width:100%;table-layout:fixed;border-collapse:collapse;margin-top:12px;font-size:13px}
+.nameplate-parameter-list :is(th,td){text-align:center;vertical-align:middle;padding:5px;border-bottom:1px solid var(--pdm-border-soft);overflow-wrap:anywhere}
+.nameplate-parameter-list th:first-child{width:26%}
+.nameplate-parameter-list :is(th,td):last-child{width:16%}
+.nameplate-parameter-list input{width:100%;max-width:220px;height:24px;box-sizing:border-box;text-align:center;border-radius:999px;border:1px solid var(--pdm-container-border,var(--pdm-border));background:var(--pdm-surface);color:var(--pdm-text)}
+.nameplate-parameter-list :deep(.el-date-editor){width:100%;max-width:220px}
 </style>

@@ -437,6 +437,8 @@ interface ApiProject {
   sourceApplicationId?: string | null
   sourceApplicationNumber?: string | null
   deliveryDate?: string | null
+  historicalUpdatedDate?: string | null
+  historicalRemarks?: string | null
   quantity?: number
   parentProjectId?: string | null
   rootProjectId?: string | null
@@ -1801,6 +1803,15 @@ export async function listProjects(token: string): Promise<ProjectSummary[]> {
   return projects.map(mapProject)
 }
 
+export function importHistoricalProjects(organizationId: string, file: File, preview: boolean, token: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ organizationId, preview: String(preview) })
+  const body = new FormData()
+  body.set('file', file)
+  return requestJson<import('./types').HistoricalProjectImportResult>('/api/projects/history/import?' + query, {
+    method: 'POST', body, signal,
+  }, token)
+}
+
 export function getProjectNumberingOptions(token: string): Promise<ProjectNumberingOptions> {
   return requestJson('/api/project-numbering/options', {}, token)
 }
@@ -2034,12 +2045,30 @@ export async function createProject(input: CreateProjectInput, token: string): P
   return mapProject(project)
 }
 
-export async function createSubproject(parentProjectId: string, input: CreateSubprojectInput, token: string): Promise<ProjectSummary> {
-  const project = await requestJson<ApiProject>(`/api/projects/${parentProjectId}/children`, {
+export async function createSubproject(parentProjectId: string, items: CreateSubprojectInput[], token: string): Promise<ProjectSummary[]> {
+  const projects = await requestJson<ApiProject[]>(`/api/projects/${parentProjectId}/children`, {
     method: 'POST',
-    body: JSON.stringify(input),
+    body: JSON.stringify({ items }),
   }, token)
-  return mapProject(project)
+  return projects.map(mapProject)
+}
+
+export async function previewChildProjectCodes(
+  scope: { parentProjectId: string } | { organizationId: string; projectTypeCode: string },
+  childCount: number,
+  token: string,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const parameters = new URLSearchParams({ childCount: String(childCount) })
+  let path = '/api/projects/numbering/preview'
+  if ('parentProjectId' in scope) {
+    path = `/api/projects/${scope.parentProjectId}/children/numbering/preview`
+  } else {
+    parameters.set('organizationId', scope.organizationId)
+    parameters.set('projectTypeCode', scope.projectTypeCode)
+  }
+  const preview = await requestJson<{ childCodes: string[] }>(`${path}?${parameters}`, { signal }, token)
+  return preview.childCodes
 }
 
 export async function deleteProject(projectId: string, token: string): Promise<void> {
@@ -2305,6 +2334,10 @@ export async function decideDrawingReviewSupervisor(packageId: string, decision:
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/supervisor-decision`, {
     method: 'POST', body: JSON.stringify({ decision, comment }),
   }, token))
+}
+
+export function readReleaseChangeOverview(projectId: string, token: string, signal: AbortSignal) {
+  return requestJson<import('./types').ReleaseChangeOverviewGroup[]>('/api/projects/' + projectId + '/release-packages/change-overview', { signal }, token)
 }
 
 export async function listReleasePackages(projectId: string, token: string): Promise<ReleasePackageSummary[]> {
@@ -3026,6 +3059,8 @@ function mapProject(project: ApiProject): ProjectSummary {
     sourceApplicationId: project.sourceApplicationId ?? undefined,
     sourceApplicationNumber: project.sourceApplicationNumber ?? undefined,
     deliveryDate: project.deliveryDate ?? undefined,
+    historicalUpdatedDate: project.historicalUpdatedDate ?? undefined,
+    historicalRemarks: project.historicalRemarks ?? undefined,
     createdAt: project.createdAt ?? undefined,
     quantity: project.quantity ?? 1,
     parentProjectId: project.parentProjectId ?? undefined,

@@ -1,6 +1,6 @@
 /* Non-button action triggers use the same capsule tiers as ordinary buttons. */
 @layer pdm-button-sizing {
-  :root body .pdm-more-actions.pdm-more-actions > summary,
+  :root body .pdm-more-actions.pdm-more-actions > summary:not([data-pdm-action-icon]),
   :root body :is(a.pdm-primary-action,a.pdm-secondary-action,a.el-button) {
     box-sizing:border-box !important; display:inline-flex !important;
     height:28px !important; min-height:28px !important; max-height:28px !important;
@@ -9,7 +9,7 @@
     font-family:var(--pdm-font-ui) !important; font-size:13px !important; font-weight:400 !important; line-height:18px !important;
     text-align:center !important; white-space:nowrap;
   }
-  :root body :is(table,.el-table,.pdm-row-actions) .pdm-more-actions.pdm-more-actions > summary,
+  :root body :is(table,.el-table,.pdm-row-actions) .pdm-more-actions.pdm-more-actions > summary:not([data-pdm-action-icon]),
   :root body :is(table,.el-table,.pdm-row-actions) :is(a.pdm-primary-action,a.pdm-secondary-action,a.el-button),
   :root body nav[aria-label*="分页"] > button {
     height:24px !important; min-height:24px !important; max-height:24px !important; font-size:12px !important;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { ProjectPlan } from '../types'
 
 const props = defineProps<{ plan: ProjectPlan | null; baseline: ProjectPlan | null; baselineUnavailable: boolean; progressTone?: 'success' | 'warning' | 'danger' }>()
@@ -27,20 +27,44 @@ function position(date: string) {
   const range = bounds.value!
   return Math.max(0, Math.min(100, (day(date) - range.start) / (range.finish - range.start) * 100))
 }
+const axis = ref<HTMLElement>()
+const axisWidth = ref(0)
+watch(axis, (element, _, onCleanup) => {
+  axisWidth.value = element?.clientWidth ?? 0
+  if (!element) return
+  const observer = new ResizeObserver(([entry]) => {
+    if (entry) axisWidth.value = Math.floor(entry.contentRect.width)
+  })
+  observer.observe(element)
+  onCleanup(() => observer.disconnect())
+})
+const crossesYear = computed(() => {
+  const range = bounds.value
+  return !!range && new Date(range.start * 86400000).getUTCFullYear() !== new Date((range.finish - 1) * 86400000).getUTCFullYear()
+})
+const labelSpacing = computed(() => crossesYear.value ? 72 : 44)
+const stackedEndpoints = computed(() => {
+  const span = bounds.value ? bounds.value.finish - bounds.value.start - 1 : 0
+  return span > 0 && axisWidth.value * span / (span + 1) < labelSpacing.value * 2
+})
 const timeTicks = computed(() => {
   const range = bounds.value
   if (!range) return []
   const last = range.finish - 1
-  const span = last - range.start
+  const pixelsPerDay = axisWidth.value / (range.finish - range.start)
   const dates = [range.start]
-  for (let value = range.start + 7; value < last; value += 7) dates.push(value)
-  if (span > 0) dates.push(last)
-  const crossesYear = new Date(range.start * 86400000).getUTCFullYear() !== new Date(last * 86400000).getUTCFullYear()
-  return dates
-    .map(value => {
-      const date = new Date(value * 86400000).toISOString().slice(0, 10)
-      return { date, label: value !== last && value !== range.start && last - value < 4 ? '' : crossesYear ? date : date.slice(5), left: (value - range.start) / (range.finish - range.start) * 100 }
-    })
+  if (!stackedEndpoints.value && pixelsPerDay > 0) {
+    const spacing = labelSpacing.value
+    const stride = Math.max(1, Math.ceil(spacing / (7 * pixelsPerDay))) * 7
+    for (let value = range.start + stride; (last - value) * pixelsPerDay >= spacing * 1.5; value += stride) {
+      if ((value - range.start) * pixelsPerDay >= spacing * 1.5) dates.push(value)
+    }
+  }
+  if (last > range.start) dates.push(last)
+  return dates.map(value => {
+    const date = new Date(value * 86400000).toISOString().slice(0, 10)
+    return { date, label: crossesYear.value ? date : date.slice(5), left: (value - range.start) / (range.finish - range.start) * 100 }
+  })
 })
 const rows = computed(() => ['actual', 'planned', 'baseline'].map(kind => {
   const tasks = kind === 'baseline' ? baselineTasks.value : props.plan?.tasks ?? []
@@ -114,8 +138,8 @@ function segmentBackground(segment: { left: number; width: number; color: string
       </div>
     </div>
     <div v-if="bounds" class="pdm-overview-timeline__dates" aria-label="计划时间刻度">
-      <div class="pdm-overview-timeline__axis">
-        <span v-for="(tick, index) in timeTicks" :key="tick.date" class="pdm-overview-timeline__tick" :class="{ 'is-first': index === 0, 'is-last': index === timeTicks.length - 1 && index > 0 }" :style="{ left: `${tick.left}%` }" :title="tick.date"><time :datetime="tick.date">{{ tick.label }}</time></span>
+      <div ref="axis" class="pdm-overview-timeline__axis" :style="stackedEndpoints ? { height: '36px' } : undefined">
+        <span v-for="(tick, index) in timeTicks" :key="tick.date" class="pdm-overview-timeline__tick" :class="{ 'is-first': index === 0, 'is-last': index === timeTicks.length - 1 && index > 0 }" :style="{ left: `${tick.left}%` }" :title="tick.date"><time :datetime="tick.date" :style="stackedEndpoints && index > 0 ? { marginTop: '14px' } : undefined">{{ tick.label }}</time></span>
       </div>
     </div>
   </div>

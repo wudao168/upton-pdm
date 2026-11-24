@@ -147,12 +147,7 @@ public static class AuthorizationPolicy
         if (user is null || !user.IsActive || project is null) return null;
         var root = project.ParentProjectId is null ? project : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct);
         if (root is null || root.OrganizationId != project.OrganizationId || root.ParentProjectId is not null) return null;
-        if (TenantContext.CompanyId is Guid company && company != project.OrganizationId) return null;
-        if (TenantContext.Current is null && user.CompanyId is Guid primary && project.OrganizationId is Guid owner && owner != primary)
-        {
-            var companies = await repository.GetUserCompanyScopeAsync(actor, ct);
-            if (companies?.CrossCompanyView != true || !companies.AccessibleCompanyIds.Contains(owner)) return null;
-        }
+        if (!await CanAccessProjectCompanyAsync(repository, user, project.OrganizationId, ct)) return null;
         var ancestors = new HashSet<Guid>();
         var parentId = project.ParentProjectId;
         while (parentId is Guid parent && ancestors.Add(parent))
@@ -163,6 +158,15 @@ public static class AuthorizationPolicy
         }
         if (parentId is not null) return null;
         return new(user, project, root, await repository.GetOrganizationDirectoryAsync(ct), await repository.FindProjectContactInformationAsync(root.Id, ct), Ancestors: ancestors);
+    }
+
+    internal static async Task<bool> CanAccessProjectCompanyAsync(IPdmRepository repository, UserAccount user, Guid? organizationId, CancellationToken ct)
+    {
+        if (TenantContext.CompanyId is Guid company && company != organizationId) return false;
+        if (TenantContext.Current is not null || user.CompanyId is not Guid primary || organizationId is not Guid owner || owner == primary)
+            return true;
+        var companies = await repository.GetUserCompanyScopeAsync(user.Username, ct);
+        return companies?.CrossCompanyView == true && companies.AccessibleCompanyIds.Contains(owner);
     }
 
     public static AuthorizationDecision Decide(AuthorizationSettings settings, Context context, string permission) =>

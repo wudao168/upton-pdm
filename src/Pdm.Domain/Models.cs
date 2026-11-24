@@ -35,6 +35,8 @@ public sealed record Project(
     public Guid? SourceApplicationId { get; init; }
     public string? SourceApplicationNumber { get; init; }
     public DateOnly? DeliveryDate { get; init; }
+    public DateOnly? HistoricalUpdatedDate { get; init; }
+    public string? HistoricalRemarks { get; init; }
 
     public DateTimeOffset? CreatedAt { get; init; }
 

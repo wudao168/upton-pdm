@@ -362,6 +362,8 @@ public sealed partial class PdmAddin
         ArchiveSession.Current?.SetStep(3, "正在预检所选图档的字符长度、引用与配置…", selected.Count);
         await ValidateArchiveScopeMetadataAsync(selected, projectId, token);
         await apiClient.RefreshArchiveWarningPolicyAsync(token);
+        ValidateArchiveToolboxReferences(selected, token, allowPendingInsertions: true);
+        selected = selected.Where(item => !item.Node.IsUnverifiedToolboxFallback).ToArray();
         ArchiveMissingReferencePolicy.Prepare(currentTree, selected.Select(item => item.Node).ToArray());
         await apiClient.RefreshDocumentRulesAsync(token);
         if (saveBeforeReferenceCheck)
@@ -434,12 +436,18 @@ public sealed partial class PdmAddin
             PathsEqual(item.Node.FullPath, original.Node.FullPath)
             || locationAliases.TryGetValue(original.Node.FullPath, out var actual) && PathsEqual(item.Node.FullPath, actual)
             || original.Node.DocumentId.HasValue && item.Node.DocumentId == original.Node.DocumentId)).ToArray();
-        var inspectedOwners = selectedForInspection;
+        ValidateArchiveToolboxReferences(selectedForInspection, token, allowPendingInsertions: true);
+        PreserveVerifiedToolboxEvidence(previous, verified, token);
+        selectedForInspection = selectedForInspection.Where(item => !item.Node.IsUnverifiedToolboxFallback).ToArray();
+        var inspectedNodes = selectedForInspection.Select(item => item.Node).ToArray();
+        // Some selected drawings only reappear when their original paths are read later.
+        // Keep the confirmed selection through that intermediate scan.
+        var confirmedSelection = paths.Concat(paths.Where(locationAliases.ContainsKey).Select(path => locationAliases[path])).ToArray();
         stage("轻量核对本次选取图档的引用配置");
         var selectedModelPaths = new HashSet<string>(selectedForInspection.Select(item => item.Node.FullPath), StringComparer.OrdinalIgnoreCase);
         ValidateSavedModelConfigurations(EnumerateCadNodes(verified).Where(node => selectedModelPaths.Contains(node.FullPath)), token);
-        ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
-        var inspectionRoots = ArchiveInspectionRoots(verified, inspectedOwners);
+        ArchiveMissingReferencePolicy.Prepare(verified, inspectedNodes, confirmedSelection);
+        var inspectionRoots = ArchiveInspectionRoots(verified, selectedForInspection);
         stage("核对压缩组件及引用完整性");
         foreach (var scope in inspectionRoots)
         {
@@ -454,7 +462,7 @@ public sealed partial class PdmAddin
                 // Include both the native dependency list and explicitly selected drawing folders.
                 stage("读取原生文件和工程图清单");
                 var nativeFiles = ReadSelectedNativeInventory(verifiedScanner, scope);
-                ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
+                ArchiveMissingReferencePolicy.Prepare(verified, inspectedNodes, confirmedSelection);
                 NativeArchiveManifest.ConfirmFileScope(scope, nativeFiles);
                 foreach (var dependency in EnumerateArchiveNodes(scope).Where(node => node.Role == CadReferenceRole.ExternalFileDependency))
                 {
@@ -471,7 +479,7 @@ public sealed partial class PdmAddin
                     .Where(node => node.Kind == CadDocumentKind.Drawing && File.Exists(node.FullPath))
                     .Where(node => paths.Contains(node.FullPath))
                     .Select(node => node.FullPath), true);
-                ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
+                ArchiveMissingReferencePolicy.Prepare(verified, inspectedNodes, confirmedSelection);
                 if (scope.Kind == CadDocumentKind.Assembly)
                 {
                     stage("比对原生文件清单与实例引用");
@@ -482,7 +490,7 @@ public sealed partial class PdmAddin
         currentTree = verified;
         stage("补齐关联工程图并核对提交范围");
         foreach (var scope in inspectionRoots) await CompleteRelatedDrawingFilesAsync(scope, projectId, token);
-        ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
+        ArchiveMissingReferencePolicy.Prepare(verified, inspectedNodes, confirmedSelection);
         foreach (var drawing in inspectionRoots.SelectMany(EnumerateCadNodes).Where(node => node.Kind == CadDocumentKind.Drawing).Distinct().ToArray())
             for (var index = 0; index < drawing.ReferencedModels.Count; index++)
             {

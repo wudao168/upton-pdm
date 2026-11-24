@@ -98,6 +98,9 @@ internal sealed class CadTreeNode
     internal string ArchiveInspectedPropertiesSha256 { get; set; }
 
     public List<string> UnmanagedReferences { get; } = new List<string>();
+    internal HashSet<string> UnverifiedToolboxReferences { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    internal List<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence> ToolboxEvidence { get; } = new List<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>();
+    internal bool IsUnverifiedToolboxFallback { get; set; }
     public List<string> EmbeddedDesignDependencies { get; } = new List<string>();
     public IReadOnlyDictionary<string, string> EmbeddedProperties { get; set; }
 

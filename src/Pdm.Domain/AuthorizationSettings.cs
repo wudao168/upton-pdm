@@ -14,6 +14,7 @@ public sealed record AuthorizationSettings(long Revision, IReadOnlyList<Authoriz
     public bool AiWebDefaultsApplied { get; init; }
     public bool UserManagementDefaultsApplied { get; init; }
     public bool DocumentReleaseDefaultsApplied { get; init; }
+    public bool HistoricalProjectImportDefaultsApplied { get; init; }
 }
 
 public static class AuthorizationActions

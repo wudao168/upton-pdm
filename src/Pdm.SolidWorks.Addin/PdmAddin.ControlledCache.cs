@@ -74,7 +74,7 @@ public sealed partial class PdmAddin
                         try
                         {
                             var protectedPaths = IncludeJournalCachePaths(paths, journal);
-                            CacheInstanceRegistry.TryPublishCurrent(root, operationBusy, protectedPaths, ids,
+                            CacheInstanceRegistry.TryPublishWorkingState(root, operationBusy, protectedPaths, paths, ids,
                                 () => !disconnecting && generation == Interlocked.Read(ref cacheProtectionGeneration)
                                     && DateTime.UtcNow - capturedUtc <= TimeSpan.FromSeconds(2));
                         }

@@ -33,6 +33,25 @@ internal static partial class Program
   }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&(args[1]=="--checkout-occurrence-session-regression"||args[1]=="--checkout-occurrence-session-fixture"))
+  {
+   try{if(args[1]=="--checkout-occurrence-session-fixture") CheckoutOccurrenceSessionFixture(args[2],args[3]); else CheckoutOccurrenceSessionScenario();}
+   catch(Exception error){Console.Error.WriteLine(error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>2 && args[1]=="--saved-owner-removal")
+  {try{SavedOwnerRemovalScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if (args.Length >= 3 && (args[1] == "--working-copy-ownership" || args[1] == "--hold-working-directory" || args[1] == "--working-directory-alias-regression"))
+  {
+   try
+   {
+    if (args[1] == "--hold-working-directory") HoldWorkingDirectory(args[2], args[3]);
+    else if (args[1] == "--working-directory-alias-regression") WorkingDirectoryAliasScenario(args[2]).GetAwaiter().GetResult();
+    else WorkingCopyOwnershipScenario(args[2]).GetAwaiter().GetResult();
+   }
+   catch (Exception error) { Console.WriteLine("FAIL: " + error); Environment.ExitCode = 1; }
+   return;
+  }
   if(args.Length>=7&&args[1]=="--native-archived-missing-acquisition")
   {
    try{var captured=NativeMissingAcquisition.FromCapturedFile(args[2],args[3],args[4],args[5],args[6]);AcquireAssemblyEditScenario(args.Length>7?args[7]:null,captured).GetAwaiter().GetResult();}
@@ -288,7 +307,7 @@ internal static partial class Program
   }
   if(args.Length>1&&args[1]=="--retained-local-reference-regression")
   {
-   try{RetainedLocalReferenceScenario(args[2]).GetAwaiter().GetResult();LoadedWorkingReferenceScenario(args[2]).GetAwaiter().GetResult();}
+   try{RetainedLocalReferenceScenario(args[2]).GetAwaiter().GetResult();LoadedWorkingReferenceScenario(args[2]).GetAwaiter().GetResult();OpenDraftJournalPreservation();}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
@@ -504,7 +523,7 @@ internal static partial class Program
   }
   if(args.Length>1&&args[1]=="--managed-save-reference-load-regression")
   {
-   try{ManagedSaveReferenceLoadScenario(args[2]);}
+   try{ManagedSaveReferenceLoadScenario(args[2]);SavedAssemblyPartActivationScenario(args[2]);DraftReferenceLoadScenario(Path.Combine(args[2], "draft-load"));}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
   }
   if(args.Length>1&&args[1]=="--saved-insertion-completion-regression")
@@ -608,6 +627,10 @@ internal static partial class Program
   {
    try{NativeMaterializationScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
   }
+  if(args.Length>1&&args[1]=="--compact-staging-binding-regression")
+  {
+   try{CompactStagingBindingScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
   if(args.Length>1&&args[1]=="--historical-reference-repair-regression")
   {
    using(var historicalHost=new Form{Opacity=0,ShowInTaskbar=false})
@@ -637,6 +660,12 @@ internal static partial class Program
   if(args.Length>1&&args[1]=="--acquire-assembly-edit-regression")
   {
    try{AcquireAssemblyEditScenario().GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--compact-working-acquisition")
+  {
+   try{CompactWorkingAcquisition().GetAwaiter().GetResult();}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
@@ -1089,10 +1118,13 @@ internal static partial class Program
    var modelType=appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
    var path=Path.Combine(Path.GetTempPath(),"open-dispatcher-"+Guid.NewGuid().ToString("N")+".SLDPRT");var opens=0;
    var model=new Proxy(modelType,call=>call.MethodName=="GetPathName"?path:throw new Exception("Unexpected model call "+call.MethodName)).GetTransparentProxy();
+   object activeModel=null;
    SetField(plugin,"application",new Proxy(appType,call=>{
     if(Thread.CurrentThread.ManagedThreadId!=owner)throw new Exception("Native SW call reached worker thread");
-    if(call.MethodName=="get_ActiveDoc")return null;if(call.MethodName=="GetDocuments")return new object[0];
-    if(call.MethodName=="OpenDoc6"){opens++;return model;}if(call.MethodName=="ActivateDoc3")return model;
+    if(call.MethodName=="get_ActiveDoc")return activeModel;
+    if(call.MethodName=="GetDocuments")return opens==0?Array.Empty<object>():new[]{model};
+    if(call.MethodName=="OpenDoc6"){opens++;return model;}
+    if(call.MethodName=="ActivateDoc3"){activeModel=model;return model;}
     throw new Exception("Unexpected SW call "+call.MethodName);
    }).GetTransparentProxy());
    using(var pane=(Control)New("PdmTaskPaneControl","句柄生命周期测试"))
@@ -1559,10 +1591,11 @@ internal static partial class Program
  sealed class AssemblyProxy:RealProxy,IRemotingTypeInfo
  {
   readonly Func<IMethodCallMessage,object> callback;
-  public AssemblyProxy(System.Type type,Func<IMethodCallMessage,object> callback):base(type){this.callback=callback;}
+  readonly bool viewOnly;
+  public AssemblyProxy(System.Type type,Func<IMethodCallMessage,object> callback,bool viewOnly=false):base(type){this.callback=callback;this.viewOnly=viewOnly;}
   public string TypeName{get;set;}
   public bool CanCastTo(System.Type type,object value)=>type.Namespace=="SolidWorks.Interop.sldworks";
-  public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var result=callback(call);return result as IMessage??new ReturnMessage(result,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception e){return new ReturnMessage(e,call);}}
+  public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var result=call.MethodName=="IsOpenedViewOnly"?viewOnly:callback(call);return result as IMessage??new ReturnMessage(result,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception e){return new ReturnMessage(e,call);}}
  }
  static void DiagnosticTabScenario(Form host)
  {
@@ -2358,6 +2391,7 @@ internal static partial class Program
     case "get_ConfigurationManager":value=new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),m=>m.MethodName=="get_ActiveConfiguration"?new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.Configuration",true),c=>c.MethodName=="get_Name"?ActiveConfiguration:throw new Exception(c.MethodName)).GetTransparentProxy():throw new Exception(m.MethodName)).GetTransparentProxy();break;
     case "GetType":value=call.MethodBase is MethodInfo info&&info.ReturnType==typeof(System.Type)?(object)nativeType:Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?2:Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?3:1;break;
     case "GetSaveFlag":value=Dirty;break;
+    case "IsOpenedViewOnly":value=false;break;
     case "GetUpdateStamp":value=UpdateStamp;break;
     case "GetComponents":value=Array.Empty<object>();break;
     case "get_Visible":value=true;break;

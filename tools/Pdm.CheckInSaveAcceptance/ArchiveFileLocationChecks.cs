@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 
 internal static partial class Program
 {
@@ -68,5 +69,92 @@ internal static partial class Program
    Check(directory=="original-working-directory",mode+"：完成或异常均恢复原工作目录");
    Check(before.All(pair=>File.ReadAllText(pair.Key)==pair.Value)&&Directory.GetFiles(folder,"*",SearchOption.AllDirectories).Length==before.Count,mode+"：无文件保存、改名、复制或内容修改");
   }
+  ArchiveToolboxReferencesScenario(Path.Combine(Path.GetFullPath(output), "toolbox"));
+ }
+
+ static void ArchiveToolboxReferencesScenario(string folder)
+ {
+  Directory.CreateDirectory(folder);
+  var project = Directory.CreateDirectory(Path.Combine(folder, "project")).FullName;
+  var toolbox = Directory.CreateDirectory(Path.Combine(folder, "Toolbox")).FullName;
+  var browser = Directory.CreateDirectory(Path.Combine(toolbox, "browser")).FullName;
+  var language = Directory.CreateDirectory(Path.Combine(toolbox, "lang", "English")).FullName;
+  var guard = Type("PdmAddin").GetMethod("VerifySavedToolboxReference", Flags);
+  var owner = Path.Combine(project, "任意子装配.SLDASM");
+  var supplied = Path.Combine(project, "自定义规格-A.SLDPRT");
+  var template = Path.Combine(browser, "通用样板.SLDPRT");
+  var sameName = Path.Combine(browser, Path.GetFileName(supplied));
+  var detachedOriginal = Path.Combine(folder, "旧目录", Path.GetFileName(supplied));
+  File.WriteAllText(owner, "original assembly");
+  File.WriteAllText(supplied, "supplied standard part");
+  File.WriteAllText(template, "local template");
+  File.WriteAllText(sameName, "modified standard part");
+  var stored = new[] { new KeyValuePair<string, string[]>("自定义规格-A", new[] { detachedOriginal }) };
+  bool Rejected(string occurrence, string loaded, IReadOnlyList<KeyValuePair<string, string[]>> entries, bool pending = false)
+  {
+   try { guard.Invoke(null, new object[] { owner, occurrence, loaded, entries, CancellationToken.None, pending }); return false; }
+   catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException diagnostic)
+   {
+    return diagnostic.Message.Contains("尚未上传") && diagnostic.Message.Contains(Path.GetFileName(owner))
+       && diagnostic.Message.Contains(occurrence) && diagnostic.Message.Contains(Path.GetFileName(loaded));
+   }
+  }
+  void Expect(bool result, string message)
+  {
+   if (!result) throw new InvalidOperationException(message);
+   Console.WriteLine("PASS: " + message);
+  }
+
+  Expect(Rejected("自定义规格-A-86", template, stored), "首存禁止通用样板替换装配记录的原标准件");
+  Expect(Rejected("自定义规格-A-86", sameName, stored), "同名但字节不同的Toolbox文件在上传前拦截");
+  Expect(Rejected("用户改过实例名-86", template, stored), "无法确认实例保存来源时不猜测");
+  Expect(!Rejected("新插入件-1", template, stored, true) && Rejected("新插入件-1", template, stored),
+     "待保存的新增实例可先准备副本，上传前仍要求确切引用");
+  Expect(Rejected("自定义规格-A-86", template, stored, true), "装配待保存时依然阻止已保存实例被错误替换");
+  File.Copy(supplied, sameName, true);
+  Expect(!Rejected("自定义规格-A-86", sameName, stored), "原路径迁移后，随装配保存的同名副本字节相同时可用");
+  var exact = new[] { new KeyValuePair<string, string[]>("通用样板", new[] { template }) };
+  Expect(!Rejected("用户改过实例名-86", template, exact), "保存的确切库文件未变，允许普通Toolbox引用");
+  var ambiguous = new[] { new KeyValuePair<string, string[]>("自定义规格-A", new[] { supplied, sameName }) };
+  Expect(Rejected("自定义规格-A-86", sameName, ambiguous), "同一实例保存候选不唯一时由用户核对");
+
+  var interfaceType = Type("PdmAddin").GetField("application", Flags).FieldType;
+  var app = new Proxy(interfaceType, call =>
+  {
+   switch (call.MethodName)
+   {
+    case "GetUserPreferenceStringValue": return language;
+    case "GetDocumentDependencies2":
+     Expect((string)call.Args[0] == owner && !(bool)call.Args[1] && !(bool)call.Args[2] && !(bool)call.Args[3],
+        "按原生保存引用核对，跳过自动搜索结果");
+     return new[] { "自定义规格-A", detachedOriginal };
+    default: throw new InvalidOperationException("预检不得改写SolidWorks文件、设置或窗口：" + call.MethodName);
+   }
+  }).GetTransparentProxy();
+  var addin = New("PdmAddin");
+  SetField(addin, "application", app);
+  var parent = New("CadTreeNode");
+  Set(parent, "Kind", Enum.Parse(Type("CadDocumentKind"), "Assembly"));
+  Set(parent, "FullPath", owner);
+  var child = New("CadTreeNode");
+  Set(child, "Kind", Enum.Parse(Type("CadDocumentKind"), "Part"));
+  Set(child, "FullPath", template);
+  Set(child, "InstancePath", "总装/子装/自定义规格-A-86");
+  ((IList)Get(parent, "Children")).Add(child);
+  var items = Array.CreateInstance(Type("BatchOperationItem"), 1);
+  items.SetValue(New("BatchOperationItem", parent, 0), 0);
+  try
+  {
+   TreeCall(addin, "ValidateArchiveToolboxReferences", items, CancellationToken.None, true);
+   throw new InvalidOperationException("已选装配未阻止错误的Toolbox源。");
+  }
+  catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException failure)
+  {
+   Expect(failure.Message.Contains("标准件来源") && failure.Message.Contains("自定义规格-A-86"), "真实预检入口核对嵌套实例且提示来源冲突");
+  }
+  Set(child, "FullPath", supplied);
+  TreeCall(addin, "ValidateArchiveToolboxReferences", items, CancellationToken.None, false);
+  Expect(File.ReadAllText(owner) == "original assembly" && File.ReadAllText(supplied) == "supplied standard part"
+     && File.ReadAllText(template) == "local template", "正确原件进入预检，装配、零件和本机库文件均未被改写");
  }
 }

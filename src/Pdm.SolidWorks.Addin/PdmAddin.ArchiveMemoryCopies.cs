@@ -25,6 +25,7 @@ public sealed partial class PdmAddin
         internal int Revision, CapturedRevision, Stamp, Operation;
         internal bool Closed;
         internal bool SourceSavedToDisk;
+        internal bool PreserveToolboxReferences;
         internal DocumentVersionDto CommittedVersion;
         internal Guid CommittedDocumentId;
         internal string CommittedUser, CommittedScope;
@@ -207,6 +208,7 @@ public sealed partial class PdmAddin
                     finally { Interlocked.Decrement(ref refreshSuppressionDepth); }
                 }
                 CompleteArchiveMemoryCopyLoad(model, node.FullPath, startLoadEpoch, completedLoadEpoch);
+                RestoreArchiveToolboxCopyReferences(node, path, token);
                 var stamp = model.GetUpdateStamp();
                 var revision = copy.Revision;
                 if (!PathsEqual(model.GetPathName(), node.FullPath))
@@ -216,6 +218,7 @@ public sealed partial class PdmAddin
                     throw new InvalidOperationException("生成副本期间源文件属性发生变化，已停止提交：" + node.FileName);
                 var copyHash = await Task.Run(() => ComputeFileHash(path), token);
                 copy.ReplaceCopy(path, hash, originalLength, copyHash, archiveMemoryOperation, stamp, revision);
+                copy.PreserveToolboxReferences = node.ToolboxEvidence.Count > 0;
                 path = null;
                 changed = true;
                 ValidateCurrentMemoryCopy(node);

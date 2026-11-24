@@ -210,12 +210,7 @@ internal static class BatchRenameRule
             throw new InvalidOperationException("新文件名过长。");
         }
 
-        var deviceName = name.Split('.')[0].ToUpperInvariant();
-        var reserved = deviceName == "CON" || deviceName == "PRN" || deviceName == "AUX" || deviceName == "NUL"
-            || (deviceName.Length == 4
-                && (deviceName.StartsWith("COM", StringComparison.Ordinal) || deviceName.StartsWith("LPT", StringComparison.Ordinal))
-                && deviceName[3] >= '1' && deviceName[3] <= '9');
-        if (reserved)
+        if (Upton.Pdm.Domain.DocumentMetadataLimits.IsWindowsDeviceName(name))
         {
             throw new InvalidOperationException("该名称是Windows保留名称，请使用其他名称。");
         }

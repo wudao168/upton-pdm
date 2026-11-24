@@ -9,18 +9,24 @@ namespace Upton.Pdm.SolidWorks;
 internal static class ArchiveMissingReferencePolicy
 {
     internal const string WarningPrefix = "存档引用提示：";
+    private const string ToolboxWarningPrefix = "Toolbox引用提醒：";
     private const string MissingReason = "引用文件缺失，未勾选，本次不上传";
+    private const string ToolboxReason = "Toolbox引用待核对，本次不上传";
     internal static IEnumerable<string> ArchivedMissingPaths(IEnumerable<string> warnings)
     {
         foreach (var warning in warnings ?? Array.Empty<string>())
         {
-            if (warning == null || !warning.StartsWith(WarningPrefix, StringComparison.Ordinal)) continue;
-            var end = warning.IndexOf("；" + MissingReason + "；", WarningPrefix.Length, StringComparison.Ordinal);
-            if (end <= WarningPrefix.Length) continue;
-            var path = warning.Substring(WarningPrefix.Length, end - WarningPrefix.Length);
+            if (!IsRecordedReferenceWarning(warning)) continue;
+            var start = warning.StartsWith(ToolboxWarningPrefix, StringComparison.Ordinal) ? ToolboxWarningPrefix.Length : WarningPrefix.Length;
+            var end = warning.IndexOf("；" + MissingReason + "；", start, StringComparison.Ordinal);
+            if (end < 0) end = warning.IndexOf("；" + ToolboxReason + "；", start, StringComparison.Ordinal);
+            if (end <= start) continue;
+            var path = warning.Substring(start, end - start);
             if (Path.IsPathRooted(path)) yield return path;
         }
     }
+    internal static bool IsRecordedReferenceWarning(string warning) => warning != null
+        && (warning.StartsWith(WarningPrefix, StringComparison.Ordinal) || warning.StartsWith(ToolboxWarningPrefix, StringComparison.Ordinal));
     internal static bool BlockMissingReferences { get; set; }
 
     internal static IEnumerable<CadTreeNode> Walk(CadTreeNode root)
@@ -48,9 +54,11 @@ internal static class ArchiveMissingReferencePolicy
             ArchiveSession.Current?.ReportMissingReference(node.FullPath, node.FileName);
     }
 
-    internal static void Prepare(CadTreeNode context, IReadOnlyList<CadTreeNode> selected)
+    internal static void Prepare(CadTreeNode context, IReadOnlyList<CadTreeNode> selected,
+        IEnumerable<string> confirmedSelection = null)
     {
         var paths = new HashSet<string>(selected.Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase);
+        if (confirmedSelection != null) paths.UnionWith(confirmedSelection);
         foreach (var node in Walk(context)) node.ConfirmedArchivePaths = paths;
         var embedded = new HashSet<CadTreeNode>(NativeArchiveManifest.EmbeddedVirtualNodes(context, false));
         foreach (var owner in selected)
@@ -60,7 +68,8 @@ internal static class ArchiveMissingReferencePolicy
             owner.IsOutsideNativeFileScope = false;
             foreach (var node in Walk(owner))
             {
-                if (node == owner || paths.Contains(node.FullPath) || embedded.Contains(node) || node.Status == CadReferenceStatus.Virtual || node.IsStoredImport) continue;
+                if (node == owner || paths.Contains(node.FullPath) || embedded.Contains(node) || node.Status == CadReferenceStatus.Virtual
+                    || node.IsStoredImport || node.IsUnverifiedToolboxFallback) continue;
                 if (!string.IsNullOrWhiteSpace(node.FullPath) && !File.Exists(node.FullPath))
                     TryOmitMissing(owner, node.FullPath, node);
                 else if (!node.DocumentId.HasValue && !PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath))
@@ -71,6 +80,7 @@ internal static class ArchiveMissingReferencePolicy
 
     internal static bool TryOmitMissing(CadTreeNode owner, string path, CadTreeNode reference = null)
     {
+        if (reference?.IsUnverifiedToolboxFallback == true || owner?.UnverifiedToolboxReferences.Contains(path) == true) return true;
         if (owner?.ConfirmedArchivePaths == null || owner.ConfirmedArchivePaths.Contains(path) || File.Exists(path)) return false;
         if (BlockMissingReferences)
             throw new ArchiveWarningBlockedException("管理员已启用“引用缺失时阻止存档”：" + owner.FileName + " → " + Path.GetFileName(path)
@@ -84,6 +94,7 @@ internal static class ArchiveMissingReferencePolicy
 
     internal static void OmitUnselected(CadTreeNode owner, CadTreeNode reference)
     {
+        if (reference.IsUnverifiedToolboxFallback || owner?.UnverifiedToolboxReferences.Contains(reference.FullPath) == true) return;
         if (owner?.ConfirmedArchivePaths == null || owner.ConfirmedArchivePaths.Contains(reference.FullPath)) return;
         // Available auxiliary sources are copied with their selected native owner.
         // This does not select unrelated native models or their design changes.
@@ -95,9 +106,58 @@ internal static class ArchiveMissingReferencePolicy
         Record(owner, reference.FullPath, "引用未纳入本次勾选，未上传其内容或修改");
     }
 
-    private static void Record(CadTreeNode owner, string path, string reason)
+    internal static void WarnToolbox(CadTreeNode owner, CadTreeNode reference, IReadOnlyList<string> savedPaths)
     {
-        var prefix = WarningPrefix + path + "；";
+        MarkToolboxFallback(reference);
+        foreach (var source in savedPaths.Count == 0 ? new[] { reference.FullPath } : savedPaths)
+            ApplyToolboxEvidence(owner, new ToolboxReferenceEvidence(source, reference.FullPath, reference.InstancePath,
+                reference.Status == CadReferenceStatus.Missing));
+    }
+
+    internal static void ApplyToolboxEvidence(CadTreeNode owner, ToolboxReferenceEvidence evidence)
+    {
+        if (!owner.ToolboxEvidence.Contains(evidence)) owner.ToolboxEvidence.Add(evidence);
+        owner.UnverifiedToolboxReferences.Add(evidence.SourcePath);
+        owner.UnverifiedToolboxReferences.Add(evidence.ActualPath);
+        foreach (var reference in owner.Children.Where(child => child.Role == CadReferenceRole.Component
+            && (string.Equals(child.FullPath, evidence.ActualPath, StringComparison.OrdinalIgnoreCase)
+                || child.Status == CadReferenceStatus.Missing && string.Equals(child.FullPath, evidence.SourcePath, StringComparison.OrdinalIgnoreCase))))
+            MarkToolboxFallback(reference);
+        var loaded = evidence.Missing ? "未加载" : ArchiveReferencePath.Visible(evidence.ActualPath);
+        // The general missing/outside-vault prefixes are interpreted by old and
+        // new servers as configurable blocking warnings. Toolbox is advisory.
+        owner.ReferenceWarnings.RemoveAll(message => message.StartsWith(WarningPrefix + evidence.SourcePath + "；", StringComparison.OrdinalIgnoreCase)
+            || message.StartsWith(WarningPrefix + evidence.ActualPath + "；", StringComparison.OrdinalIgnoreCase));
+        Record(owner, evidence.SourcePath, ToolboxReason + "；实例 " + evidence.InstancePath + "；实际来源 " + loaded, ToolboxWarningPrefix);
+    }
+
+    private static void MarkToolboxFallback(CadTreeNode reference)
+    {
+        reference.IsUnverifiedToolboxFallback = true;
+        reference.IsOutsideNativeFileScope = true;
+    }
+
+    internal sealed class ToolboxReferenceEvidence : IEquatable<ToolboxReferenceEvidence>
+    {
+        internal readonly string SourcePath, ActualPath, InstancePath;
+        internal readonly bool Missing;
+
+        internal ToolboxReferenceEvidence(string sourcePath, string actualPath, string instancePath, bool missing)
+        {
+            SourcePath = sourcePath; ActualPath = actualPath; InstancePath = instancePath; Missing = missing;
+        }
+
+        public bool Equals(ToolboxReferenceEvidence other) => other != null && Missing == other.Missing
+            && StringComparer.OrdinalIgnoreCase.Equals(SourcePath, other.SourcePath)
+            && StringComparer.OrdinalIgnoreCase.Equals(ActualPath, other.ActualPath)
+            && StringComparer.OrdinalIgnoreCase.Equals(InstancePath, other.InstancePath);
+        public override bool Equals(object value) => Equals(value as ToolboxReferenceEvidence);
+        public override int GetHashCode() => StringComparer.OrdinalIgnoreCase.GetHashCode(SourcePath);
+    }
+
+    private static void Record(CadTreeNode owner, string path, string reason, string warningPrefix = WarningPrefix)
+    {
+        var prefix = warningPrefix + path + "；";
         owner.StructureIndexPending = true;
         if (owner.ReferenceWarnings.Any(message => message.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) return;
         var message = prefix + reason + "；原有关联保留，结构待补全";

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using SolidWorks.Interop.sldworks;
-using SolidWorks.Interop.swconst;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -13,6 +12,7 @@ internal sealed class ControlledOpenBoundary : IDisposable
     private readonly ControlledOpenBoundary previous;
     private readonly Dictionary<string, string> paths;
     private readonly Dictionary<string, RetainedLocalReference> localReferences;
+    private readonly string rootFileName;
     private readonly HashSet<string> blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     internal static bool IsActive => current != null;
 
@@ -20,6 +20,7 @@ internal sealed class ControlledOpenBoundary : IDisposable
     {
         paths = Paths(directory, manifest);
         localReferences = manifest.RetainedLocalReferences;
+        rootFileName = Path.GetFileName(manifest.RootRelativePath);
         previous = current;
         current = this;
     }
@@ -40,6 +41,7 @@ internal sealed class ControlledOpenBoundary : IDisposable
     internal static void RequireLoadedSources(ISldWorks application, string rootPath, ControlledOpenManifestDto manifest)
     {
         var expected = Paths(Path.GetDirectoryName(rootPath), manifest);
+        var browser = new Lazy<string>(() => SolidWorksToolboxPaths.BrowserDirectory(application));
         foreach (var model in (application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
         {
             var actual = model.GetPathName();
@@ -52,8 +54,12 @@ internal sealed class ControlledOpenBoundary : IDisposable
             }
             if (!string.IsNullOrWhiteSpace(actual) && expected.TryGetValue(Path.GetFileName(actual), out var target)
                 && !string.Equals(Path.GetFullPath(actual), target, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.Equals(Path.GetFileName(actual), Path.GetFileName(rootPath), StringComparison.OrdinalIgnoreCase)
+                    && SolidWorksToolboxPaths.IsBrowserPart(actual, browser.Value)) continue;
                 throw new InvalidOperationException("已打开另一目录的同名图档，未加载PLM副本，原窗口及修改均保留。请先保存并关闭该同名图档后重试。"
                     + "\r\n当前来源：" + actual + "\r\nPLM工作副本：" + target);
+            }
         }
     }
 
@@ -80,34 +86,21 @@ internal sealed class ControlledOpenBoundary : IDisposable
     internal void Verify(ISet<string> missingComponents = null, ISldWorks application = null)
     {
         var unexpected = blocked.Where(path => missingComponents?.Contains(path) != true).ToList();
-        bool IsUnlistedPart(string path) => string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
-            && !paths.ContainsKey(Path.GetFileName(path));
+        bool IsOptionalPart(string path) => string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(Path.GetFileName(path), rootFileName, StringComparison.OrdinalIgnoreCase);
         // SolidWorks can omit a Toolbox occurrence from the returned tree when its
         // open callback rejects the file. When missing references are allowed, the rejected request
         // itself identifies the missing part. Loaded sources are checked separately.
-        if (missingComponents != null && application != null && unexpected.Any(IsUnlistedPart))
+        if (missingComponents != null && application != null && unexpected.Any(IsOptionalPart))
         {
-            try
-            {
-                var toolbox = application.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swHoleWizardToolBoxFolder);
-                if (!string.IsNullOrWhiteSpace(toolbox) && Path.IsPathRooted(toolbox))
+            var browser = SolidWorksToolboxPaths.BrowserDirectory(application);
+            if (browser != null)
+                unexpected.RemoveAll(path =>
                 {
-                    var root = Path.GetFullPath(toolbox);
-                    var parent = Path.GetDirectoryName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                    // SOLIDWORKS 2022 can return the language directory of the
-                    // Hole Wizard database instead of the configured Toolbox root.
-                    if (string.Equals(Path.GetFileName(parent), "lang", StringComparison.OrdinalIgnoreCase))
-                        root = Path.GetDirectoryName(parent);
-                    var browser = Path.Combine(root, "browser") + Path.DirectorySeparatorChar;
-                    unexpected.RemoveAll(path =>
-                    {
-                        if (!IsUnlistedPart(path) || !path.StartsWith(browser, StringComparison.OrdinalIgnoreCase)) return false;
-                        missingComponents.Add(path);
-                        return true;
-                    });
-                }
-            }
-            catch (Exception error) { PluginDiagnosticLog.Record("受控打开核对", "未能识别Toolbox目录，保留引用拦截：" + error); }
+                    if (!IsOptionalPart(path) || !SolidWorksToolboxPaths.IsBrowserPart(path, browser)) return false;
+                    missingComponents.Add(path);
+                    return true;
+                });
         }
         if (unexpected.Count > 0)
             throw new InvalidOperationException("已阻止图档加载原目录或其他非受控文件，尚未完成打开；请核对PLM引用定位。原文件和已有窗口均保留：\r\n"

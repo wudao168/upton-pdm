@@ -11,6 +11,53 @@ using System.Web.Script.Serialization;
 
 internal static partial class Program
 {
+ static void CheckLargeDesignReviewOpenAndRollback(string prepared,string other,Action<bool,string> check)
+ {
+  var plugin=New("PdmAddin");
+  var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+  var modelType=appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
+  var reviewPath=Path.Combine(prepared,"REVIEW.SLDASM");
+  var regularPath=Path.Combine(prepared,"NORMAL.SLDASM");
+  var outsidePath=Path.Combine(other,"UNRELATED.SLDASM");
+  var docs=new Dictionary<string,object>(StringComparer.OrdinalIgnoreCase);
+  object ModelWindow(string path,bool review) => new AssemblyProxy(modelType,call=>
+  {
+   switch(call.MethodName)
+   {
+    case "GetPathName":return path;
+    case "GetTitle":return Path.GetFileName(path);
+    case "GetType":return 2;
+    case "GetSaveFlag":return false;
+    default:throw new InvalidOperationException(call.MethodName);
+   }
+  },review).GetTransparentProxy();
+  docs.Add(reviewPath,ModelWindow(reviewPath,true));
+  docs.Add(regularPath,ModelWindow(regularPath,false));
+  docs.Add(outsidePath,ModelWindow(outsidePath,false));
+  var app=new Proxy(appType,call=>
+  {
+   if(call.MethodName=="GetDocuments")return docs.Values.ToArray();
+   if(call.MethodName=="CloseDoc")
+   {
+    var path=docs.Keys.Single(key=>Path.GetFileName(key)==(string)call.Args[0]);
+    docs.Remove(path);
+    return null;
+   }
+   throw new InvalidOperationException(call.MethodName);
+  }).GetTransparentProxy();
+  SetField(plugin,"application",app);
+  string message=null;
+  try { TreeCall(plugin,"RequireFullAssemblyForControlledOpen",docs[reviewPath]); }
+  catch(System.Reflection.TargetInvocationException e) { message=e.InnerException?.Message; }
+  check(message?.Contains("大型设计审阅")==true && message.Contains(reviewPath),"大型设计审阅模式在核对引用前提示确切受影响的装配体");
+  TreeCall(plugin,"RequireFullAssemblyForControlledOpen",docs[regularPath]);
+  check(docs.Count==3,"正常装配可以继续，预检期间无窗口被关闭");
+  var windowType=Type("PdmAddin").GetNestedType("PlmOpenWindow",Flags);
+  TreeCall(plugin,"RestorePlmOpenWindows",Array.CreateInstance(windowType,0),reviewPath);
+  check(docs.ContainsKey(reviewPath),"并发打开的审阅窗口在获取失败恢复后保留");
+  check(!docs.ContainsKey(regularPath) && docs.ContainsKey(outsidePath),"同一次失败中只关闭工作区内正常新增的干净窗口，保留其他目录窗口");
+ }
+
  static async Task ControlledOpenBoundaryScenario(string output)
  {
   output=Path.GetFullPath(output);Directory.CreateDirectory(output);
@@ -21,6 +68,7 @@ internal static partial class Program
   try
   {
    var directory=Path.Combine(output,"View","controlled");var original=Path.Combine(output,"original");Directory.CreateDirectory(directory);Directory.CreateDirectory(original);
+   CheckLargeDesignReviewOpenAndRollback(directory,original,Check);
    var manifest=New("ControlledOpenManifestDto");Set(manifest,"ProjectId",Guid.NewGuid());var files=(IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);
    foreach(var name in new[]{"ROOT.SLDASM","PART.SLDPRT","DRAWING.SLDDRW"})
    {var file=New("ControlledOpenFileDto");Set(file,"FileName",name);Set(file,"RelativePath",name);files.Add(file);File.WriteAllText(Path.Combine(directory,name),"controlled");File.WriteAllText(Path.Combine(original,name),"different original geometry");}

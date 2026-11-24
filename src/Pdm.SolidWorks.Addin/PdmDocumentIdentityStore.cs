@@ -241,9 +241,18 @@ internal static class PdmDocumentIdentityStore
         string sha256,
         long fileLength)
     {
-        return TryWriteBinding(filePath, documentId, projectId, versionId, revision, sha256, fileLength,
-            receiptProjectId: IsControlledWorkspacePath(filePath) ? null : projectId);
+        return TryWriteVersionBinding(filePath, documentId, projectId, versionId, revision, sha256, fileLength, workspaceCopy: false);
     }
+
+    // A manifest materializes a PLM-owned copy, including in transient directories
+    // outside the user's workspace. Its path binding must travel with the bytes
+    // through staging and merge. Imported source files keep per-project receipts.
+    internal static bool TryWriteVersionBinding(string filePath, Guid documentId, Guid? projectId,
+        Guid versionId, string revision, string sha256, long fileLength, bool workspaceCopy,
+        string resolvedHash = null, Guid? isolationSnapshot = null) =>
+        TryWriteBinding(filePath, documentId, projectId, versionId, revision, sha256, fileLength,
+            resolvedReferenceSha256: resolvedHash, nativeIsolationSnapshotId: isolationSnapshot,
+            receiptProjectId: workspaceCopy || IsControlledWorkspacePath(filePath) ? null : projectId);
 
     internal static bool TryRecoverControlledVersion(string filePath, PdmControlledFileMetadata expected,
         Guid projectId, Guid versionId, string revision, string sha256, long fileLength)

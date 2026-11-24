@@ -60,9 +60,15 @@ public sealed record CreateProjectRequest(
     string? ProjectAlias,
     DateOnly? SignedDate,
     int Quantity,
-    string BomItemCategoryCode = "0302");
+    string BomItemCategoryCode = "0302",
+    IReadOnlyList<CreateSubprojectItem?>? Children = null);
 
-public sealed record CreateSubprojectRequest(string Name, string? ProjectAlias, int Quantity, int? EquipmentTypeCode = null);
+public sealed record CreateSubprojectRequest(
+    string? Name = null,
+    string? ProjectAlias = null,
+    int Quantity = 0,
+    int? EquipmentTypeCode = null,
+    IReadOnlyList<CreateSubprojectItem?>? Items = null);
 
 public sealed record CopyProjectContentRequest(
     Guid SourceProjectId,

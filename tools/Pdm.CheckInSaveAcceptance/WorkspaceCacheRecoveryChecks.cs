@@ -50,7 +50,7 @@ internal static partial class Program
      {
       Check(((IEnumerable)Get(error,"Files")).Cast<object>().Single().GetType().GetProperty("FileName").GetValue(((IEnumerable)Get(error,"Files")).Cast<object>().Single()).Equals("ROOT.SLDASM"),"冲突列明实际文件");
       if(mode=="backup-later-edit")File.AppendAllText(f.Path," after confirmation");
-      backup=DiscardCall(f.Manager,"BackupWorkingConflicts",f.Manifest,error,CancellationToken.None);
+      backup=DiscardCall(f.Manager,"BackupWorkingConflicts",f.Manifest,error,CancellationToken.None,null);
      }
      if(mode=="backup-tampered")File.AppendAllText(System.IO.Path.Combine((string)Get(backup,"RecoveryDirectory"),"ROOT.SLDASM"),"tampered");
      if(mode=="backup-manifest-changed")Set(f.RootFile,"VersionId",Guid.NewGuid());
@@ -132,8 +132,11 @@ internal static partial class Program
 
  static async Task WorkspaceRecoveryCoordinatorScenario(Form host,string output)
  {
-  foreach(var choice in new[]{"cancel","backup","backup-retained","restore","checkout-denied","other-session"})
-  using(var f=new WorkspaceRecoveryFixture(output,choice!="cancel"&&choice!="backup"))
+  const string longBackup="backup-long-workspace";
+  foreach(var choice in new[]{"cancel","backup","backup-retained",longBackup,"restore","checkout-denied","other-session"})
+  using(var f=new WorkspaceRecoveryFixture(choice==longBackup
+      ? System.IO.Path.Combine(output,new string('深',Math.Max(8,126-output.Length))) : output,
+      choice!="cancel"&&choice!="backup"&&choice!=longBackup))
   using(var pane=(Control)New("PdmTaskPaneControl","工作区恢复流程隔离验证"))
   using(var lifetime=new CancellationTokenSource())
   {
@@ -179,6 +182,13 @@ internal static partial class Program
       &&File.ReadAllText(originalDraft)=="older unsaved recovery content"
       &&Directory.GetFiles(System.IO.Path.Combine((string)Get(backup,"RecoveryDirectory"),"drafts")).Length==1,"备份后旧恢复记录会再次覆盖新版，或旧草稿未完整保留");
      TreeCheck(((IDictionary)Get(f.Manifest,"RetainedWorkingHashes")).Count==0&&((ISet<Guid>)Get(f.Manifest,"ResumedDocumentIds")).Count==0&&editable.Count==0,"打开PLM最新时仍混入本机保留修改");
+     if(choice==longBackup)
+     {
+      var directory=(string)Get(backup,"RecoveryDirectory");
+      var draft=Directory.GetFiles(System.IO.Path.Combine(directory,"drafts")).Single();
+      TreeCheck(System.IO.Path.GetDirectoryName(directory)==System.IO.Path.Combine(f.Root,".uplm","c")
+       &&WorkingReuseHash(draft)==WorkingReuseHash(originalDraft),"深层工作区未为完整恢复备份选择短目录，或草稿内容不一致");
+     }
     }
     if(choice=="restore")TreeCheck(WorkingReuseHash(f.Path)==before&&f.Handler.Downloads==0&&f.Handler.Checkouts==1&&editable.Contains(f.Id)
      &&((IDictionary)Field(plugin,"localEdits")).Contains(f.Id)&&((IDictionary)Get(f.Manifest,"RetainedWorkingHashes")).Contains(f.Id),"恢复未保留内容、记录或正确编辑权限");

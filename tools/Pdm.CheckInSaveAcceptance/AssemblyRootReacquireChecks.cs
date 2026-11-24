@@ -166,12 +166,16 @@ internal static partial class Program
                     }
                     var beforeAcquire = WorkingReuseHash(path);
                     bool success = false;
+                    async Task<bool> AcquireAsync()
+                    {
+                        var task = (Task)TreeCall(plugin, "TryAcquireReusableWorkingCopyAsync", selected, project, id);
+                        await task;
+                        return (bool)Get(task, "Result");
+                    }
                     using (var fileLock = mode == "locked-file" || lockRecoveryOnly ? new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read) : null)
                         try
                         {
-                            var task = (Task)TreeCall(plugin, "TryAcquireReusableWorkingCopyAsync", selected, project, id);
-                            await task;
-                            success = (bool)Get(task, "Result");
+                            success = await AcquireAsync();
                         }
                         catch (InvalidOperationException error) when (mode != "committed") { Console.WriteLine("DIAGNOSTIC: " + error.Message); }
                     Check(success == (mode == "committed"), mode + "：仅确切的服务器已存档状态允许原窗口获取");
@@ -182,14 +186,18 @@ internal static partial class Program
                         mode + "：只有成功获取后才解除只读");
                     Check(events.Count == 0 && File.ReadAllText(removed) == "prior referenced part kept locally", mode + "：保留原窗口及旧结构中移除的本机文件");
                     if (mode == "locked-file")
-                        Check(directoryChanges == 2 && workingDirectory == originalDirectory && searchFolders == originalFolders
-                            && searchOptions.Values.All(enabled => !enabled), "系统文件锁无法释放时恢复原工作目录、搜索目录和搜索设置");
+                        Check(directoryChanges == 0 && workingDirectory == originalDirectory && searchFolders == originalFolders
+                            && searchOptions.Count == 0, "工作文件被占用时保留原工作目录、搜索目录和搜索设置");
                     if (lockRecoveryOnly)
                     {
                         Check(WorkingReuseHash(path) == oldHash && WorkingReuseHash(copyPath) == copyHash
                             && native.Path == path && native.MemoryPayload == originalMemory,
                             "外部文件锁持续占用时，磁盘基准、存档副本和当前内存保持原样");
-                        Check(!detached, $"外部文件锁持续占用时原窗口应保持文件挂接；原生释放调用 {releaseCalls} 次，重载调用 {reloadCalls} 次");
+                        Check(!detached && releaseCalls == 0 && reloadCalls == 0,
+                            $"外部文件锁持续占用时原窗口应保持文件挂接。原生释放调用 {releaseCalls} 次，重载调用 {reloadCalls} 次");
+                        Check(await AcquireAsync() && checkouts == 1 && WorkingReuseHash(path) == copyHash
+                            && !native.ReadOnly && native.Path == path && native.MemoryPayload == originalMemory,
+                            "文件解除占用后在原窗口同步存档基准，只获取一次，并保留当前模型内容");
                     }
                     if (success) Check(Equals(Get(((IDictionary)Field(plugin, "localEdits"))[id], "BaseVersionId"), newVersion),
                         "原窗口再次获取后的恢复记录采用服务器最新版本");

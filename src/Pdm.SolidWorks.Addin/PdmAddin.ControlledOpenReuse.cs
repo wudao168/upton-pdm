@@ -192,6 +192,7 @@ public sealed partial class PdmAddin
             throw new InvalidOperationException("已打开另一目录的同名模型，未新建或替换PLM工作副本。请先保存并关闭该同名图档后重试：\r\n"
                 + string.Join("\r\n", loaded.Select(model => model.GetPathName())));
         var loadedRoot = loaded.SingleOrDefault();
+        controlledWorkspace?.RequireLoadedWorkingDirectory(context.Value, context.Key);
         if (loadedRoot == null)
         {
             var owner = context.Value.Files.Single(file => file.DocumentId == context.Value.RootDocumentId);
@@ -200,7 +201,10 @@ public sealed partial class PdmAddin
             // loaded owner still requires an in-bound existing file and binding.
             if (!WorkingReuseBindingMatches(ControlledReferenceMaterializer.LocalPath(context.Key, owner), requested.ProjectId, owner))
                 throw WorkingModelContextMismatch(owner.FileName);
+            RequireFullAssemblyForControlledOpen(loadedDocuments.FirstOrDefault(model => PathsEqual(model.GetPathName(),
+                ControlledReferenceMaterializer.LocalPath(context.Key, owner))));
         }
+        RequireFullAssemblyForControlledOpen(loadedRoot);
         if (loadedRoot != null && !string.IsNullOrWhiteSpace(root.Configuration)
             && !string.Equals(loadedRoot.ConfigurationManager?.ActiveConfiguration?.Name, root.Configuration, StringComparison.OrdinalIgnoreCase))
             throw WorkingModelContextMismatch(root.FileName);

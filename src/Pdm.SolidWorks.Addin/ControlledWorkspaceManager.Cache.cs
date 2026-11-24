@@ -15,6 +15,7 @@ internal sealed partial class ControlledWorkspaceManager
         var preferred = Path.Combine(ProjectViewDirectory(workspaceRoot, manifest.ProjectCode), "装配工作区",
             "plm-" + manifest.RootDocumentId.ToString("N"));
         var directory = ChooseManifestDirectory(manifest, preferred, "w", "recovery|" + manifest.ProjectId + "|" + manifest.RootDocumentId);
+        directory = ReserveWorkingDirectory(manifest, directory, HasOwnedWorkingPaths(directory));
         serverWorkingDirectories[manifest.RootDocumentId] = directory;
         return directory;
     }
@@ -113,10 +114,10 @@ internal sealed partial class ControlledWorkspaceManager
             && (file.NativeIsolation != null ? previous.NativeIsolationSnapshotId == file.NativeIsolation.ReferenceSnapshotId
                 : !file.IsNativeIsolated || previous.NativeIsolationSnapshotId == file.VersionId)) return;
         // Preserve a verified technical reference projection when source == target.
-        if (!PdmDocumentIdentityStore.TryWriteControlledVersion(to, file.DocumentId, manifest?.ProjectId ?? previous?.ProjectId,
-            file.VersionId, file.Revision, file.Sha256, file.FileLength))
+        if (!PdmDocumentIdentityStore.TryWriteVersionBinding(to, file.DocumentId, manifest?.ProjectId ?? previous?.ProjectId,
+            file.VersionId, file.Revision, file.Sha256, file.FileLength, workspaceCopy: true))
             throw new IOException("受控副本的版本记录未能保存：" + file.FileName);
         if (previous != null && previous.DocumentId == file.DocumentId && previous.VersionId == file.VersionId)
-            ControlledReferenceMaterializer.CopyResolvedBinding(from, to);
+            ControlledReferenceMaterializer.CopyWorkspaceResolvedBinding(from, to);
     }
 }

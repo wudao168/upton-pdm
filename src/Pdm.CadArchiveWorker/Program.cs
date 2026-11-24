@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -29,11 +30,13 @@ internal static class Program
         var archiveReady = false;
         var nativeFailed = false;
         var readSavedProperties = false;
+        var readCheckoutOccurrences = false;
         var attempt = 0;
         try
         {
             var request = Json.Deserialize<Request>(File.ReadAllText(args[0]));
-            readSavedProperties = request.ReadSavedProperties;
+            readCheckoutOccurrences = request.ReadCheckoutOccurrences;
+            readSavedProperties = request.ReadSavedProperties || readCheckoutOccurrences;
             var job = Path.GetDirectoryName(result);
             var work = Path.Combine(job, "work");
             var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -103,6 +106,8 @@ internal static class Program
             }
             if (loadedAddin != null && Marshal.IsComObject(loadedAddin)) Marshal.ReleaseComObject(loadedAddin);
             app.Visible = false; app.UserControl = false;
+            if (readCheckoutOccurrences)
+                return ReadCheckoutOccurrences(app, job);
             if (readSavedProperties)
             {
                 if (!PdmAddin.TryReadNativeArchiveSavedPropertiesJob(app, job, out var savedProperties))
@@ -133,7 +138,9 @@ internal static class Program
             catch (InvalidOperationException) { }
             File.WriteAllText(result + ".diagnostic.txt", error + nativeExit);
             var message = error is InvalidOperationException && error.Message.Any(c => c >= '\u4e00' && c <= '\u9fff')
-                ? error.Message : readSavedProperties
+                ? error.Message : readCheckoutOccurrences
+                    ? "历史缺件的独立核对未完成，已保留工作文件和窗口。请检查图档及读取组件后重试。"
+                    : readSavedProperties
                     ? "独立会话未能读取所选图档的属性，本批尚未上传。请检查共享路径及读取权限后重试，技术原因已记入诊断日志。"
                     : nativeFailed
                     ? archiveReady ? "专用预览会话发生异常，原生存档已保留，可重试生成预览。"
@@ -193,6 +200,13 @@ internal static class Program
             if (owned != null) { if (!owned.HasExited && !owned.WaitForExit(15000)) owned.Kill(); owned.Dispose(); }
         }
     }
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int ReadCheckoutOccurrences(SldWorks app, string job)
+    {
+        PdmAddin.RunCheckoutOccurrenceSession(app, job);
+        return 0;
+    }
+
     private static string[] WatchRoots(string location, bool configuration)
     {
         string[] values;
@@ -381,6 +395,7 @@ internal static class Program
         public bool Previews { get; set; }
         public bool ArchiveBeforePreviews { get; set; }
         public bool ReadSavedProperties { get; set; }
+        public bool ReadCheckoutOccurrences { get; set; }
     }
     private sealed class ResultStatus { public bool Success { get; set; } public bool PreviewsPending { get; set; } }
     private sealed class PreviewAttempts { public int Attempts { get; set; } }

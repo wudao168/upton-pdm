@@ -145,3 +145,64 @@
 :root body [data-pdm-leading-icon] { display:none !important; }
 :root body button[data-pdm-text-only][data-pdm-button-kind]::after { display:none !important; }
 :root body button[data-pdm-text-only][data-pdm-button-kind]:not([data-pdm-button-kind="outline"])::before { opacity:1 !important; }
+
+@layer pdm-button-sizing {
+  :root body :is(button, .pdm-more-actions > summary)[data-pdm-action-icon][data-pdm-button-kind] {
+    --pdm-action-size: 36px;
+    position: relative;
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    list-style: none;
+    box-sizing: border-box !important;
+    width: var(--pdm-action-size) !important;
+    min-width: var(--pdm-action-size) !important;
+    max-width: var(--pdm-action-size) !important;
+    height: var(--pdm-action-size) !important;
+    min-height: var(--pdm-action-size) !important;
+    max-height: var(--pdm-action-size) !important;
+    padding: 0 !important;
+    border: 1px solid var(--pdm-container-border, var(--pdm-border)) !important;
+    border-radius: 10px !important;
+    background: var(--pdm-action-surface, var(--pdm-surface)) !important;
+    color: transparent !important;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 6%) !important;
+    outline: none !important;
+  }
+  :root body :is(td, th, [role="cell"], [role="gridcell"], .pdm-row-actions) :is(button, .pdm-more-actions > summary)[data-pdm-action-icon][data-pdm-button-kind] {
+    --pdm-action-size: 24px;
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+  :root body button[data-pdm-action-icon][data-pdm-button-kind="delete"] {
+    --pdm-action-surface: var(--pdm-surface-muted, var(--pdm-surface));
+  }
+  :root body :is(button, .pdm-more-actions > summary)[data-pdm-action-icon][data-pdm-button-kind]:hover:not(:disabled):not(.is-disabled):not([aria-disabled="true"]) {
+    background: var(--pdm-surface-muted, var(--pdm-surface)) !important;
+    border-color: var(--pdm-border) !important;
+  }
+  :root body :is(button, .pdm-more-actions > summary)[data-pdm-action-icon][data-pdm-button-kind]:focus-visible {
+    outline: 2px solid var(--pdm-theme-accent) !important;
+    outline-offset: 2px;
+  }
+  :root body :is(button, .pdm-more-actions > summary)[data-pdm-action-icon][data-pdm-button-kind] > * { opacity: 0 !important; }
+  :root body :is(button, .pdm-more-actions > summary)[data-pdm-action-icon][data-pdm-button-kind]::before { display: none !important; }
+  :root body :is(button, .pdm-more-actions > summary)[data-pdm-action-icon][data-pdm-button-kind]::after {
+    content: "" !important;
+    display: block !important;
+    position: absolute;
+    inset: 0 !important;
+    width: 100%;
+    opacity: 1 !important;
+    border: 0;
+    background: var(--pdm-text) !important;
+    mask: var(--pdm-button-icon) center / var(--pdm-button-icon-size, 16px) no-repeat;
+    pointer-events: none;
+  }
+}
+:root body button[data-pdm-action-icon="edit"] {
+  --pdm-button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h9M16 4l4 4-11 11H5v-4z'/%3E%3C/svg%3E");
+}
+:root body [data-pdm-action-icon="more"] {
+  --pdm-button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Ccircle cx='12' cy='5' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='12' cy='19' r='2'/%3E%3C/svg%3E");
+}

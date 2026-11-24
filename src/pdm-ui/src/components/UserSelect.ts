@@ -3,6 +3,7 @@ import { useUserDisplayName, type UserDisplayNameResolver } from '../userDisplay
 import { ElOption, ElSelect, type SelectInstance } from 'element-plus'
 import { matchesUserSearch } from '../userSearch'
 import PersonName from './PersonName.vue'
+import '../styles/project-person-picker.css'
 
 function optionText(children: VNodeChild): string {
   if (typeof children === 'string' || typeof children === 'number') return String(children)

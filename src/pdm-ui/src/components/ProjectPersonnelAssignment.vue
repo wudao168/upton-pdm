@@ -5,6 +5,7 @@ import { computed, nextTick, reactive, ref } from 'vue'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { getProjectPositionMembers, updateProjectPositionMembers, PdmApiError } from '../api'
 import type { MainProjectStaffingInput, OrganizationDirectory, ProjectPhaseOwners, ProjectPositionDefinition, ProjectSummary } from '../types'
+import { canChangeProjectManager, divisionStaffingUsers } from '../projectStaffing'
 
 const props = defineProps<{
   token?: string
@@ -39,14 +40,7 @@ const engineers = ref<string[]>([])
 const originalEngineers = ref('[]')
 const phases = reactive<Partial<Record<keyof ProjectPhaseOwners, string[]>>>({})
 const definitions = projectPhasePersonnelRoles
-function inDivision(unitId: string): boolean {
-  const unit = props.directory.units.find(item => item.id === unitId)
-  return unitId === props.root.executionUnitId || Boolean(unit?.parentUnitId && inDivision(unit.parentUnitId))
-}
-const divisionUsers = computed(() => {
-  const members = new Set(props.directory.memberships.filter(item => inDivision(item.unitId)).map(item => item.username))
-  return props.directory.users.filter(user => user.isActive && members.has(user.username))
-})
+const divisionUsers = computed(() => divisionStaffingUsers(props.directory, props.root.executionUnitId))
 const companyUsers = computed(() => {
   const units = new Set(props.directory.units.filter(unit => unit.organizationId === props.root.organizationId && unit.isActive).map(unit => unit.id))
   const members = new Set(props.directory.memberships.filter(item => units.has(item.unitId)).map(item => item.username))
@@ -178,7 +172,7 @@ defineExpose({ configure, configureMany })
       <label v-if="position">{{ definitions.find(item => item.key === position)?.label }}<UserSelect v-model="phases[position]" :aria-label="definitions.find(item => item.key === position)?.label" multiple filterable clearable :disabled="saving || (batch && batchCompleted > 0)"><el-option v-for="user in positionCandidates" :key="user.username" :label="user.displayName" :value="user.username" :disabled="!user.isActive" /></UserSelect></label>
       <template v-else-if="!target">
 
-          <label>项目经理<UserSelect v-model="staffing.primaryProjectManager" aria-label="项目经理" filterable :disabled="saving || !root.canManageMainStaffing || (!root.effectiveProjectPermissions?.includes('project.staffing.replace-self') && currentUsername === root.primaryProjectManager)"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
+          <label>项目经理<UserSelect v-model="staffing.primaryProjectManager" aria-label="项目经理" filterable :disabled="saving || !root.canManageMainStaffing || !canChangeProjectManager(currentUsername, root)"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
           <label>协同项目经理<UserSelect v-model="staffing.collaborativeProjectManagers" aria-label="协同项目经理" multiple filterable :disabled="saving || !root.canManageMainStaffing"><el-option v-for="user in divisionUsers.filter(item => item.username !== staffing.primaryProjectManager)" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
           <label>主设计<UserSelect v-model="staffing.designLeads" aria-label="主设计" multiple filterable :disabled="saving || !root.canManageMainStaffing"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
 

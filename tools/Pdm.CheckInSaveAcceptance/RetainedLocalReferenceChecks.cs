@@ -56,7 +56,18 @@ internal static partial class Program
     var includeExistingPart=false;var loadedDirty=false;
     var loadedPart=new Proxy(modelType,call=>{switch(call.MethodName){case "GetPathName":return selectedPath;case "GetSaveFlag":return loadedDirty;case "GetType":return 1;case "get_Extension":return null;default:forbidden++;throw new Exception(call.MethodName);}}).GetTransparentProxy();
     var componentType=interop.GetType("SolidWorks.Interop.sldworks.Component2",true);
-    var component=new Proxy(componentType,call=>{switch(call.MethodName){case "GetPathName":return selectedPath;case "GetModelDoc2":return mode=="loaded"?loadedPart:null;case "IsSuppressed":return archivedMissing;case "get_IsVirtual":return false;case "get_Name2":return "底座-1";case "GetParent":return null;default:throw new Exception(call.MethodName);}}).GetTransparentProxy();
+    var component=new Proxy(componentType,call=>{
+     switch(call.MethodName){
+      case "GetPathName":return selectedPath;
+      case "GetModelDoc2":return mode=="loaded"?loadedPart:null;
+      case "IsSuppressed":return archivedMissing;
+      case "GetSuppression2":return archivedMissing?0:2;
+      case "get_IsVirtual":return false;
+      case "get_Name2":return "底座-1";
+      case "GetParent":return null;
+      default:throw new Exception(call.MethodName);
+     }
+    }).GetTransparentProxy();
     var model=new AssemblyProxy(modelType,call=>{switch(call.MethodName){case "GetPathName":return rootPath;case "GetType":return 2;case "GetComponents":return new[]{component};case "get_Extension":return null;default:forbidden++;throw new Exception("恢复不得保存、关闭或改写模型："+call.MethodName);}}).GetTransparentProxy();
     var app=new Proxy(appType,call=>{
      if(call.MethodName=="GetDocuments")return includeExistingPart?new[]{loadedPart}:new object[0];

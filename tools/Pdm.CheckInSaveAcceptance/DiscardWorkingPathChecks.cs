@@ -192,7 +192,7 @@ internal static partial class Program
             if(!blocked||(Guid)Get(after[1],"DocumentId")!=otherId||!fixture.Records().Where(entry=>(string)Get(entry,"SourcePath")==fixture.CurrentPath).All(entry=>(bool)Get(entry,"DiscardPending")))throw new Exception("Completion overwrote a concurrently changed physical-file binding");
             Console.WriteLine("PASS: completion compare-and-swap preserves a concurrently changed file binding and pending intent");
         }
-        DiscardReferenceRestorationScenario();
+        await DiscardReferenceRestorationScenario();
         await DiscardDirtyReadOnlySiblingScenario();
         var messages=New("PdmAddin");
         foreach(var error in new Exception[]{new HttpRequestException("connection reset"),new IOException("access denied"),new UnauthorizedAccessException("denied"),new Exception("unexpected failure")})
@@ -216,7 +216,7 @@ internal static partial class Program
         public readonly DiscardDownloadHandler Handler=new DiscardDownloadHandler();
         public readonly string DirectoryPath,CurrentPath,OldPath;
         public bool Loaded=true,MemoryReadOnly,SameTitleOtherLoaded;
-        public string ReferenceTargetPath; public bool FailBindingAfterRewrite;
+        public string ReferenceTargetPath; public bool FailBindingAfterRewrite, LoadedPathMasksStoredReference;
         public int Closes;
         readonly string oldJournalPath,oldJournalText;
         readonly FieldInfo bindings,rootResolver,isolatedScope;
@@ -260,7 +260,8 @@ internal static partial class Program
                 {
                     if(ReferenceTargetPath==null||Path.GetFileName((string)call.Args[0])!="PART.SLDPRT")return Array.Empty<string>();
                     var owner=(string)call.Args[0];var rewritten=owner==CurrentPath&&File.ReadAllText(owner).EndsWith("|working-reference");
-                    return new[]{Path.GetFileName(ReferenceTargetPath),rewritten?ReferenceTargetPath:Path.Combine(DirectoryPath,"Snapshots",Path.GetFileName(ReferenceTargetPath))};
+                    return new[]{Path.GetFileName(ReferenceTargetPath),rewritten || LoadedPathMasksStoredReference && Loaded
+                        ? ReferenceTargetPath : Path.Combine(DirectoryPath,"Snapshots",Path.GetFileName(ReferenceTargetPath))};
                 }
                 if(call.MethodName=="ReplaceReferencedDocument")
                 {
@@ -292,6 +293,9 @@ internal static partial class Program
         public bool Fail;public int Downloads,LimitedVersionReads;public object OperationManifest;public Action OnOperation;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
         {
+            if (OperationManifest == null && request.Method == HttpMethod.Get && request.RequestUri.AbsolutePath.EndsWith("/versions")
+                && request.RequestUri.Query == "?take=1")
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") });
             if(OperationManifest!=null&&!request.RequestUri.AbsolutePath.EndsWith("/file"))
             {
                 var path=request.RequestUri.AbsolutePath;object value;OnOperation?.Invoke();
@@ -307,8 +311,22 @@ internal static partial class Program
         }
     }
 
-    static void DiscardReferenceRestorationScenario()
+    static async Task DiscardReferenceRestorationScenario()
     {
+        using (var fixture = new DiscardPathFixture())
+        {
+            var child = fixture.AddWorkingPart("CHILD.SLDPRT");
+            fixture.ReferenceTargetPath = (string)Get(child, "FullPath");
+            fixture.LoadedPathMasksStoredReference = true;
+            File.WriteAllText(fixture.CurrentPath, "selected edit before discard");
+            DiscardCall(fixture.Plugin, "MarkDiscardedLocalEdit", fixture.Node);
+            await fixture.Restore();
+            if (fixture.Closes != 1 || File.ReadAllText(fixture.CurrentPath) != DiscardPathFixture.Canonical + "|working-reference"
+                || fixture.Records().Any(entry => (bool)Get(entry, "DiscardPending")))
+                throw new Exception("Discard planned the stored references through the loaded working model.");
+            fixture.AssertOldUntouched();
+            Console.WriteLine("PASS: after closing the edited window discard re-reads the archive and restores its actual stored references");
+        }
         var directory=Path.Combine(Path.GetTempPath(),"UPLM-discard-reference-test",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(directory);
         var canonical=Path.Combine(directory,"canonical.SLDDRW");var target=Path.Combine(directory,"working.SLDDRW");var untouched=Path.Combine(directory,"PART.SLDPRT");
         File.WriteAllText(canonical,"canonical drawing");File.WriteAllText(untouched,"unselected local part edit");
@@ -323,7 +341,10 @@ internal static partial class Program
                 throw new Exception("Unexpected native operation: "+call.MethodName);
             }).GetTransparentProxy());
             var canonicalHash=(string)Type("EditDraftJournal").GetMethod("Hash",Flags).Invoke(null,new object[]{canonical});
-            var blocked=false;try{DiscardCall(plugin,"RestoreDiscardWorkingReferences",target,canonical,new Dictionary<string,string>{{oldPath,untouched}},canonicalHash);}catch(IOException){blocked=true;}
+            var blocked=false;
+            try { await (Task<string>)DiscardCall(plugin,"RestoreDiscardWorkingReferences",target,canonical,
+                new Dictionary<string,string>{{oldPath,untouched}},canonicalHash,new HashSet<string>(StringComparer.OrdinalIgnoreCase)); }
+            catch(IOException){blocked=true;}
             var expected=mode=="later-edit"?"later external user edit":fail?"canonical drawing":"canonical drawing|working reference";
             if(blocked!=(mode!="success")||replaced!=1||File.ReadAllText(untouched)!="unselected local part edit"||File.ReadAllText(target)!=expected)throw new Exception("Discard reference recovery failed its scope/rollback guarantee");
             File.SetAttributes(target,FileAttributes.Normal);
@@ -363,6 +384,6 @@ internal static partial class Program
         public DiscardAssemblyProxy(System.Type modelType,Func<IMethodCallMessage,object> callback):base(modelType){this.modelType=modelType;this.callback=callback;}
         public string TypeName{get;set;}
         public bool CanCastTo(System.Type type,object value)=>type==typeof(object)||type.Namespace=="SolidWorks.Interop.sldworks"&&new[]{"ModelDoc2","IModelDoc2","AssemblyDoc","IAssemblyDoc"}.Contains(type.Name);
-        public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var value=call.MethodName=="GetType"&&(call.MethodBase as MethodInfo)?.ReturnType==typeof(System.Type)?modelType:callback(call);return value as IMessage ?? new ReturnMessage(value,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception error){return new ReturnMessage(error,call);}}
+        public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var value=call.MethodName=="IsOpenedViewOnly"?false:call.MethodName=="GetType"&&(call.MethodBase as MethodInfo)?.ReturnType==typeof(System.Type)?modelType:callback(call);return value as IMessage ?? new ReturnMessage(value,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception error){return new ReturnMessage(error,call);}}
     }
 }

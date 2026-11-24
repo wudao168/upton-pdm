@@ -10,6 +10,8 @@ internal sealed partial class PdmApiClient
 {
     private TimeSpan archiveRecoveryWindow = TimeSpan.FromSeconds(600);
     private Func<TimeSpan, CancellationToken, Task> archiveRecoveryDelay = Task.Delay;
+    private static readonly TimeSpan ArchiveFinalRetryWindow = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan ArchiveFinalRetryInterval = TimeSpan.FromMilliseconds(250);
 
     internal sealed class ArchiveConnectionTimeoutException : InvalidOperationException
     {
@@ -50,7 +52,13 @@ internal sealed partial class PdmApiClient
                     throw new ArchiveConnectionTimeoutException(error);
                 var remaining = archiveRecoveryWindow - elapsed.Elapsed;
                 var delay = TimeSpan.FromSeconds(attempt == 0 ? 1 : attempt == 1 ? 3 : 10);
-                if (delay > remaining) delay = remaining;
+                if (delay >= remaining)
+                {
+                    // Leave time for a recovery probe before the overall deadline.
+                    delay = remaining > ArchiveFinalRetryWindow
+                        ? remaining - ArchiveFinalRetryWindow
+                        : remaining > ArchiveFinalRetryInterval ? ArchiveFinalRetryInterval : remaining;
+                }
                 attempt++;
                 var reason = error is OperationCanceledException ? "服务器响应超时，正在重试核对"
                     : error is ServiceUnavailableException ? "PLM服务暂时不可用，正在等待恢复并核对"

@@ -74,7 +74,7 @@ internal static partial class Program
     if(missing&&mode!="missing-nested"&&!toolbox)
       components.Add(new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{
        switch(call.MethodName){case "GetPathName":return missingPath;case "get_Name2":return "MISSING-1";case "get_IsVirtual":return false;
-        case "GetModelDoc2":return mode=="missing-actually-loaded"?Part(missingPath):null;case "IsSuppressed":return true;
+        case "GetModelDoc2":return mode=="missing-actually-loaded"?Part(missingPath):null;case "IsSuppressed":return true;case "GetSuppression2":return 0;
         default:throw new Exception("Unexpected missing component operation "+call.MethodName);}
       }).GetTransparentProxy());
     var root=new DiscardAssemblyProxy(modelType,call=>{

@@ -140,6 +140,30 @@ internal static partial class Program
      if(mode=="registration-reply-lost")Check(bodies.Distinct().Count()==1,"暂存登记重试保留同一批次及相同请求，不扩大登记范围");
     }
    }
+
+   var finalWindowAttempts = 0;
+   var finalWindowDelay = TimeSpan.Zero;
+   using (var client = (IDisposable)New("PdmApiClient", "http://network-fixture.invalid/"))
+   using (var handler = new ReferenceRecoveryHandler(_ =>
+   {
+    if (++finalWindowAttempts == 1) throw new HttpRequestException("isolated connection interruption");
+    return Reply(new { value = "recovered" });
+   }))
+   using (var http = new HttpClient(handler) { BaseAddress = new Uri("http://network-fixture.invalid/") })
+   {
+    SetField(client, "httpClient", http);
+    Type("PdmApiClient").GetField("archiveRecoveryWindow", Flags).SetValue(client, TimeSpan.FromMilliseconds(750));
+    FastRetry(client, (delay, _) => { finalWindowDelay = delay; return Task.CompletedTask; });
+    var requestType = Type("PdmApiClient").GetNestedType("ArchiveRequest", Flags);
+    var request = Activator.CreateInstance(requestType, true);
+    requestType.GetField("Path", Flags).SetValue(request, "api/fixture");
+    requestType.GetField("FileName", Flags).SetValue(request, "零件.SLDPRT");
+    var read = Type("PdmApiClient").GetMethod("ReadArchiveResponseAsync", Flags)
+     .MakeGenericMethod(typeof(Dictionary<string, string>));
+    await (Task)read.Invoke(client, new[] { request, (object)CancellationToken.None });
+    Check(finalWindowAttempts == 2 && finalWindowDelay > TimeSpan.Zero && finalWindowDelay <= TimeSpan.FromMilliseconds(250),
+     "恢复窗口末尾仍安排一次窗口内探测");
+   }
   }
   finally{
    journal.SetValue(null,old);

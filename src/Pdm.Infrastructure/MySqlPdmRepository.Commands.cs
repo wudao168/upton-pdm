@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Text.Json;
 using Dapper;
+using MySqlConnector;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
@@ -1011,24 +1012,68 @@ public sealed partial class MySqlPdmRepository
 
     public async Task AppendAuditAsync(AuditEntry entry, CancellationToken cancellationToken)
     {
-        await using var connection = await OpenAsync(cancellationToken);
-        await connection.ExecuteAsync(new CommandDefinition(
+        var parameters = AuditParameters(entry);
+
+        async Task InsertAsync()
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await InsertAuditAsync(connection, null, parameters, cancellationToken);
+        }
+
+        try
+        {
+            await InsertAsync();
+        }
+        catch (MySqlException first) when (retryTransientAuditWrites && !cancellationToken.IsCancellationRequested
+            && System.Transactions.Transaction.Current is null && IsTransientMySqlWriteFailure(first))
+        {
+            // An autocommit can succeed before its acknowledgement reaches the
+            // client. Reuse the exact event and its primary key on a fresh connection.
+            cancellationToken.ThrowIfCancellationRequested();
+            try { await InsertAsync(); }
+            catch (MySqlException retry) when (!cancellationToken.IsCancellationRequested &&
+                (retry.Number == 1062 || IsTransientMySqlWriteFailure(retry)))
+            {
+                // Audit columns normally use case/accent-insensitive collations.
+                // Only the immutable original event is evidence of success.
+                await using var connection = await OpenAsync(cancellationToken);
+                var confirmed = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                    """
+                    SELECT EXISTS(SELECT 1 FROM audit_entry
+                        WHERE id=@Id AND occurred_at=@OccurredAt
+                          AND CAST(actor AS BINARY)=CAST(@Actor AS BINARY)
+                          AND CAST(action_name AS BINARY)=CAST(@Action AS BINARY)
+                          AND CAST(entity_type AS BINARY)=CAST(@EntityType AS BINARY)
+                          AND CAST(entity_id AS BINARY)=CAST(@EntityId AS BINARY)
+                          AND detail_json=CAST(@DetailJson AS JSON))
+                    """, parameters, cancellationToken: cancellationToken));
+                if (confirmed != 1) throw;
+            }
+        }
+    }
+
+    private object AuditParameters(AuditEntry entry) => new
+    {
+        entry.Id,
+        OccurredAt = entry.OccurredAt.UtcDateTime,
+        entry.Actor,
+        entry.Action,
+        entry.EntityType,
+        entry.EntityId,
+        DetailJson = JsonSerializer.Serialize(new { detail = entry.Detail }, jsonOptions)
+    };
+
+    private static Task InsertAuditAsync(DbConnection connection, DbTransaction? transaction, object parameters, CancellationToken cancellationToken) =>
+        connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO audit_entry(id, occurred_at, actor, action_name, entity_type, entity_id, detail_json)
             VALUES (@Id, @OccurredAt, @Actor, @Action, @EntityType, @EntityId, @DetailJson)
-            """,
-            new
-            {
-                entry.Id,
-                OccurredAt = entry.OccurredAt.UtcDateTime,
-                entry.Actor,
-                entry.Action,
-                entry.EntityType,
-                entry.EntityId,
-                DetailJson = JsonSerializer.Serialize(new { detail = entry.Detail }, jsonOptions)
-            },
-            cancellationToken: cancellationToken));
-    }
+            """, parameters, transaction, cancellationToken: cancellationToken));
+
+    private static bool IsTransientMySqlWriteFailure(MySqlException error) =>
+        error.IsTransient || error.ErrorCode == MySqlErrorCode.CommandTimeoutExpired
+        || error.Number is 2006 or 2013 or 2055
+        || error.Number == 0 && error.InnerException is IOException or System.Net.Sockets.SocketException;
 
     private sealed class ApprovalDecisionRow
     {

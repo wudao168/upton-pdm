@@ -34,7 +34,7 @@ internal static partial class Program
    TreeCheck(conflict?.GetType().Name=="WorkspaceCacheConflictException","真实V2/V3字节副本未识别出缓存差异");
    var details=((IEnumerable)Get(conflict,"Files")).Cast<object>().ToArray();
    TreeCheck(details.Length==1&&Get(details[0],"FileName").ToString()==rootName,"单纯旧版可写工程图被错误认定为未提交设计修改");
-   var originalHash=WorkingReuseHash(f.Path);var backup=DiscardCall(f.Manager,"BackupWorkingConflicts",f.Manifest,conflict,CancellationToken.None);
+   var originalHash=WorkingReuseHash(f.Path);var backup=DiscardCall(f.Manager,"BackupWorkingConflicts",f.Manifest,conflict,CancellationToken.None,null);
    await (Task)DiscardCall(f.Manager,"PrepareBackedUpWorkingCopyAsync",f.Manifest,new Guid[0],backup,CancellationToken.None);
    TreeCheck(f.Handler.Downloads==2&&f.Handler.OtherMutations==0,"真实副本重放扩大了下载或服务器修改范围");
    foreach(var row in rows)

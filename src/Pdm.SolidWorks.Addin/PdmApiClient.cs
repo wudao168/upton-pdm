@@ -445,6 +445,20 @@ internal sealed partial class PdmApiClient : IDisposable
             error.Data["ArchiveReceiptIncomplete"] = true;
             throw error;
         }
+        return ApplyCommittedArchiveVersionLabels(receipt);
+    }
+
+    private static ArchiveBatchReceiptDto ApplyCommittedArchiveVersionLabels(ArchiveBatchReceiptDto receipt)
+    {
+        // Receipts saved by older servers can have a pre-insert document summary.
+        foreach (var entry in receipt?.Results ?? Enumerable.Empty<CheckInResultDto>())
+        {
+            var document = entry.Document;
+            var version = entry.Version;
+            if (entry.VersionCreated && document != null && version != null && version.DocumentId == document.Id
+                && !string.IsNullOrWhiteSpace(version.DrawingVersion) && version.DrawingVersion != "待核对")
+                document.DrawingVersion = version.DrawingVersion;
+        }
         return receipt;
     }
 
@@ -456,7 +470,7 @@ internal sealed partial class PdmApiClient : IDisposable
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             { ThrowAuthenticationExpiredIfNeeded(response); ThrowServiceUnavailableIfNeeded(response); throw ServiceError(response.StatusCode.ToString(), body); }
-            return serializer.Deserialize<ArchiveBatchReceiptDto>(body);
+            return ApplyCommittedArchiveVersionLabels(serializer.Deserialize<ArchiveBatchReceiptDto>(body));
         }
     }
 
@@ -1718,8 +1732,12 @@ internal sealed class ControlledOpenManifestDto
     internal WorkspaceCacheBackup CacheBackup { get; set; }
     internal bool WorkspaceOpenCanceled { get; set; }
     internal HashSet<string> CompletedReferencePrepasses { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    internal Dictionary<string, HashSet<string>> VerifiedNativePreloads { get; } = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
     internal HashSet<Guid> ResumedDocumentIds { get; } = new HashSet<Guid>();
     internal Dictionary<string, RetainedLocalReference> RetainedLocalReferences { get; } = new Dictionary<string, RetainedLocalReference>(StringComparer.OrdinalIgnoreCase);
+    internal HashSet<string> UnverifiedToolboxSources { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    internal Dictionary<string, List<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>> VerifiedMissingToolboxReferences { get; }
+        = new Dictionary<string, List<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>>(StringComparer.OrdinalIgnoreCase);
     public Guid Id { get; set; }
     public Guid ProjectId { get; set; }
     public string ProjectCode { get; set; }

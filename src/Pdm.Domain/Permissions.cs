@@ -36,6 +36,7 @@ public static class PermissionCodes
     public const string QualityFinalAcceptanceUpload = "quality.final-acceptance.upload";
     public const string ProjectView = "project.view";
     public const string ProjectCreate = "project.create";
+    public const string ProjectHistoricalImport = "project.history.import";
     public const string ProjectApplicationSubmit = "project.application.submit";
     public const string ProjectApplicationApprove = "project.application.approve";
     public const string ProjectEdit = "project.edit";

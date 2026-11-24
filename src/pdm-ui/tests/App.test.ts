@@ -25,7 +25,7 @@ function json(value: unknown, status = 200) {
 }
 
 function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = [], loginRoleCodes?: string[], loginPermissions?: string[]) {
-  const projects: Array<Record<string, unknown>> = [...projectsBeforeDefault, { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [], effectiveProjectPermissions: ['project.plan.edit', 'project.edit', 'project.child.create', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'validation-plan.edit', 'release.manage'] }]
+  const projects: Array<Record<string, unknown>> = [...projectsBeforeDefault, { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [], effectiveProjectPermissions: ['project.plan.edit', 'project.edit', 'project.child.create', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'validation-plan.edit', 'release.manage', 'release.view'] }]
   const customers = [{ id: 'customer-1', code: 'C00465', name: '中山比亚迪电子有限公司', isActive: true }]
   let crmSettings = { baseUrl: 'http://10.7.7.188/U9', username: 'pdm', passwordConfigured: true, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null as string | null, lastSyncCount: 0, lastAutoSyncAttemptAt: null as string | null, lastAutoSyncError: null as string | null }
   let u9Settings = { baseUrl: 'http://10.7.7.188/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM', clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query', itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false }
@@ -141,10 +141,16 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
       return json(projects)
     }
     if (url.endsWith('/api/projects/project-created/children') && init?.method === 'POST') {
-      const request = JSON.parse(String(init.body)) as Record<string, unknown>
-      const child = { id: 'project-child', ...request, code: 'P700001-1', parentProjectId: 'project-created', childSequence: 1, owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\Vault\\P700001-1', releaseLocation: 'D:\\PDM\\Release\\P700001-1', customerCode: 'C00465', customerName: '中山比亚迪电子有限公司', deviceModel: 'AK-2-C00465-001-01', serialNumbers: ['70000003', '70000004'], isActive: true }
-      projects.push(child)
-      return json(child, 201)
+      const { items } = JSON.parse(String(init.body)) as { items: Record<string, unknown>[] }
+      let nextSerial = 70000003
+      const children = items.map((item, index) => {
+        const sequence = index + 1
+        const code = `P700001-${sequence}`
+        const serialNumbers = Array.from({ length: Number(item.quantity) }, () => String(nextSerial++))
+        return { id: index === 0 ? 'project-child' : `project-child-${sequence}`, ...item, code, parentProjectId: 'project-created', childSequence: sequence, owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: `D:/PDM/Vault/${code}`, releaseLocation: `D:/PDM/Release/${code}`, customerCode: 'C00465', customerName: '中山比亚迪电子有限公司', deviceModel: `AK-2-C00465-001-${String(sequence).padStart(2, '0')}`, serialNumbers, isActive: true }
+      })
+      projects.push(...children)
+      return json(children, 201)
     }
     if (url.includes('/api/projects/') && url.endsWith('/procurement-tracking')) {
       const requestedProjectId = url.split('/api/projects/')[1]?.split('/')[0] ?? ''
@@ -223,6 +229,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
       return json([{ id: 'source-real-part', kind: 'Standard', sequence: 1, drawingNumber: 'REAL-PRT-001', name: '真实底板', quantity: 2, unit: '件', material: 'Q235B', specification: '10mm', revision: 'A', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-part' }])
     }
     if (url.endsWith('/boms/empty-declarations')) return json([])
+    if (url.endsWith('/release-packages/change-overview')) return json([{ category: 'All', count: 0, reasons: [] }])
     if (url.endsWith('/release-packages')) {
       return json([{ id: 'package-1', number: 'RP-REAL-001', state: 2, approvalTasks: [{ stage: 1, assignee: '工艺工程师', decisionBy: '工艺工程师', decision: 0, decidedAt: '2026-08-11T01:00:00Z' }, { stage: 2, assignee: '批准人', decisionBy: null, decision: null, decidedAt: null }], publishedAt: null }])
     }
@@ -1599,11 +1606,22 @@ describe('PLM client workspace', () => {
     await runProjectAction(wrapper, 'create-child', 'P700001')
     await wrapper.get('input[name="childProjectName"]').setValue('子项目一')
     await wrapper.get('input[name="childQuantity"]').setValue('2')
+    await buttonByText(wrapper, '新增行').trigger('click')
+    await wrapper.get('[aria-label="第 2 行子项目名称"]').setValue('子项目二')
+    await wrapper.get('[aria-label="第 2 行子项目别名"]').setValue('二号设备')
     await wrapper.get('form[aria-label="创建PLM子项目"]').trigger('submit')
     await flushPromises()
+    const childRequests = fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/api/projects/project-created/children') && init?.method === 'POST')
+    expect(childRequests).toHaveLength(1)
+    expect(JSON.parse(String(childRequests[0]?.[1]?.body))).toEqual({ items: [
+      { name: '子项目一', projectAlias: '', quantity: 2 },
+      { name: '子项目二', projectAlias: '二号设备', quantity: 1 },
+    ] })
     expect(wrapper.text()).toContain('P700001-1')
     expect(wrapper.text()).toContain('AK-2-C00465-001-01')
     expect(wrapper.text()).toContain('子项目一')
+    expect(wrapper.text()).toContain('P700001-2')
+    expect(wrapper.text()).toContain('子项目二')
 
     await runProjectAction(wrapper, 'open', 'P700001')
     await flushPromises()
@@ -1974,7 +1992,7 @@ describe('PLM client workspace', () => {
     await login(wrapper)
 
     await projectTabByText(wrapper, '概览').trigger('click')
-    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('项目风险')
+    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('发布详情')
 
     await projectTabByText(wrapper, '图档').trigger('click')
     expect(wrapper.find('[aria-label="项目设计树"]').exists()).toBe(true)

@@ -17,6 +17,8 @@ public static class ProjectWorkbenchEndpointExtensions
             Results.Ok(await service.GetAsync(view, Actor(context), Role(context), ct, scope, summaryOnly ?? false, projectId)));
         api.MapGet("/projects/{projectId:guid}/risk-overview", async (Guid projectId, HttpContext context, ProjectWorkbenchService service, CancellationToken ct) =>
             Results.Ok(await service.GetRiskOverviewAsync(projectId, Actor(context), Role(context), ct)));
+        api.MapGet("/projects/{projectId:guid}/release-packages/change-overview", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken ct) =>
+            Results.Ok(await new ProjectReleaseChangeOverview(repository).ReadAsync(projectId, Actor(context), Role(context), ct)));
         api.MapPost("/projects/{projectId:guid}/risks", async (Guid projectId, RegisterWorkbenchRisk command, HttpContext context, ProjectWorkbenchService service, CancellationToken ct) =>
             Results.Ok(await service.RegisterRiskAsync(projectId, command, Actor(context), Role(context), ct)));
         api.MapPost("/workbench/risks/{id:guid}/close", async (Guid id, HttpContext context, ProjectWorkbenchService service, CancellationToken ct) =>

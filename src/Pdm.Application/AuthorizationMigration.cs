@@ -7,6 +7,20 @@ public static class AuthorizationMigration
 {
     private static readonly string[] UserManagementPermissions = [PermissionCodes.UserDeactivate, PermissionCodes.UserDelete];
 
+    public static AuthorizationSettings EnableHistoricalProjectImportDefaults(AuthorizationSettings settings)
+    {
+        if (settings.HistoricalProjectImportDefaultsApplied) return settings;
+        return settings with
+        {
+            HistoricalProjectImportDefaultsApplied = true,
+            Templates = settings.Templates.Select(role =>
+                role.RoleCode == nameof(UserRole.Administrator)
+                && !role.Grants.Any(grant => grant.Permission == PermissionCodes.ProjectHistoricalImport)
+                ? role with { Grants = [..role.Grants, new AuthorizationGrant(PermissionCodes.ProjectHistoricalImport, ["company"])] }
+                : role).ToArray()
+        };
+    }
+
     public static AuthorizationSettings EnableUserManagementDefaults(AuthorizationSettings settings)
     {
         if (settings.UserManagementDefaultsApplied) return settings;

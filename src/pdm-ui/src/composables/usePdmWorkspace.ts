@@ -1522,6 +1522,20 @@ export function usePdmWorkspace() {
     window.location.reload()
   }
 
+  async function loadAdminSettings() {
+    const token = accessToken
+    if (!token) return
+    const [crm, folders, roles] = await Promise.all([
+      hasPermission('settings.customer.manage') ? getCrmIntegrationSettings(token) : { ...defaultCrmIntegrationSettings },
+      hasPermission('settings.folder.manage') ? listFolderTemplate(token) : [],
+      hasPermission('system.role.view') ? getRolePermissionDirectory(token) : { permissions: [], roles: [] },
+    ])
+    if (accessToken !== token) return
+    crmIntegrationSettings.value = crm
+    folderTemplate.value = folders
+    rolePermissionDirectory.value = roles
+  }
+
   async function reload(projectId?: string, refreshGlobal = true, tabs?: readonly string[]) {
     if (!accessToken) return
     const wasReady = ready.value
@@ -1546,7 +1560,7 @@ export function usePdmWorkspace() {
         }
       }
       if (refreshGlobal) {
-        const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedNotifications, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules, loadedSettingsResult, loadedEquipmentTypes, loadedCrmIntegrationSettings, loadedFolderTemplate, loadedRolePermissionDirectory] = await Promise.all([
+        const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedNotifications, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules, loadedSettingsResult, loadedEquipmentTypes] = await Promise.all([
           withLoadContext('项目列表', listProjects(accessToken)),
           optional('项目编号选项', getProjectNumberingOptions(accessToken), projectNumberingOptions.value),
           optional('客户列表', listCustomers(accessToken), customers.value),
@@ -1565,9 +1579,6 @@ export function usePdmWorkspace() {
           }), systemSettings.value.validationRules),
           hasPermission('settings.storage.manage') ? optional('系统设置', getSystemSettings(accessToken), null) : Promise.resolve(null),
           hasPermission('settings.storage.manage') ? optional('设备类型', listEquipmentTypes(accessToken), equipmentTypes.value) : Promise.resolve([]),
-          hasPermission('settings.customer.manage') ? optional('客户集成设置', getCrmIntegrationSettings(accessToken), crmIntegrationSettings.value) : Promise.resolve({ ...defaultCrmIntegrationSettings }),
-          hasPermission('settings.folder.manage') ? optional('项目文件夹模板', listFolderTemplate(accessToken), folderTemplate.value) : Promise.resolve([]),
-          hasPermission('system.role.view') ? optional('角色权限', getRolePermissionDirectory(accessToken), rolePermissionDirectory.value) : Promise.resolve({ permissions: [], roles: [] }),
         ])
         if (requestSequence !== reloadRequestSequence) return
         projects.value = loadedProjects
@@ -1595,9 +1606,6 @@ export function usePdmWorkspace() {
           }
           equipmentTypes.value = loadedEquipmentTypes
         } else equipmentTypes.value = []
-        crmIntegrationSettings.value = loadedCrmIntegrationSettings
-        folderTemplate.value = loadedFolderTemplate
-        rolePermissionDirectory.value = loadedRolePermissionDirectory
         globalLoadErrors = [...auxiliaryErrors]
       }
       const selectedProject = projects.value.find(candidate => candidate.id === projectId)
@@ -1735,11 +1743,11 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function createSubproject(parentProjectId: string, input: CreateSubprojectInput) {
+  async function createSubproject(parentProjectId: string, items: CreateSubprojectInput[]) {
     operationPending.value = true
     operationError.value = ''
     try {
-      const created = await createSubprojectRequest(parentProjectId, input, accessToken)
+      const created = await createSubprojectRequest(parentProjectId, items, accessToken)
       await reload()
       return created
     } catch (error) {
@@ -2044,8 +2052,8 @@ export function usePdmWorkspace() {
 
   async function selectProject(projectId: string, tab = 'overview') {
     activeProjectTab = tab
-    if (ready.value && project.value.id === projectId) { await ensureProjectTab(tab); return }
-    await reload(projectId, !ready.value || !projects.value.some(candidate => candidate.id === projectId), projectTabModules(tab))
+    if (ready.value && project.value.id === projectId) { if (tab !== 'overview') await ensureProjectTab(tab); return }
+    await reload(projectId, !ready.value || !projects.value.some(candidate => candidate.id === projectId), tab === 'overview' ? [] : projectTabModules(tab))
   }
 
   function projectTabModules(tab: string) {
@@ -2061,7 +2069,7 @@ export function usePdmWorkspace() {
     if (!project.value.id || (!modules.length && !refresh)) return
     const id = project.value.id, generation = reloadRequestSequence, token = accessToken
     const bomDeleteSequence = confirmedBomDeleteSequence
-    const key = `${id}:${tab}`
+    const key = `${id}:${modules.join(',')}`
     const existing = pendingProjectTabs.get(key)
     if (existing && !refresh) return await existing
     const version = (projectTabReadVersions.get(key) ?? 0) + 1
@@ -2266,6 +2274,7 @@ export function usePdmWorkspace() {
     projects,
     projectNumberingOptions,
     customers,
+    loadAdminSettings,
     crmIntegrationSettings,
     users,
     organizationDirectory,

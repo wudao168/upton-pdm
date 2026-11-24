@@ -14,14 +14,17 @@ public sealed partial class PdmAddin
         if (!EnsureEditJournal()) return Array.Empty<DocumentDto>();
         var recovered = await RestoreClosedWorkingDraftsAsync(manifest);
         if (recovered.Count > 0) return recovered;
+        var openEdits = editJournal.ReadAll().Where(entry => entry.ProjectId == manifest.ProjectId && !entry.Closed
+            && !entry.DiscardPending && !entry.PendingClose).ToArray();
+        controlledWorkspace.PreferRecordedWorkingDirectory(manifest, openEdits.Where(entry =>
+            entry.SessionId == checkoutSessionId || !EditDraftJournal.OwnerProcessRunning(entry)));
         string rootPath;
         try { rootPath = controlledWorkspace.GetWorkingRootPath(manifest); }
         catch (FileNotFoundException) { return Array.Empty<DocumentDto>(); }
         var directory = Path.GetDirectoryName(rootPath);
         var files = manifest.Files.ToDictionary(file => file.DocumentId);
-        var entries = editJournal.ReadAll().Where(entry => entry.ProjectId == manifest.ProjectId && !entry.Closed
-            && !entry.DiscardPending && !entry.PendingClose && files.TryGetValue(entry.DocumentId, out var file)
-            && PathsEqual(entry.SourcePath, ControlledReferenceMaterializer.LocalPath(directory, file)))
+        var entries = openEdits.Where(entry => files.TryGetValue(entry.DocumentId, out var file)
+            && PathsEqual(entry.SourcePath, ControlledReferenceMaterializer.ManifestPath(directory, file)))
             .GroupBy(entry => entry.DocumentId).Select(group => group.OrderByDescending(entry => entry.CheckedOutAt).First()).ToArray();
         if (entries.Length == 0 || !entries.Any(entry => !ControlledReferenceMaterializer.Matches(entry.SourcePath, files[entry.DocumentId])))
             return Array.Empty<DocumentDto>();

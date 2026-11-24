@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
@@ -49,7 +51,7 @@ public sealed partial class PdmAddin
         ControlledOpenManifestDto manifest, WorkingAssemblyReferenceScope scope, ISet<Guid> editableAssemblyIds,
         IReadOnlyDictionary<Guid, DocumentDto> documents,
         IReadOnlyDictionary<Guid, ControlledOpenFileDto> latestFiles, WorkingAssemblyReferenceProof proof,
-        IDictionary<Guid, HashSet<string>> archivedReferenceCache)
+        IDictionary<Guid, HashSet<string>> archivedReferenceCache, ArchiveNativeProcessWorkspace.CheckoutOccurrenceReader archiveReader)
     {
         // Evidence for an archived reference does not depend on the edit session.
         // Adopting new references still requires the existing edit eligibility.
@@ -59,7 +61,7 @@ public sealed partial class PdmAddin
             var owner = files.Single(file => file.DocumentId == id);
             var components = scope.Components;
             if (latestFiles.TryGetValue(id, out var exactOwner) && exactOwner.VersionId == owner.VersionId)
-                await VerifyArchivedMissingOccurrencesAsync(scope, exactOwner, files, proof, archivedReferenceCache);
+                await VerifyArchivedMissingOccurrencesAsync(scope, exactOwner, files, proof, archivedReferenceCache, archiveReader);
             foreach (var component in components)
             {
                 if (component.IsVirtual) continue;
@@ -129,11 +131,55 @@ public sealed partial class PdmAddin
         return files.Count == manifest.Files.Count ? manifest : WithWorkingFiles(manifest, files);
     }
 
-    private Func<ISldWorks, string, string, string, System.Threading.CancellationToken, Task<ArchivedMissingOccurrence[]>> readArchivedOccurrences
+    private static readonly Func<ISldWorks, string, string, string, CancellationToken, Task<ArchivedMissingOccurrence[]>> SingleArchivedOccurrenceReader
         = ArchiveNativeProcessWorkspace.ReadSavedOccurrencesAsync;
+    private Func<ISldWorks, string, string, string, CancellationToken, Task<ArchivedMissingOccurrence[]>> readArchivedOccurrences
+        = SingleArchivedOccurrenceReader;
+
+    private const int ArchivedOccurrenceEvidenceLimit = 64;
+    private Dictionary<(Guid Document, Guid Version, long Length, string Hash, string Configuration), ArchivedMissingOccurrence[]>
+        archivedOccurrenceEvidence = new Dictionary<(Guid, Guid, long, string, string), ArchivedMissingOccurrence[]>();
+
+    private void ResetArchivedOccurrenceEvidence() => Volatile.Write(ref archivedOccurrenceEvidence,
+        new Dictionary<(Guid, Guid, long, string, string), ArchivedMissingOccurrence[]>());
+
+    private async Task<ArchivedMissingOccurrence[]> ReadVerifiedArchivedOccurrencesAsync(ControlledOpenFileDto owner,
+        string canonical, string configuration, ArchiveNativeProcessWorkspace.CheckoutOccurrenceReader archiveReader)
+    {
+        var token = lifetime.Token;
+        token.ThrowIfCancellationRequested();
+        var evidence = Volatile.Read(ref archivedOccurrenceEvidence);
+        var key = (owner.DocumentId, owner.VersionId, owner.FileLength, owner.Sha256?.ToUpperInvariant(), configuration);
+        var timer = Stopwatch.StartNew();
+        ArchivedMissingOccurrence[] cached;
+        lock (evidence) evidence.TryGetValue(key, out cached);
+        if (cached != null)
+        {
+            // The caller still downloads the same authorized version and reads its direct
+            // reference paths. Reuse only the immutable native parsing result.
+            if (new FileInfo(canonical).Length != owner.FileLength
+                || !string.Equals(ArchiveFileFingerprint.Read(canonical), owner.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("存档基准的内容发生变化，尚未获取装配体权限：" + owner.FileName);
+            token.ThrowIfCancellationRequested();
+            LogOperation("历史缺件原生读取 file=" + owner.FileName + " source=verified-memory elapsedMs=" + timer.ElapsedMilliseconds);
+            return cached;
+        }
+        var occurrences = archiveReader != null && readArchivedOccurrences == SingleArchivedOccurrenceReader
+            ? await archiveReader.ReadAsync(canonical, configuration, owner.Sha256, token)
+            : await readArchivedOccurrences(application, canonical, configuration, owner.Sha256, token);
+        token.ThrowIfCancellationRequested();
+        lock (evidence)
+        {
+            if (evidence.Count >= ArchivedOccurrenceEvidenceLimit) evidence.Remove(evidence.Keys.First());
+            evidence[key] = occurrences;
+        }
+        LogOperation("历史缺件原生读取 file=" + owner.FileName + " source=reader elapsedMs=" + timer.ElapsedMilliseconds);
+        return occurrences;
+    }
 
     private async Task VerifyArchivedMissingOccurrencesAsync(WorkingAssemblyReferenceScope scope, ControlledOpenFileDto owner,
-        IReadOnlyList<ControlledOpenFileDto> files, WorkingAssemblyReferenceProof proof, IDictionary<Guid, HashSet<string>> directReferenceCache)
+        IReadOnlyList<ControlledOpenFileDto> files, WorkingAssemblyReferenceProof proof, IDictionary<Guid, HashSet<string>> directReferenceCache,
+        ArchiveNativeProcessWorkspace.CheckoutOccurrenceReader archiveReader)
     {
         var components = scope.Components;
         var unknown = new HashSet<string>(components.Where(component => !component.IsVirtual && component.GetModelDoc2() == null
@@ -161,7 +207,7 @@ public sealed partial class PdmAddin
         if (!cache.TryGetValue(key, out var original))
         {
             canonical ??= await DownloadArchivedReferenceBaselineAsync(owner);
-            cache[key] = original = await readArchivedOccurrences(application, canonical, scope.Configuration, owner.Sha256, lifetime.Token);
+            cache[key] = original = await ReadVerifiedArchivedOccurrencesAsync(owner, canonical, scope.Configuration, archiveReader);
         }
         foreach (var path in unknown)
         {

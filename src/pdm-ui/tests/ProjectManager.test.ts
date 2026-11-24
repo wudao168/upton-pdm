@@ -34,7 +34,7 @@ const parent: ProjectSummary = {
   canManageMainStaffing: false,
   canAssignDesigners: false,
   canReadContent: true,
-  effectiveProjectPermissions: ['project.edit', 'project.child.create', 'project.delete', 'project.designer.assign'],
+  effectiveProjectPermissions: ['project.edit', 'project.content.write', 'project.child.create', 'project.delete', 'project.designer.assign'],
 }
 
 const child: ProjectSummary = {
@@ -75,8 +75,8 @@ function mountProjectManager(directory = emptyDirectory, sourceProjects = [paren
       canDelete,
       canCreateSubproject,
       pending: false,
-      onCreate: vi.fn(),
-      onCreateSubproject: vi.fn(),
+      onCreate: vi.fn().mockResolvedValue(parent),
+      onCreateSubproject: vi.fn().mockResolvedValue([child]),
       onUpdateProject: vi.fn().mockResolvedValue(parent),
       onDeleteProject: vi.fn().mockResolvedValue(undefined),
       onUpdateExecutionUnit: vi.fn(),
@@ -123,7 +123,7 @@ describe('ProjectManager', () => {
     ] } })
     const tabs = () => wrapper.findAll('.pdm-project-type-tabs [role="tab"]')
     expect(tabs().map(item => item.text())).toEqual(['全部项目', '标准项目', '研发项目', '外发项目'])
-    expect(tabs().find(item => item.text() === '全部项目')!.attributes('aria-selected')).toBe('true')
+    expect(tabs().find(item => item.text() === '标准项目')!.attributes('aria-selected')).toBe('true')
     await tabs().find(item => item.text() === '研发项目')!.trigger('click')
     expect(wrapper.get('tbody').text()).toContain('R700001')
     expect(wrapper.get('tbody').text()).not.toContain('P700001')
@@ -159,7 +159,7 @@ describe('ProjectManager', () => {
     await tabs().find(item => item.text() === '外发项目')!.trigger('click')
     expect(wrapper.get('tbody').text()).toContain('W700001')
     await wrapper.setProps({ projects: [parent, legacy, custom] })
-    expect(tabs().find(item => item.text() === '全部项目')!.attributes('aria-selected')).toBe('true')
+    expect(tabs().find(item => item.text() === '标准项目')!.attributes('aria-selected')).toBe('true')
     wrapper.unmount()
   })
 
@@ -196,6 +196,7 @@ describe('ProjectManager', () => {
     const otherCompany = {...unassigned,id:'other-company',code:'P700005',organizationId:'org-2'}
     const wrapper = mountProjectManager(directory,[assigned,unassigned,unassignedChild,legacyAssigned,idOnlyAssigned,otherCompany])
     const pending = wrapper.get('.pdm-project-classification__unassigned')
+    expect(pending.get('.pdm-department-name').text()).toBe('待分配')
     await pending.trigger('click')
     expect(pending.attributes('aria-selected')).toBe('true')
     expect(wrapper.findAll('tbody tr')).toHaveLength(1)
@@ -212,16 +213,35 @@ describe('ProjectManager', () => {
     wrapper.unmount()
   })
 
-  it('列表仅允许分配事业部，管理员也不能从此修改其他项目字段或人员', async () => {
-    const wrapper = mountProjectManager(emptyDirectory, [{ ...parent, executionUnitId: 'division-1', canAssignExecutionUnit: true, canManageMainStaffing: true }, { ...child, canAssignDesigners: true }], true, true)
+  it('用列表快捷选择本公司可分配事业部，确认后才保存', async () => {
+    const division = { id: 'division-1', organizationId: 'org-1', code: 'T1', name: 'T1事业部', kind: 'BusinessDivision' as const, canManufacture: true, isActive: true, sortOrder: 1 }
+    const directory = { ...emptyDirectory, units: [
+      division,
+      { ...division, id: 'division-2', code: 'T2', name: 'T2事业部' },
+      { ...division, id: 'division-other', organizationId: 'org-2', code: 'T3', name: '其他公司事业部' },
+      { ...division, id: 'division-disabled', isActive: false, code: 'T4', name: '已停用事业部' },
+      { ...division, id: 'division-office', canManufacture: false, code: 'T5', name: '非制造事业部' },
+    ] }
+    const wrapper = mountProjectManager(directory, [{ ...parent, executionUnitId: 'division-1', canAssignExecutionUnit: true, canManageMainStaffing: true }, { ...child, canAssignDesigners: true }], true, true)
     expect(wrapper.find('[aria-label="分配事业部 P700001"]').exists()).toBe(true)
     for (const name of ['配置项目经理（含协同） P700001', '配置主设计 P700001', '配置子项目负责人 P700001-1', '分配工程师 P700001-1']) expect(wrapper.find('[aria-label="' + name + '"]').exists()).toBe(false)
     const menuItems = wrapper.findAllComponents({ name: 'ElDropdownItem' }).map(item => item.props('command'))
-    expect(menuItems).not.toContain('edit')
+    expect(menuItems).toContain('edit')
     expect(menuItems).not.toContain('configure-staffing')
     expect(menuItems).not.toContain('assign-designers')
     await wrapper.get('[aria-label="分配事业部 P700001"]').trigger('click')
     expect(wrapper.text()).toContain('分配执行事业部 · P700001')
+    const choices = wrapper.get('[aria-label="可分配的事业部"]').findAll('button')
+    expect(choices.map(choice => choice.text())).toEqual(['T1事业部', 'T2事业部'])
+    expect(choices[0].attributes('aria-pressed')).toBe('true')
+    await choices[1].trigger('click')
+    expect(choices[1].attributes('aria-pressed')).toBe('true')
+    expect(userFilter(wrapper, '执行事业部').props('modelValue')).toBe('division-2')
+    expect(wrapper.props('onUpdateExecutionUnit')).not.toHaveBeenCalled()
+    const confirm = wrapper.findAll('button').find(button => button.text() === '确认分配')!
+    await confirm.trigger('click')
+    expect(wrapper.props('onUpdateExecutionUnit')).toHaveBeenCalledExactlyOnceWith(parent.id, 'division-2')
+    wrapper.unmount()
   })
 
   it('按公司与制造部门筛选，区分同名事业部并排除非制造部门', async () => {
@@ -344,7 +364,7 @@ describe('ProjectManager', () => {
 
     customerSelect.vm.$emit('update:modelValue', 'customer-2')
     await wrapper.vm.$nextTick()
-    expect(wrapper.text()).toContain('客户编码由U9C客户数据自动带出：0-000003')
+    expect(wrapper.text()).not.toContain('客户编码由U9C客户数据自动带出')
   })
 
   it('直接建项的订单日期也可留空，且不自动填入当天日期', async () => {
@@ -372,11 +392,33 @@ describe('ProjectManager', () => {
     await form.trigger('submit')
     await flushPromises()
 
-    expect(wrapper.props('onCreateSubproject')).toHaveBeenCalledWith(parent.id, {
+    expect(wrapper.props('onCreateSubproject')).toHaveBeenCalledWith(parent.id, [{
       name: '继承型号设备',
       projectAlias: '',
       quantity: 2,
-    })
+    }])
+  })
+
+  it('在同一个主项目表单添加可选子项目并一起提交', async () => {
+    const wrapper = mountProjectManager(emptyDirectory, [], false, true, false, true, true)
+    await wrapper.get('.pdm-project-create-action').trigger('click')
+    const form = wrapper.get('form[aria-label="创建PLM项目"]')
+    expect(form.text()).toContain('子项目（选填）')
+    expect(form.text()).not.toContain('0301产线通常包含多台0302设备')
+    expect(form.find('input[name="childProjectName"]').exists()).toBe(false)
+    await form.get('input[name="projectName"]').setValue('装配产线')
+    await form.get('button[data-pdm-primary]').trigger('click')
+    await form.get('input[name="childProjectName"]').setValue('装配检测机')
+    await form.get('input[name="childProjectAlias"]').setValue('检测')
+    await form.get('input[name="childQuantity"]').setValue(2)
+    await form.trigger('submit')
+    await flushPromises()
+    expect(wrapper.props('onCreate')).toHaveBeenCalledOnce()
+    expect(wrapper.props('onCreate')).toHaveBeenCalledWith(expect.objectContaining({
+      name: '装配产线',
+      children: [{ name: '装配检测机', projectAlias: '检测', quantity: 2 }],
+    }))
+    expect(wrapper.props('onCreateSubproject')).not.toHaveBeenCalled()
   })
 
   it('主项目行提供创建子项目快捷入口', async () => {
@@ -387,6 +429,34 @@ describe('ProjectManager', () => {
 
     expect(wrapper.find('[aria-label="创建PLM子项目"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('创建0302设备子项目 · P700001')
+    const list = wrapper.get('[aria-label="子项目列表"]')
+    expect(list.text()).toContain(child.code)
+    expect(list.findAll('[name="childProjectName"]')).toHaveLength(1)
+  })
+
+  it('编辑现有子项目时保留其归属、编号资料和订单日期', async () => {
+    const wrapper = mountProjectManager()
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
+    const menu = wrapper.findAllComponents({ name: 'ElDropdown' }).find(item => item.attributes('aria-label') === '操作项目P700001-1')
+    menu!.vm.$emit('command', 'edit')
+    await wrapper.vm.$nextTick()
+
+    const form = wrapper.get('form[aria-label="编辑PLM项目"]')
+    expect(form.get('[name="projectTypeCode"]').attributes('readonly')).toBeDefined()
+    expect(form.get('[name="signedDate"]').attributes('readonly')).toBeDefined()
+    expect(form.get('[aria-label="子项目列表"]').text()).toContain(child.code)
+    expect(form.find('[name="childProjectName"]').exists()).toBe(false)
+    await form.get('[name="projectName"]').setValue('气密检测子项目')
+    await form.get('[name="projectAlias"]').setValue('检测')
+    await form.get('[name="quantity"]').setValue(2)
+    await form.trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.props('onUpdateProject')).toHaveBeenCalledExactlyOnceWith(child.id, {
+      name: '气密检测子项目', projectAlias: '检测', signedDate: null, quantity: 2,
+    })
+    expect(wrapper.props('onCreateSubproject')).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('子项目不能继续创建二级子项目', async () => {
@@ -542,16 +612,20 @@ describe('ProjectManager', () => {
     expect(wrapper.text()).not.toContain('P700002')
   })
 
-  it('操作菜单移除进入与事业部分配，并仅向有权限账号开放项目删除', async () => {
-    const withoutPermission = mountProjectManager(emptyDirectory, [parent, child], true)
+  it('操作菜单依照全局和项目权限提供编辑及删除', async () => {
+    const withoutPermission = mountProjectManager(emptyDirectory, [parent, child], true, false)
     const hiddenCommands = withoutPermission.findAllComponents({ name: 'ElDropdownItem' }).map(item => item.props('command'))
     expect(hiddenCommands).not.toContain('open')
     expect(hiddenCommands).not.toContain('assign-execution')
     expect(hiddenCommands).not.toContain('delete')
+    expect(hiddenCommands).not.toContain('edit')
+
+    const withoutProjectPermission = mountProjectManager(emptyDirectory, [{ ...parent, effectiveProjectPermissions: ['project.edit'] }])
+    expect(withoutProjectPermission.findAllComponents({ name: 'ElDropdownItem' }).some(item => item.props('command') === 'edit')).toBe(false)
 
     const wrapper = mountProjectManager(emptyDirectory, [parent, child], true, true, true)
     const commands = wrapper.findAllComponents({ name: 'ElDropdownItem' }).map(item => item.props('command'))
-    expect(commands).not.toContain('edit')
+    expect(commands).toContain('edit')
     expect(commands).toContain('delete')
     expect(commands).not.toContain('open')
     expect(commands).not.toContain('assign-execution')

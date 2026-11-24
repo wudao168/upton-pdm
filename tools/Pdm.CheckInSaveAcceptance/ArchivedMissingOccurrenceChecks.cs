@@ -2,6 +2,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 
 internal static partial class Program
 {
@@ -75,5 +77,59 @@ internal static partial class Program
             TreeCheck(accepted == expected, "历史缺件实例比对有误：" + mode);
             Console.WriteLine("PASS: archived missing occurrence " + mode);
         }
+        VerifyArchivedOccurrenceReuseAsync(root).GetAwaiter().GetResult();
+    }
+
+    private static async Task VerifyArchivedOccurrenceReuseAsync(string root)
+    {
+        var archive = Path.Combine(root, "PARENT.SLDASM");
+        File.WriteAllText(archive, "archived parent");
+        var plugin = New("PdmAddin");
+        using var lifetime = new CancellationTokenSource();
+        SetField(plugin, "lifetime", lifetime);
+        var document = New("ControlledOpenFileDto");
+        Set(document, "DocumentId", Guid.NewGuid());
+        Set(document, "VersionId", Guid.NewGuid());
+        Set(document, "FileName", Path.GetFileName(archive));
+        Set(document, "FileLength", new FileInfo(archive).Length);
+        Set(document, "Sha256", WorkingReuseHash(archive));
+        var reads = 0;
+        NativeMissingAcquisition.InstallReader(plugin, (_, configuration, __) =>
+        {
+            reads++;
+            return new[] { new NativeMissingAcquisition.Row { Path = Path.Combine(root, "missing.SLDPRT"),
+                Instance = "sensor-1", Configuration = configuration, Suppression = 0 } };
+        });
+        var read = plugin.GetType().GetMethod("ReadVerifiedArchivedOccurrencesAsync", Flags);
+        Task Read(string configuration) => (Task)read.Invoke(plugin, new object[] { document, archive, configuration, null });
+        await Read("Default");
+        await Read("Default");
+        TreeCheck(reads == 1, "同一存档父版本和配置重复启动原生读取器");
+        await Read("Other");
+        TreeCheck(reads == 2, "另一个配置复用了原始配置证据");
+        Set(document, "VersionId", Guid.NewGuid());
+        await Read("Default");
+        TreeCheck(reads == 3, "新版本复用了旧版本证据");
+        File.WriteAllText(archive, "modified parent");
+        try
+        {
+            await Read("Default");
+            throw new InvalidOperationException("缓存命中后接受了被替换的源字节");
+        }
+        catch (IOException) { }
+        TreeCheck(reads == 3, "损坏的原件触发新的原生读取");
+        File.WriteAllText(archive, "archived parent");
+        plugin.GetType().GetMethod("ResetArchivedOccurrenceEvidence", Flags).Invoke(plugin, Array.Empty<object>());
+        await Read("Default");
+        TreeCheck(reads == 4, "重新登录后继续复用了上次证据");
+        lifetime.Cancel();
+        try
+        {
+            await Read("Default");
+            throw new InvalidOperationException("取消的获取操作仍接受缓存证据");
+        }
+        catch (OperationCanceledException) { }
+        TreeCheck(reads == 4, "取消后执行了新的原生读取");
+        Console.WriteLine("PASS: versioned archive occurrence reuse; repeat readers 2 -> 1; config, version, hash, login and cancellation rechecked");
     }
 }

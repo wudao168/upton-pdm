@@ -26,6 +26,7 @@ internal static partial class Program
    File.WriteAllText(record,json.Serialize(new{SchemaVersion=1,FullPath=path,MachineName=Environment.MachineName,ProjectId=project,DocumentId=document,VersionId=version,Revision="W1",Sha256=WorkingReuseHash(path),FileLength=new FileInfo(path).Length}));return record;
   }
   try{
+   await VerifyExistingDependencyHeartbeat(output,Check);
    // One physical source can be independently imported into two projects without
    // overwriting the earlier import's identity or touching the source file.
    var source=Path.Combine(output,"SAME.SLDPRT");File.WriteAllText(source,"all saved configurations and geometry");
@@ -92,7 +93,7 @@ internal static partial class Program
        var decision=TreeCall(plugin,"RegistrationDecisionFor",dependency,null);
        Check((bool)Get(decision,"AllowDuplicateContent"),"辅助来源沿用已确认的独立复制授权，不新增人工确认操作");
        var registered=New("DocumentDto");Set(registered,"Id",targetId);Set(registered,"ProjectId",project);Set(registered,"FileName",Path.GetFileName(step));Set(registered,"Kind",5);Set(registered,"Revision",LinkedRevision("W1"));
-       TreeCall(plugin,"ApplyPreparedDocumentToMatchingInstances",dependency,registered,false);
+       TreeCall(plugin,"ApplyReservedDocumentToMatchingInstances",dependency,registered);
        TreeCallStatic("PdmAddin","SynchronizeBatchFileIdentities",result);
        var captured=TreeCallStatic("PdmApiClient","CaptureArchiveSnapshot",owner,new HashSet<string>{ownerPath,step});
        var graph=json.Serialize(TreeCall(captured,"CreateRoot"));
@@ -107,6 +108,48 @@ internal static partial class Program
    await IndependentImportRecoveredSource(output,Check);
    IndependentImportMaterialization(output,Check);
   }finally{bindings.SetValue(null,oldBindings);resolver.SetValue(null,oldResolver);}
+ }
+
+ static async Task VerifyExistingDependencyHeartbeat(string output,Action<bool,string> check)
+ {
+  var plugin=New("PdmAddin");var session=Guid.NewGuid();var project=Guid.NewGuid();
+  SetField(plugin,"checkoutSessionId",session);SetField(plugin,"authenticatedUsername","tester");
+  var pending=(HashSet<Guid>)Type("PdmAddin").GetField("pendingArchiveDocumentIds",Flags).GetValue(plugin);
+  object Document((Guid Id,string File) source)
+  {
+   var document=New("DocumentDto");Set(document,"Id",source.Id);Set(document,"ProjectId",project);
+   Set(document,"FileName",source.File);Set(document,"Revision",LinkedRevision("W1"));
+   Set(document,"CheckoutSessionId",session);Set(document,"CheckedOutBy","tester");return document;
+  }
+  object Node((Guid Id,string File) source)
+  {
+   var node=New("CadTreeNode");Set(node,"FileName",source.File);Set(node,"FullPath",Path.Combine(output,source.File));return node;
+  }
+  var owner=(Id:Guid.NewGuid(),File:"EXISTING-OWNER.SLDASM");
+  var newFile=(Id:Guid.NewGuid(),File:"NEW-FILE.SLDPRT");
+  TreeCall(plugin,"ApplyPreparedDocumentToMatchingInstances",Node(owner),Document(owner),false);
+  check(!pending.Contains(owner.Id),"单件存档读到已入库的上级装配时，保留其已有会话的续期资格");
+  TreeCall(plugin,"ApplyReservedDocumentToMatchingInstances",Node(newFile),Document(newFile));
+  check(pending.SetEquals(new[]{newFile.Id}),"只有本批新预留的图档被标记为待提交");
+
+  var json=new JavaScriptSerializer();
+  var heartbeat=new TaskCompletionSource<Guid[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+  using var client=(IDisposable)New("PdmApiClient","http://checkout-scope.invalid/");
+  using var lifetime=new CancellationTokenSource();
+  using var http=new HttpClient(new ReferenceRecoveryHandler(request=>{
+   if(request.Method!=HttpMethod.Post||request.RequestUri.AbsolutePath!="/api/edit-sessions/"+session+"/heartbeat")
+    throw new Exception("续期不得登记、检出或修改权限配置");
+   var body=json.Deserialize<Dictionary<string,object>>(request.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+   var ids=((IEnumerable)body["documentIds"]).Cast<string>().Select(Guid.Parse).ToArray();
+   heartbeat.TrySetResult(ids);
+   return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(json.Serialize(new {sessionId=session,serverTime=DateTime.UtcNow}))};
+  })){BaseAddress=new Uri("http://checkout-scope.invalid/")};
+  http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","test");
+  SetField(client,"httpClient",http);SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);
+  TreeCall(plugin,"TryStartCheckoutHeartbeat");
+  var completed=await Task.WhenAny(heartbeat.Task,Task.Delay(TimeSpan.FromSeconds(5)));
+  check(completed==heartbeat.Task&&(await heartbeat.Task).SequenceEqual(new[]{owner.Id}),
+   "真实续期请求只包含仍在编辑的已入库子装配，批次预留仍由提交事务管理");
  }
 
  static object TreeCallStatic(string type,string method,params object[] args)=>Type(type).GetMethod(method,Flags).Invoke(null,args);

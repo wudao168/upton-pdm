@@ -54,6 +54,13 @@ internal static class ControlledReferenceMaterializer
     internal static void Prepare(ISldWorks app, string rootPath, ControlledOpenManifestDto manifest) =>
         PrepareCore(app, rootPath, manifest, false);
 
+    internal static void PrepareWorkingCopyBeforeOpen(ISldWorks app, string rootPath, ControlledOpenManifestDto manifest)
+    {
+        using var retained = new ControlledWorkingCopyScope(rootPath, manifest);
+        using var search = new ControlledReferenceSearchScope(app, rootPath, manifest);
+        Prepare(app, rootPath, manifest);
+    }
+
     internal static void PrepareEditable(ISldWorks app, string rootPath, ControlledOpenManifestDto manifest) =>
         PrepareCore(app, rootPath, manifest, true);
 
@@ -72,6 +79,7 @@ internal static class ControlledReferenceMaterializer
         {
         ControlledOpenBoundary.RequireLoadedSources(app, rootPath, manifest);
         manifest.CompletedReferencePrepasses.Clear();
+        manifest.VerifiedNativePreloads.Clear();
         var directory = Path.GetDirectoryName(Path.GetFullPath(rootPath));
         var files = manifest.Files.ToDictionary(file => file.FileName, StringComparer.OrdinalIgnoreCase);
         var preparationKey = ReferencePreparationKey(directory, manifest);
@@ -158,6 +166,10 @@ internal static class ControlledReferenceMaterializer
             var attributes = File.GetAttributes(owner);
             var backup = Path.Combine(Path.GetDirectoryName(owner), ".ref-" + Guid.NewGuid().ToString("N") + ".bak");
             CopyVerifiedBackup(owner, backup, before);
+            // SOLIDWORKS can report a successful native replacement but retain a
+            // saved path. An existing old work copy can still win during open.
+            var requiredSources = replacements.Where(pair => IsLinkedResource(pair.Key) || IsNative(pair.Key) && File.Exists(pair.Key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
             var keepBackup = false;
             try
             {
@@ -165,17 +177,17 @@ internal static class ControlledReferenceMaterializer
                 foreach (var pair in replacements)
                     if (!app.ReplaceReferencedDocument(owner, pair.Key, pair.Value))
                         throw new IOException("原生接口未完成引用替换：" + file.FileName + " → " + Path.GetFileName(pair.Value));
-                if (replacements.Keys.Any(IsLinkedResource))
+                if (requiredSources.Count > 0)
                 {
                     var verified = app.GetDocumentDependencies2(owner, false, false, false) as Array;
                     if (verified == null || verified.Length % 2 != 0)
-                        throw new IOException("外部来源的受控路径尚未核对完成：" + file.FileName);
+                        throw new IOException("引用来源的受控路径尚未核对完成：" + file.FileName);
                     var paths = Enumerable.Range(0, verified.Length / 2)
                         .SelectMany(index => (Convert.ToString(verified.GetValue(index * 2 + 1)) ?? string.Empty).Split('|')).ToArray();
                     if (paths.Any(path => IsLinkedResource(path) && files.TryGetValue(Path.GetFileName(path), out var target)
                             && !string.Equals(path, LocalPath(directory, target), StringComparison.OrdinalIgnoreCase))
-                        || replacements.Where(pair => IsLinkedResource(pair.Key)).Any(pair => !paths.Contains(pair.Value, StringComparer.OrdinalIgnoreCase)))
-                        throw new IOException("外部来源的受控路径尚未核对完成：" + file.FileName);
+                        || requiredSources.Any(pair => !MatchesReferencePath(paths, pair.Value)))
+                        throw new IOException("引用替换后的实际路径尚未与受控清单一致：" + file.FileName);
                 }
                 if (unchanged && !PdmDocumentIdentityStore.TryRecordResolvedReferences(owner, baseline, ArchiveFileFingerprint.Read(owner)))
                     throw new IOException("引用已定位，但无法记录本地副本校验信息：" + file.FileName);
@@ -206,11 +218,15 @@ internal static class ControlledReferenceMaterializer
                     throw new IOException("引用定位未完成，当前工作副本仍被占用或无法恢复，未继续打开：" + file.FileName
                         + "。完整恢复副本已保留：" + backup, new AggregateException(error, recoveryError));
                 }
-                if (replacements.Keys.Any(IsLinkedResource) && !ResolvesControlledSources(app, owner, replacements, files, directory))
-                    throw new IOException("外部来源引用未能安全定位到PLM工作区，已恢复原副本，未加载原目录来源：" + file.FileName, error);
-                if (replacements.Keys.Any(IsLinkedResource))
+                if (requiredSources.Count > 0 && !ResolvesControlledSources(app, owner, requiredSources, files, directory))
+                    throw new IOException("引用来源未能安全定位到PLM工作区，已恢复原副本，未加载原目录来源：" + file.FileName, error);
+                if (requiredSources.Count > 0)
                 {
-                    PluginDiagnosticLog.Record("受控来源定位", file.FileName + "：引用替换接口未支持此来源，已恢复原副本并核对受控搜索结果；原有关联保留。");
+                    var nativeTargets = requiredSources.Values.Where(path => NativeModelType(path) != 0
+                        && !string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (nativeTargets.Length > 0)
+                        manifest.VerifiedNativePreloads.Add(owner, new HashSet<string>(nativeTargets, StringComparer.OrdinalIgnoreCase));
+                    PluginDiagnosticLog.Record("受控来源定位", file.FileName + "：替换结果未能确认，已恢复原副本并核对受控搜索结果；原有关联保留。");
                     continue;
                 }
                 PluginDiagnosticLog.Record("引用重定位", file.FileName + "：已恢复原始副本，将尝试原生打开并核对实际来源：" + error);
@@ -221,13 +237,68 @@ internal static class ControlledReferenceMaterializer
                 if (!keepBackup) File.Delete(backup);
             }
         }
-        // F25/F26: no speculative OpenDoc/Save3, BreakLink or virtual externalization.
-        // The actual user-requested open performs the loaded-source verification.
+        // Preparation never opens or saves models. The user-requested open verifies actual sources.
         }
         finally
         {
             PluginDiagnosticLog.Record("引用准备耗时", Path.GetFileName(rootPath) + "；文件数=" + manifest.Files.Count
                 + "；复用已核对引用=" + reused + "；耗时=" + elapsed.ElapsedMilliseconds + "毫秒");
+        }
+    }
+
+    internal static void PreloadVerifiedNativeSources(ISldWorks app, string rootPath, ControlledOpenManifestDto manifest,
+        Func<string, int, IModelDoc2> openReadOnly)
+    {
+        if (manifest.VerifiedNativePreloads.Count == 0) return;
+        if (!ControlledOpenBoundary.IsActive) throw new InvalidOperationException("预加载引用须在PLM受控打开范围内进行。");
+        var directory = Path.GetDirectoryName(Path.GetFullPath(rootPath));
+        var files = manifest.Files.ToDictionary(file => ManifestPath(directory, file), StringComparer.OrdinalIgnoreCase);
+        var pending = new HashSet<string>(manifest.VerifiedNativePreloads.Values.SelectMany(paths => paths), StringComparer.OrdinalIgnoreCase);
+        var visiting = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var toolboxBrowser = new Lazy<string>(() => SolidWorksToolboxPaths.BrowserDirectory(app));
+        foreach (var path in pending.OrderBy(NativeModelType).ThenBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray())
+            Load(path);
+
+        void Load(string path)
+        {
+            if (!pending.Contains(path) || !visiting.Add(path)) return;
+            if (manifest.VerifiedNativePreloads.TryGetValue(path, out var references))
+                foreach (var reference in references) Load(reference);
+            visiting.Remove(path);
+            pending.Remove(path);
+
+            var type = NativeModelType(path);
+            if (type == 0 || !files.TryGetValue(path, out var file) || !Matches(path, file))
+                throw new IOException("预加载引用未通过PLM工作副本校验，已停止打开：" + Path.GetFileName(path));
+            ControlledOpenBoundary.RequireLoadedSources(app, rootPath, manifest);
+            var openPaths = ((app.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+                .Select(model => model.GetPathName()).ToArray();
+            if (openPaths.Contains(path, StringComparer.OrdinalIgnoreCase)) return;
+            var existingToolbox = openPaths.FirstOrDefault(actual => !file.IsRoot
+                && string.Equals(Path.GetFileName(actual), file.FileName, StringComparison.OrdinalIgnoreCase)
+                && SolidWorksToolboxPaths.IsBrowserPart(actual, toolboxBrowser.Value));
+            if (existingToolbox != null)
+            {
+                PluginDiagnosticLog.Record("Toolbox引用提醒", "保留已打开的本机标准件，后续核对实际来源：" + existingToolbox);
+                return;
+            }
+
+            var loaded = openReadOnly(path, type);
+            if (loaded == null || !string.Equals(loaded.GetPathName(), path, StringComparison.OrdinalIgnoreCase)
+                || !loaded.IsOpenedReadOnly() || !Matches(path, file))
+                throw new IOException("SolidWorks预加载的引用与PLM清单不一致，已停止打开：" + file.FileName);
+            ControlledOpenBoundary.RequireLoadedSources(app, rootPath, manifest);
+            PluginDiagnosticLog.Record("受控引用预加载", "已只读加载并核对PLM版本：" + path);
+        }
+    }
+
+    private static int NativeModelType(string path)
+    {
+        switch (Path.GetExtension(path).ToUpperInvariant())
+        {
+            case ".SLDPRT": return (int)swDocumentTypes_e.swDocPART;
+            case ".SLDASM": return (int)swDocumentTypes_e.swDocASSEMBLY;
+            default: return 0;
         }
     }
 
@@ -243,14 +314,12 @@ internal static class ControlledReferenceMaterializer
             if (values == null || values.Length % 2 != 0) return false;
             var paths = Enumerable.Range(0, values.Length / 2)
                 .SelectMany(index => (Convert.ToString(values.GetValue(index * 2 + 1)) ?? string.Empty).Split('|')).ToArray();
-            foreach (var pair in replacements.Where(pair => IsLinkedResource(pair.Key)))
+            foreach (var pair in replacements)
             {
                 if (!files.TryGetValue(Path.GetFileName(pair.Value), out var file)
                     || !string.Equals(pair.Value, LocalPath(directory, file), StringComparison.OrdinalIgnoreCase)
                     || !Matches(pair.Value, file)
-                    || !paths.Contains(pair.Value, StringComparer.OrdinalIgnoreCase)
-                    || paths.Any(path => string.Equals(Path.GetFileName(path), file.FileName, StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(path, pair.Value, StringComparison.OrdinalIgnoreCase))) return false;
+                    || !MatchesReferencePath(paths, pair.Value)) return false;
             }
             return true;
         }
@@ -260,6 +329,11 @@ internal static class ControlledReferenceMaterializer
             return false;
         }
     }
+
+    private static bool MatchesReferencePath(string[] paths, string expected) =>
+        paths.Contains(expected, StringComparer.OrdinalIgnoreCase)
+        && !paths.Any(path => string.Equals(Path.GetFileName(path), Path.GetFileName(expected), StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(path, expected, StringComparison.OrdinalIgnoreCase));
 
     internal static bool IsLinkedResource(string path) => new[] { ".txt", ".xls", ".xlsx", ".xlsm", ".step", ".stp", ".iges", ".igs",
         ".x_t", ".x_b", ".sat", ".stl", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".slddrt" }
@@ -336,18 +410,21 @@ internal static class ControlledReferenceMaterializer
         return path;
     }
 
-    internal static void CopyResolvedBinding(string source, string target)
+    internal static void CopyResolvedBinding(string source, string target) =>
+        RecordCopiedReferences(source, target, workspaceCopy: false);
+
+    internal static void CopyWorkspaceResolvedBinding(string source, string target) =>
+        RecordCopiedReferences(source, target, workspaceCopy: true);
+
+    private static void RecordCopiedReferences(string source, string target, bool workspaceCopy)
     {
         if (!PdmDocumentIdentityStore.TryReadLocalMetadata(source, out var baseline)
             || !baseline.VersionId.HasValue || string.IsNullOrWhiteSpace(baseline.ResolvedReferenceSha256)) return;
         var hash = ArchiveFileFingerprint.Read(target);
         if (!string.Equals(hash, baseline.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase)) return;
-        if (!PdmDocumentIdentityStore.TryWriteControlledVersion(target, baseline.DocumentId, baseline.ProjectId,
-            baseline.VersionId.Value, baseline.Revision, baseline.Sha256, baseline.FileLength ?? new FileInfo(source).Length)
-            || !PdmDocumentIdentityStore.TryReadLocalMetadata(target, out var copied)
-            || !(baseline.NativeIsolationSnapshotId.HasValue
-                ? PdmDocumentIdentityStore.TryRecordNativeIsolation(target, copied, baseline.NativeIsolationSnapshotId.Value, hash)
-                : PdmDocumentIdentityStore.TryRecordResolvedReferences(target, copied, hash)))
+        if (!PdmDocumentIdentityStore.TryWriteVersionBinding(target, baseline.DocumentId, baseline.ProjectId,
+            baseline.VersionId.Value, baseline.Revision, baseline.Sha256, baseline.FileLength ?? new FileInfo(source).Length,
+            workspaceCopy, hash, baseline.NativeIsolationSnapshotId ?? Guid.Empty))
             throw new IOException("工作副本引用校验记录未能保存：" + Path.GetFileName(target));
     }
 }

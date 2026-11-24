@@ -16,7 +16,9 @@ public sealed partial class PdmAddin
         var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var restore = new List<Action>();
         var inventories = new Dictionary<string, Tuple<string[], string[]>>(StringComparer.OrdinalIgnoreCase);
+        var identicalCopies = new Dictionary<(string Source, string Copy), bool>();
         var visited = new HashSet<CadTreeNode>();
+        var rootDirectory = root == null ? null : Path.GetDirectoryName(root.FullPath);
         var context = controlledOpenManifests.FirstOrDefault(pair => root != null && IsPathWithinDirectory(root.FullPath, pair.Key));
         var known = context.Value?.Files.ToDictionary(file => file.FileName, StringComparer.OrdinalIgnoreCase);
         Tuple<string[], string[]> Inventory(CadTreeNode owner)
@@ -39,6 +41,35 @@ public sealed partial class PdmAddin
                     throw new InvalidOperationException("存档引用核对后未能恢复SolidWorks原工作目录，请重试；原图档未改写。");
             }
         }
+        string FindVerifiedLocalPeer(CadTreeNode node, CadTreeNode owner, string source)
+        {
+            // An unmanaged assembly can be copied while its old directory is still reachable.
+            // Keep both discovery passes on the same local bytes without rebinding PLM identities.
+            if (string.IsNullOrWhiteSpace(rootDirectory) || !IsPathWithinDirectory(owner.FullPath, rootDirectory)
+                || node.DocumentId.HasValue || node.IsModifiedInSolidWorks || node.IsRenamePendingSave
+                || PdmDocumentIdentityStore.IsControlledWorkspacePath(owner.FullPath)) return null;
+            var peer = Path.Combine(Path.GetDirectoryName(owner.FullPath), Path.GetFileName(source));
+            if (PathsEqual(source, peer) || !File.Exists(peer)
+                || PdmDocumentIdentityStore.TryReadLocalMetadata(source, out _)
+                || PdmDocumentIdentityStore.TryReadLocalMetadata(peer, out _)) return null;
+            if (!PathsEqual(node.SourceReferencePath, source) && !Inventory(owner).Item1.Any(path => PathsEqual(path, source)))
+                return null;
+            var key = (source.ToUpperInvariant(), peer.ToUpperInvariant());
+            if (!identicalCopies.TryGetValue(key, out var matches))
+            {
+                try
+                {
+                    matches = new FileInfo(source).Length == new FileInfo(peer).Length
+                        && string.Equals(ArchiveFileFingerprint.Read(source), ArchiveFileFingerprint.Read(peer), StringComparison.OrdinalIgnoreCase);
+                }
+                catch (IOException) { matches = false; }
+                catch (UnauthorizedAccessException) { matches = false; }
+                identicalCopies.Add(key, matches);
+            }
+            if (!matches || FindLoadedDocument(source)?.GetSaveFlag() == true || FindLoadedDocument(peer)?.GetSaveFlag() == true)
+                return null;
+            return peer;
+        }
         void Visit(CadTreeNode node, CadTreeNode owner)
         {
             if (node == null || !visited.Add(node)) return;
@@ -51,13 +82,17 @@ public sealed partial class PdmAddin
             }
             if (owner != null && node.Role != CadReferenceRole.ExternalFileDependency
                 && node.Status != CadReferenceStatus.Virtual && !node.IsStoredImport
-                && !string.IsNullOrWhiteSpace(node.FullPath) && (controlledPath != null || !File.Exists(node.FullPath))
+                && !string.IsNullOrWhiteSpace(node.FullPath)
                 && !NativeArchiveManifest.IsInterconnectCachePath(node.FullPath)
                 && !IsSolidWorksTemporaryVirtualComponentPath(node.FullPath) && File.Exists(owner.FullPath))
             {
                 var old = node.FullPath;
                 var actual = controlledPath;
-                if (actual == null)
+                if (actual == null && File.Exists(old))
+                {
+                    actual = FindVerifiedLocalPeer(node, owner, old);
+                }
+                else if (actual == null)
                 {
                     var inventory = Inventory(owner);
                     var matches = inventory.Item2.Where(path => string.Equals(Path.GetFileName(path), node.FileName, StringComparison.OrdinalIgnoreCase)).ToArray();

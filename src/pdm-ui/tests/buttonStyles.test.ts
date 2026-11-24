@@ -73,6 +73,21 @@ it('keeps deletion confirmations red and standard-library inclusion green', () =
   expect([...document.querySelectorAll('button')].map(button => button.dataset.pdmButtonKind)).toEqual(['delete', 'delete', 'add', 'confirm', 'add'])
 })
 
+it('识别删除、编辑和更多操作，保留原有文字及可访问名称', async () => {
+  install('<button>批量删除</button><button class="pdm-text-action">编辑</button><button aria-expanded="false">更多操作</button><div class="pdm-row-actions"><button class="pdm-project-action-trigger" aria-label="操作项目P1">操作</button><button>更多操作</button></div><button>清空筛选</button>')
+  const buttons = [...document.querySelectorAll('button')]
+  expect(buttons.map(button => button.dataset.pdmActionIcon)).toEqual(['delete', 'edit', undefined, 'more', 'more', undefined])
+  expect(buttons[0]!.textContent).toBe('批量删除')
+  expect(buttons[1]!.title).toBe('编辑')
+  expect(buttons[2]!.textContent).toBe('更多操作')
+  expect(buttons[2]!.dataset.pdmButtonKind).toBe('outline')
+  expect(buttons[3]!.getAttribute('aria-label')).toBe('操作项目P1')
+  buttons[1]!.textContent = '查看'
+  await settle()
+  expect(buttons[1]!.dataset.pdmActionIcon).toBeUndefined()
+  expect(buttons[1]!.title).toBe('')
+})
+
 it('preserves Vue-owned nodes, click handlers and disabled pending states', async () => {
   const pending = ref(false)
   const clicks = ref(0)

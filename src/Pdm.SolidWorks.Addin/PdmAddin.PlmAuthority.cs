@@ -39,9 +39,10 @@ public sealed partial class PdmAddin
             return await AcquireLatestAndCheckoutAsync(initial, projectId, registrationDecisions);
         var ids = stored.Select(item => item.Node.DocumentId.Value).Distinct().ToArray();
         var rootId = ids[0];
-        if (currentTree?.DocumentId.HasValue == true
-            && (await apiClient.GetVersionsAsync(currentTree.DocumentId.Value, lifetime.Token, 1)).Count > 0)
-            rootId = currentTree.DocumentId.Value;
+        var activeRootId = currentTree?.DocumentId;
+        if (activeRootId.HasValue && (ids.Contains(activeRootId.Value)
+            || (await apiClient.GetVersionsAsync(activeRootId.Value, lifetime.Token, 1)).Count > 0))
+            rootId = activeRootId.Value;
         if (MarkCacheOperationBusy(ref controlledOpenInProgress) != 0)
             throw new InvalidOperationException("已有PLM图档正在准备，请等待当前操作结束。");
         var reused = false;
@@ -248,6 +249,13 @@ public sealed partial class PdmAddin
             {
                 var model = FindLoadedDocument(window.Path);
                 if (model == null) continue;
+                // A concurrent user/native Large Design Review open can enter the
+                // prepared directory. Our controlled open never requests that mode.
+                if (IsAssemblyInLargeDesignReview(model))
+                {
+                    LogOperation("获取回滚保留大型设计审阅窗口：" + window.Path);
+                    continue;
+                }
                 if (hasDirtyIntroducedDocument || model.GetSaveFlag()) throw new IOException("本次打开的副本已有未保存内容，已保留该窗口，请核对后恢复原工作窗口。");
                 if (string.IsNullOrWhiteSpace(window.Title) || models.Any(other => string.Equals(other.Title, window.Title,
                     StringComparison.OrdinalIgnoreCase) && !PathsEqual(other.Path, window.Path)))

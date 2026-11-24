@@ -60,7 +60,9 @@ internal static class NativeDesignDependencies
         ICollection<ContextOwner> contextOwners = null, ISet<string> unverified = null)
     {
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (model == null || model.GetType() == (int)swDocumentTypes_e.swDocDRAWING) return paths.ToArray();
+        if (model == null) return paths.ToArray();
+        var documentType = model.GetType();
+        if (documentType == (int)swDocumentTypes_e.swDocDRAWING) return paths.ToArray();
         model.Extension.ListExternalFileReferences2(out var models, out var components, out var features,
             out var types, out var statuses, out var entities, out var owners, out var options, out var configurations);
         var references = models as Array;
@@ -100,18 +102,18 @@ internal static class NativeDesignDependencies
             paths.Add(table.FileName);
         if (includeLocked)
         {
-            var featureInventory = ArchiveSmartComponentLinks.Features(model).ToArray();
-            var importedSources = ImportSources(featureInventory).ToArray();
+            var featureInventory = ArchiveSmartComponentLinks.ReadFeatureInventory(model);
+            var importedSources = ImportSources(featureInventory.Select(entry => entry.Feature)).ToArray();
             paths.UnionWith(importedSources);
             var mirroredPartSources = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var feature in featureInventory)
+            foreach (var entry in featureInventory)
             {
-                var type = feature.GetTypeName2();
-                if (type == "LibraryFeature" && feature.GetDefinition() is ILibraryFeatureData library
+                var type = entry.Type;
+                if (type == "LibraryFeature" && entry.Feature.GetDefinition() is ILibraryFeatureData library
                     && library.LinkToLibraryPart && !string.IsNullOrWhiteSpace(library.LibraryPart)) paths.Add(library.LibraryPart);
-                if (unverified != null && type == "MirrorStock" && feature.GetDefinition() is IMirrorPartFeatureData mirror
+                if (unverified != null && type == "MirrorStock" && entry.Feature.GetDefinition() is IMirrorPartFeatureData mirror
                     && string.Equals(Path.GetExtension(mirror.PathName), ".SLDPRT", StringComparison.OrdinalIgnoreCase))
-                    mirroredPartSources.Add(feature.Name);
+                    mirroredPartSources.Add(entry.Name);
             }
             if (unverified != null && references != null && mirroredPartSources.Count != 0)
             {
@@ -134,14 +136,14 @@ internal static class NativeDesignDependencies
                 possible.ExceptWith(importedSources);
                 foreach (var path in possible) { ordinary?.Remove(path); unverified.Add(path); }
             }
-            if (unverified != null && references != null && model.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY)
+            if (unverified != null && references != null && documentType == (int)swDocumentTypes_e.swDocASSEMBLY)
             {
                 // The assembly API aggregates child-part references, including
                 // MirrorStock plane rows with an empty FeatCom. An aggregate row
                 // whose feature is absent from this file does not prove that the
                 // assembly itself depends on that document. Retain the path as
                 // unverified; do not invent a context or remove a physical link.
-                var ownFeatures = new HashSet<string>(featureInventory.Select(feature => feature.Name), StringComparer.Ordinal);
+                var ownFeatures = new HashSet<string>(featureInventory.Select(entry => entry.Name), StringComparer.Ordinal);
                 var possible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var explicitOrdinary = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (var i = 0; i < references.Length; i++)
@@ -241,6 +243,11 @@ internal static class NativeDesignDependencies
             }
             if (known.Contains(path) || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(path)
                 || NativeArchiveManifest.IsInterconnectCachePath(path)) continue;
+            var extension = Path.GetExtension(path);
+            // Pack and Go can enumerate drawings from a search directory. The
+            // drawing scan already attached the drawings with a verified model
+            // relationship. An unattached hit cannot become a model dependency.
+            if (extension.Equals(".SLDDRW", StringComparison.OrdinalIgnoreCase)) continue;
             if (!File.Exists(path))
             {
                 root.UnmanagedReferences.Add(source);
@@ -248,10 +255,8 @@ internal static class NativeDesignDependencies
                 continue;
             }
             known.Add(path);
-            var extension = Path.GetExtension(path);
             var kind = extension.Equals(".SLDASM", StringComparison.OrdinalIgnoreCase) ? CadDocumentKind.Assembly
-                : extension.Equals(".SLDPRT", StringComparison.OrdinalIgnoreCase) ? CadDocumentKind.Part
-                : extension.Equals(".SLDDRW", StringComparison.OrdinalIgnoreCase) ? CadDocumentKind.Drawing : CadDocumentKind.Other;
+                : extension.Equals(".SLDPRT", StringComparison.OrdinalIgnoreCase) ? CadDocumentKind.Part : CadDocumentKind.Other;
             root.Children.Add(new CadTreeNode
             {
                 FullPath = path, SourceReferencePath = source, FileName = Path.GetFileName(path),

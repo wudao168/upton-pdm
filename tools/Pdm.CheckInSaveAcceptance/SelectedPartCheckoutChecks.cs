@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 
 internal static partial class Program
 {
-    static async Task SelectedPartCheckoutScenario(string output)
+    static async Task SelectedPartCheckoutScenario(string output, bool compactWorkspace = false)
     {
         output = Path.GetFullPath(output);
         var identity = Type("PdmDocumentIdentityStore");
@@ -29,11 +29,12 @@ internal static partial class Program
             {
                 var subassembly = mode.StartsWith("subassembly-", StringComparison.Ordinal);
                 var allowed = mode is "unloaded" or "subassembly-unloaded" or "subassembly-loaded";
-                var folder = Path.Combine(output, "View", mode);
-                Directory.CreateDirectory(folder);
                 var bytes = Encoding.UTF8.GetBytes("verified disk content");
                 var manifest = SpeedManifest("上层总装.SLDASM", bytes);
                 var project = (Guid)Get(manifest, "ProjectId");
+                var folder = compactWorkspace ? (string)TreeCallStatic("ManagedCadPaths", "CompactDirectory", output, "w",
+                    project + "|" + Get(manifest, "RootDocumentId"), Get(manifest, "ProjectCode")) : Path.Combine(output, "View", mode);
+                Directory.CreateDirectory(folder);
                 Set(manifest, "ForEdit", true);
                 var files = (IList)Get(manifest, "Files");
                 while (files.Count > 3) files.RemoveAt(files.Count - 1);

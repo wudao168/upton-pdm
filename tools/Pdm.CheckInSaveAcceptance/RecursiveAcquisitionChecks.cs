@@ -81,23 +81,39 @@ internal static partial class Program
                 var managed = mode.StartsWith("managed-", StringComparison.Ordinal) || mode == "extra-managed-instance";
                 var oldPath = Path.Combine(output, "原存档目录", managed ? (string)Get(part, "FileName") : "历史夹具.SLDASM");
                 var midOldPath = Path.Combine(output, "原存档目录", "中层历史夹具.SLDPRT");
-                object Component(string path, object model, string configuration, int state, Func<object[]> children = null) =>
+                string Instance(string path,int ordinal) => Path.GetFileNameWithoutExtension(path)+"-"+ordinal;
+                NativeMissingAcquisition.InstallReader(plugin,(source,configuration,sha) =>
+                {
+                    var fileName=Path.GetFileName(source);
+                    var owner=nodes.Single(node => (string)Get(node,"FileName")==fileName);
+                    var working=(string)Get(owner,"FullPath");
+                    if (original.ContainsKey(source) || !string.Equals(WorkingReuseHash(working),sha,StringComparison.OrdinalIgnoreCase)
+                        || configuration!="Default" && !(mode=="multiple-configurations" && owner==inner && configuration=="Alternate"))
+                        throw new InvalidOperationException("原生读取未使用指定父版本的独立副本和配置");
+                    if (owner!=inner && !(owner==mid && mode=="multiple-owners"))
+                        throw new InvalidOperationException("不应读取此父项的历史缺件实例");
+                    var stored=owner==mid?midOldPath:oldPath;
+                    return new[]{new NativeMissingAcquisition.Row{Path=stored,Instance=Instance(stored,1),Configuration="Default",Suppression=0}};
+                });
+                object Component(string path, object model, string configuration, int state, Func<object[]> children = null,int ordinal = 1) =>
                     new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2", true), call =>
                     {
                         switch (call.MethodName)
                         {
                             case "GetPathName": return path;
+                            case "get_Name2": return Instance(path,ordinal);
                             case "GetModelDoc2": return model;
                             case "get_ReferencedConfiguration": return configuration;
                             case "get_IsVirtual": return false;
-                            case "GetSuppression": return state;
-                            case "IsSuppressed": return state == 0;
+                            case "GetSuppression":
+                            case "GetSuppression2": return state;
+                            case "IsSuppressed": return state == 0 || state == 1 || state == 4;
                             case "GetChildren": return children?.Invoke() ?? Array.Empty<object>();
                             default: throw new Exception("不能修改实例：" + call.MethodName);
                         }
                     }).GetTransparentProxy();
-                object Known(object node, Func<object[]> children = null, string configuration = "Default") =>
-                    Component((string)Get(node, "FullPath"), models[(Guid)Get(node, "DocumentId")], configuration, 2, children);
+                object Known(object node, Func<object[]> children = null, string configuration = "Default",int ordinal=1) =>
+                    Component((string)Get(node, "FullPath"), models[(Guid)Get(node, "DocumentId")], configuration, 2, children,ordinal);
                 object[] InnerChildren(string configuration = "Default")
                 {
                     var result = new List<object> { Known(peer) };
@@ -109,14 +125,14 @@ internal static partial class Program
                         result.Add(Component(oldPath, null, "Default", state));
                     }
                     if (mode == "extra-managed-instance" || mode == "instance-race" && changedDuringCheckout)
-                        result.Add(Component(oldPath, null, "Default", state));
-                    if (mode == "unselected-insertion") result.Add(Known(peer));
+                        result.Add(Component(oldPath, null, "Default", state,ordinal:2));
+                    if (mode == "unselected-insertion") result.Add(Known(peer,ordinal:2));
                     return result.ToArray();
                 }
                 object[] MidChildren()
                 {
                     var rows = new List<object> { Known(inner, () => InnerChildren()) };
-                    if (multiple) rows.Add(Known(inner, () => InnerChildren("Alternate"), mode == "multiple-configurations" ? "Alternate" : "Default"));
+                    if (multiple) rows.Add(Known(inner, () => InnerChildren("Alternate"), mode == "multiple-configurations" ? "Alternate" : "Default",2));
                     if (mode == "multiple-owners") rows.Add(Component(midOldPath, null, "Default", 0));
                     return rows.ToArray();
                 }

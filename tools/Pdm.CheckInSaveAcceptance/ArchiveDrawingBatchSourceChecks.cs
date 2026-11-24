@@ -13,7 +13,8 @@ internal static partial class Program
         var errors = new List<string>();
         foreach (var mode in new[] { "inserted", "nested", "subassembly-drawing", "unchecked", "other-copy", "same-name-same-bytes", "other-drawing-model", "ordinary-open",
             "unconfirmed-path", "other-session", "external-dependency", "unrelated-selected", "not-native-child", "unregistered-title",
-            "missing-edit-record", "edited-other-copy", "registered-version", "other-project", "changed-after-preflight" })
+            "missing-edit-record", "edited-other-copy", "registered-version", "other-project", "changed-after-preflight",
+            "other-root-preflight-version", "root-changed-since-confirmation" })
         {
             try { CheckDrawingBatchSources(Path.GetFullPath(Path.Combine(output, mode)), mode); }
             catch (Exception error) { errors.Add(mode + ": " + error); }
@@ -50,6 +51,7 @@ internal static partial class Program
             Set(file, "FileName", Get(original, "FileName")); Set(file, "RelativePath", Get(original, "FileName"));
             Set(file, "Sha256", WorkingReuseHash(PathOf(original))); Set(file, "FileLength", new FileInfo(PathOf(original)).Length);
             Set(file, "IsRoot", original == root);
+            if (original == root) Set(manifest, "RootVersionId", Get(file, "VersionId"));
             files.Add(file);
         }
         Set(manifest, "Files", files);
@@ -148,10 +150,19 @@ internal static partial class Program
         try
         {
             var effective = BuildBatchDrawingSourceContext(plugin, manifest, folder, drawing, selected, added, project, mode);
+            if (mode == "inserted" || nested || mode == "other-root-preflight-version" || mode == "root-changed-since-confirmation")
+            {
+                var hashes = (IDictionary)Get(effective, "RetainedWorkingHashes");
+                var id = Get(root, "DocumentId");
+                var expected = mode == "inserted" || nested;
+                TreeCheck(expected ? Equals(hashes[id], WorkingReuseHash(PathOf(root))) : !hashes.Contains(id),
+                    "受控根版本及当前检出会话的存档预检证据不正确：" + mode);
+                TreeCheck(((IDictionary)Get(manifest, "RetainedWorkingHashes")).Count == 0, "工程图预检污染原清单");
+            }
             TreeCallStatic("PdmAddin", "ValidateControlledLoadedSources", modelDrawing, PathOf(drawing), effective, application, new HashSet<string>(), true);
         }
         catch (TargetInvocationException error) { failure = error.InnerException; }
-        var accepted = mode == "inserted" || nested;
+        var accepted = mode == "inserted" || nested || mode == "other-root-preflight-version" || mode == "root-changed-since-confirmation";
         var contentChanged = mode == "changed-after-preflight" && scans == 0 && failure is InvalidOperationException
             && failure.Message.Contains("存档确认后发生变化") && failure.Message.Contains(PathOf(added));
         TreeCheck(scans == 1 || contentChanged, "工程图实际模型引用未经核验");
@@ -175,7 +186,17 @@ internal static partial class Program
         var factory = Type("PdmAddin").GetMethod("CreateArchiveDrawingManifest", Flags);
         // Running the same test against an installed older add-in exercises its server-only context.
         if (factory==null || mode=="ordinary-open") return manifest;
-        var plan=New("PdmAddin+BatchCheckInPlan",LinkedItems(selected),0,null);
+        var rootPath = Path.Combine(folder, (string)Get(manifest, "RootRelativePath"));
+        var version = New("DocumentVersionDto");
+        Set(version, "DocumentId", Get(manifest, "RootDocumentId"));
+        Set(version, "Id", mode == "other-root-preflight-version" ? Guid.NewGuid() : Get(manifest, "RootVersionId"));
+        var versions = Array.CreateInstance(Type("DocumentVersionDto"), 1);
+        versions.SetValue(version, 0);
+        var proof = TreeCallStatic("PdmAddin+BatchCheckInPreflight", "Create", rootPath, versions, WorkingReuseHash(rootPath));
+        var proofs = (IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(string), proof.GetType()), StringComparer.OrdinalIgnoreCase);
+        proofs.Add(rootPath, proof);
+        if (mode == "root-changed-since-confirmation") File.AppendAllText(rootPath, " concurrent change");
+        var plan=New("PdmAddin+BatchCheckInPlan",LinkedItems(selected),0,proofs);
         var decisionType=Type("PdmAddin+RegistrationDecision");
         var decisions=(IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(string),decisionType),StringComparer.OrdinalIgnoreCase);
         var path=(string)Get(added,"FullPath");

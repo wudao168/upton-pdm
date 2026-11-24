@@ -48,25 +48,28 @@ public sealed partial class PdmAddin
             .SelectMany(file => editJournal.ReadDocument(file.DocumentId)).ToArray();
         var backup = await Task.Run(() =>
         {
-            var result = controlledWorkspace.BackupWorkingConflicts(manifest, conflict, lifetime.Token);
+            const string editRecoveryManifest = "edit-recovery.json";
+            var draftFiles = records.Where(entry => !string.IsNullOrWhiteSpace(entry.DraftPath) && File.Exists(entry.DraftPath))
+                .Select(entry => new { Source = entry.DraftPath, RelativePath = "drafts/" + entry.SessionId.ToString("N")
+                    + "-" + entry.DocumentId.ToString("N") + Path.GetExtension(entry.DraftPath) }).ToArray();
+            var editRecoveryPaths = draftFiles.Select(file => file.RelativePath).Append(editRecoveryManifest).ToArray();
+            var result = controlledWorkspace.BackupWorkingConflicts(manifest, conflict, lifetime.Token, editRecoveryPaths);
             var drafts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var draftHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var entry in records.Where(entry => !string.IsNullOrWhiteSpace(entry.DraftPath)))
+            foreach (var draft in draftFiles)
             {
                 lifetime.Token.ThrowIfCancellationRequested();
-                if (!File.Exists(entry.DraftPath)) continue; // Keep its record; do not claim the absent draft was recovered.
-                var expected = ComputeFileHash(entry.DraftPath);
-                var relative = "drafts/" + entry.SessionId.ToString("N") + "-" + entry.DocumentId.ToString("N") + Path.GetExtension(entry.DraftPath);
-                var path = Path.Combine(result.RecoveryDirectory, relative);
+                var expected = ComputeFileHash(draft.Source);
+                var path = ManagedCadPaths.Resolve(result.RecoveryDirectory, draft.RelativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                using (var input = new FileStream(entry.DraftPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var input = new FileStream(draft.Source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)) input.CopyTo(output);
-                if (ComputeFileHash(path) != expected || ComputeFileHash(entry.DraftPath) != expected)
+                if (ComputeFileHash(path) != expected || ComputeFileHash(draft.Source) != expected)
                     throw new IOException("草稿备份内容发生变化，原文件和草稿均已保留，未更新工作区。");
-                drafts[entry.DraftPath] = relative;
-                draftHashes[entry.DraftPath] = expected;
+                drafts[draft.Source] = draft.RelativePath;
+                draftHashes[draft.Source] = expected;
             }
-            File.WriteAllText(Path.Combine(result.RecoveryDirectory, "edit-recovery.json"),
+            File.WriteAllText(ManagedCadPaths.Resolve(result.RecoveryDirectory, editRecoveryManifest),
                 new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }.Serialize(new { records, drafts, draftHashes }), System.Text.Encoding.UTF8);
             result.PreservedEdits = records;
             return result;

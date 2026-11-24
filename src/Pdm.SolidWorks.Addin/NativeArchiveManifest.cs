@@ -29,7 +29,8 @@ internal static class NativeArchiveManifest
                     && !SuppressedAssemblyLocalStructure.CanUse(node);
             // A saved path outside the package is not another mandatory upload.
             // Keep the visible node for diagnosis, but never manufacture its identity.
-            node.IsOutsideNativeFileScope = node.ConfirmedArchivePaths != null && !node.ConfirmedArchivePaths.Contains(node.FullPath) && node.IsOutsideNativeFileScope
+            node.IsOutsideNativeFileScope = node.IsUnverifiedToolboxFallback
+                || node.ConfirmedArchivePaths != null && !node.ConfirmedArchivePaths.Contains(node.FullPath) && node.IsOutsideNativeFileScope
                 || node != root && node.Status != CadReferenceStatus.Virtual && !File.Exists(node.FullPath) && !listed.Contains(node.FullPath);
             foreach (var child in node.Children) Confirm(child);
             foreach (var model in node.ReferencedModels) Confirm(model);

@@ -3,10 +3,10 @@ import { computed } from 'vue'
 import { isDepartmentName } from '../departmentLabels'
 import { nameColorHue } from '../nameColorHue'
 
-const props = withDefaults(defineProps<{ name?: string | null; names?: readonly string[]; fallback?: string; separator?: string; plain?: boolean }>(), { fallback: '—', separator: '、' })
+const props = withDefaults(defineProps<{ name?: string | null; names?: readonly string[]; fallback?: string; separator?: string; plain?: boolean; highlight?: boolean }>(), { fallback: '—', separator: '、' })
 const labels = computed(() => (props.names?.length ? props.names : [props.name || props.fallback]).map(text => ({
   text,
-  hue: !props.plain && isDepartmentName(text) ? nameColorHue(text.trim().normalize('NFC').toLowerCase()) : null,
+  hue: !props.plain && (props.highlight || isDepartmentName(text)) ? nameColorHue(text.trim().normalize('NFC').toLowerCase()) : null,
 })))
 </script>
 

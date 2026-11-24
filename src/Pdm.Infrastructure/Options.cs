@@ -9,6 +9,8 @@ public sealed class PdmDatabaseOptions
     public string ConnectionString { get; set; } = string.Empty;
 
     public bool RunMigrations { get; set; } = true;
+
+    public bool RetryTransientAuditWrites { get; set; } = true;
 }
 
 public sealed class PdmStorageOptions : Upton.Pdm.Application.IServerStoragePaths

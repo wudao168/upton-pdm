@@ -33,6 +33,9 @@ public sealed partial class PdmAddin
                 || !IsCheckedOutByCurrentUser(node) || !PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath)
                 || MemoryCopy(node) is not ArchiveMemoryCopy copy)
                 continue;
+            // A direct SolidWorks save can write its temporary Toolbox template
+            // back into the work file, discarding the verified submission copy.
+            if (copy.PreserveToolboxReferences || node.ToolboxEvidence.Count > 0) continue;
             var drawing = node.Kind == CadDocumentKind.Drawing;
             if (!drawing && (copy.Model.IsOpenedReadOnly() || (File.GetAttributes(node.FullPath) & FileAttributes.ReadOnly) != 0))
                 continue;

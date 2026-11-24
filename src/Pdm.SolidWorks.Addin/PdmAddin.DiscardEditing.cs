@@ -70,6 +70,11 @@ public sealed partial class PdmAddin
 
     private async Task DiscardSelectedWorkingFilesAsync(IReadOnlyList<CadTreeNode> requestedNodes)
     {
+        // Before releasing a server lease, ensure restoring the selected file
+        // cannot change the working copy of another native instance.
+        foreach (var context in controlledOpenManifests.Where(pair => requestedNodes.Any(node =>
+            IsCurrentProjectWorkingPath(node.FullPath, pair.Value.ProjectCode) && FindWorkingManifestFile(pair, node.DocumentId, node.FullPath) != null)))
+            controlledWorkspace?.RequireLoadedWorkingDirectory(context.Value, context.Key);
         // Validate the entire requested scope before releasing even the first lease.
         // A later native-state change is checked again immediately before replacement.
         var changingPaths = new HashSet<string>(requestedNodes.Where(DiscardNeedsWindowRestore)
@@ -276,6 +281,11 @@ public sealed partial class PdmAddin
             && (selectedPaths == null || selectedPaths.Any(path => PathsEqual(path, entry.SourcePath)))).ToArray();
         if (entries.Length == 0) return;
         var groups = entries.GroupBy(entry => entry.SourcePath, StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (var group in groups)
+        {
+            var record = group.First();
+            controlledWorkspace?.RequireRestoreWorkingDirectory(manifest, manifest.Files.Single(file => file.DocumentId == record.DocumentId), record.SourcePath);
+        }
         var selectedWorkingPaths = new HashSet<string>(groups.Select(group => group.Key), StringComparer.OrdinalIgnoreCase);
         var changed = new List<IGrouping<string, LocalEditDraft>>();
         foreach (var group in groups)
@@ -332,15 +342,13 @@ public sealed partial class PdmAddin
                 stagingId + ":" + key, new[] { file.RelativePath ?? file.FileName });
             restoreFiles[entry.DocumentId] = await apiClient.DownloadControlledOpenFileAsync(file, directory, lifetime.Token);
         }
-        var references = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var group in changed)
         {
             var entry = group.OrderByDescending(item => item.SavedAtUtc).First();
             var file = manifest.Files.Single(item => item.DocumentId == entry.DocumentId);
             ValidateDiscardBinding(entry);
             editJournal.ValidateDiscardedFile(entry, restoreFiles[entry.DocumentId], file.Sha256);
-            references[entry.SourcePath] = PlanDiscardWorkingReferences(restoreFiles[entry.DocumentId], entry.SourcePath, manifest,
-                selectedWorkingPaths);
+            PlanDiscardWorkingReferences(restoreFiles[entry.DocumentId], entry.SourcePath, manifest, selectedWorkingPaths);
         }
         closing = DiscardAffectedDocuments(paths); // CAD state may change while HTTP is pending.
         var ambiguous = CaptureLoadedDocumentSnapshots().GroupBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
@@ -358,6 +366,22 @@ public sealed partial class PdmAddin
         }
         if (CaptureLoadedDocumentSnapshots().Any(item => paths.Contains(item.Path)))
             throw new IOException("图档仍被打开的装配或工程图占用；放弃状态已记录，请关闭引用窗口后从PLM重新打开。");
+        // Even with Searchflag=false SOLIDWORKS can substitute a loaded component's
+        // working path for the address stored in a different, hash-verified archive.
+        // Re-read after closing the edited owners and validate every plan before writing.
+        var references = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        var remainingNames = new HashSet<string>(CaptureLoadedDocumentSnapshots().Select(item => Path.GetFileName(item.Path)),
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var group in changed)
+        {
+            var entry = group.First();
+            var file = manifest.Files.Single(item => item.DocumentId == entry.DocumentId);
+            var source = restoreFiles[entry.DocumentId];
+            var stored = await ReadDiscardReferencesFromDiskAsync(source, file.Sha256, remainingNames);
+            references[entry.SourcePath] = PlanDiscardWorkingReferences(source, entry.SourcePath, manifest, selectedWorkingPaths, stored);
+        }
+        if (CaptureLoadedDocumentSnapshots().Any(item => paths.Contains(item.Path)))
+            throw new IOException("引用核对期间工作文件已重新打开，已保留窗口、文件及待恢复记录。");
         foreach (var group in changed)
         {
             var entry = group.OrderByDescending(item => item.SavedAtUtc).First();
@@ -370,7 +394,7 @@ public sealed partial class PdmAddin
             {
                 editJournal.RestoreDiscardedFile(entry, source, file.Sha256);
                 replaced = true;
-                restoredHash = RestoreDiscardWorkingReferences(entry.SourcePath, source, references[entry.SourcePath], file.Sha256);
+                restoredHash = await RestoreDiscardWorkingReferences(entry.SourcePath, source, references[entry.SourcePath], file.Sha256, remainingNames);
                 CompleteDiscardBinding(group, file, manifest.ProjectId, restoredHash, expectedBinding);
             }
             catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
@@ -392,8 +416,8 @@ public sealed partial class PdmAddin
                 LogDiagnostic("放弃恢复文件失败；路径=" + entry.SourcePath + "；副本=" + source
                     + "；记录指纹=" + entry.DiskSha256 + "；恢复指纹=" + file.Sha256
                     + "；底层错误码=0x" + error.GetBaseException().HResult.ToString("X8"), error);
-                throw new IOException("本地工作文件恢复失败：" + file.FileName + "；路径：" + entry.SourcePath
-                    + "。文件及备份已保留，请检查文件占用和目录写入权限后重试；仍可从PLM打开最新只读版本。", error);
+                throw new IOException("本地工作文件恢复失败：" + file.FileName + "。"
+                    + DiscardRecoveryError(error) + " 工作文件、备份和待恢复记录已保留。", error);
             }
             LogOperation("Discard working restored completed path=" + entry.SourcePath);
         }
@@ -553,11 +577,11 @@ public sealed partial class PdmAddin
     }
 
     private Dictionary<string, string> PlanDiscardWorkingReferences(string canonicalPath, string targetPath,
-        ControlledOpenManifestDto manifest, ISet<string> selectedPaths)
+        ControlledOpenManifestDto manifest, ISet<string> selectedPaths, string[] storedReferences = null)
     {
         var plan = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var files = manifest.Files.ToDictionary(file => file.FileName, StringComparer.OrdinalIgnoreCase);
-        foreach (var source in ReadDiscardNativeReferences(canonicalPath))
+        foreach (var source in storedReferences ?? ReadDiscardNativeReferences(application, canonicalPath))
         {
             if (!files.TryGetValue(Path.GetFileName(source), out var file))
             {
@@ -578,9 +602,19 @@ public sealed partial class PdmAddin
         return plan;
     }
 
-    private string[] ReadDiscardNativeReferences(string path)
+    private async Task<string[]> ReadDiscardReferencesFromDiskAsync(string path, string hash, ISet<string> loadedNames,
+        IEnumerable<string> expected = null)
     {
-        var values = application.GetDocumentDependencies2(path, false, false, false) as Array;
+        var references = ReadDiscardNativeReferences(application, path);
+        if (loadedNames.Count == 0 || (!loadedNames.Contains(Path.GetFileName(path))
+            && !references.Concat(expected ?? Array.Empty<string>()).Any(reference => loadedNames.Contains(Path.GetFileName(reference)))))
+            return references;
+        return await ArchiveNativeProcessWorkspace.ReadSavedReferencePathsAsync(application, path, (int)DocumentKindFromPath(path), hash, lifetime.Token);
+    }
+
+    internal static string[] ReadDiscardNativeReferences(ISldWorks app, string path)
+    {
+        var values = app.GetDocumentDependencies2(path, false, false, false) as Array;
         if (values == null)
         {
             if (Path.GetExtension(path).Equals(".SLDPRT", StringComparison.OrdinalIgnoreCase)) return Array.Empty<string>();
@@ -592,7 +626,8 @@ public sealed partial class PdmAddin
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    private string RestoreDiscardWorkingReferences(string target, string canonical, IReadOnlyDictionary<string, string> references, string canonicalHash)
+    private async Task<string> RestoreDiscardWorkingReferences(string target, string canonical, IReadOnlyDictionary<string, string> references,
+        string canonicalHash, ISet<string> loadedNames)
     {
         if (!string.Equals(ComputeFileHash(target), canonicalHash, StringComparison.OrdinalIgnoreCase))
             throw new IOException("工作文件在恢复后又发生变化，未改写引用，待恢复记录已保留。");
@@ -610,10 +645,12 @@ public sealed partial class PdmAddin
                 if (!replaced)
                     throw new IOException("所选工作文件的引用恢复未完成：" + Path.GetFileName(target));
             }
-            var actual = ReadDiscardNativeReferences(target);
-            if (actual.Any(path => !references.Values.Any(expected => PathsEqual(path, expected)))
-                || references.Values.Any(path => !actual.Any(current => PathsEqual(path, current))))
-                throw new IOException("恢复后的引用没有全部指向已核对的工作文件：" + Path.GetFileName(target));
+            var actual = await ReadDiscardReferencesFromDiskAsync(target, writtenHash, loadedNames, references.Values);
+            var unexpected = actual.FirstOrDefault(path => !references.Values.Any(expected => PathsEqual(path, expected)));
+            var missing = references.Values.FirstOrDefault(path => !actual.Any(current => PathsEqual(path, current)));
+            if (unexpected != null || missing != null)
+                throw new IOException("恢复后的引用没有全部指向已核对的工作文件：" + Path.GetFileName(target)
+                    + (missing == null ? "" : "；应引用：" + missing) + (unexpected == null ? "" : "；实际引用：" + unexpected));
             if (!string.Equals(ComputeFileHash(target), writtenHash, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("引用核对期间工作文件又发生变化，文件及待恢复记录已保留。");
             return writtenHash;

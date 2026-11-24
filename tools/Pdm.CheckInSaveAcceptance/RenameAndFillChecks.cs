@@ -140,8 +140,18 @@ internal static partial class Program
   {
    var property=(ComboBox)Field(dialog,"fillProperty");var value=(TextBox)Field(dialog,"fillValue");
    if(!property.Items.Contains("项目号")||!property.Items.Contains("项目名称"))throw new Exception("整列填充缺少项目字段");
-   property.SelectedItem="项目号";value.Text="P700017-2";Type("BatchPropertyEditDialog").GetMethod("FillSelectedRows",Flags).Invoke(dialog,null);
-   property.SelectedItem="项目名称";value.Text="自动上料单元";Type("BatchPropertyEditDialog").GetMethod("FillSelectedRows",Flags).Invoke(dialog,null);
+   var fill=Type("BatchPropertyEditDialog").GetMethod("FillSelectedRows",Flags);
+   void FillProjectIdentity()
+   {
+    property.SelectedItem="项目号";value.Text="P700017-2";fill.Invoke(dialog,null);
+    property.SelectedItem="项目名称";value.Text="自动上料单元";fill.Invoke(dialog,null);
+   }
+   FillProjectIdentity();
+   var drawing=list.GetValue(2);
+   if((string)Get(drawing,"ProjectNumber")!="P-ORIGINAL"||(string)Get(drawing,"ProjectName")!="原项目"||(bool)Get(drawing,"HasChanges"))
+    throw new Exception("填写模型的项目身份时，未勾选配图应保留自己的项目字段");
+   Set(drawing,"Selected",true);
+   FillProjectIdentity();
    foreach(var i in new[]{0,2})
    {
     var item=list.GetValue(i);
@@ -157,7 +167,7 @@ internal static partial class Program
    if(Directory.GetFiles(folder,"*.SLD*").Any(path=>File.ReadAllText(path)!="unchanged CAD bytes"))throw new Exception("整列填充预览未经批量写入就改动原图档");
    foreach(var item in list)Set(item,"Selected",false);Type("BatchPropertyEditDialog").GetMethod("RefreshFillPropertyOptions",Flags).Invoke(dialog,null);if(property.Items.Count!=0)throw new Exception("未勾选图档时仍保留填充选项");
   }
-  Console.WriteLine("PASS: 项目号及项目名称整列填充、原值保留、关联工程图、未勾选行、配置范围和批量写入变更列表");
+  Console.WriteLine("PASS: 项目身份按勾选行填充，关联工程图保留原值直至明确勾选，配置范围和写入变更列表通过");
  }
 
  static void ModelFillCheck(bool conflictingSameName)

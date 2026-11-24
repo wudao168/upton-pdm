@@ -1,0 +1,11 @@
+.pdm-project-form .pdm-user-select .el-select__input {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pdm-project-form .pdm-user-select .el-select__placeholder {
+  pointer-events: none;
+}

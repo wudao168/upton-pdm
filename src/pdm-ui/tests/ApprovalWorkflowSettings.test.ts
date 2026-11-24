@@ -271,7 +271,7 @@ describe('ApprovalWorkflowSettings', () => {
     const group = wrapper.findAll('.change-reason-list section')[1]!
     await group.get('button[aria-label="删除物料问题原因 交期不满足"]').trigger('click')
     await group.findAll('button').find(b => b.text() === '新增原因')!.trigger('click')
-    const added = group.findAll('input').at(-1)!
+    const added = group.findAll('input:not([type=checkbox])').at(-1)!
     await added.setValue('临时库存替代')
     await wrapper.get('.change-reason-settings header button').trigger('click'); await flushPromises()
     const saved = onSave.mock.lastCall![0] as PdmSystemSettings
@@ -279,7 +279,7 @@ describe('ApprovalWorkflowSettings', () => {
     const key = saved.releaseChangeReasonTypes!.find(key => key.startsWith('物料问题 / custom-'))!
     expect(saved.releaseChangeReasonLabels![key]).toBe('临时库存替代')
     await wrapper.setProps({ settings: saved })
-    expect(group.findAll('input').some(input => (input.element as HTMLInputElement).value === '临时库存替代')).toBe(true)
+    expect(group.findAll('input:not([type=checkbox])').some(input => (input.element as HTMLInputElement).value === '临时库存替代')).toBe(true)
     wrapper.unmount()
   })
 
@@ -290,13 +290,13 @@ describe('ApprovalWorkflowSettings', () => {
     expect(group.get('[aria-label="上移物料问题原因 交期不满足"]').attributes('disabled')).toBeDefined()
     expect(group.get('[aria-label="下移物料问题原因 物料漏买"]').attributes('disabled')).toBeDefined()
     await group.get('[aria-label="下移物料问题原因 交期不满足"]').trigger('click')
-    expect(group.findAll('input').map(input => (input.element as HTMLInputElement).value)).toEqual(['物料下单晚', '交期不满足', '买错物料', '物料漏买'])
+    expect(group.findAll('input:not([type=checkbox])').map(input => (input.element as HTMLInputElement).value)).toEqual(['物料下单晚', '交期不满足', '买错物料', '物料漏买'])
     await group.get('[aria-label="上移物料问题原因 买错物料"]').trigger('click')
     await wrapper.get('.change-reason-settings header button').trigger('click'); await flushPromises()
     const saved = onSave.mock.lastCall![0] as PdmSystemSettings
     expect(saved.releaseChangeReasonTypes!.filter(key => key.startsWith('物料问题 / '))).toEqual(['物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 交期不满足', '物料问题 / 物料漏买'])
     await wrapper.setProps({ settings: saved })
-    expect(group.findAll('input')[1]!.element).toHaveProperty('value', '买错物料')
+    expect(group.findAll('input:not([type=checkbox])')[1]!.element).toHaveProperty('value', '买错物料')
     wrapper.unmount()
   })
 

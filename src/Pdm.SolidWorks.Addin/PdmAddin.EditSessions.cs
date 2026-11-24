@@ -249,6 +249,8 @@ public sealed partial class PdmAddin
                         && Volatile.Read(ref pendingTreeRefresh) == 0 && Volatile.Read(ref treeRefreshInProgress) == 0 && draftIdleCheck())
                     {
                         string copy = null;
+                        AssemblyReferenceLoad referenceLoad = null;
+                        var draftCopied = false;
                         // Record the attempt before COM work: a locked source must not trigger
                         // SaveAs on every ten-second maintenance tick or immediately after a crash.
                         entry.NextSnapshotAttemptUtc = DateTime.UtcNow.AddMinutes(1);
@@ -257,7 +259,9 @@ public sealed partial class PdmAddin
                         {
                             Interlocked.Increment(ref refreshSuppressionDepth);
                             Interlocked.Increment(ref draftSnapshotInProgress);
+                            referenceLoad = BeginAssemblyDraftReferenceLoad(model, entry);
                             copy = CreateCheckInUploadCopy(model, entry.SourcePath, entry.DocumentId);
+                            draftCopied = true;
                             editJournal.Preserve(entry, copy, true);
                             EditDraftJournal.ClearMaintenanceFailure(entry);
                             editJournal.Save(entry);
@@ -273,6 +277,7 @@ public sealed partial class PdmAddin
                             }
                             finally
                             {
+                                FinishAssemblyReferenceOperation(referenceLoad, draftCopied);
                                 Interlocked.Decrement(ref draftSnapshotInProgress);
                                 Interlocked.Decrement(ref refreshSuppressionDepth);
                             }

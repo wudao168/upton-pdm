@@ -15,7 +15,7 @@ namespace Upton.Pdm.SolidWorks;
 
 // Uses the existing private CAD reader. The engineer's SolidWorks process never
 // opens, activates or closes the native archive copies.
-internal static class ArchiveNativeProcessWorkspace
+internal static partial class ArchiveNativeProcessWorkspace
 {
     private const string RequestName = "native-isolation-request.json";
     private const string ReaderJobVariable = "UPLM_NATIVE_ARCHIVE_JOB";
@@ -277,8 +277,19 @@ internal static class ArchiveNativeProcessWorkspace
         return saved.Occurrences;
     }
 
+    internal static async Task<string[]> ReadSavedReferencePathsAsync(ISldWorks caller, string source, int documentKind,
+        string sourceHash, CancellationToken token)
+    {
+        var saved = await ReadSavedFileAsync(caller, source, documentKind, Array.Empty<string>(),
+            sourceHash, null, token, false, true);
+        if (saved.ReferencePaths == null || !string.Equals(saved.ReaderSourceSha256, sourceHash, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("无法核对指定文件中实际保存的引用，工作文件和备份已保留：" + Path.GetFileName(source));
+        return saved.ReferencePaths;
+    }
+
     private static async Task<SavedPropertyResult> ReadSavedFileAsync(ISldWorks caller, string source,
-        int documentKind, string[] configurations, string sourceHash, Action<string> report, CancellationToken token, bool readOccurrences)
+        int documentKind, string[] configurations, string sourceHash, Action<string> report, CancellationToken token, bool readOccurrences,
+        bool readReferences = false)
     {
         token.ThrowIfCancellationRequested();
         var job = Path.Combine(Jobs, Guid.NewGuid().ToString("N"));
@@ -286,7 +297,8 @@ internal static class ArchiveNativeProcessWorkspace
         request.SavedPropertyRead = new SavedPropertyRead
         {
             Source = Path.GetFullPath(source), DocumentKind = documentKind,
-            Configurations = configurations ?? Array.Empty<string>(), SourceSha256 = sourceHash, ReadOccurrences = readOccurrences
+            Configurations = configurations ?? Array.Empty<string>(), SourceSha256 = sourceHash, ReadOccurrences = readOccurrences,
+            ReadReferences = readReferences
         };
         // An encrypted share can expose different bytes to the CAD application
         // and its worker. Pin the selected source while each checks its own view.
@@ -331,7 +343,13 @@ internal static class ArchiveNativeProcessWorkspace
             WriteProgress(job, Path.GetFileName(read.Source));
             var readerHash = ArchiveFileFingerprint.Read(read.Source);
             var saved = new SavedPropertyResult { Source = read.Source, SourceSha256 = read.SourceSha256, ReaderSourceSha256 = readerHash };
-            if (read.ReadOccurrences)
+            if (read.ReadReferences)
+            {
+                if (app.GetDocumentCount() != 0 || !string.Equals(readerHash, read.SourceSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("专用读取会话或源文件发生变化，未采用内存中的引用地址。");
+                saved.ReferencePaths = PdmAddin.ReadDiscardNativeReferences(app, read.Source);
+            }
+            else if (read.ReadOccurrences)
             {
                 if (read.DocumentKind != (int)CadDocumentKind.Assembly || read.Configurations.Length != 1
                     || !string.Equals(readerHash, read.SourceSha256, StringComparison.OrdinalIgnoreCase))
@@ -542,12 +560,14 @@ internal static class ArchiveNativeProcessWorkspace
         public string JobId { get; set; }
         public int CallerSolidWorksId { get; set; }
         public string SolidWorksExecutable { get; set; }
+        public long CheckoutCallerStartedUtcTicks { get; set; }
         public string[] Inventory { get; set; }
         public Dictionary<string, string> Requested { get; set; }
         public SavedPropertyRead SavedPropertyRead { get; set; }
     }
     internal sealed class SavedPropertyRead
     {
+        public bool ReadReferences { get; set; }
         public bool ReadOccurrences { get; set; }
         public string Source { get; set; }
         public int DocumentKind { get; set; }
@@ -556,6 +576,7 @@ internal static class ArchiveNativeProcessWorkspace
     }
     internal sealed class SavedPropertyResult
     {
+        public string[] ReferencePaths { get; set; }
         public ArchivedMissingOccurrence[] Occurrences { get; set; }
         public string Source { get; set; }
         public string SourceSha256 { get; set; }

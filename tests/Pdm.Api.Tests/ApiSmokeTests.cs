@@ -204,6 +204,90 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(savedParent.Id, Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default)).Id);
     }
 
+    [Fact]
+    public async Task HistoricalDrawingKeepsContextAssemblySeparateFromItsDirectModel()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var directory = Path.Combine(Path.GetTempPath(), "pdm-drawing-context-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(directory, ".versions"));
+        var written = new List<string>();
+        try
+        {
+            var project = await ApiTestAuthorization.CreateProjectAsync(repository,
+                new("DRAWING-CONTEXT-" + Guid.NewGuid().ToString("N"), "工程图归档上下文验收", "admin", directory, directory), "admin", default);
+            Task<PdmDocument> Register(string number, string fileName, DocumentKind kind) =>
+                repository.RegisterDocumentAsync(new(project.Id, number, number, fileName, kind), "admin", default);
+            DocumentReferenceNode Node(PdmDocument document, RevisionLabel? revision, params DocumentReferenceNode[] children) =>
+                new(Guid.NewGuid(), document.Id, document.FileName, document.FileName, document.Name, document.Kind,
+                    "Default", 1, ReferenceNodeStatus.Normal, revision, null, children);
+            async Task<DocumentVersion> Save(PdmDocument document, string content, params DocumentReferenceNode[] children)
+            {
+                var session = Guid.NewGuid();
+                var locked = await repository.CheckoutAsync(document.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+                var bytes = Encoding.UTF8.GetBytes(content);
+                var relative = Path.Combine(".versions", Guid.NewGuid().ToString("N"));
+                var path = Path.Combine(directory, relative);
+                await File.WriteAllBytesAsync(path, bytes);
+                written.Add(path);
+                File.SetAttributes(path, FileAttributes.ReadOnly);
+                var now = DateTimeOffset.UtcNow;
+                await repository.CheckInVersionAsync(document.Id, "admin", session,
+                    new(new StoredFile(relative, bytes.Length, Convert.ToHexString(SHA256.HashData(bytes)), now), "历史版本引用验收",
+                        new Dictionary<string, string?>(), new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, now, "admin",
+                            Node(document, locked.Revision, children), new string('C', 64)), [], []), default);
+                return (await repository.ListDocumentVersionsAsync(document.Id, default)).First();
+            }
+
+            var environmentPart = await Register("SHARED", "SHARED.SLDPRT", DocumentKind.Part);
+            var model = await Register("MODEL", "MODEL.SLDPRT", DocumentKind.Part);
+            var assembly = await Register("CONTEXT", "CONTEXT.SLDASM", DocumentKind.Assembly);
+            var drawing = await Register("DRAWING", "DRAWING.SLDDRW", DocumentKind.Drawing);
+            var assemblyDrawing = await Register("ASSEMBLY-DRAWING", "ASSEMBLY-DRAWING.SLDDRW", DocumentKind.Drawing);
+            var oldShared = await Save(environmentPart, "历史环境零件");
+            var nextShared = await Save(environmentPart, "后续修改环境零件");
+            Assert.NotEqual(oldShared.Id, nextShared.Id);
+            var archivedAssembly = await Save(assembly, "保留旧快照的装配上下文",
+                Node(environmentPart, oldShared.Revision) with { InstancePath = "CONTEXT/SHARED-1" },
+                Node(environmentPart, nextShared.Revision) with { InstancePath = "CONTEXT/SHARED-2" });
+            var context = Node(assembly, archivedAssembly.Revision) with
+            {
+                IsContextReference = true,
+                Role = ReferenceRole.ExternalFileDependency,
+                InstancePath = "design-context/CONTEXT.SLDASM"
+            };
+            var pinnedModel = await Save(model, "工程图指定的模型版本", context);
+            var pinnedDrawing = await Save(drawing, "引用零件模型的工程图", Node(model, pinnedModel.Revision), context);
+            await Save(model, "工程图归档之后的模型版本", context);
+            var directAssemblyDrawing = await Save(assemblyDrawing, "直接引用装配模型的工程图", Node(assembly, archivedAssembly.Revision));
+
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+            foreach (var request in new[] { (VersionId: (Guid?)pinnedDrawing.Id, ForEdit: false), (VersionId: (Guid?)null, ForEdit: false), (VersionId: (Guid?)null, ForEdit: true) })
+            {
+                var response = await client.PostAsJsonAsync($"/api/documents/{drawing.Id}/open-manifest", new { request.VersionId, request.ForEdit });
+                Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+                var manifest = (await response.Content.ReadFromJsonAsync<ControlledOpenManifest>())!;
+                Assert.Equal(pinnedDrawing.Id, manifest.RootVersionId);
+                Assert.Equal(pinnedModel.Id, Assert.Single(manifest.Files, file => file.DocumentId == model.Id).VersionId);
+                Assert.Equal(archivedAssembly.Id, Assert.Single(manifest.Files, file => file.DocumentId == assembly.Id).VersionId);
+                Assert.Equal(oldShared.Id, Assert.Single(manifest.Files, file => file.DocumentId == environmentPart.Id).VersionId);
+            }
+
+            var ambiguousResponse = await client.PostAsJsonAsync($"/api/documents/{assemblyDrawing.Id}/open-manifest", new { versionId = directAssemblyDrawing.Id });
+            Assert.Equal(HttpStatusCode.BadRequest, ambiguousResponse.StatusCode);
+            Assert.Contains("不能安全打开", await ambiguousResponse.Content.ReadAsStringAsync());
+        }
+        finally
+        {
+            foreach (var path in written)
+            {
+                File.SetAttributes(path, FileAttributes.Normal);
+                File.Delete(path);
+            }
+            Directory.Delete(Path.Combine(directory, ".versions"));
+            Directory.Delete(directory);
+        }
+    }
+
     [Theory]
     [InlineData(DocumentKind.Part, "EXTRA.SLDPRT")]
     [InlineData(DocumentKind.Assembly, "CONTEXT.SLDASM")]
@@ -356,6 +440,22 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             foreach (var file in Directory.GetFiles(directory, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
             Directory.Delete(directory, true);
         }
+    }
+
+    [Fact]
+    public async Task ArchiveRegistrationRejectsWindowsDeviceNameBeforeReservingDocument()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await ApiTestAuthorization.CreateProjectAsync(repository, new CreateProjectCommand(
+            "DEVICE-" + Guid.NewGuid().ToString("N"), "存档文件名校验", "admin", "vault", "release"), "admin", default);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var response = await client.PostAsJsonAsync($"/api/archive-batches/{Guid.NewGuid()}/projects/{project.Id}/registrations",
+            new { sessionId = Guid.NewGuid(), machineName = "QA", document = new { drawingNumber = "QA-DEVICE",
+                name = "存档文件名校验", fileName = "COM¹.SLDPRT", kind = DocumentKind.Part, sourceSha256 = new string('A', 64) } });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Contains("Windows 保留名称", problem.GetProperty("title").GetString());
+        Assert.Empty(await repository.ListDocumentsAsync(project.Id, default));
     }
 
     [Fact]
@@ -1334,6 +1434,32 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Matches("^AK-2-C00465-[0-9]{3}-02$", secondChild.DeviceModel);
         Assert.Single(secondChild.SerialNumbers);
 
+        var childUrl = $"/api/projects/{created.Id}/children";
+        var invalidBatch = await client.PostAsJsonAsync(childUrl, new
+        {
+            items = new[] { new { name = "第一行有效但不应保存", quantity = 1 }, new { name = "第二行数量无效", quantity = 0 } }
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidBatch.StatusCode);
+
+        var validBatch = await client.PostAsJsonAsync(childUrl, new
+        {
+            items = new[]
+            {
+                new { name = " 批量子项目甲 ", projectAlias = " 子项目别名甲 ", quantity = 3 },
+                new { name = "批量子项目乙", projectAlias = " ", quantity = 1 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.Created, validBatch.StatusCode);
+        var children = await validBatch.Content.ReadFromJsonAsync<Project[]>();
+        Assert.NotNull(children);
+        Assert.Equal(new[] { $"{created.Code}-3", $"{created.Code}-4" }, children.Select(project => project.Code));
+        Assert.Equal(new[] { "批量子项目甲", "批量子项目乙" }, children.Select(project => project.Name));
+        Assert.Equal("子项目别名甲", children[0].ProjectAlias);
+        Assert.Null(children[1].ProjectAlias);
+        Assert.Equal(new[] { 3, 1 }, children.Select(project => project.Quantity));
+        Assert.Equal(4, children.SelectMany(project => project.SerialNumbers).Distinct().Count());
+        Assert.All(children, project => Assert.Equal(created.Id, project.ParentProjectId));
+
         var registerOnParent = await client.PostAsJsonAsync($"/api/projects/{created.Id}/documents/register", new
         {
             drawingNumber = "MAIN-WITH-CHILD",
@@ -1392,6 +1518,8 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(drawingDocumentId, relation.GetProperty("drawingDocumentId").GetGuid());
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("engineer", "Engineer"));
+        var engineerBatchCreate = await client.PostAsJsonAsync(childUrl, new { items = new[] { new { name = "未授权创建", quantity = 1 } } });
+        Assert.Equal(HttpStatusCode.Forbidden, engineerBatchCreate.StatusCode);
         var engineerDelete = await client.DeleteAsync($"/api/projects/{created.Id}");
         Assert.Equal(HttpStatusCode.Forbidden, engineerDelete.StatusCode);
     }

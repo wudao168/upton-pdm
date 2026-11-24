@@ -685,7 +685,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
-    public Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken)
+    public Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken,
+        Action<Project>? authorizeChildren = null)
     {
         lock (gate)
         {
@@ -695,79 +696,158 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     ?? throw new PdmConflictException("申请已批准，关联项目已不存在；不能重复建项，请联系管理员。"));
             var organization = NumberingOptions().Organizations.Single(item => item.Id == command.OrganizationId);
             if (!customers.TryGetValue(command.CustomerId, out var customer) || !customer.IsActive) throw new PdmRuleException("所选客户不存在或已停用。");
-            var projectSequence = ReserveProjectNumber(organization, command.ProjectTypeCode);
             var customerKey = (organization.Id, customer.Code.ToUpperInvariant());
-            var customerSequence = ReserveNumber(customerCounters, releasedCustomerNumbers, customerKey, 999);
-            var serials = ReserveSerials(organization, command.Quantity);
-            var code = $"{command.ProjectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}";
-            var model = $"{organization.ModelCompanyCode}-{command.EquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-00";
             var projectId = Guid.NewGuid();
-            var project = BuildNumberedProject(projectId, code, command.Name, command.ProjectAlias, organization, command.ProjectTypeCode,
-                command.EquipmentTypeCode, customer.Code, customer.Name, customerSequence, model, command.SignedDate,
-                command.Quantity, null, null, command.Owner,
-                StorageLocationPolicy.ProjectStorageLocation(command.VaultLocation, code, $"{code}-0"),
-                StorageLocationPolicy.ProjectStorageLocation(command.ReleaseLocation, code, $"{code}-0"), serials);
-            var approvedInput = command.ApplicationApproval?.Event.ApprovedData?.Input ?? application?.Data.Input;
-            project = project with
+            var hasChildren = command.Children.Count > 0;
+            if (hasChildren && (authorizeChildren is null || command.ApplicationApproval is not null))
+                throw new UnauthorizedAccessException("当前建项操作没有创建子项目的权限。");
+            var childSequences = hasChildren ? ProjectChildCreation.AllocateSequences([], command.Children.Count) : [];
+            var rollbackProject = hasChildren
+                ? CaptureNumberingState(projectCounters, releasedProjectNumbers, (organization.Id, command.ProjectTypeCode.ToUpperInvariant()))
+                : null;
+            var rollbackCustomer = hasChildren ? CaptureNumberingState(customerCounters, releasedCustomerNumbers, customerKey) : null;
+            var rollbackSerials = hasChildren ? CaptureNumberingState(serialCounters, releasedSerialNumbers, organization.Id) : null;
+            try
             {
-                CreatedAt = timeProvider.GetUtcNow(),
-                RootProjectId = projectId,
-                BomItemCategoryCode = command.BomItemCategoryCode,
-                SourceApplicationId = application?.Id, SourceApplicationNumber = application?.Number,
-                IsSpecialInitiation = approvedInput?.IsSpecial ?? false, DeliveryDate = approvedInput?.DeliveryDate,
-                ResponsibleUsers = [command.Owner]
-            };
-            projects[project.Id] = project;
-            projectResponsibles[project.Id] = project.ResponsibleUsers;
-            EnsureProjectFolderTree(project.Id);
-            if (application is not null) CompleteApplicationApproval(application, command.ApplicationApproval!, project);
-            return Task.FromResult(project);
+                cancellationToken.ThrowIfCancellationRequested();
+                var projectSequence = ReserveProjectNumber(organization, command.ProjectTypeCode);
+                var customerSequence = ReserveNumber(customerCounters, releasedCustomerNumbers, customerKey, 999);
+                var serials = ReserveSerials(organization, command.Quantity);
+                var code = ProjectNumberAllocation.FormatMainCode(command.ProjectTypeCode, organization.ProjectCompanyCode, projectSequence);
+                var model = $"{organization.ModelCompanyCode}-{command.EquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-00";
+                var project = BuildNumberedProject(projectId, code, command.Name, command.ProjectAlias, organization, command.ProjectTypeCode,
+                    command.EquipmentTypeCode, customer.Code, customer.Name, customerSequence, model, command.SignedDate,
+                    command.Quantity, null, null, command.Owner,
+                    StorageLocationPolicy.ProjectStorageLocation(command.VaultLocation, code, $"{code}-0"),
+                    StorageLocationPolicy.ProjectStorageLocation(command.ReleaseLocation, code, $"{code}-0"), serials);
+                var approvedInput = command.ApplicationApproval?.Event.ApprovedData?.Input ?? application?.Data.Input;
+                var now = timeProvider.GetUtcNow();
+                project = project with
+                {
+                    CreatedAt = now,
+                    RootProjectId = projectId,
+                    BomItemCategoryCode = command.BomItemCategoryCode,
+                    SourceApplicationId = application?.Id, SourceApplicationNumber = application?.Number,
+                    IsSpecialInitiation = approvedInput?.IsSpecial ?? false, DeliveryDate = approvedInput?.DeliveryDate,
+                    ResponsibleUsers = [command.Owner]
+                };
+
+                if (hasChildren)
+                {
+                    authorizeChildren!(project);
+                    var childCommand = new CreateSubprojectsCommand(project.Id, command.Children, command.VaultLocation, command.ReleaseLocation);
+                    var children = BuildSubprojects(childCommand, project, code, organization, childSequences, now, cancellationToken);
+                    Project[] created = [project, .. children];
+                    EnsureProjectFolderTree(project.Id, created);
+                    StoreSubprojects(created, command.Owner, now);
+                }
+                else
+                {
+                    projects[project.Id] = project;
+                    projectResponsibles[project.Id] = project.ResponsibleUsers;
+                    EnsureProjectFolderTree(project.Id);
+                    if (application is not null) CompleteApplicationApproval(application, command.ApplicationApproval!, project);
+                }
+                return Task.FromResult(project);
+            }
+            catch
+            {
+                if (hasChildren)
+                {
+                    rollbackProject!();
+                    rollbackCustomer!();
+                    rollbackSerials!();
+                    foreach (var folder in projectFolders.Values.Where(item => item.RootProjectId == projectId))
+                        projectFolders.TryRemove(folder.Id, out _);
+                }
+                throw;
+            }
         }
     }
 
-    public Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken)
+    public async Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken)
+        => (await CreateSubprojectsAsync(command.ToBatch(), null, cancellationToken)).Single();
+
+    public Task<string> PreviewNextProjectCodeAsync(Guid organizationId, string projectTypeCode, CancellationToken cancellationToken)
     {
         lock (gate)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!organizations.TryGetValue(organizationId, out var organization) || !organization.IsActive)
+                throw new PdmRuleException("所选组织不存在或已停用。");
+            var (current, released, _) = ReadProjectNumberCandidate(organization, projectTypeCode);
+            var sequence = ProjectNumberAllocation.SelectMainSequence(projectTypeCode, current, released);
+            return Task.FromResult(ProjectNumberAllocation.FormatMainCode(projectTypeCode, organization.ProjectCompanyCode, sequence));
+        }
+    }
+
+    public Task<IReadOnlyList<int>> ListUsedChildProjectSequencesAsync(Guid parentProjectId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<IReadOnlyList<int>>(UsedChildProjectSequences(parentProjectId).ToArray());
+        }
+    }
+
+    private IEnumerable<int> UsedChildProjectSequences(Guid parentProjectId) =>
+        projects.Values.Where(project => project.ParentProjectId == parentProjectId && project.ChildSequence.HasValue)
+            .Select(project => project.ChildSequence!.Value);
+
+    public Task<IReadOnlyList<Project>> CreateSubprojectsAsync(CreateSubprojectsCommand command, string? actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!projects.TryGetValue(command.ParentProjectId, out var parent)) throw new PdmNotFoundException("上级项目不存在。");
-            if (parent.OrganizationId is null || parent.EquipmentTypeCode is null || parent.CustomerProjectSequence is null
-                || string.IsNullOrWhiteSpace(parent.ProjectTypeCode)
-                || string.IsNullOrWhiteSpace(parent.CustomerCode) || string.IsNullOrWhiteSpace(parent.CustomerName))
-                throw new PdmRuleException("旧项目缺少自动编号资料，不能直接创建子项目。");
+            ProjectChildCreation.RequireParentNumberingData(parent);
             var organization = NumberingOptions().Organizations.Single(item => item.Id == parent.OrganizationId);
-            var usedChildSequences = projects.Values.Where(item => item.ParentProjectId == parent.Id).Select(item => item.ChildSequence ?? 0).ToHashSet();
-            var childSequence = Enumerable.Range(1, 99).FirstOrDefault(value => !usedChildSequences.Contains(value));
-            if (childSequence == 0) throw new PdmRuleException("该主项目的两位子项目号已用尽。");
-            var serials = ReserveSerials(organization, command.Quantity);
-            var code = $"{parent.Code}-{childSequence}";
+            var childSequences = ProjectChildCreation.AllocateSequences(UsedChildProjectSequences(parent.Id), command.Items.Count);
             var root = parent.RootProjectId is { } rootProjectId && projects.TryGetValue(rootProjectId, out var rootProject)
                 ? rootProject
                 : parent;
-            var equipmentTypeCode = command.EquipmentTypeCode ?? parent.EquipmentTypeCode.Value;
-            var model = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{BuildChildModelSuffix(parent.Code, childSequence)}";
-            var project = BuildNumberedProject(Guid.NewGuid(), code, command.Name, command.ProjectAlias, organization, parent.ProjectTypeCode,
-                equipmentTypeCode, parent.CustomerCode, parent.CustomerName, parent.CustomerProjectSequence.Value, model,
-                parent.SignedDate, command.Quantity, parent.Id, childSequence, parent.Owner,
-                StorageLocationPolicy.ProjectStorageLocation(command.VaultRoot ?? systemSettings.VaultRoot, root.Code, code),
-                StorageLocationPolicy.ProjectStorageLocation(command.ReleaseRoot ?? systemSettings.ReleaseRoot, root.Code, code), serials);
-            project = project with
+            var rollbackSerials = CaptureNumberingState(serialCounters, releasedSerialNumbers, organization.Id);
+            var now = timeProvider.GetUtcNow();
+            IReadOnlyList<Project> created;
+            try
             {
-                CreatedAt = timeProvider.GetUtcNow(),
-                RootProjectId = parent.RootProjectId ?? parent.Id,
-                BomItemCategoryCode = "0302",
-                IsSpecialInitiation = parent.IsSpecialInitiation, DeliveryDate = parent.DeliveryDate,
-                ResponsibleUsers = parent.ResponsibleUsers,
-                ExecutionUnitId = parent.ExecutionUnitId,
-                ExecutionUnitName = parent.ExecutionUnitName,
-                PrimaryProjectManager = parent.PrimaryProjectManager,
-                CollaborativeProjectManagers = parent.CollaborativeProjectManagers,
-                DesignLead = parent.DesignLead,
-                DesignLeads = parent.DesignLeads
-            };
+                created = BuildSubprojects(command, parent, root.Code, organization, childSequences, now, cancellationToken);
+                EnsureProjectFolderTree(root.Id, created);
+            }
+            catch
+            {
+                rollbackSerials();
+                throw;
+            }
+            StoreSubprojects(created, actor, now);
+            return Task.FromResult(created);
+        }
+    }
+
+    private IReadOnlyList<Project> BuildSubprojects(CreateSubprojectsCommand command, Project parent, string rootCode,
+        ProjectOrganization organization, IReadOnlyList<int> childSequences, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var vaultRoot = command.VaultRoot ?? systemSettings.VaultRoot;
+        var releaseRoot = command.ReleaseRoot ?? systemSettings.ReleaseRoot;
+        var created = new List<Project>(command.Items.Count);
+        foreach (var (item, childSequence) in command.Items.Zip(childSequences))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var serials = ReserveSerials(organization, item.Quantity);
+            created.Add(ProjectChildCreation.Build(parent, rootCode, vaultRoot, releaseRoot,
+                organization.ModelCompanyCode, item, childSequence, serials) with { CreatedAt = now });
+        }
+        return created;
+    }
+
+    private void StoreSubprojects(IEnumerable<Project> created, string? actor, DateTimeOffset now)
+    {
+        foreach (var project in created)
+        {
             projects[project.Id] = project;
             projectResponsibles[project.Id] = project.ResponsibleUsers;
-            EnsureProjectFolderTree(project.Id);
-            return Task.FromResult(project);
+            if (actor is not null)
+                audits.Enqueue(ProjectChildCreation.CreateAudit(project, actor, now));
         }
     }
 
@@ -903,14 +983,32 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     private int ReserveProjectNumber(ProjectOrganization organization, string type)
     {
+        var (current, released, occupiedReleasedNumbers) = ReadProjectNumberCandidate(organization, type);
+        var sequence = ProjectNumberAllocation.SelectMainSequence(type, current, released);
+        var key = (organization.Id, type.ToUpperInvariant());
+        projectCounters[key] = released.HasValue ? current : sequence;
+        if (releasedProjectNumbers.TryGetValue(key, out var numbers))
+        {
+            numbers.ExceptWith(occupiedReleasedNumbers);
+            if (released.HasValue) numbers.Remove(sequence);
+        }
+        return sequence;
+    }
+
+    private (int Current, int? Released, IReadOnlyList<int> OccupiedReleasedNumbers) ReadProjectNumberCandidate(ProjectOrganization organization, string type)
+    {
         var key = (organization.Id, type.ToUpperInvariant());
         var existing = projects.Values.Where(p => p.OrganizationId == organization.Id && p.ParentProjectId is null
             && string.Equals(p.ProjectTypeCode, type, StringComparison.OrdinalIgnoreCase))
             .Select(p => TryParseProjectSequence(p, organization, out var sequence) ? sequence : 0).DefaultIfEmpty().Max();
-        projectCounters[key] = Math.Max(projectCounters.GetValueOrDefault(key), existing);
-        if (releasedProjectNumbers.TryGetValue(key, out var released))
-            released.RemoveWhere(sequence => projects.Values.Any(p => string.Equals(p.Code, $"{type}{organization.ProjectCompanyCode}{sequence:D5}", StringComparison.OrdinalIgnoreCase)));
-        return ReserveNumber(projectCounters, releasedProjectNumbers, key, 99999);
+        var current = Math.Max(projectCounters.GetValueOrDefault(key), existing);
+        if (!releasedProjectNumbers.TryGetValue(key, out var released) || released.Count == 0)
+            return (current, null, []);
+
+        var existingCodes = projects.Values.Select(project => project.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var occupied = released.Where(sequence => existingCodes.Contains(ProjectNumberAllocation.FormatMainCode(type, organization.ProjectCompanyCode, sequence))).ToArray();
+        var available = released.Except(occupied).Select(sequence => (int?)sequence).FirstOrDefault();
+        return (current, available, occupied);
     }
 
     private ProjectNumberingOptions NumberingOptions() => new(
@@ -928,6 +1026,19 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         new(Guid.Parse("30000000-0000-0000-0000-000000000001"), "广州阿普顿自动化系统有限公司", "3", "AG", "广州阿普顿自动化系统有限公司", true),
         new(Guid.Parse("90000000-0000-0000-0000-000000000001"), "南京阿普顿自动化系统有限公司", "9", "AN", "南京阿普顿自动化系统有限公司", true)
     ];
+
+    private static Action CaptureNumberingState<TKey>(Dictionary<TKey, int> counters, Dictionary<TKey, SortedSet<int>> releasedNumbers, TKey key) where TKey : notnull
+    {
+        var hadCounter = counters.TryGetValue(key, out var previousCounter);
+        var previousReleased = releasedNumbers.TryGetValue(key, out var released) ? new SortedSet<int>(released) : null;
+        return () =>
+        {
+            if (hadCounter) counters[key] = previousCounter;
+            else counters.Remove(key);
+            if (previousReleased is not null) releasedNumbers[key] = previousReleased;
+            else releasedNumbers.Remove(key);
+        };
+    }
 
     private static int ReserveNumber<TKey>(Dictionary<TKey, int> counters, Dictionary<TKey, SortedSet<int>> releasedNumbers, TKey key, int maximum) where TKey : notnull
     {
@@ -984,14 +1095,6 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             ChildSequence = childSequence,
             SerialNumbers = serialNumbers
         };
-
-    private static string BuildChildModelSuffix(string parentCode, int childSequence)
-    {
-        var parentSegments = parentCode.Split('-', StringSplitOptions.RemoveEmptyEntries)
-            .Skip(1)
-            .Select(segment => int.TryParse(segment, out var value) ? value.ToString("D2") : segment);
-        return string.Join('-', parentSegments.Append(childSequence.ToString("D2")));
-    }
 
     private static string BuildModelSuffixFromCode(string code)
     {
@@ -2883,12 +2986,14 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return Task.FromResult<IReadOnlyList<AuditEntry>>(entries);
     }
 
-    private void EnsureProjectFolderTree(Guid projectId)
+    private void EnsureProjectFolderTree(Guid projectId, IReadOnlyList<Project>? newProjects = null)
     {
-        var project = projects.GetValueOrDefault(projectId) ?? throw new PdmNotFoundException("项目不存在。");
+        var project = projects.GetValueOrDefault(projectId) ?? newProjects?.FirstOrDefault(item => item.Id == projectId)
+            ?? throw new PdmNotFoundException("项目不存在。");
         var rootId = project.RootProjectId ?? project.Id;
-        var root = projects.GetValueOrDefault(rootId) ?? throw new PdmNotFoundException("主项目不存在。");
-        var targets = projects.Values.Where(item => item.Id == root.Id || item.RootProjectId == root.Id).OrderBy(item => item.Code).ToArray();
+        var root = rootId == project.Id ? project : projects.GetValueOrDefault(rootId) ?? throw new PdmNotFoundException("主项目不存在。");
+        var targets = projects.Values.Where(item => item.Id == root.Id || item.RootProjectId == root.Id)
+            .Concat(newProjects ?? []).OrderBy(item => item.Code).ToArray();
         var actualIds = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
         var rootFolder = UpsertFolder(root.Id, null, root.Id, "root", "root", root.Code, ProjectFolderPurpose.Root, 0, true, true);
         actualIds["root"] = rootFolder.Id;

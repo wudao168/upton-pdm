@@ -65,7 +65,7 @@ internal static partial class Program
     SetField(client,"controlledOpenHttpClient",new HttpClient(handler,false){BaseAddress=new Uri("http://fixture.invalid/")});
     var plugin=New("PdmAddin");SetField(plugin,"apiClient",client);
     SetField(plugin,"controlledWorkspace",New("ControlledWorkspaceManager",client,Path.Combine(folder,"workspace")));
-    var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var directory=source;var referenceRemoved=false;
+    var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var directory=source;var referenceRemoved=false;var changeDuringRescan=false;
     var app=new Proxy(appType,call=>{
      switch(call.MethodName){
       case "GetDocuments":return new object[0];case "GetOpenDocumentByName":return null;
@@ -75,6 +75,7 @@ internal static partial class Program
        if(referenceRemoved)return new string[0];
        if((string)call.Args[0]!=owner)return (mode=="nested"||mode=="later-directory")&&Path.GetFileName((string)call.Args[0])==Path.GetFileName(old)
         ?new[]{"nested source",Path.Combine(folder,mode=="later-directory"?"later":"absent","SECOND.SLDPRT")}:new string[0];
+       if(changeDuringRescan)File.AppendAllText(owner," concurrent save");
        if((bool)call.Args[2])directory=source;
        if(mode=="embedded")return new[]{"embedded",virtualFile};
        return mode=="missing-batch"?new[]{"slider",old,"another",Path.Combine(folder,"absent","SECOND.SLDPRT")}:new[]{"slider",old};
@@ -158,7 +159,15 @@ internal static partial class Program
        var restored=(IEnumerable)Type("PdmAddin").GetMethod("RestoreRecoveredArchiveReferences",Flags).Invoke(plugin,new[]{fresh,result});
        Check(restored.Cast<object>().Count()==(referenceRemoved?1:2),"正常保存后复核范围，不误报补齐文件消失");
        Check(((IList)Get(fresh,"Children")).Count==(referenceRemoved?0:1),referenceRemoved?"删除关联后不继续收集旧依赖":"保留关联时恢复已校验的补齐依赖");
-       if(!referenceRemoved)Check((bool)Type("PdmAddin").GetMethod("TryGetRecoveredArchiveReference",Flags).Invoke(plugin,new object[]{owner,old,null}),"正常保存后更新基准，保留补齐目标校验");
+       if(!referenceRemoved){
+        var getReference=Type("PdmAddin").GetMethod("TryGetRecoveredArchiveReference",Flags);
+        Check((bool)getReference.Invoke(plugin,new object[]{owner,old,null}),"正常保存后更新基准，保留补齐目标校验");
+        changeDuringRescan=true;
+        try{Type("PdmAddin").GetMethod("RestoreRecoveredArchiveReferences",Flags).Invoke(plugin,new[]{fresh,result});throw new Exception("重扫期间的写入未被拦截");}
+        catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){Check(true,"重扫期间主图档再次写入时停止，避免采信过期的引用列表");}
+        Check(File.ReadAllText(owner).EndsWith(" concurrent save",StringComparison.Ordinal),"拦截后保留并发保存的新内容");
+        File.WriteAllText(owner,"legitimate normal owner save");
+       }
       }
      }
      Check(File.ReadAllText(owner)==(mode=="rescan"||mode=="removed"?"legitimate normal owner save":"original smart component; never changed")&&directory==source,"原图档和SolidWorks工作目录均保留");

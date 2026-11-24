@@ -55,8 +55,13 @@ public sealed class ProjectReportingService(IPdmRepository repository, ProjectWo
         IReadOnlyList<ReportDrawingVersion>? drawingHistory = null;
         try { drawingHistory = await repository.ListReportDrawingVersionsAsync(ids, ct); }
         catch (Exception ex) when (ex is not OperationCanceledException) { Console.Error.WriteLine($"报表图纸元数据读取失败: {ex}"); }
-        var details = new List<ReportProjectDetail>();
-        foreach (var root in roots)
+        var rootByProject = items.ToDictionary(item => item.Project.Id, item => item.Project.RootProjectId ?? item.Project.ParentProjectId ?? item.Project.Id);
+        var drawingsByRoot = drawingHistory?.ToLookup(version => rootByProject[version.ProjectId]);
+        var details = new List<ReportProjectDetail>(roots.Length);
+        const int maxConcurrentProjectReads = 4;
+        foreach (var batch in roots.Chunk(maxConcurrentProjectReads))
+            details.AddRange(await Task.WhenAll(batch.Select(ReadDetailAsync)));
+        async Task<ReportProjectDetail> ReadDetailAsync(WorkbenchProject root)
         {
             var warnings = new List<string>(); ReportFinance? finance = null; DateTimeOffset? entered = null;
             try
@@ -84,8 +89,7 @@ public sealed class ProjectReportingService(IPdmRepository repository, ProjectWo
             if (drawingHistory is null) warnings.Add("正式图纸记录读取失败，请刷新重试");
             else
             {
-                var familyIds = items.Where(p => p.Project.Id == root.Project.Id || (p.Project.RootProjectId ?? p.Project.ParentProjectId) == root.Project.Id).Select(p => p.Project.Id).ToHashSet();
-                foreach (var group in drawingHistory.Where(v => familyIds.Contains(v.ProjectId)).GroupBy(v => v.DocumentId))
+                foreach (var group in drawingsByRoot![root.Project.Id].GroupBy(v => v.DocumentId))
                 {
                     var formal = group.OrderBy(v => v.PublishedAt).DistinctBy(v => v.Revision).ToArray();
                     drawings!.Add(new(group.Key, formal[0].Name, formal[0].PublishedAt,
@@ -93,7 +97,7 @@ public sealed class ProjectReportingService(IPdmRepository repository, ProjectWo
                             v.Reasons.Select(r => string.IsNullOrWhiteSpace(r.Reason) ? "未填写" : r.Reason.Trim()).Distinct().DefaultIfEmpty("未填写").ToArray())).ToArray()));
                 }
             }
-            details.Add(new(root.Project.Id, finance, entered, drawings, warnings));
+            return new(root.Project.Id, finance, entered, drawings, warnings);
         }
         return new(source with { Projects = items, Risks = source.Risks.Where(r => ids.Contains(r.ProjectId)).ToArray(), Scopes = companyAccess ? ["company", "division"] : ["division"] },
             companyAccess, companyAccess ? "公司授权项目" : "所属事业部授权项目", details);

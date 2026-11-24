@@ -19,7 +19,7 @@ internal static partial class Program
   "indexed-occurrence-foreign-memory-edit","indexed-occurrence-missing-file"
  };
 
- static async Task AcquireAssemblyEditScenario(string modeFilter=null, NativeMissingAcquisition nativeMissing=null)
+ static async Task AcquireAssemblyEditScenario(string modeFilter=null, NativeMissingAcquisition nativeMissing=null, bool compactWorkspace=false)
  {
   var identity=Type("PdmDocumentIdentityStore");var bindings=identity.GetField("bindingDirectory",Flags);var resolver=identity.GetField("workspaceRootResolver",Flags);var isolated=identity.GetField("isolatedReadScope",Flags);
   var oldBindings=bindings.GetValue(null);var oldResolver=resolver.GetValue(null);var oldIsolated=isolated.GetValue(null);
@@ -31,12 +31,16 @@ internal static partial class Program
    foreach(var mode in suppliedNativeFixture==null?cases.Concat(NativeMissingAcquisition.Cases):NativeMissingAcquisition.Cases)
    {
     if(modeFilter!=null&&!mode.StartsWith(modeFilter,StringComparison.Ordinal))continue;
-    var directory=Path.Combine(Path.GetTempPath(),"pdm-acquire-assembly-edit-"+Guid.NewGuid().ToString("N"));var folder=Path.Combine(directory,"View","P700014-1");Directory.CreateDirectory(folder);
+    var directory=Path.Combine(Path.GetTempPath(),"pdm-acquire-assembly-edit-"+Guid.NewGuid().ToString("N"));
+    var project=Guid.NewGuid();var plannedRoot=Guid.NewGuid();
+    var folder=compactWorkspace?(string)TreeCallStatic("ManagedCadPaths","CompactDirectory",directory,"w",project+"|"+plannedRoot,"P700014-1"):Path.Combine(directory,"View","P700014-1");
+    Directory.CreateDirectory(folder);
     nativeMissing=mode.StartsWith("stored-missing-",StringComparison.Ordinal)?suppliedNativeFixture??NativeMissingAcquisition.Synthetic(directory):null;
     bindings.SetValue(null,Path.Combine(directory,"bindings"));resolver.SetValue(null,new Func<string>(()=>directory));isolated.SetValue(null,true);
-    var project=Guid.NewGuid();var plugin=New("PdmAddin");var session=(Guid)Field(plugin,"checkoutSessionId");var serializer=new JavaScriptSerializer{MaxJsonLength=int.MaxValue};
+    var plugin=New("PdmAddin");var session=(Guid)Field(plugin,"checkoutSessionId");var serializer=new JavaScriptSerializer{MaxJsonLength=int.MaxValue};
     SetField(plugin,"authenticatedUsername","tester");SetField(plugin,"currentProjectId",project);
     var root=LinkedNode(folder,nativeMissing?.OwnerFileName??"CW0030002.10.SLDASM","Assembly");var part=LinkedNode(folder,"7000093.101.02-01.SLDPRT","Part");var removed=LinkedNode(folder,"REMOVED.SLDPRT","Part");
+    if(compactWorkspace)Set(root,"DocumentId",plannedRoot);
     nativeMissing?.PrepareWorkingFile((string)Get(root,"FullPath"));
     var managedDeferred=mode.StartsWith("archived-managed-reference",StringComparison.Ordinal);
     var previousSession=mode.StartsWith("previous-session-",StringComparison.Ordinal);
@@ -186,7 +190,9 @@ internal static partial class Program
      {
       case "GetPathName":return path;case "get_Name2":return instance??Path.GetFileNameWithoutExtension(path)+"-"+id;case "GetID":return id;
       case "get_ReferencedConfiguration":return config;case "get_IsVirtual":return false;
-      case "GetModelDoc2":return model;case "IsSuppressed":return state==0;case "GetSuppression":return state;
+      case "GetModelDoc2":return model;
+      case "IsSuppressed":return state==0 || state==1 || state==4;
+      case "GetSuppression":case "GetSuppression2":return state;
       case "GetChildren":return new object[0];
       default:throw new Exception(call.MethodName);
      }

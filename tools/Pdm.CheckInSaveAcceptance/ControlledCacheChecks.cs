@@ -63,7 +63,7 @@ internal static partial class Program
     Exception firstConflict=null;try{await Prepare(manager,manifest);}catch(Exception error){firstConflict=error;}
     Check(firstConflict?.GetType().Name=="WorkspaceCacheConflictException"&&handler.Requests==4&&File.ReadAllText(part)==local,
      "未提交内容要求明确恢复选择，选择前零下载且原字节保持");
-    var backup=DiscardCall(manager,"BackupWorkingConflicts",manifest,firstConflict,CancellationToken.None);
+    var backup=DiscardCall(manager,"BackupWorkingConflicts",manifest,firstConflict,CancellationToken.None,null);
     var recoveryPart=Path.Combine((string)Get(backup,"RecoveryDirectory"),"PART.SLDPRT");
     Check(File.ReadAllText(recoveryPart)==local&&File.ReadAllText(part)==local,"模拟选择保留备份后先核对完整备份，仍不修改原文件");
     var prepareBackedUp=(Task)DiscardCall(manager,"PrepareBackedUpWorkingCopyAsync",manifest,new Guid[0],backup,CancellationToken.None);

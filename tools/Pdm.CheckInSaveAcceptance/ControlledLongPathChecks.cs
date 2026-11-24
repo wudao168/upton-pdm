@@ -175,6 +175,27 @@ internal static partial class Program
                 Require(failure is InvalidDataException && handler.Requests == 4 && WorkingReuseHash(outside) == outsideHash,
                     "受控清单越界路径在下载前拒绝，外部文件保持原样");
 
+                var resolve = Type("ManagedCadPaths").GetMethod("Resolve", Flags);
+                var issue = assembly.GetType("Upton.Pdm.Domain.DocumentMetadataLimits", true).GetMethod("GetArchiveFileNameIssue");
+                var rename = Type("BatchRenameRule").GetMethod("NormalizeFileBaseName", Flags);
+                bool Rejects(System.Reflection.MethodInfo method, params object[] arguments)
+                {
+                    try { method.Invoke(null, arguments); return false; }
+                    catch (TargetInvocationException error) when (error.InnerException.Message.Contains("保留名称")) { return true; }
+                }
+                foreach (var name in new[] { "CON.SLDDRW", "nul.tar.gz", "COM¹.SLDPRT", "lpt9.SLDASM" })
+                {
+                    Require(Rejects(resolve, ordinaryRoot, name) && Rejects(rename, name, Path.GetExtension(name))
+                        && (issue.Invoke(null, new object[] { name }) as string)?.Contains("保留名称") == true,
+                        "存档、受控打开和重命名都能提前拒绝 Windows 保留名称 " + name);
+                }
+                Require(Rejects(resolve, ordinaryRoot, @"PRN\模型.SLDPRT") && handler.Requests == 4,
+                    "保留目录名称在取回图档前被拦截");
+                foreach (var name in new[] { "COM10.SLDPRT", "CONveyor.SLDASM", "设备 夹具.SLDDRW" })
+                    Require((string)resolve.Invoke(null, new object[] { ordinaryRoot, name }) == Path.Combine(ordinaryRoot, name)
+                        && issue.Invoke(null, new object[] { name }) == null,
+                        "相似普通文件名和中文空格保持原名 " + name);
+
                 var previewWorkspace = Path.Combine(output, "preview");
                 resolver.SetValue(null, new Func<string>(() => previewWorkspace));
                 var compactDirectory = Type("ManagedCadPaths").GetMethod("CompactDirectory", Flags);

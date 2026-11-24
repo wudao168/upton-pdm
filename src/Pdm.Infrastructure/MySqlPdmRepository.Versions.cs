@@ -130,7 +130,7 @@ public sealed partial class MySqlPdmRepository
                 sha256 VARCHAR(64) PATH '$.sha256', publish BOOLEAN PATH '$.publish')) binding ON binding.publish=TRUE
             JOIN document d ON d.id=binding.document_id AND d.project_id=p.project_id
             JOIN document_version v ON v.id=binding.version_id AND v.document_id=d.id AND v.sha256=binding.sha256
-            WHERE d.project_id IN @ProjectIds AND d.kind='Drawing'
+            WHERE p.project_id IN @ProjectIds AND d.kind='Drawing'
               AND d.deleted_at IS NULL AND d.purged_at IS NULL AND d.lifecycle_state<>'Obsolete'
               AND v.version_status='Released' AND p.state='Published'
               AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')

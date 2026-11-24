@@ -62,10 +62,7 @@ internal sealed class EditDraftJournal
     public IReadOnlyList<LocalEditDraft> ReadAll()
     {
         if (!Directory.Exists(directory)) return Array.Empty<LocalEditDraft>();
-        return Directory.GetFiles(directory, "*.xml").Select(path =>
-        {
-            using (var stream = File.OpenRead(path)) return (LocalEditDraft)Serializer.Deserialize(stream);
-        }).ToArray();
+        return Directory.GetFiles(directory, "*.xml").Select(ReadRecord).ToArray();
     }
 
     public IReadOnlyList<LocalEditDraft> ReadDocument(Guid documentId)
@@ -75,14 +72,18 @@ internal sealed class EditDraftJournal
         // but do not open or deserialize records belonging to other documents.
         return Directory.GetFiles(directory, "*-" + documentId.ToString("N") + ".xml").Select(path =>
         {
-            using (var stream = File.OpenRead(path))
-            {
-                var entry = (LocalEditDraft)Serializer.Deserialize(stream);
-                if (entry.DocumentId != documentId)
-                    throw new InvalidOperationException("本地编辑记录与图档身份不一致，已保留记录，请检查诊断日志。");
-                return entry;
-            }
+            var entry = ReadRecord(path);
+            if (entry.DocumentId != documentId)
+                throw new InvalidOperationException("本地编辑记录与图档身份不一致，已保留记录，请检查诊断日志。");
+            return entry;
         }).ToArray();
+    }
+
+    private static LocalEditDraft ReadRecord(string path)
+    {
+        // Save publishes flushed, complete XML files with File.Replace. A reader
+        // can keep its existing handle while the next complete record is published.
+        using (var stream = OpenSharedRead(path)) return (LocalEditDraft)Serializer.Deserialize(stream);
     }
 
     public void Save(LocalEditDraft entry)
@@ -106,10 +107,13 @@ internal sealed class EditDraftJournal
 
     public static string Hash(string path)
     {
-        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var stream = OpenSharedRead(path))
         using (var hash = SHA256.Create())
             return BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "");
     }
+
+    private static FileStream OpenSharedRead(string path) =>
+        new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
     public bool DelayMaintenance(LocalEditDraft entry, string errorKey, bool recoveryRequired, DateTime now)
     {
@@ -146,7 +150,9 @@ internal sealed class EditDraftJournal
         var folder = Path.Combine(directory, entry.DocumentId.ToString("N"), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var target = Path.Combine(folder, "draft" + Path.GetExtension(entry.SourcePath));
-        using (var source = new FileStream(snapshotPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        // SolidWorks keeps a writable handle to an open checked-out model. Open
+        // the source the same way as the hashes on either side of the copy.
+        using (var source = OpenSharedRead(snapshotPath))
         using (var destination = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None))
         {
             source.CopyTo(destination);

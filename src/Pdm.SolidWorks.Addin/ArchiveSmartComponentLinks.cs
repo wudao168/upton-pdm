@@ -94,6 +94,9 @@ internal static class ArchiveSmartComponentLinks
     }
 
     internal static IEnumerable<IFeature> Features(IModelDoc2 model)
+        => ReadFeatureInventory(model).Select(entry => entry.Feature).ToArray();
+
+    internal static (IFeature Feature, string Name, string Type)[] ReadFeatureInventory(IModelDoc2 model)
     {
         // The native flat inventory includes child features. Avoid walking linked
         // next-feature pointers, which can stall after repeated document changes.
@@ -103,7 +106,8 @@ internal static class ArchiveSmartComponentLinks
         var features = values?.OfType<IFeature>().ToArray() ?? new IFeature[0];
         if (features.Length != count || values != null && features.Length != values.Length)
             throw new IOException("原生特征目录未完整读取，已停止存档：" + Path.GetFileName(model.GetPathName()));
-        return features.GroupBy(feature => feature.Name + "|" + feature.GetTypeName2(), StringComparer.Ordinal)
+        return features.Select(feature => (Feature: feature, Name: feature.Name, Type: feature.GetTypeName2()))
+            .GroupBy(entry => entry.Name + "|" + entry.Type, StringComparer.Ordinal)
             .OrderBy(group => group.Key, StringComparer.Ordinal).Select(group => group.First()).ToArray();
     }
 }

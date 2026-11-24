@@ -47,10 +47,10 @@ internal sealed partial class ControlledWorkspaceManager
                     var to = ManifestPath(target, file);
                     Directory.CreateDirectory(Path.GetDirectoryName(to));
                     CopyFileAtomically(from, to);
-                    if (!PdmDocumentIdentityStore.TryWriteControlledVersion(to, file.DocumentId, manifest.ProjectId,
-                        file.VersionId, file.Revision, file.Sha256, file.FileLength))
+                    if (!PdmDocumentIdentityStore.TryWriteVersionBinding(to, file.DocumentId, manifest.ProjectId,
+                        file.VersionId, file.Revision, file.Sha256, file.FileLength, workspaceCopy: true))
                         throw new IOException("新受控副本的版本记录未能写入：" + to);
-                    ControlledReferenceMaterializer.CopyResolvedBinding(from, to);
+                    ControlledReferenceMaterializer.CopyWorkspaceResolvedBinding(from, to);
                 }
                 if (!ValidateWorkspace(target, manifest.Files)) throw new IOException("新取回的PLM工作副本校验失败。");
                 SetWorkspaceAttributes(target, manifest, editableIds ?? Array.Empty<Guid>());
@@ -128,7 +128,7 @@ internal sealed partial class ControlledWorkspaceManager
             var destination = ManifestPath(target, file);
             Directory.CreateDirectory(Path.GetDirectoryName(destination));
             CopyFileAtomically(source, destination);
-            ControlledReferenceMaterializer.CopyResolvedBinding(source, destination);
+            ControlledReferenceMaterializer.CopyWorkspaceResolvedBinding(source, destination);
             if (!ControlledReferenceMaterializer.Matches(destination, file))
                 throw new IOException("缓存文件在复制期间发生变化，未打开图档：" + file.FileName);
             return true;

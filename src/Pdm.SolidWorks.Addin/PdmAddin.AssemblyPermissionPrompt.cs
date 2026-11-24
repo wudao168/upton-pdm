@@ -39,8 +39,8 @@ public sealed partial class PdmAddin
 
     private int OnAssemblyCommandOpening(int command, int userCommand)
     {
-        nativeCommandSequence++;
-        if (assemblyReferenceLoad?.Completed == false) assemblyReferenceLoad = null;
+        // A queued Ctrl+S is canceled here and does not start a native command.
+        // Let the pending save wait for already-observed draft references.
         try { if (TryQueueManagedSave(command)) return 1; }
         catch (Exception error)
         {
@@ -48,6 +48,8 @@ public sealed partial class PdmAddin
             taskPaneControl?.SetCheckoutReminder("本次保存尚未执行，请核对当前图档和编辑权限后重试。", true);
             return 1;
         }
+        nativeCommandSequence++;
+        if (assemblyReferenceLoad?.Completed == false) assemblyReferenceLoad = null;
         var previous = nativeUiCommandId;
         if (command > 0) { nativeUiCommandId = command; unknownSavedEpoch = 0; }
         var operation = AssemblyStructureOperation(command);

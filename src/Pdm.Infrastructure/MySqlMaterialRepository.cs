@@ -81,17 +81,16 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         var normalizedBrand = string.IsNullOrWhiteSpace(brand) ? null : brand.Trim();
         var normalizedPageSize = Math.Clamp(pageSize, 1, 200);
         var normalizedPage = Math.Max(page, 1);
-        var filters =
-            " WHERE (@IncludeArchived=1 OR is_archived=0)" +
-            " AND (@CategoryCode IS NULL OR category_code LIKE @CategoryCode)" +
-            " AND (@Brand IS NULL OR brand=@Brand)" +
-            " AND (@Query IS NULL OR material_code LIKE @Query OR name LIKE @Query OR specification LIKE @Query OR material LIKE @Query OR category_code LIKE @Query OR u9_category_code LIKE @Query OR surface_treatment LIKE @Query OR purchase_link LIKE @Query OR remark LIKE @Query)";
+        var filters = includeArchived ? " WHERE 1=1" : " WHERE is_archived=0";
+        if (normalizedCategory is not null) filters += " AND category_code LIKE @CategoryCode";
+        if (normalizedBrand is not null) filters += " AND brand=@Brand";
+        if (normalizedQuery is not null)
+            filters += " AND (material_code LIKE @Query OR name LIKE @Query OR specification LIKE @Query OR material LIKE @Query OR category_code LIKE @Query OR u9_category_code LIKE @Query OR surface_treatment LIKE @Query OR purchase_link LIKE @Query OR remark LIKE @Query)";
         var parameters = new
         {
             Query = normalizedQuery,
             CategoryCode = normalizedCategory,
             Brand = normalizedBrand,
-            IncludeArchived = includeArchived,
             ExactCode = query?.Trim(),
             Offset = (normalizedPage - 1) * normalizedPageSize,
             PageSize = normalizedPageSize

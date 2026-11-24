@@ -16,6 +16,7 @@ public sealed partial class PdmAddin
         var files = manifest.Files.ToDictionary(file => file.DocumentId);
         var entries = editJournal.ReadAll().Where(entry => entry.ProjectId == manifest.ProjectId && entry.RestoreOnOpen
             && !entry.DiscardPending && !entry.PendingClose && (entry.Closed || entry.SessionId == checkoutSessionId)
+            && (entry.SessionId == checkoutSessionId || !EditDraftJournal.OwnerProcessRunning(entry))
             && files.ContainsKey(entry.DocumentId))
             .GroupBy(entry => entry.DocumentId).Select(group => group.OrderByDescending(entry => entry.SavedAtUtc)
                 .ThenByDescending(entry => entry.CheckedOutAt).First()).ToArray();

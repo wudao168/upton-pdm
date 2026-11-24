@@ -55,6 +55,12 @@ public sealed partial class PdmAddin
                             RecordArchivedMissingReference(manifest, owner, source);
                             continue;
                         }
+                        var toolbox = FindArchivedToolboxTemplate(source, archivedReferences);
+                        if (toolbox != null)
+                        {
+                            RecordArchivedMissingReference(manifest, owner, source, toolbox);
+                            continue;
+                        }
                     }
                     throw new InvalidOperationException("上次编辑新增的本地引用尚未入库，原文件缺失，草稿已保留。请恢复该原文件后重试：" + source);
                 }
@@ -144,7 +150,7 @@ public sealed partial class PdmAddin
     {
         var stagingId = Guid.NewGuid().ToString("N");
         var staging = ManagedCadPaths.ChooseStagingDirectory(
-            Path.Combine(Path.GetTempPath(), "UPLM", "reference-baseline", stagingId),
+            Path.Combine(ArchiveNativeProcessWorkspace.ReferenceBaselineDirectory, stagingId),
             stagingId, new[] { file.RelativePath ?? file.FileName });
         var canonical = await apiClient.DownloadControlledOpenFileAsync(file, staging, lifetime.Token);
         if (!ControlledReferenceMaterializer.Matches(canonical, file))
@@ -152,13 +158,32 @@ public sealed partial class PdmAddin
         return canonical;
     }
 
-    private void RecordArchivedMissingReference(ControlledOpenManifestDto manifest, string owner, string source)
+    private string FindArchivedToolboxTemplate(string missing, IEnumerable<string> archivedReferences)
+    {
+        if (!string.Equals(Path.GetExtension(missing), ".SLDPRT", StringComparison.OrdinalIgnoreCase)) return null;
+        var browser = SolidWorksToolboxPaths.BrowserDirectory(application);
+        if (browser == null) return null;
+        var configuration = Path.GetFileNameWithoutExtension(missing);
+        var matched = archivedReferences.Where(path => SolidWorksToolboxPaths.IsBrowserPart(path, browser) && File.Exists(path))
+            .Where(path => ((application.GetConfigurationNames(path) as Array)?.OfType<string>() ?? Enumerable.Empty<string>())
+                .Contains(configuration, StringComparer.OrdinalIgnoreCase)).Take(2).ToArray();
+        return matched.Length == 1 ? matched[0] : null;
+    }
+
+    private void RecordArchivedMissingReference(ControlledOpenManifestDto manifest, string owner, string source, string toolbox = null)
     {
         if (File.Exists(source) || Directory.Exists(source) || FindLoadedDocument(source) != null)
             throw new IOException("存档引用未在受控清单中，原路径存在文件或已打开窗口，未作为缺件放行：" + Path.GetFileName(source));
+        if (toolbox != null)
+        {
+            if (!manifest.VerifiedMissingToolboxReferences.TryGetValue(owner, out var references))
+                manifest.VerifiedMissingToolboxReferences[owner] = references = new List<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>();
+            references.Add(new ArchiveMissingReferencePolicy.ToolboxReferenceEvidence(source, toolbox, Path.GetFileName(owner), true));
+        }
         manifest.ReferenceIssues = OpenReferenceFindings.Merge((manifest.ReferenceIssues ?? new List<OpenReferenceIssueDto>())
             .Concat(new[] { new OpenReferenceIssueDto { FileName = Path.GetFileName(source), OriginalPath = source,
-                InstancePath = Path.GetFileName(owner), Reason = "存档基准中的引用文件缺失，已保留原引用，未猜测替代文件。" } }));
+                InstancePath = Path.GetFileName(owner), Reason = toolbox == null ? "存档基准中的引用文件缺失，已保留原引用，未猜测替代文件。"
+                    : "Toolbox原文件缺失，已核对存档模板的配置并保留原引用。" } }));
         LogOperation("已核对存档原有缺失引用，未认定为本次编辑新增：" + source);
     }
 }

@@ -579,6 +579,46 @@ public static class PdmEndpointExtensions
                 organizationId, request.CurrentProjectSequence, request.CurrentSerialSequence, cancellationToken));
         });
 
+        api.MapGet("/projects/numbering/preview", async (Guid organizationId, string projectTypeCode, int? childCount,
+            HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Ok(await workflow.PreviewNewProjectCodesAsync(organizationId, projectTypeCode, childCount ?? 0,
+                actor, role, cancellationToken));
+        });
+
+        api.MapGet("/projects/{projectId:guid}/children/numbering/preview", async (Guid projectId, int? childCount,
+            HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Ok(await workflow.PreviewSubprojectCodesAsync(projectId, childCount ?? 0, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/history/import", async (Guid organizationId, bool? preview, IFormFile file, HttpContext context,
+            PdmWorkflowService workflow, CancellationToken ct) =>
+        {
+            if (file.Length is < 1 or > HistoricalProjectImport.MaximumFileBytes ||
+                !string.Equals(Path.GetExtension(file.FileName), ".xlsx", StringComparison.OrdinalIgnoreCase))
+                throw new PdmRuleException("请选择不超过5 MB的Excel（.xlsx）文件。");
+            var (actor, role) = CurrentUser(context.User);
+            using var input = file.OpenReadStream();
+            var result = await workflow.ImportHistoricalProjectsAsync(organizationId, () => HistoricalProjectWorkbook.Read(input, ct),
+                preview != false, actor, role, ct);
+            return Results.Ok(new
+            {
+                result.Created,
+                Rows = result.Projects.Select(project => new
+                {
+                    project.Code, project.Name, project.ProjectAlias, project.DeviceModel, project.SerialNumbers,
+                    project.CustomerName, project.SignedDate, project.DeliveryDate, project.HistoricalUpdatedDate, project.HistoricalRemarks,
+                    IsSubproject = project.ParentProjectId.HasValue
+                }).ToArray()
+            });
+        }).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(HistoricalProjectImport.MaximumFileBytes + 65536))
+          .DisableAntiforgery();
+
         api.MapPost("/projects", async (CreateProjectRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -595,7 +635,10 @@ public static class PdmEndpointExtensions
                     actor,
                     string.Empty,
                     string.Empty,
-                    request.BomItemCategoryCode),
+                    request.BomItemCategoryCode)
+                {
+                    Children = request.Children?.Select(item => item ?? new CreateSubprojectItem(string.Empty, null, 0)).ToArray() ?? []
+                },
                 actor,
                 role,
                 cancellationToken);
@@ -631,8 +674,14 @@ public static class PdmEndpointExtensions
         api.MapPost("/projects/{projectId:guid}/children", async (Guid projectId, CreateSubprojectRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            if (request.Items is not null)
+            {
+                var items = request.Items.Select(item => item ?? new CreateSubprojectItem(string.Empty, null, 0)).ToArray();
+                var children = await workflow.CreateSubprojectsAsync(new(projectId, items), actor, role, cancellationToken);
+                return Results.Created($"/api/projects/{projectId}/children", children);
+            }
             var project = await workflow.CreateSubprojectAsync(
-                new CreateSubprojectCommand(projectId, request.Name, request.ProjectAlias, request.Quantity, EquipmentTypeCode: request.EquipmentTypeCode),
+                new CreateSubprojectCommand(projectId, request.Name ?? string.Empty, request.ProjectAlias, request.Quantity, EquipmentTypeCode: request.EquipmentTypeCode),
                 actor,
                 role,
                 cancellationToken);

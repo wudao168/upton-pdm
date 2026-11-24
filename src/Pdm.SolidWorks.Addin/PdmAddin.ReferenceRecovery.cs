@@ -99,7 +99,7 @@ public sealed partial class PdmAddin
             var owner = pending.Dequeue();
             if (!visited.Add(owner.FullPath) || !IsPdmNativeFile(owner.FullPath)) continue;
             using var referenceTiming = ArchiveReadContext.Measure(owner, "核对引用位置、历史断开状态和保存归属");
-            owner.ReferenceWarnings.RemoveAll(message => !message.StartsWith(ArchiveMissingReferencePolicy.WarningPrefix, StringComparison.Ordinal));
+            owner.ReferenceWarnings.RemoveAll(message => !ArchiveMissingReferencePolicy.IsRecordedReferenceWarning(message));
             // Unsaved structures are checked again after the normal save step.
             var loaded = reads.FindLoaded(owner.FullPath);
             if (loaded?.GetSaveFlag() == true && MemoryCopy(owner) == null) continue;
@@ -133,6 +133,7 @@ public sealed partial class PdmAddin
             {
                 token.ThrowIfCancellationRequested();
                 var path = source;
+                if (owner.UnverifiedToolboxReferences.Contains(path)) continue;
                 if (packageOwners.TryGetValue(owner.FullPath, out var fixedFiles)
                     && fixedFiles.TryGetValue(Path.GetFileName(path), out var fixedReference)
                     && !PathsEqual(owner.FullPath, fixedReference.FullPath))
@@ -281,14 +282,26 @@ public sealed partial class PdmAddin
             var records = recoveredArchiveReferences.Values.Where(record => record.Scope == apiClient?.EditJournalScope
                 && PathsEqual(record.Owner, owner.FullPath)).ToArray();
             if (records.Length == 0) continue;
-            var saved = application.GetDocumentDependencies2(ArchiveFileReadPath(owner), false, false, false) as Array;
+            var readPath = ArchiveFileReadPath(owner);
+            var ownerHash = ArchiveFileFingerprint.Read(owner.FullPath);
+            var saved = application.GetDocumentDependencies2(readPath, false, false, false) as Array;
+            if (ownerHash != ArchiveFileFingerprint.Read(owner.FullPath))
+                throw new InvalidOperationException("核对已补齐引用时图档发生变化，原图档已保留，请重新检查：" + owner.FileName);
             var sources = new HashSet<string>(PdmDependencyEntries(saved, owner.FullPath).SelectMany(entry => entry.Value), StringComparer.OrdinalIgnoreCase);
             foreach (var record in records.Where(record => sources.Contains(record.Source)))
             {
                 if (!File.Exists(record.Path) || record.Hash != ArchiveFileFingerprint.Read(record.Path))
                     throw new InvalidOperationException("已补齐的引用副本发生变化，原图档已保留，请重新检查：" + Path.GetFileName(record.Path));
-                var sameOwner = record.OwnerHash == ArchiveFileFingerprint.Read(owner.FullPath)
+                var sameOwner = record.OwnerHash == ownerHash
                     && string.Equals(record.OwnerConfiguration, owner.Configuration, StringComparison.OrdinalIgnoreCase);
+                if (PathsEqual(readPath, owner.FullPath))
+                {
+                    // This exact saved document still refers to the verified file.
+                    // A different owner revision cannot carry forward context proof.
+                    record.OwnerHash = ownerHash;
+                    record.OwnerConfiguration = owner.Configuration;
+                    record.IsContext = sameOwner && record.IsContext;
+                }
                 if (!owner.Children.Concat(owner.ReferencedModels).Any(node => PathsEqual(node.FullPath, record.Path)))
                 {
                     var link = NewRecoveredReferenceNode(record.Path, record.Source, owner);

@@ -3,11 +3,11 @@ import PersonName from './PersonName.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, canViewTab } = useProjectCenterAccess()
 import ProjectTodoFields from './ProjectTodoFields.vue'
-import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, TriangleAlert } from '@lucide/vue'
-import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, readProjectOverviewRecords, readProjectOpl, listProjectPlanVersions, readProjectPlanPortfolio, readProjectRiskOverview, readProjectValidationPlan } from '../api'
+import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw } from '@lucide/vue'
+import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, readProjectOverviewRecords, readProjectOpl, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import OverviewTimeline from './OverviewTimeline.vue'
+import ProjectReleaseChangeOverview from './ProjectReleaseChangeOverview.vue'
 import { chinaToday } from '../projectCalendar'
-import { projectRiskRows, type ProjectAttentionDetail, type ProjectRiskOverviewProject } from '../projectAttention'
 import { ElMessage } from '../statusMessage'
 import { resolveUserDisplayName } from '../userDisplay'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -40,8 +40,7 @@ const props = withDefaults(defineProps<{
   canAddManagerNote: boolean
 }>(), { active: true })
 
-const emit = defineEmits<{ documents: []; bom: [kind?: import('../types').BomKind]; opl: []; projectPlan: [taskId?: string]; openPortfolioPlan: [projectId: string]; validationPlan: []; release: [];
-  openRisk: [projectId: string, tab: ProjectAttentionDetail['tab']] }>()
+const emit = defineEmits<{ documents: []; bom: [kind?: import('../types').BomKind]; opl: []; projectPlan: [taskId?: string]; openPortfolioPlan: [projectId: string]; validationPlan: []; release: [] }>()
 
 const activeProject = computed(() => props.projects.find(item => item.id === props.project.id) ?? props.project)
 const rootProject = computed(() => {
@@ -74,64 +73,9 @@ const todoDueDate = ref<string>()
 const todoRecipients = ref<string[]>([])
 let overviewRequestId = 0
 
-const riskProjects = ref<ProjectRiskOverviewProject[]>([])
-const riskToday = ref(chinaToday())
-const risksPending = ref(false)
-const risksFailed = ref(false)
-const canReadRisks = computed(() => activeProject.value.canReadContent && canViewTab('overview'))
-const riskRows = computed(() => projectRiskRows(riskProjects.value, riskToday.value).filter(row => canViewTab(row.tab)))
-const activeRisk = ref<{ projectId: string; key: string }>()
-const selectedRisk = computed(() => riskRows.value.find(row => row.projectId === activeRisk.value?.projectId && row.key === activeRisk.value?.key))
-const riskDetailOpen = computed({
-  get: () => Boolean(selectedRisk.value),
-  set: (open: boolean) => { if (!open) activeRisk.value = undefined },
-})
-const riskTabLabels = { 'project-plan': '计划', procurement: '备料', release: '发布' } as const
-
-function openRiskPage() {
-  const risk = selectedRisk.value
-  if (!risk) return
-  activeRisk.value = undefined
-  emit('openRisk', risk.projectId, risk.tab)
-}
-const risksIncomplete = computed(() => risksFailed.value || riskProjects.value.some(item => item.incomplete))
-let riskRequest: AbortController | undefined
-
-async function loadProjectRisks() {
-  riskRequest?.abort()
-  if (!props.token || !canReadRisks.value || !props.active) {
-    risksPending.value = false
-    return
-  }
-  const request = new AbortController()
-  riskRequest = request
-  risksPending.value = true
-  risksFailed.value = false
-  try {
-    const data = await readProjectRiskOverview(activeProject.value.id, props.token, request.signal)
-    if (!request.signal.aborted) {
-      riskProjects.value = data
-      riskToday.value = chinaToday()
-    }
-  } catch {
-    if (!request.signal.aborted) {
-      riskProjects.value = []
-      risksFailed.value = true
-    }
-  } finally {
-    if (!request.signal.aborted) {
-      risksPending.value = false
-      if (!selectedRisk.value) activeRisk.value = undefined
-    }
-  }
-}
-
-watch([() => activeProject.value.id, () => props.token, () => props.active, canReadRisks], () => {
-  activeRisk.value = undefined
-  riskProjects.value = []
-  risksFailed.value = false
-  void loadProjectRisks()
-}, { immediate: true })
+const canReadReleaseOverview = computed(() => activeProject.value.canReadContent && canViewTab('release')
+  && activeProject.value.effectiveProjectPermissions?.includes('release.view') === true)
+const releaseOverviewRefresh = ref(0)
 
 function projectDesignLeads(project: ProjectSummary) {
   return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
@@ -211,14 +155,14 @@ watch([() => props.project.id, () => props.token, () => recordProjects.value.map
 }, { immediate: true })
 function refreshOverview() {
   void loadOperationalSummary()
-  if (!risksPending.value) void loadProjectRisks()
+  releaseOverviewRefresh.value++
 }
 onMounted(() => {
   overviewTimer = window.setInterval(() => {
     if (props.active && !document.hidden && !refreshingOverview.value) refreshOverview()
   }, 300_000)
 })
-onBeforeUnmount(() => { window.clearInterval(overviewTimer); ++overviewRequestId; riskRequest?.abort() })
+onBeforeUnmount(() => { window.clearInterval(overviewTimer); ++overviewRequestId })
 
 function assignedPeople(usernames: Array<string | undefined>) {
   const uniqueUsernames = [...new Set(usernames.flatMap(item => item?.split('、') ?? []).map(item => item.trim()).filter((item): item is string => Boolean(item)))]
@@ -515,29 +459,13 @@ const overviewAlerts = computed(() => [
           </div>
       </section>
 
-      <div class="pdm-overview-summary" aria-label="项目核心业务概览">
-        <article v-if="canReadRisks" class="pdm-panel pdm-overview-project-risks" aria-label="项目风险" :aria-busy="risksPending">
-          <header><span><TriangleAlert :size="18" /></span><h2>项目风险</h2></header>
-          <div class="pdm-overview-project-risks__table-wrap">
-            <table class="pdm-fit-columns">
-              <colgroup><col class="risk-project"><col class="risk-type"><col><col class="risk-action"></colgroup>
-              <thead><tr><th scope="col">项目号</th><th scope="col">风险类型</th><th scope="col">明细</th><th scope="col">操作</th></tr></thead>
-              <tbody>
-                <tr v-for="risk in riskRows" :key="`${risk.projectId}:${risk.key}`">
-                  <td :title="risk.projectCode">{{ risk.projectCode }}</td>
-                  <td class="risk-description" :title="risk.reason">{{ risk.reason }}</td>
-                  <td :title="risk.subject">{{ risk.subject }}</td>
-                  <td><button type="button" class="pdm-text-action" :aria-label="`查看 ${risk.projectCode} ${risk.reason} ${risk.subject}`" @click="activeRisk = { projectId: risk.projectId, key: risk.key }">查看</button></td>
-                </tr>
-                <tr v-if="!riskRows.length && !risksIncomplete"><td colspan="4" role="status">{{ risksPending ? '正在读取项目风险…' : '当前暂无风险' }}</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div v-if="risksIncomplete" class="pdm-overview-project-risks__notice" role="status">
-            <span>{{ risksFailed ? '项目风险读取失败' : '部分项目风险暂未更新' }}</span>
-            <button type="button" class="pdm-text-action" :disabled="risksPending" @click="loadProjectRisks">刷新</button>
-          </div>
-        </article>
+      <div v-if="canReadReleaseOverview" class="pdm-overview-summary" aria-label="项目核心业务概览">
+        <ProjectReleaseChangeOverview
+          :project-id="activeProject.id"
+          :token="token"
+          :active="active"
+          :refresh-version="releaseOverviewRefresh"
+        />
       </div>
 
       <div class="pdm-overview-bottom">
@@ -569,25 +497,6 @@ const overviewAlerts = computed(() => [
       <template #footer><button type="button" class="pdm-secondary-action" @click="alertDetailOpen = false">关闭</button></template>
     </el-drawer>
 
-    <el-drawer v-model="riskDetailOpen" title="项目风险详情" size="min(480px, calc(100vw - 24px))" append-to-body>
-      <template v-if="selectedRisk">
-        <section class="risk-detail" aria-label="风险明细">
-          <span class="risk-description">{{ selectedRisk.reason }}</span>
-          <h3>{{ selectedRisk.subject }}</h3>
-          <dl>
-            <dt>项目号</dt><dd>{{ selectedRisk.projectCode }}</dd>
-            <template v-for="field in selectedRisk.fields" :key="field.label">
-              <dt>{{ field.label }}</dt><dd>{{ field.value === '' ? '—' : field.value ?? '—' }}</dd>
-            </template>
-          </dl>
-        </section>
-      </template>
-      <template #footer>
-        <button type="button" class="pdm-secondary-action" @click="riskDetailOpen = false">关闭</button>
-        <button v-if="selectedRisk" type="button" class="pdm-primary-action" data-pdm-primary @click="openRiskPage">前往{{ riskTabLabels[selectedRisk.tab] }}</button>
-      </template>
-    </el-drawer>
-
     <el-dialog v-model="managerNoteDialogOpen" class="pdm-manager-note-dialog" :title="managerNoteTarget ? `${canAddManagerNote ? '维护' : '查看'}项目记录 · ${managerNoteTarget.code}` : '项目记录'" width="520px" append-to-body>
       <template v-if="canAddManagerNote"><label class="pdm-dialog-field">备注内容<textarea v-model="managerNoteContent" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
       <ProjectTodoFields v-model:due-date="todoDueDate" v-model:recipients="todoRecipients" :users="todoRecipientCandidates" :pending="savingManagerNote" /></template>
@@ -616,101 +525,7 @@ const overviewAlerts = computed(() => [
 .overview-alert-details th,.overview-alert-details td { padding:10px 4px; text-align:center; vertical-align:middle; border-bottom:1px solid var(--pdm-border-soft); }
 .overview-alert-details th { color:var(--pdm-muted); font-weight:500; }
 .overview-alert-details button { white-space:nowrap; }
-.pdm-overview-project-risks {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.pdm-overview-project-risks > header {
-  min-height: 42px;
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 13px;
-  border-bottom: 1px solid var(--pdm-border-soft);
-}
-.pdm-overview-project-risks > header > span {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 7px;
-  color: var(--pdm-orange);
-  background: var(--pdm-orange-soft);
-}
-.pdm-overview-project-risks h2 {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-}
-.pdm-overview-project-risks__table-wrap {
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
-}
-.pdm-overview-project-risks table {
-  width: 100%;
-  table-layout: fixed;
-  border-collapse: collapse;
-  font-size: 11px;
-}
-.pdm-overview-project-risks th {
-  height: var(--pdm-overview-table-header-height);
-  position: sticky;
-  top: 0;
-  background: var(--pdm-bg);
-  color: var(--pdm-muted);
-  font-weight: 500;
-}
-.pdm-overview-project-risks td {
-  height: var(--pdm-detail-row-height);
-  border-top: 1px solid var(--pdm-border-soft);
-}
-.pdm-overview-project-risks :is(th, td) {
-  padding: 0 5px;
-  text-align: center;
-  vertical-align: middle;
-  white-space: nowrap;
-}
-.risk-project { width: 88px; }
-.risk-type { width: 118px; }
-.risk-action { width: 48px; }
-.risk-description { color: var(--pdm-orange); }
-.risk-detail h3 {
-  margin: 6px 0 16px;
-  font-size: 16px;
-  overflow-wrap: anywhere;
-}
-.risk-detail dl {
-  display: grid;
-  grid-template-columns: minmax(88px, max-content) minmax(0, 1fr);
-  gap: 12px;
-}
-.risk-detail dt { color: var(--pdm-muted); }
-.risk-detail dd {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.pdm-overview-project-risks__notice {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 4px;
-  color: var(--pdm-muted);
-  font-size: 12px;
-}
 @media (max-width: 1000px) {
-  .pdm-overview-project-risks__table-wrap { max-height: 250px; }
-}
-@media (max-width: 480px) {
-  .risk-project { width: 72px; }
-  .risk-type { width: 96px; }
-  .risk-action { width: 40px; }
+  .pdm-overview-summary { display: block; min-height: auto; }
 }
 </style>

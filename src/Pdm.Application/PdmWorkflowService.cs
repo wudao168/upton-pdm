@@ -47,8 +47,53 @@ public sealed partial class PdmWorkflowService(
 
     public async Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
+        var authorizeChildren = await RequireNumberedProjectCreationPermissionAsync(command.OrganizationId, command.Children.Count,
+            actor, role, cancellationToken);
+        return await CreateNumberedProjectCoreAsync(command, actor, cancellationToken, authorizeChildren);
+    }
+
+    public async Task<ProjectCodePreview> PreviewNewProjectCodesAsync(Guid organizationId, string projectTypeCode, int childCount,
+        string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var authorizeChildren = await RequireNumberedProjectCreationPermissionAsync(organizationId, childCount, actor, role, cancellationToken);
+        if (authorizeChildren is not null)
+        {
+            var projectId = Guid.NewGuid();
+            // No project-specific staffing or contacts exist before the root is created.
+            authorizeChildren(new Project(projectId, "", "", actor, "", "", true) { OrganizationId = organizationId, RootProjectId = projectId });
+        }
+        ProjectChildCreation.RequirePreviewCount(childCount);
+        var normalizedType = projectTypeCode.Trim().ToUpperInvariant();
+        var options = await repository.GetProjectNumberingOptionsAsync(cancellationToken);
+        if (!options.ProjectTypes.Any(item => item.IsActive && string.Equals(item.Code, normalizedType, StringComparison.OrdinalIgnoreCase)))
+            throw new PdmRuleException("所选项目类型不存在或已停用。");
+        var code = await repository.PreviewNextProjectCodeAsync(organizationId, normalizedType, cancellationToken);
+        return ProjectChildCreation.Preview(code, [], childCount);
+    }
+
+    public async Task<ProjectCodePreview> PreviewSubprojectCodesAsync(Guid parentProjectId, int childCount,
+        string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireExistingSubprojectCreationPermissionAsync(parentProjectId, actor, role, cancellationToken);
+        // The POST is protected by the project write middleware as well as the operation permission.
+        if (!await ProjectPermissionPolicy.CanAsync(repository, parentProjectId, actor, role, ProjectCenterPermissions.Write, cancellationToken))
+            throw new UnauthorizedAccessException("当前账号仅允许查看项目资料，不能执行编辑或业务处理操作。");
+        ProjectChildCreation.RequirePreviewCount(childCount);
+        var parent = await repository.FindProjectAsync(parentProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("上级项目不存在。");
+        ProjectChildCreation.RequireParentNumberingData(parent);
+        var used = await repository.ListUsedChildProjectSequencesAsync(parentProjectId, cancellationToken);
+        return ProjectChildCreation.Preview(parent.Code, used, childCount);
+    }
+
+    private async Task<Action<Project>?> RequireNumberedProjectCreationPermissionAsync(Guid organizationId, int childCount,
+        string actor, UserRole role, CancellationToken cancellationToken)
+    {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectCreate, cancellationToken);
-        return await CreateNumberedProjectCoreAsync(command, actor, cancellationToken);
+        RequireActiveCompany(organizationId);
+        if (childCount <= 0) return null;
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProjectChildCreate, cancellationToken);
+        return await PrepareNewRootChildAuthorizationAsync(organizationId, actor, cancellationToken);
     }
 
     internal async Task<Project> CreateApprovedApplicationProjectAsync(CreateNumberedProjectCommand command, string actor, UserRole role, CancellationToken cancellationToken)
@@ -57,7 +102,8 @@ public sealed partial class PdmWorkflowService(
         return await CreateNumberedProjectCoreAsync(command, actor, cancellationToken);
     }
 
-    private async Task<Project> CreateNumberedProjectCoreAsync(CreateNumberedProjectCommand command, string actor, CancellationToken cancellationToken)
+    private async Task<Project> CreateNumberedProjectCoreAsync(CreateNumberedProjectCommand command, string actor, CancellationToken cancellationToken,
+        Action<Project>? authorizeChildren = null)
     {
         RequireActiveCompany(command.OrganizationId);
         ValidateProjectDetails(command.Name, command.ProjectAlias, command.Quantity);
@@ -82,6 +128,7 @@ public sealed partial class PdmWorkflowService(
         if (string.Equals(vaultRoot, releaseRoot, StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("图档库与生产发包目录不能是同一位置。");
 
+        var children = NormalizeSubprojectItems(command.Children, options, includeRowNumber: true);
         var project = await repository.CreateNumberedProjectAsync(command with
         {
             ProjectTypeCode = command.ProjectTypeCode.Trim().ToUpperInvariant(),
@@ -90,35 +137,86 @@ public sealed partial class PdmWorkflowService(
             ProjectAlias = NullIfWhiteSpace(command.ProjectAlias),
             Owner = actor,
             VaultLocation = vaultRoot,
-            ReleaseLocation = releaseRoot
-        }, cancellationToken);
-        await repository.EnsureProjectFolderTreeAsync(project.Id, cancellationToken);
-        await AuditAsync(actor, "project.create", nameof(Project), project.Id.ToString(), $"{project.Code} · {project.Name} · 数量{project.Quantity}", cancellationToken);
+            ReleaseLocation = releaseRoot,
+            Children = children
+        }, cancellationToken, authorizeChildren);
+        if (children.Count == 0)
+        {
+            await repository.EnsureProjectFolderTreeAsync(project.Id, cancellationToken);
+            await AuditAsync(actor, "project.create", nameof(Project), project.Id.ToString(), $"{project.Code} · {project.Name} · 数量{project.Quantity}", cancellationToken);
+        }
         return project;
     }
 
-    public async Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    private async Task<Action<Project>> PrepareNewRootChildAuthorizationAsync(Guid organizationId, string actor, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.ProjectChildCreate, cancellationToken);
-        await ProjectPermissionPolicy.RequireAsync(repository, command.ParentProjectId, actor, role, PermissionCodes.ProjectChildCreate, cancellationToken);
-        ValidateProjectDetails(command.Name, command.ProjectAlias, command.Quantity);
-        if (!await repository.HasProjectReadAccessAsync(command.ParentProjectId, actor, role, cancellationToken))
+        var user = await repository.FindUserAsync(actor, cancellationToken);
+        if (user is null || !user.IsActive || !await AuthorizationPolicy.CanAccessProjectCompanyAsync(repository, user, organizationId, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该上级项目的访问权限。");
-        var options = await repository.GetProjectNumberingOptionsAsync(cancellationToken);
-        if (command.EquipmentTypeCode is not null
-            && !options.EquipmentTypes.Any(item => item.Code == command.EquipmentTypeCode && item.IsActive))
-            throw new PdmRuleException("所选设备类型不存在或已停用。");
-        var settings = await repository.GetSystemSettingsAsync(cancellationToken);
-        var project = await repository.CreateSubprojectAsync(command with
+
+        var settings = await repository.GetAuthorizationSettingsAsync(cancellationToken);
+        var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+        return project =>
         {
-            Name = command.Name.Trim(),
-            ProjectAlias = NullIfWhiteSpace(command.ProjectAlias),
+            if (project.OrganizationId != organizationId || project.ParentProjectId is not null || project.RootProjectId != project.Id)
+                throw new UnauthorizedAccessException("当前用户没有该上级项目的访问权限。");
+            var context = new AuthorizationPolicy.Context(user, project, project, directory);
+            if (!AuthorizationPolicy.Decide(settings, context, PermissionCodes.ProjectChildCreate).Allowed)
+                throw new UnauthorizedAccessException("当前账号没有该项目的操作权限。");
+            if (!AuthorizationPolicy.Decide(settings, context, PermissionCodes.ProjectView).Allowed)
+                throw new UnauthorizedAccessException("当前用户没有该上级项目的访问权限。");
+        };
+    }
+
+    public async Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+        => (await CreateSubprojectsAsync(command.ToBatch(), actor, role, cancellationToken)).Single();
+
+    public async Task<IReadOnlyList<Project>> CreateSubprojectsAsync(CreateSubprojectsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireExistingSubprojectCreationPermissionAsync(command.ParentProjectId, actor, role, cancellationToken);
+        if (command.Items.Count == 0) throw new PdmRuleException("请至少填写一行子项目。");
+
+        var options = await repository.GetProjectNumberingOptionsAsync(cancellationToken);
+        var items = NormalizeSubprojectItems(command.Items, options, includeRowNumber: command.Items.Count > 1);
+        var settings = await repository.GetSystemSettingsAsync(cancellationToken);
+        return await repository.CreateSubprojectsAsync(command with
+        {
+            Items = items,
             VaultRoot = StorageLocationPolicy.Normalize(settings.VaultRoot),
             ReleaseRoot = StorageLocationPolicy.Normalize(settings.ReleaseRoot)
-        }, cancellationToken);
-        await repository.EnsureProjectFolderTreeAsync(project.Id, cancellationToken);
-        await AuditAsync(actor, "project.child.create", nameof(Project), project.Id.ToString(), $"{project.Code} · {project.Name} · 数量{project.Quantity}", cancellationToken);
-        return project;
+        }, actor, cancellationToken);
+    }
+
+    private async Task RequireExistingSubprojectCreationPermissionAsync(Guid parentProjectId, string actor, UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProjectChildCreate, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, parentProjectId, actor, role, PermissionCodes.ProjectChildCreate, cancellationToken);
+        if (!await repository.HasProjectReadAccessAsync(parentProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该上级项目的访问权限。");
+    }
+
+    private static IReadOnlyList<CreateSubprojectItem> NormalizeSubprojectItems(IReadOnlyList<CreateSubprojectItem> input,
+        ProjectNumberingOptions options, bool includeRowNumber)
+    {
+        var items = new List<CreateSubprojectItem>(input.Count);
+        foreach (var item in input)
+        {
+            try
+            {
+                ValidateProjectDetails(item.Name, item.ProjectAlias, item.Quantity);
+                if (item.EquipmentTypeCode is int equipmentTypeCode
+                    && !options.EquipmentTypes.Any(option => option.Code == equipmentTypeCode && option.IsActive))
+                    throw new PdmRuleException("所选设备类型不存在或已停用。");
+            }
+            catch (PdmRuleException exception) when (includeRowNumber)
+            {
+                throw new PdmRuleException($"第{items.Count + 1}行：{exception.Message}");
+            }
+            items.Add(item with { Name = item.Name.Trim(), ProjectAlias = NullIfWhiteSpace(item.ProjectAlias) });
+        }
+
+        return items;
     }
 
     private static string NormalizeBomItemCategory(string? value)
@@ -2401,9 +2499,9 @@ public sealed partial class PdmWorkflowService(
                     nodes.Add(reference);
                 }
             }
-            // Drawing snapshots pin models without copying their whole assembly tree.
-            // Resolve dependencies from that exact model version when opening the drawing itself.
-            if (rootDocument.Kind == DocumentKind.Drawing && !isRoot
+            // Direct drawing models require their exact assembly tree. Deferred design
+            // contexts were expanded above and must keep that context's precedence.
+            if (rootDocument.Kind == DocumentKind.Drawing && !isRoot && !isContext
                 && node.Kind == DocumentKind.Assembly && node.Children.Count == 0
                 && expandedDrawingModelVersions.Add(version.Id))
             {

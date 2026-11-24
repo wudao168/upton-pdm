@@ -11,6 +11,7 @@ namespace Upton.Pdm.Infrastructure;
 public sealed partial class MySqlPdmRepository : IPdmRepository
 {
     private readonly string connectionString;
+    private readonly bool retryTransientAuditWrites;
     private readonly TimeProvider timeProvider;
     private readonly IProjectContactInformationRepository? projectContacts;
     public Task<ProjectContactInformation?> FindProjectContactInformationAsync(Guid projectId, CancellationToken ct) =>
@@ -20,6 +21,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public MySqlPdmRepository(IOptions<PdmDatabaseOptions> options, TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null)
     {
         connectionString = options.Value.ConnectionString;
+        retryTransientAuditWrites = options.Value.RetryTransientAuditWrites;
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             throw new InvalidOperationException("PLM MySQL连接字符串未配置。 ");
@@ -46,7 +48,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                    p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                   p.signed_date,p.is_special_initiation,p.source_application_id,p.source_application_number,p.delivery_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
+                   p.signed_date,p.is_special_initiation,p.source_application_id,p.source_application_number,p.delivery_date,p.historical_updated_date,p.historical_remarks,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
                    p.owner,p.vault_location,p.release_location,p.is_active,p.created_at,
                    COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
              FROM project p
@@ -312,9 +314,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return await GetProjectNumberingOptionsAsync(cancellationToken);
     }
 
-    public async Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken)
+    public async Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken,
+        Action<Project>? authorizeChildren = null)
     {
-        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var now = timeProvider.GetUtcNow();
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
@@ -343,7 +346,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             var projectSequence = await ReserveProjectNumberAsync(connection, transaction, command.OrganizationId, command.ProjectTypeCode, cancellationToken);
             var customerSequence = await ReserveCustomerProjectNumberAsync(connection, transaction, command.OrganizationId, customer.Code, cancellationToken);
             var serialSequences = await ReserveSerialNumbersAsync(connection, transaction, command.OrganizationId, command.Quantity, cancellationToken);
-            var code = $"{command.ProjectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}";
+            var code = ProjectNumberAllocation.FormatMainCode(command.ProjectTypeCode, organization.ProjectCompanyCode, projectSequence);
             var deviceModel = $"{organization.ModelCompanyCode}-{command.EquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-00";
             var projectId = Guid.NewGuid();
             var approvedInput = command.ApplicationApproval?.Event.ApprovedData?.Input ?? application?.Data.Input;
@@ -356,7 +359,21 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 with { RootProjectId = projectId, BomItemCategoryCode = command.BomItemCategoryCode, ResponsibleUsers = [command.Owner],
                     SourceApplicationId = application?.Id, SourceApplicationNumber = application?.Number,
                     IsSpecialInitiation = approvedInput?.IsSpecial ?? false, DeliveryDate = approvedInput?.DeliveryDate };
-            await InsertNumberedProjectAsync(connection, transaction, project, now, cancellationToken);
+            if (command.Children.Count > 0)
+            {
+                if (authorizeChildren is null || command.ApplicationApproval is not null)
+                    throw new UnauthorizedAccessException("当前建项操作没有创建子项目的权限。");
+                authorizeChildren(project);
+            }
+            await InsertNumberedProjectAsync(connection, transaction, project, now.UtcDateTime, cancellationToken);
+            if (command.Children.Count > 0)
+            {
+                var childSequences = ProjectChildCreation.AllocateSequences([], command.Children.Count);
+                var childCommand = new CreateSubprojectsCommand(project.Id, command.Children, command.VaultLocation, command.ReleaseLocation);
+                await InsertSubprojectsAsync(connection, transaction, project, code, organization, childCommand, childSequences, command.Owner, now, cancellationToken);
+                await EnsureProjectFolderTreeAsync(connection, transaction, project.Id, cancellationToken);
+                await InsertAuditAsync(connection, transaction, AuditParameters(ProjectChildCreation.CreateAudit(project, command.Owner, now)), cancellationToken);
+            }
             if (application is not null) await CompleteApplicationApproval(connection, transaction, application, command.ApplicationApproval!, project, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return project;
@@ -369,72 +386,116 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     }
 
     public async Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken)
+        => (await CreateSubprojectsAsync(command.ToBatch(), null, cancellationToken)).Single();
+
+    public async Task<string> PreviewNextProjectCodeAsync(Guid organizationId, string projectTypeCode, CancellationToken cancellationToken)
     {
-        var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var preview = await connection.QuerySingleOrDefaultAsync<ProjectNumberCandidateRow>(new CommandDefinition($"""
+            SELECT organization.project_company_code CompanyCode,
+                   GREATEST(COALESCE(counter.current_value,0), (SELECT {UsedProjectNumberFloorSql})) CurrentSequence,
+                   ({AvailableReleasedProjectNumberSql}) ReleasedSequence
+            FROM project_organization organization
+            LEFT JOIN project_type_number_counter counter ON counter.organization_id=organization.id AND counter.project_type_code=@ProjectTypeCode
+            WHERE organization.id=@OrganizationId AND organization.is_active=1
+            """, new { OrganizationId = organizationId, ProjectTypeCode = projectTypeCode }, cancellationToken: cancellationToken))
+            ?? throw new PdmRuleException("所选组织不存在或已停用。");
+        var sequence = ProjectNumberAllocation.SelectMainSequence(projectTypeCode, preview.CurrentSequence, preview.ReleasedSequence);
+        return ProjectNumberAllocation.FormatMainCode(projectTypeCode, preview.CompanyCode, sequence);
+    }
+
+    private sealed class ProjectNumberCandidateRow
+    {
+        public string CompanyCode { get; init; } = "";
+        public int CurrentSequence { get; init; }
+        public int? ReleasedSequence { get; init; }
+    }
+
+    private const string UsedSubprojectSequencesSql =
+        "SELECT child_sequence FROM project WHERE parent_project_id=@ParentProjectId AND child_sequence IS NOT NULL ORDER BY child_sequence";
+
+    public async Task<IReadOnlyList<int>> ListUsedChildProjectSequencesAsync(Guid parentProjectId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return (await connection.QueryAsync<int>(new CommandDefinition(UsedSubprojectSequencesSql,
+            new { ParentProjectId = parentProjectId }, cancellationToken: cancellationToken))).ToArray();
+    }
+
+    public async Task<IReadOnlyList<Project>> CreateSubprojectsAsync(CreateSubprojectsCommand command, string? actor, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
         try
         {
+            var rootId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+                "SELECT COALESCE(root_project_id,id) FROM project WHERE id=@ParentProjectId",
+                new { command.ParentProjectId }, transaction, cancellationToken: cancellationToken))
+                ?? throw new PdmNotFoundException("主项目不存在。");
+            // Match folder initialization's root-first locking order for nested projects.
+            var rootCode = await connection.ExecuteScalarAsync<string>(new CommandDefinition(
+                "SELECT code FROM project WHERE id=@RootId FOR UPDATE",
+                new { RootId = rootId }, transaction, cancellationToken: cancellationToken));
+            if (string.IsNullOrWhiteSpace(rootCode)) throw new PdmRuleException("主项目号不存在。");
+
             var parent = await connection.QuerySingleOrDefaultAsync<ProjectRow>(new CommandDefinition(
                 """
                 SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                        p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                       p.signed_date,p.is_special_initiation,p.source_application_id,p.source_application_number,p.delivery_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
+                       p.signed_date,p.is_special_initiation,p.source_application_id,p.source_application_number,p.delivery_date,p.historical_updated_date,p.historical_remarks,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
                        p.owner,p.vault_location,p.release_location,p.is_active,p.created_at
                 FROM project p LEFT JOIN project_organization o ON o.id=p.organization_id
                 WHERE p.id=@ParentProjectId FOR UPDATE
                 """,
                 new { command.ParentProjectId }, transaction, cancellationToken: cancellationToken))
                 ?? throw new PdmNotFoundException("主项目不存在。");
-            if (parent.OrganizationId is null || parent.EquipmentTypeCode is null || parent.CustomerProjectSequence is null
-                || string.IsNullOrWhiteSpace(parent.ProjectTypeCode) || string.IsNullOrWhiteSpace(parent.CustomerCode)
-                || string.IsNullOrWhiteSpace(parent.CustomerName))
-                throw new PdmRuleException("旧项目缺少自动编号资料，不能直接创建子项目。");
+            var parentProject = MapProject(parent);
+            ProjectChildCreation.RequireParentNumberingData(parentProject);
 
             var usedChildSequences = (await connection.QueryAsync<int>(new CommandDefinition(
-                "SELECT child_sequence FROM project WHERE parent_project_id=@ParentProjectId ORDER BY child_sequence FOR UPDATE",
-                new { command.ParentProjectId }, transaction, cancellationToken: cancellationToken))).ToHashSet();
-            var childSequence = Enumerable.Range(1, 99).FirstOrDefault(value => !usedChildSequences.Contains(value));
-            if (childSequence == 0) throw new PdmRuleException("该主项目的两位子项目号已用尽。");
+                UsedSubprojectSequencesSql + " FOR UPDATE",
+                new { command.ParentProjectId }, transaction, cancellationToken: cancellationToken))).ToArray();
+            var childSequences = ProjectChildCreation.AllocateSequences(usedChildSequences, command.Items.Count);
             var organization = await connection.QuerySingleAsync<ProjectOrganizationRow>(new CommandDefinition(
                 "SELECT id,name,project_company_code,model_company_code,crm_company_name,is_active FROM project_organization WHERE id=@OrganizationId",
-                new { OrganizationId = parent.OrganizationId.Value }, transaction, cancellationToken: cancellationToken));
-            var serialSequences = await ReserveSerialNumbersAsync(connection, transaction, parent.OrganizationId.Value, command.Quantity, cancellationToken);
-            var code = $"{parent.Code}-{childSequence}";
-            var rootCode = parent.RootProjectId is { } rootProjectId && rootProjectId != parent.Id
-                ? await connection.ExecuteScalarAsync<string>(new CommandDefinition(
-                    "SELECT code FROM project WHERE id=@ProjectId", new { ProjectId = rootProjectId }, transaction, cancellationToken: cancellationToken))
-                : parent.Code;
-            if (string.IsNullOrWhiteSpace(rootCode)) throw new PdmRuleException("主项目号不存在。 ");
-            var equipmentTypeCode = command.EquipmentTypeCode ?? parent.EquipmentTypeCode.Value;
-            var deviceModel = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{BuildChildModelSuffix(parent.Code, childSequence)}";
+                new { OrganizationId = parent.OrganizationId!.Value }, transaction, cancellationToken: cancellationToken));
             var responsibleUsers = (await connection.QueryAsync<string>(new CommandDefinition(
                 "SELECT username FROM project_responsible WHERE project_id=@ProjectId ORDER BY username",
                 new { ProjectId = parent.Id }, transaction, cancellationToken: cancellationToken))).ToArray();
             if (responsibleUsers.Length == 0) responsibleUsers = [parent.Owner];
-            var project = BuildNumberedProject(
-                Guid.NewGuid(), code, command.Name, command.ProjectAlias, parent.OrganizationId.Value, organization.Name,
-                parent.ProjectTypeCode, equipmentTypeCode, parent.CustomerCode, parent.CustomerName,
-                parent.CustomerProjectSequence.Value, deviceModel, parent.SignedDate is null ? null : DateOnly.FromDateTime(parent.SignedDate.Value), command.Quantity,
-                parent.Id, childSequence, parent.Owner,
-                StorageLocationPolicy.ProjectStorageLocation(command.VaultRoot ?? StorageLocationPolicy.ProjectStorageRoot(parent.VaultLocation, rootCode), rootCode, code),
-                StorageLocationPolicy.ProjectStorageLocation(command.ReleaseRoot ?? StorageLocationPolicy.ProjectStorageRoot(parent.ReleaseLocation, rootCode), rootCode, code), organization.ProjectCompanyCode, serialSequences)
-                with
-                {
-                    RootProjectId = parent.RootProjectId ?? parent.Id,
-                    BomItemCategoryCode = "0302",
-                    IsSpecialInitiation = parent.IsSpecialInitiation, DeliveryDate = parent.DeliveryDate is null ? null : DateOnly.FromDateTime(parent.DeliveryDate.Value),
-                    ResponsibleUsers = responsibleUsers
-                };
-            await InsertNumberedProjectAsync(connection, transaction, project, now, cancellationToken);
+
+            var projects = await InsertSubprojectsAsync(connection, transaction,
+                parentProject with { ResponsibleUsers = responsibleUsers, RootProjectId = rootId },
+                rootCode, organization, command, childSequences, actor, now, cancellationToken);
+            await EnsureProjectFolderTreeAsync(connection, transaction, rootId, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-            return project;
+            return projects;
         }
         catch (MySqlException exception) when (exception.Number == 1062)
         {
             await transaction.RollbackAsync(cancellationToken);
             throw new PdmConflictException("子项目号或序列号发生冲突，请重试。");
         }
+    }
+
+    private async Task<IReadOnlyList<Project>> InsertSubprojectsAsync(MySqlConnection connection, DbTransaction transaction,
+        Project parent, string rootCode, ProjectOrganizationRow organization, CreateSubprojectsCommand command, IReadOnlyList<int> childSequences,
+        string? actor, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var vaultRoot = command.VaultRoot ?? StorageLocationPolicy.ProjectStorageRoot(parent.VaultLocation, rootCode);
+        var releaseRoot = command.ReleaseRoot ?? StorageLocationPolicy.ProjectStorageRoot(parent.ReleaseLocation, rootCode);
+        var projects = new List<Project>(command.Items.Count);
+        foreach (var (item, childSequence) in command.Items.Zip(childSequences))
+        {
+            var serialSequences = await ReserveSerialNumbersAsync(connection, transaction, organization.Id, item.Quantity, cancellationToken);
+            var serialNumbers = serialSequences.Select(value => $"{organization.ProjectCompanyCode}{value:D7}").ToArray();
+            var project = ProjectChildCreation.Build(parent, rootCode, vaultRoot, releaseRoot, organization.ModelCompanyCode, item, childSequence, serialNumbers);
+            await InsertNumberedProjectAsync(connection, transaction, project, now.UtcDateTime, cancellationToken);
+            if (actor is not null)
+                await InsertAuditAsync(connection, transaction, AuditParameters(ProjectChildCreation.CreateAudit(project, actor, now)), cancellationToken);
+            projects.Add(project);
+        }
+        return projects;
     }
 
     public async Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken)
@@ -1541,7 +1602,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                    p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                   p.signed_date,p.is_special_initiation,p.source_application_id,p.source_application_number,p.delivery_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
+                   p.signed_date,p.is_special_initiation,p.source_application_id,p.source_application_number,p.delivery_date,p.historical_updated_date,p.historical_remarks,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
                    p.owner,p.vault_location,p.release_location,p.is_active,p.created_at,
                    COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
             FROM project p LEFT JOIN project_organization o ON o.id=p.organization_id
@@ -1623,6 +1684,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SignedDate = row.SignedDate is null ? null : DateOnly.FromDateTime(row.SignedDate.Value),
             IsSpecialInitiation = row.IsSpecialInitiation, SourceApplicationId = row.SourceApplicationId, SourceApplicationNumber = row.SourceApplicationNumber,
             DeliveryDate = row.DeliveryDate is null ? null : DateOnly.FromDateTime(row.DeliveryDate.Value),
+            HistoricalUpdatedDate = row.HistoricalUpdatedDate is DateTime historicalDate ? DateOnly.FromDateTime(historicalDate) : null,
+            HistoricalRemarks = row.HistoricalRemarks,
             CreatedAt = row.CreatedAt is DateTime created ? new DateTimeOffset(DateTime.SpecifyKind(created, DateTimeKind.Utc)) : null,
             Quantity = row.Quantity,
             ParentProjectId = row.ParentProjectId,
@@ -1792,14 +1855,6 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SerialNumbers = serialSequences.Select(value => $"{projectCompanyCode}{value:D7}").ToArray()
         };
 
-    private static string BuildChildModelSuffix(string parentCode, int childSequence)
-    {
-        var parentSegments = parentCode.Split('-', StringSplitOptions.RemoveEmptyEntries)
-            .Skip(1)
-            .Select(segment => int.TryParse(segment, out var value) ? value.ToString("D2") : segment);
-        return string.Join('-', parentSegments.Append(childSequence.ToString("D2")));
-    }
-
     private static string BuildModelSuffixFromCode(string code)
     {
         var segments = code.Split('-', StringSplitOptions.RemoveEmptyEntries)
@@ -1826,11 +1881,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO project(id,code,name,project_alias,organization_id,project_type_code,equipment_type_code,customer_code,customer_name,
-                customer_project_sequence,device_model,signed_date,is_special_initiation,source_application_id,source_application_number,delivery_date,quantity,parent_project_id,root_project_id,child_sequence,bom_item_category_code,
+                customer_project_sequence,device_model,signed_date,is_special_initiation,source_application_id,source_application_number,delivery_date,historical_updated_date,historical_remarks,quantity,parent_project_id,root_project_id,child_sequence,bom_item_category_code,
                 owner,vault_location,release_location,
                 is_active,row_version,created_at,updated_at)
             VALUES(@Id,@Code,@Name,@ProjectAlias,@OrganizationId,@ProjectTypeCode,@EquipmentTypeCode,@CustomerCode,@CustomerName,
-                @CustomerProjectSequence,@DeviceModel,@SignedDate,@IsSpecialInitiation,@SourceApplicationId,@SourceApplicationNumber,@DeliveryDate,@Quantity,@ParentProjectId,@RootProjectId,@ChildSequence,@BomItemCategoryCode,
+                @CustomerProjectSequence,@DeviceModel,@SignedDate,@IsSpecialInitiation,@SourceApplicationId,@SourceApplicationNumber,@DeliveryDate,@HistoricalUpdatedDate,@HistoricalRemarks,@Quantity,@ParentProjectId,@RootProjectId,@ChildSequence,@BomItemCategoryCode,
                 @Owner,@VaultLocation,@ReleaseLocation,
                 1,1,@Now,@Now)
             """,
@@ -1840,6 +1895,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 project.EquipmentTypeCode, project.CustomerCode, project.CustomerName, project.CustomerProjectSequence,
                 project.DeviceModel, SignedDate = project.SignedDate?.ToDateTime(TimeOnly.MinValue), project.Quantity,
                 project.IsSpecialInitiation, project.SourceApplicationId, project.SourceApplicationNumber, DeliveryDate = project.DeliveryDate?.ToDateTime(TimeOnly.MinValue),
+                HistoricalUpdatedDate = project.HistoricalUpdatedDate?.ToDateTime(TimeOnly.MinValue), project.HistoricalRemarks,
                 project.ParentProjectId, project.RootProjectId, project.ChildSequence, project.BomItemCategoryCode,
                 project.Owner, project.VaultLocation, project.ReleaseLocation, Now = now
             }, transaction, cancellationToken: cancellationToken));
@@ -1853,35 +1909,41 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             transaction, cancellationToken: cancellationToken));
     }
 
+    private const string UsedProjectNumberFloorSql = """
+        COALESCE(MAX(CAST(RIGHT(p.code,5) AS UNSIGNED)),0)
+        FROM project p JOIN project_organization o ON o.id=p.organization_id
+        WHERE p.organization_id=@OrganizationId AND p.parent_project_id IS NULL
+          AND LEFT(p.code,CHAR_LENGTH(CONCAT(@ProjectTypeCode,o.project_company_code)))=CONCAT(@ProjectTypeCode,o.project_company_code)
+          AND CHAR_LENGTH(p.code)=CHAR_LENGTH(CONCAT(@ProjectTypeCode,o.project_company_code))+5 AND RIGHT(p.code,5) REGEXP '^[0-9]{5}$'
+        """;
+
+    private const string AvailableReleasedProjectNumberSql = """
+        SELECT r.sequence_value FROM released_project_type_number r
+        JOIN project_organization o ON o.id=r.organization_id
+        WHERE r.organization_id=@OrganizationId AND r.project_type_code=@ProjectTypeCode
+          AND NOT EXISTS(SELECT 1 FROM project p WHERE p.code=CONCAT(@ProjectTypeCode,o.project_company_code,LPAD(r.sequence_value,5,'0')))
+        ORDER BY r.sequence_value LIMIT 1
+        """;
+
     private static async Task<int> ReserveProjectNumberAsync(MySqlConnection connection, DbTransaction transaction, Guid organizationId, string projectTypeCode, CancellationToken cancellationToken)
     {
         var parameters = new { OrganizationId = organizationId, ProjectTypeCode = projectTypeCode.ToUpperInvariant() };
         // 调用方已锁定所属公司；各类型独立续号，并从完整历史项目号恢复下限。
-        await connection.ExecuteAsync(new CommandDefinition("""
+        await connection.ExecuteAsync(new CommandDefinition($"""
             INSERT INTO project_type_number_counter(organization_id,project_type_code,current_value)
-            SELECT @OrganizationId,@ProjectTypeCode,COALESCE(MAX(CAST(RIGHT(p.code,5) AS UNSIGNED)),0)
-            FROM project p JOIN project_organization o ON o.id=p.organization_id
-            WHERE p.organization_id=@OrganizationId AND p.parent_project_id IS NULL
-              AND LEFT(p.code,CHAR_LENGTH(CONCAT(@ProjectTypeCode,o.project_company_code)))=CONCAT(@ProjectTypeCode,o.project_company_code)
-              AND CHAR_LENGTH(p.code)=CHAR_LENGTH(CONCAT(@ProjectTypeCode,o.project_company_code))+5 AND RIGHT(p.code,5) REGEXP '^[0-9]{5}$'
+            SELECT @OrganizationId,@ProjectTypeCode,{UsedProjectNumberFloorSql}
             ON DUPLICATE KEY UPDATE current_value=GREATEST(project_type_number_counter.current_value,VALUES(current_value))
             """, parameters, transaction, cancellationToken: cancellationToken));
         var last = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT current_value FROM project_type_number_counter WHERE organization_id=@OrganizationId AND project_type_code=@ProjectTypeCode FOR UPDATE", parameters, transaction, cancellationToken: cancellationToken));
-        var released = await connection.ExecuteScalarAsync<int?>(new CommandDefinition("""
-            SELECT r.sequence_value FROM released_project_type_number r
-            JOIN project_organization o ON o.id=r.organization_id
-            WHERE r.organization_id=@OrganizationId AND r.project_type_code=@ProjectTypeCode
-              AND NOT EXISTS(SELECT 1 FROM project p WHERE p.code=CONCAT(@ProjectTypeCode,o.project_company_code,LPAD(r.sequence_value,5,'0')))
-            ORDER BY r.sequence_value LIMIT 1 FOR UPDATE
-            """, parameters, transaction, cancellationToken: cancellationToken));
+        var released = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
+            AvailableReleasedProjectNumberSql + " FOR UPDATE", parameters, transaction, cancellationToken: cancellationToken));
+        var next = ProjectNumberAllocation.SelectMainSequence(projectTypeCode, last, released);
         if (released is not null)
         {
             await connection.ExecuteAsync(new CommandDefinition("DELETE FROM released_project_type_number WHERE organization_id=@OrganizationId AND project_type_code=@ProjectTypeCode AND sequence_value=@Sequence",
                 new { parameters.OrganizationId, parameters.ProjectTypeCode, Sequence = released.Value }, transaction, cancellationToken: cancellationToken));
             return released.Value;
         }
-        if (last >= 99999) throw new PdmRuleException($"该组织的{projectTypeCode}类5位项目流水号已用尽。");
-        var next = last + 1;
         await connection.ExecuteAsync(new CommandDefinition("UPDATE project_type_number_counter SET current_value=@Next WHERE organization_id=@OrganizationId AND project_type_code=@ProjectTypeCode",
             new { parameters.OrganizationId, parameters.ProjectTypeCode, Next = next }, transaction, cancellationToken: cancellationToken));
         // 保留旧版管理接口的汇总最大值；该值不再参与任何类型的自动取号。
@@ -2164,6 +2226,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public Guid? SourceApplicationId { get; init; }
         public string? SourceApplicationNumber { get; init; }
         public DateTime? DeliveryDate { get; init; }
+        public DateTime? HistoricalUpdatedDate { get; init; }
+        public string? HistoricalRemarks { get; init; }
         public int Quantity { get; init; } = 1;
         public Guid? ParentProjectId { get; init; }
         public Guid? RootProjectId { get; init; }

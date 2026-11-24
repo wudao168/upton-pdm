@@ -8,6 +8,37 @@ namespace Upton.Pdm.SolidWorks;
 
 public sealed partial class PdmAddin
 {
+    private void PrepareWorkingDrawingReferencePreloads(string drawing, ControlledOpenManifestDto manifest)
+    {
+        var directory = Path.GetDirectoryName(drawing);
+        var files = manifest.Files.ToDictionary(file => file.FileName, StringComparer.OrdinalIgnoreCase);
+        var direct = PdmDependencyEntries(application.GetDocumentDependencies2(drawing, false, false, false) as Array, drawing)
+            .SelectMany(entry => entry.Value);
+        if (!direct.Any(path => Path.GetExtension(path).Equals(".SLDASM", StringComparison.OrdinalIgnoreCase)
+            && files.ContainsKey(Path.GetFileName(path)))) return;
+
+        // A drawing can resolve lightweight children whose saved paths still point
+        // to a previous working directory. Prefer only this manifest's verified files.
+        var dependencies = PdmDependencyEntries(application.GetDocumentDependencies2(drawing, true, false, false) as Array, drawing)
+            .SelectMany(entry => entry.Value).Distinct(StringComparer.OrdinalIgnoreCase);
+        var preloads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in dependencies)
+        {
+            ArchiveSession.Current?.Token.ThrowIfCancellationRequested();
+            if (!IsNativeModelReference(source) || !files.TryGetValue(Path.GetFileName(source), out var file)) continue;
+            var target = ControlledReferenceMaterializer.ManifestPath(directory, file);
+            if (PathsEqual(source, target)
+                || !PdmDocumentIdentityStore.TryReadControlledMetadata(source, out var previous)
+                || previous.ProjectId != manifest.ProjectId || previous.DocumentId != file.DocumentId
+                || !previous.VersionId.HasValue || !File.Exists(source)) continue;
+            preloads.Add(target);
+        }
+        if (preloads.Count == 0) return;
+        if (manifest.VerifiedNativePreloads.TryGetValue(drawing, out var planned)) planned.UnionWith(preloads);
+        else manifest.VerifiedNativePreloads.Add(drawing, preloads);
+        PluginDiagnosticLog.Record("工程图引用预加载", Path.GetFileName(drawing) + "：先核对并加载本次工作区的引用 " + preloads.Count + " 项。");
+    }
+
     private IModelDoc2 ReadLinkedDrawingForArchive(CadTreeNode drawing, BatchCheckInPlan plan, Guid projectId, out bool opened)
     {
         var path = drawing.FullPath;
@@ -86,6 +117,17 @@ public sealed partial class PdmAddin
         scope.ResumedDocumentIds.UnionWith(source.ResumedDocumentIds);
         scope.LocalCompatibilityNotes.AddRange(source.LocalCompatibilityNotes);
         foreach (var pair in source.RetainedWorkingHashes) scope.RetainedWorkingHashes.Add(pair.Key, pair.Value);
+        var rootFile = source.Files.FirstOrDefault(file => file.IsRoot && file.DocumentId == source.RootDocumentId
+            && file.VersionId == source.RootVersionId);
+        if (rootFile != null)
+        {
+            var rootPath = ControlledReferenceMaterializer.ManifestPath(directory, rootFile);
+            if (models.TryGetValue(rootPath, out var rootOwner) && IsCurrentArchiveOwner(rootOwner, projectId)
+                && plan.Preflights.TryGetValue(rootPath, out var proof) && proof.MatchesCurrentFile(rootPath)
+                && proof.Versions.FirstOrDefault() is DocumentVersionDto latest && latest.DocumentId == rootFile.DocumentId
+                && latest.Id == rootFile.VersionId && !string.IsNullOrWhiteSpace(proof.LocalSha256))
+                scope.RetainedWorkingHashes[rootFile.DocumentId] = proof.LocalSha256;
+        }
         foreach (var pair in source.RetainedLocalReferences) scope.RetainedLocalReferences.Add(pair.Key, pair.Value);
         foreach (var pair in additions) scope.RetainedLocalReferences[pair.Key] = pair.Value;
         return scope;

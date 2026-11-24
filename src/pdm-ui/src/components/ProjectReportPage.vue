@@ -5,8 +5,9 @@ import DepartmentName from './DepartmentName.vue'
 import CompanyName from './CompanyName.vue'
 import CompanyNameField from './CompanyNameField.vue'
 import PersonName from './PersonName.vue'
-import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, ref, shallowRef, watch, onBeforeUnmount } from 'vue'
 import ProjectReportChart from './ProjectReportChart.vue'
+import { reportChartColors as colors } from '../reportCharts'
 import { type ReportChartDatum } from '../reportCharts'
 import { readProjectReporting } from '../api'
 import { useUserDisplayName } from '../userDisplay'
@@ -17,7 +18,7 @@ const props=defineProps<{companyName?:string;active?:boolean;token?:string;compa
 const emit=defineEmits<{open:[projectId:string,tab:WorkbenchTab]}>()
 const today=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())
 const day=ref(today()),from=ref(day.value.slice(0,4)+'-01-01'),to=ref(day.value),unit=ref(''),customer=ref(''),manager=ref(''),stage=ref(''),search=ref('')
-const data=ref<ReportingData|null>(null),loading=ref(false),error=ref(''),tab=ref('阶段分析'),metric=ref('项目数'),drill=ref(''),page=ref(1),sort=ref('code'),days=ref(30),dueKind=ref('交货')
+const data=shallowRef<ReportingData|null>(null),loading=ref(false),error=ref(''),tab=ref('阶段分析'),metric=ref('项目数'),drill=ref(''),page=ref(1),sort=ref('code'),days=ref(30),dueKind=ref('交货')
 const detailDialog=ref<HTMLDialogElement>(),methodDialog=ref<HTMLDialogElement>()
 let run=0,abort:AbortController|undefined
 async function refresh(){const current=++run;abort?.abort();abort=new AbortController();error.value='';loading.value=true;day.value=today();try{if(!props.token){data.value=null;error.value='请登录后查看授权范围内的项目报表。';return}const response=await readProjectReporting(props.token,abort.signal);if(current===run)data.value=response}catch(e){if(current===run){data.value=null;error.value='项目报表读取失败，请检查网络或登录状态后刷新重试。';console.error('项目报表读取失败',e)}}finally{if(current===run)loading.value=false}}
@@ -36,7 +37,6 @@ const expenseSample=computed(()=>rows.value.filter(r=>r.finance?.budget!=null&&r
 const overruns=computed(()=>expenseSample.value.filter(r=>r.finance!.actual!>r.finance!.budget!))
 const budget=computed(()=>knownSum(expenseSample.value.map(r=>r.finance!.budget))),actual=computed(()=>knownSum(expenseSample.value.map(r=>r.finance!.actual)))
 const percent=(n:number|null)=>n==null?'—':`${n.toFixed(1)}%`
-const colors=['#3485ff','#99d900','#06c5bd','#af74ef','#f15ab5','#f4b942','#6875db']
 const distribution=computed(()=>[...new Set(rows.value.map(r=>r.stage))].map((label,i)=>{const group=rows.value.filter(r=>r.stage===label);return {label,count:group.length,customers:new Set(group.map(r=>r.customerKey).filter(Boolean)).size,amount:knownSum(group.map(r=>r.finance?.settlement)),color:colors[i%colors.length]}}))
 const distValue=(r:typeof distribution.value[number])=>metric.value==='金额'?r.amount??0:metric.value==='客户数'?r.customers:r.count
 const dueOf=(r:ReportRow)=>dueKind.value==='设计'?r.designResult.due:r.deliveryDate

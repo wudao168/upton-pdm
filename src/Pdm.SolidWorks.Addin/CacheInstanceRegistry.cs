@@ -18,6 +18,9 @@ internal sealed class CacheInstanceState
     public DateTime RecordedUtc { get; set; }
     public bool Busy { get; set; }
     public string[] Paths { get; set; } = Array.Empty<string>();
+    // Paths includes shared edit journals for eviction. Working paths belong to
+    // this native process only. Older clients cannot reserve a working directory.
+    public string[] WorkingPaths { get; set; }
     public Guid[] CheckedOut { get; set; } = Array.Empty<Guid>();
 }
 
@@ -56,6 +59,10 @@ internal static class CacheInstanceRegistry
     internal static bool TryPublish(string root, bool busy, string[] paths, Guid[] checkedOut) =>
         TryPublishCurrent(root, busy, paths, checkedOut, null);
     internal static bool TryPublishCurrent(string root, bool busy, string[] paths, Guid[] checkedOut, Func<bool> stillCurrent)
+        => TryPublishWorkingState(root, busy, paths, paths, checkedOut, stillCurrent);
+
+    internal static bool TryPublishWorkingState(string root, bool busy, string[] paths, string[] workingPaths,
+        Guid[] checkedOut, Func<bool> stillCurrent)
     {
         using (var mutex = new Mutex(false, GateName(root)))
         {
@@ -67,13 +74,13 @@ internal static class CacheInstanceRegistry
                 // Recheck under the same gate as synchronous busy publication. A delayed
                 // background snapshot must not turn a newer operation back into idle.
                 if (stillCurrent != null && !stillCurrent()) return false;
-                PublishCore(root, busy, paths, checkedOut);
+                PublishCore(root, busy, paths, checkedOut, workingPaths);
                 return true;
             }
             finally { if (acquired) mutex.ReleaseMutex(); }
         }
     }
-    private static void PublishCore(string root, bool busy, string[] paths, Guid[] checkedOut)
+    private static void PublishCore(string root, bool busy, string[] paths, Guid[] checkedOut, string[] workingPaths = null)
     {
         using (var process = Process.GetCurrentProcess())
         {
@@ -83,12 +90,17 @@ internal static class CacheInstanceRegistry
             var file = Path.Combine(directory, process.Id + ".json");
             var temporary = file + ".tmp";
             var value = new CacheInstanceState { ProcessId = process.Id, StartedUtcTicks = process.StartTime.ToUniversalTime().Ticks,
-                RecordedUtc = DateTime.UtcNow, Busy = busy, Paths = paths ?? Array.Empty<string>(), CheckedOut = checkedOut ?? Array.Empty<Guid>() };
+                RecordedUtc = DateTime.UtcNow, Busy = busy, Paths = paths ?? Array.Empty<string>(),
+                WorkingPaths = workingPaths ?? paths ?? Array.Empty<string>(), CheckedOut = checkedOut ?? Array.Empty<Guid>() };
             File.WriteAllText(temporary, new JavaScriptSerializer().Serialize(value), new UTF8Encoding(false));
             if (File.Exists(file)) File.Replace(temporary, file, null); else File.Move(temporary, file);
         }
     }
-    internal static CacheInstanceProtection Read(string root)
+    internal static CacheInstanceProtection Read(string root) => ReadCore(root, false);
+
+    internal static CacheInstanceProtection ReadForWorkingCopies(string root) => ReadCore(root, true);
+
+    private static CacheInstanceProtection ReadCore(string root, bool workingCopies)
     {
         var result = new CacheInstanceProtection();
         var revisions = new List<string>();
@@ -103,14 +115,18 @@ internal static class CacheInstanceRegistry
                 ControlledCacheMaintenance.RequireOrdinaryPath(file, root);
                 var text = File.ReadAllText(file);
                 var state = new JavaScriptSerializer().Deserialize<CacheInstanceState>(text);
-                if (!Matches(state, process.Id, process.StartTime.ToUniversalTime().Ticks, DateTime.UtcNow))
+                var started = process.StartTime.ToUniversalTime().Ticks;
+                var confirmed = workingCopies ? AddWorkingObservation(result, state, process.Id, started, DateTime.UtcNow)
+                    : Matches(state, process.Id, started, DateTime.UtcNow);
+                if (!confirmed)
                     throw new InvalidDataException("实例保护状态尚未就绪。");
-                result.Paths.AddRange(state.Paths ?? Array.Empty<string>());
+                if (!workingCopies) result.Paths.AddRange(state.Paths ?? Array.Empty<string>());
                 result.CheckedOut.AddRange(state.CheckedOut ?? Array.Empty<Guid>());
                 // Heartbeats alone do not invalidate an otherwise unchanged protection set.
-                revisions.Add(process.Id + ":" + string.Join("|", state.Paths ?? Array.Empty<string>()) + ":" + string.Join("|", state.CheckedOut ?? Array.Empty<Guid>()));
+                if (!workingCopies)
+                    revisions.Add(process.Id + ":" + string.Join("|", state.Paths ?? Array.Empty<string>()) + ":" + string.Join("|", state.CheckedOut ?? Array.Empty<Guid>()));
             }
-            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidOperationException
+            catch (Exception error) when (error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is InvalidOperationException
                 || error is System.ComponentModel.Win32Exception || error is ArgumentException)
             {
                 try { if (process.HasExited) continue; } catch { }
@@ -124,4 +140,16 @@ internal static class CacheInstanceRegistry
     internal static bool Matches(CacheInstanceState state, int processId, long started, DateTime now) =>
         state != null && state.ProcessId == processId && state.StartedUtcTicks == started && !state.Busy
         && state.RecordedUtc <= now.AddSeconds(2) && state.RecordedUtc >= now.AddSeconds(-10);
+
+    internal static bool AddWorkingObservation(CacheInstanceProtection result, CacheInstanceState state,
+        int processId, long started, DateTime now)
+    {
+        if (state == null || state.ProcessId != processId || state.StartedUtcTicks != started) return false;
+        var observed = state.WorkingPaths ?? (state.Busy ? state.Paths : null) ?? Array.Empty<string>();
+        var valid = observed.All(path => !string.IsNullOrWhiteSpace(path) && Path.IsPathRooted(path)
+            && !string.IsNullOrEmpty(Path.GetFileName(path)) && !string.IsNullOrEmpty(Path.GetDirectoryName(path))
+            && (Path.GetPathRoot(path)?.Length ?? 0) > 2);
+        if (valid) result.Paths.AddRange(observed.Select(Path.GetFullPath));
+        return valid && state.WorkingPaths != null && Matches(state, processId, started, now);
+    }
 }

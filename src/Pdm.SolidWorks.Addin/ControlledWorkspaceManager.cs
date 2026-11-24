@@ -23,6 +23,7 @@ internal sealed partial class ControlledWorkspaceManager
         : this(apiClient, WorkspaceSettingsStore.GetWorkspaceRoot())
     {
         machineFallbackEnabled = true;
+        OtherWorkingInstances = () => CacheInstanceRegistry.ReadForWorkingCopies(this.workspaceRoot);
     }
 
     internal ControlledWorkspaceManager(PdmApiClient apiClient, string workspaceRoot)
@@ -104,7 +105,7 @@ internal sealed partial class ControlledWorkspaceManager
         CancellationToken cancellationToken)
     {
         LocalCacheNotice = null;
-        var target = WorkingDirectory(manifest);
+        var target = WorkingDirectory(manifest, true);
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
             foreach (var file in manifest.Files) BindWorkspaceFile(target, target, manifest, file);
@@ -125,7 +126,7 @@ internal sealed partial class ControlledWorkspaceManager
 
     private string CopyWorkingContext(ControlledOpenManifestDto manifest, string source, IReadOnlyCollection<Guid> editableDocumentIds)
     {
-        var target = WorkingDirectory(manifest);
+        var target = WorkingDirectory(manifest, true);
         var editableIds = new HashSet<Guid>(editableDocumentIds ?? Array.Empty<Guid>());
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
@@ -173,7 +174,7 @@ internal sealed partial class ControlledWorkspaceManager
             throw new InvalidDataException("只读工作区在获取权限前发生变化，未创建编辑工作区。");
         }
 
-        var target = WorkingDirectory(manifest);
+        var target = WorkingDirectory(manifest, true);
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
             SetWorkspaceAttributes(target, manifest, new[] { manifest.RootDocumentId });
@@ -203,7 +204,7 @@ internal sealed partial class ControlledWorkspaceManager
         IReadOnlyCollection<Guid> editableDocumentIds,
         bool preserveLocalChanges = false)
     {
-        var target = WorkingDirectory(manifest);
+        var target = WorkingDirectory(manifest, true);
         var valid = preserveLocalChanges
             ? Directory.Exists(target) && HasAllManifestFiles(target, manifest.Files)
             : Directory.Exists(target) && ValidateWorkingWorkspace(target, manifest);
@@ -300,11 +301,13 @@ internal sealed partial class ControlledWorkspaceManager
         return ChooseManifestDirectory(manifest, preferred, "l", shape);
     }
 
-    private string WorkingDirectory(ControlledOpenManifestDto manifest)
+    private string WorkingDirectory(ControlledOpenManifestDto manifest, bool recheck = false)
     {
+        var reserved = ReservedWorkingDirectory(manifest, recheck);
+        if (reserved != null) return reserved;
         var files = ManifestPaths(manifest.Files);
         if (serverWorkingDirectories.TryGetValue(manifest.RootDocumentId, out var prepared)
-            && ManagedCadPaths.Fits(prepared, files)) return prepared;
+            && ManagedCadPaths.Fits(prepared, files)) return ReserveWorkingDirectory(manifest, prepared, HasOwnedWorkingPaths(prepared));
 
         var project = ProjectViewDirectory(workspaceRoot, manifest.ProjectCode);
         var server = Path.Combine(project, "装配工作区", "plm-" + manifest.RootDocumentId.ToString("N"));
@@ -332,7 +335,7 @@ internal sealed partial class ControlledWorkspaceManager
                 throw new InvalidDataException("原工作目录中有未提交的修改，已保留。请核对以下图档后，再切换到较短的受控目录："
                     + string.Join("、", conflicts.Select(file => file.FileName)));
         }
-        return target;
+        return ReserveWorkingDirectory(manifest, target, HasOwnedWorkingPaths(target));
     }
 
     private string HistoricalDerivedDirectory(ControlledOpenManifestDto manifest)

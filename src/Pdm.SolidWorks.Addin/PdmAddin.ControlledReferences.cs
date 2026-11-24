@@ -12,9 +12,26 @@ namespace Upton.Pdm.SolidWorks;
 
 public sealed partial class PdmAddin
 {
+    private static bool IsCurrentProjectWorkingPath(string path, string projectCode)
+    {
+        if (string.IsNullOrWhiteSpace(path) || IsReadOnlyPreviewPath(path) || IsHistoricalDerivedPath(path)) return false;
+        var configuredRoot = PdmDocumentIdentityStore.CurrentWorkspaceRoot;
+        var managedRoot = PdmDocumentIdentityStore.FindManagedWorkspaceRoot(configuredRoot, path);
+        if (managedRoot == null) return false;
+        // Existing View checkouts can retain an older project folder name. The manifest
+        // and file bindings still identify the project. Compact entries encode its code.
+        return !PdmDocumentIdentityStore.IsMachineCompactRoot(managedRoot)
+            && ManagedCadPaths.IsWithin(path, Path.Combine(managedRoot, "View"))
+            || PdmDocumentIdentityStore.IsProjectWorkspacePath(configuredRoot, projectCode, path);
+    }
+
     private IModelDoc2 OpenControlledReadOnlyDocument(string path, int documentType, string configuration,
         ControlledOpenManifestDto manifest)
         => OpenControlledReadOnlyDocumentCore(path, documentType, configuration, manifest, false, allowMissingComponents: true);
+
+    private void PreloadControlledNativeSources(string path, ControlledOpenManifestDto manifest) =>
+        ControlledReferenceMaterializer.PreloadVerifiedNativeSources(application, path, manifest,
+            (source, kind) => OpenDocumentInvisiblyForBatch(source, kind, string.Empty, readOnly: true));
 
     private IModelDoc2 OpenControlledReadOnlyDocumentCore(string path, int documentType, string configuration,
         ControlledOpenManifestDto manifest, bool preserveLoadedContext, bool preserveWorkingEdits = false,
@@ -32,9 +49,7 @@ public sealed partial class PdmAddin
                 .Select(model => model.GetPathName()).Where(value => !string.IsNullOrWhiteSpace(value))
             : Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
         var nativeFirst = documentType == (int)swDocumentTypes_e.swDocASSEMBLY && !manifest.ForEdit
-            && !IsReadOnlyPreviewPath(path) && !IsHistoricalDerivedPath(path)
-            && PdmDocumentIdentityStore.IsControlledWorkspacePath(path)
-            && path.IndexOf(Path.DirectorySeparatorChar + "View" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) >= 0;
+            && IsCurrentProjectWorkingPath(path, manifest.ProjectCode);
         var wasLoaded = FindLoadedDocument(path) != null;
         if (nativeFirst && !wasLoaded)
         {
@@ -74,6 +89,9 @@ public sealed partial class PdmAddin
                     if (preserveLoadedContext && preserveWorkingEdits) ControlledReferenceMaterializer.PrepareEditableDrawingOnly(application, path, manifest);
                     else if (preserveLoadedContext) ControlledReferenceMaterializer.PrepareDrawingOnly(application, path, manifest);
                     else ControlledReferenceMaterializer.Prepare(application, path, manifest);
+                    if (documentType == (int)swDocumentTypes_e.swDocDRAWING && preserveLoadedContext && preserveWorkingEdits)
+                        PrepareWorkingDrawingReferencePreloads(path, manifest);
+                    PreloadControlledNativeSources(path, manifest);
                 }
                 opened = OpenOrActivateDocumentOnSolidWorksThread(path, documentType, configuration,
                     !preserved.Contains(path) && !resumedPaths.Contains(path));
@@ -98,7 +116,8 @@ public sealed partial class PdmAddin
                 {
                     var actual = loaded.GetPathName();
                     if (!string.IsNullOrWhiteSpace(actual) && !beforeOpen.Contains(actual)
-                        && !expected.Contains(Path.GetFullPath(actual)) && !embeddedSources.Contains(actual))
+                        && !expected.Contains(Path.GetFullPath(actual)) && !embeddedSources.Contains(actual)
+                        && !manifest.UnverifiedToolboxSources.Contains(actual))
                         throw new InvalidOperationException("本次打开加载了受控范围之外的上下文文件，尚未认定打开成功：" + actual);
                     if (!string.IsNullOrWhiteSpace(actual) && expected.Contains(Path.GetFullPath(actual)) && !preserved.Contains(actual)
                         && !resumedPaths.Contains(actual))
@@ -112,7 +131,8 @@ public sealed partial class PdmAddin
                     SetFileReadOnly(editablePath, false);
                     EnsureLoadedDocumentEditable(editablePath);
                 }
-                try { if (manifest.RetainedLocalReferences.Count == 0 && !(missingComponents?.Count > 0)) ControlledReferenceMaterializer.RememberVerifiedOpen(path, manifest); }
+                try { if (manifest.RetainedLocalReferences.Count == 0 && manifest.UnverifiedToolboxSources.Count == 0
+                    && !(missingComponents?.Count > 0)) ControlledReferenceMaterializer.RememberVerifiedOpen(path, manifest); }
                 catch (Exception cacheError) { LogDiagnostic("保存已核对的引用准备记录，本次打开已完成", cacheError); }
                 ReportMissingComponentsOnOpen(missingComponents, "已打开", path);
                 if (documentType == (int)swDocumentTypes_e.swDocASSEMBLY && !wasLoaded && !beforeOpen.Contains(path)
@@ -177,11 +197,17 @@ public sealed partial class PdmAddin
             catch (Exception error) { LogDiagnostic("保留缺件诊断清单", error); }
             if (currentTree != null && PathsEqual(currentTree.FullPath, rootPath)) currentTree.OpenReferenceIssues = manifest.ReferenceIssues;
         }
-        if (!(missingComponents?.Count > 0)) return;
-        var names = missingComponents.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
-        PluginDiagnosticLog.Record("缺件打开", "缺失引用未加载：" + string.Join("、", names));
-        taskPaneControl?.SetCheckoutReminder(completed + "，" + names.Length + "项缺失引用未加载："
-            + string.Join("、", names.Take(2)) + (names.Length > 2 ? "等（详见日志）" : ""), false);
+        var names = (missingComponents ?? new HashSet<string>()).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
+        var toolbox = context.Value?.UnverifiedToolboxSources.Count ?? 0;
+        if (names.Length == 0 && toolbox == 0) return;
+        var details = new List<string>();
+        if (names.Length > 0)
+        {
+            PluginDiagnosticLog.Record("缺件打开", "缺失引用未加载：" + string.Join("、", names));
+            details.Add(names.Length + "项缺失引用未加载，" + string.Join("、", names.Take(2)) + (names.Length > 2 ? "等" : ""));
+        }
+        if (toolbox > 0) details.Add(toolbox + "项Toolbox来源待核对，详见引用诊断");
+        taskPaneControl?.SetCheckoutReminder(completed + "，" + string.Join("；", details), false);
     }
 
     private async Task RestoreMissingControlledArchiveFilesAsync(CadTreeNode root, Guid projectId, CancellationToken token)
@@ -239,6 +265,15 @@ public sealed partial class PdmAddin
         ControlledOpenManifestDto manifest, ISldWorks app)
         => ValidateControlledLoadedPathsCore(opened, rootPath, manifest, app, false);
 
+    private static bool IsAssemblyInLargeDesignReview(IModelDoc2 model)
+        => model is IAssemblyDoc && model.IsOpenedViewOnly();
+
+    private static void RequireFullAssemblyForControlledOpen(IModelDoc2 model)
+    {
+        if (IsAssemblyInLargeDesignReview(model))
+            throw new InvalidOperationException("装配体正以大型设计审阅模式打开，无法核对完整的模型引用。请在“大型设计审阅”选项卡选择“设定所有为还原”，等待组件加载完成后重试。图档：" + model.GetPathName());
+    }
+
     private static void ValidateControlledLoadedPathsCore(IModelDoc2 opened, string rootPath,
         ControlledOpenManifestDto manifest, ISldWorks app, bool requireExactSources)
         => ValidateControlledLoadedSources(opened, rootPath, manifest, app);
@@ -250,10 +285,40 @@ public sealed partial class PdmAddin
         var expected = ControlledOpenBoundary.Paths(directory, manifest);
         var failures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var recoveredViewConfigurations = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         var validatedDependencies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var deferredAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var verifiedCopies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var embeddedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var toolboxBrowser = new Lazy<string>(() => SolidWorksToolboxPaths.BrowserDirectory(app));
+        var toolboxOwners = new Dictionary<string, IReadOnlyList<KeyValuePair<string, string[]>>>(StringComparer.OrdinalIgnoreCase);
+        bool WarnUnverifiedToolboxSource(IComponent2 component, IModelDoc2 root, string actual, bool embedded)
+        {
+            if (embedded || missingComponents == null || !SolidWorksToolboxPaths.IsBrowserPart(actual, toolboxBrowser.Value)
+                || expected.TryGetValue(Path.GetFileName(actual), out var controlled) && PathsEqual(controlled, actual)) return false;
+            var ownerPath = (component.GetParent()?.GetModelDoc2() as IModelDoc2 ?? root).GetPathName();
+            if (!toolboxOwners.TryGetValue(ownerPath, out var saved))
+            {
+                try { saved = PdmDependencyEntries(app.GetDocumentDependencies2(ownerPath, false, false, false) as Array, ownerPath); }
+                catch (Exception error)
+                {
+                    PluginDiagnosticLog.Record("Toolbox引用核对", ownerPath + "：" + error);
+                    saved = Array.Empty<KeyValuePair<string, string[]>>();
+                }
+                toolboxOwners[ownerPath] = saved;
+            }
+            var instance = component.Name2.Split('/').Last();
+            var original = FindSavedToolboxReferencePaths(instance, component.ReferencedConfiguration, saved).FirstOrDefault();
+            var reason = "SolidWorks已临时加载本机Toolbox文件，来源待核对。实际来源：" + ArchiveReferencePath.Visible(actual);
+            manifest.UnverifiedToolboxSources.Add(actual);
+            var issue = new OpenReferenceIssueDto { InstancePath = component.Name2, OriginalPath = original,
+                FileName = Path.GetFileName(original ?? actual), Reason = reason };
+            manifest.ReferenceIssues ??= new List<OpenReferenceIssueDto>();
+            if (!manifest.ReferenceIssues.Any(existing => string.Equals(existing.Key, issue.Key, StringComparison.OrdinalIgnoreCase)))
+                manifest.ReferenceIssues.Add(issue);
+            PluginDiagnosticLog.Record("Toolbox引用提醒", issue.ToString());
+            return true;
+        }
         bool SavedImportedOwner(string ownerPath, string configuration)
         {
             // A closed imported container can retain a cache address from another
@@ -375,18 +440,46 @@ public sealed partial class PdmAddin
             if (model != null && validatedDependencies.Add(model.GetPathName() ?? model.GetTitle()))
                 NativeDesignDependencies.Validate(model, expected);
         }
-        void Visit(IModelDoc2 model)
+        void Visit(IModelDoc2 model, IView drawingView = null)
         {
-            if (model == null || !visited.Add(model.GetPathName() ?? model.GetTitle())) return;
+            if (model == null) return;
+            var modelKey = model.GetPathName() ?? model.GetTitle();
+            if (!visited.Add(modelKey) && (drawingView == null
+                || !recoveredViewConfigurations.TryGetValue(modelKey, out var configurations)
+                || !configurations.Add(drawingView.ReferencedConfiguration ?? string.Empty))) return;
+            RequireFullAssemblyForControlledOpen(model);
             ValidateDependencies(model);
             if (model.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY && model is IAssemblyDoc assembly)
             {
                 var imported = new ImportedComponentStorage(app);
-                foreach (var component in ((assembly.GetComponents(false) as Array)?.Cast<object>() ?? Enumerable.Empty<object>()).OfType<IComponent2>())
+                var drawingOccurrences = new Lazy<DrawingAssemblyOccurrences>(() =>
+                    DrawingAssemblyOccurrences.FromControlledRoot(app, manifest, directory, model, drawingView, expected));
+                foreach (var original in (assembly.GetComponents(false) as Array)?.OfType<IComponent2>() ?? Enumerable.Empty<IComponent2>())
                 {
+                    var component = original;
                     var loaded = component.GetModelDoc2() as IModelDoc2;
                     var path = loaded?.GetPathName();
                     if (string.IsNullOrWhiteSpace(path)) path = component.GetPathName();
+                    if (drawingView != null && loaded == null && string.IsNullOrWhiteSpace(path) && !component.IsVirtual)
+                    {
+                        if (!recoveredViewConfigurations.TryGetValue(modelKey, out var seen))
+                            recoveredViewConfigurations.Add(modelKey, seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+                        seen.Add(drawingView.ReferencedConfiguration ?? string.Empty);
+                        IComponent2 corresponding = null;
+                        try { corresponding = drawingOccurrences.Value?.Find(component); }
+                        catch (System.Runtime.InteropServices.COMException error)
+                        { PluginDiagnosticLog.Record("工程图实例来源核对", modelKey + "；" + component.Name2 + "；" + error); }
+                        if (corresponding == null)
+                        {
+                            failures.Add(Path.GetFileName(modelKey) + "（视图配置 " + drawingView.ReferencedConfiguration + "）中的 " + component.Name2
+                                + "：工程图视图没有返回组件路径，也未能在当前受控总装的相同配置中确认该实例。");
+                            continue;
+                        }
+                        component = corresponding;
+                        loaded = component.GetModelDoc2() as IModelDoc2;
+                        path = loaded?.GetPathName();
+                        if (string.IsNullOrWhiteSpace(path)) path = component.GetPathName();
+                    }
                     var embedded = component.IsVirtual;
                     if (!embedded && IsSolidWorksTemporaryVirtualComponentPath(path))
                         for (var parent = component.GetParent(); parent != null; parent = parent.GetParent())
@@ -396,10 +489,16 @@ public sealed partial class PdmAddin
                         var owner = imported.FindOwner(component, model);
                         embedded = !string.IsNullOrWhiteSpace(owner) && expected.Values.Contains(owner, StringComparer.OrdinalIgnoreCase);
                     }
-                    if (loaded != null) Check(path, component.Name2, embedded);
+                    if (loaded != null)
+                    {
+                        if (WarnUnverifiedToolboxSource(component, model, path, embedded)) continue;
+                        Check(path, component.Name2, embedded);
+                    }
                     else CheckDeferred(path, component.Name2, embedded, missingComponents != null
                         && !expected.ContainsKey(Path.GetFileName(path) ?? string.Empty)
-                        && CanOmitUnloadedComponent(component, path, embedded));
+                        && (CanOmitUnloadedComponent(component, path, embedded)
+                            || SolidWorksToolboxPaths.IsBrowserPart(path, toolboxBrowser.Value)),
+                        requireExactPath: !ReferenceEquals(original, component));
                     if (embedded && !string.IsNullOrWhiteSpace(path)) embeddedSources.Add(path);
                     // GetComponents(false) already contains every occurrence in this
                     // root's configuration. Re-rooting each loaded child inspects that
@@ -418,7 +517,7 @@ public sealed partial class PdmAddin
                     if (loaded != null) Check(path, "工程图模型", false);
                     else CheckDeferred(path, "工程图模型", false, mayBeMissing: allowMissingDrawingModels,
                         requireExactPath: !allowMissingDrawingModels);
-                    Visit(loaded);
+                    Visit(loaded, view);
                 }
         }
         Check(opened?.GetPathName(), "当前图档", false);
@@ -437,5 +536,6 @@ public sealed partial class PdmAddin
 
     private static bool CanOmitUnloadedComponent(IComponent2 component, string path, bool embedded)
         => !embedded && IsNativeModelReference(path) && !NativeArchiveManifest.IsInterconnectCachePath(path)
-            && !IsSolidWorksTemporaryVirtualComponentPath(path) && component.IsSuppressed();
+            && !IsSolidWorksTemporaryVirtualComponentPath(path)
+            && component.GetSuppression2() == (int)swComponentSuppressionState_e.swComponentSuppressed;
 }

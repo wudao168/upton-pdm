@@ -182,6 +182,7 @@ internal static partial class Program
             {
                 NativeCalls++;
                 if (call.MethodName == "get_ActiveDoc") return null;
+                if (call.MethodName == "GetDocuments") return Array.Empty<object>();
                 throw new Exception("Unexpected native call in managed tree-refresh test: " + call.MethodName);
             }).GetTransparentProxy());
             Client = New("PdmApiClient", "http://fixture.invalid/");

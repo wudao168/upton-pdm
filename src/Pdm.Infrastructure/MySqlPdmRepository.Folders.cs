@@ -36,6 +36,12 @@ public sealed partial class MySqlPdmRepository
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("项目不存在。");
         var rootId = project.RootProjectId ?? project.Id;
+        await EnsureProjectFolderTreeAsync(connection, transaction, rootId, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private async Task EnsureProjectFolderTreeAsync(MySqlConnection connection, DbTransaction transaction, Guid rootId, CancellationToken cancellationToken)
+    {
         // Serialize initialization within one project tree without locking unrelated project folders.
         var root = await connection.QuerySingleAsync<FolderProjectRow>(new CommandDefinition(
             "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@ProjectId FOR UPDATE",
@@ -97,7 +103,6 @@ public sealed partial class MySqlPdmRepository
             WHERE d.folder_id IS NULL AND f.root_project_id=@RootId
             """,
             new { RootId = rootId }, transaction, cancellationToken: cancellationToken));
-        await transaction.CommitAsync(cancellationToken);
     }
 
     public Task<IReadOnlyList<ProjectFolder>> ListProjectFoldersAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>

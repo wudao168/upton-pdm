@@ -47,22 +47,37 @@ public sealed partial class PdmAddin
         internal Exception JournalError;
     }
 
+    private sealed class ArchiveCacheProtection
+    {
+        private readonly string[] loadedPaths;
+        private readonly string[] draftPaths;
+
+        internal ArchiveCacheProtection(string[] loadedPaths, string[] draftPaths)
+        {
+            this.loadedPaths = loadedPaths;
+            this.draftPaths = draftPaths;
+        }
+
+        internal string[] ForSource(string source) => draftPaths.Length == 0 ? loadedPaths
+            : loadedPaths.Concat(draftPaths.Where(path => !PathsEqual(path, source))).ToArray();
+    }
+
     private ArchiveLocalSyncJob CreateArchiveLocalSyncJob(string path, Guid documentId, Guid projectId,
-        DocumentVersionDto version, string uploadCopyPath, string sourceHash = null, bool syncIdentity = true,
+        DocumentVersionDto version, string uploadCopyPath, ArchiveCacheProtection protection, string sourceHash = null, bool syncIdentity = true,
         EditDraftJournal journal = null)
         => new ArchiveLocalSyncJob { Path = path, DocumentId = documentId, ProjectId = projectId, Version = version,
             UploadCopyPath = uploadCopyPath, SourceHash = sourceHash, SyncIdentity = syncIdentity, Journal = journal,
-            ProjectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code, ProtectedCachePaths = CaptureArchiveCacheProtection(path),
+            ProjectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code, ProtectedCachePaths = protection?.ForSource(path),
             WorkspaceRoot = WorkspaceSettingsStore.GetWorkspaceRoot(), User = authenticatedUsername, Scope = apiClient?.EditJournalScope };
 
-    private string[] CaptureArchiveCacheProtection(string source)
+    private ArchiveCacheProtection CaptureArchiveCacheProtection()
     {
         try
         {
-            var paths = CaptureLoadedCachePaths().ToList();
-            if (editJournal != null) paths.AddRange(editJournal.ReadAll().Where(entry => !entry.Closed && !PathsEqual(entry.SourcePath, source))
-                .Select(entry => entry.SourcePath));
-            return paths.ToArray();
+            var loadedPaths = CaptureLoadedCachePaths();
+            var draftPaths = editJournal?.ReadAll().Where(entry => !entry.Closed).Select(entry => entry.SourcePath).ToArray()
+                ?? Array.Empty<string>();
+            return new ArchiveCacheProtection(loadedPaths, draftPaths);
         }
         catch (Exception error) { LogDiagnostic("存档后缓存占用状态未读取，保留原缓存", error); return null; }
     }
@@ -70,7 +85,7 @@ public sealed partial class PdmAddin
     private async Task<ArchiveLocalSyncResult> RememberControlledVersionIdentityAndManifestAsync(
         string path, Guid documentId, Guid projectId, DocumentVersionDto version, string uploadCopyPath)
     {
-        var job = CreateArchiveLocalSyncJob(path, documentId, projectId, version, uploadCopyPath);
+        var job = CreateArchiveLocalSyncJob(path, documentId, projectId, version, uploadCopyPath, CaptureArchiveCacheProtection());
         var result = (await RunArchiveLocalSyncJobsAsync(new[] { job }))[0];
         ApplyArchiveLocalSyncResult(job, result);
         return result;

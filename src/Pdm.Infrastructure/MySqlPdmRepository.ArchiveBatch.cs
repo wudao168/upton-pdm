@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Dapper;
+using MySqlConnector;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
@@ -19,6 +20,26 @@ public sealed partial class MySqlPdmRepository
         IReadOnlyList<ArchiveBatchFile> files, CancellationToken cancellationToken)
     {
         var ordered = ArchiveBatchRules.Order(files);
+        const int maxAttempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await CommitArchiveBatchTransactionAsync(batchId, requestHash, actor, sessionId, ordered, cancellationToken);
+            }
+            catch (MySqlException error) when (!cancellationToken.IsCancellationRequested && IsTransientMySqlWriteFailure(error))
+            {
+                if (attempt == maxAttempts) throw new ArchiveBatchTemporarilyUnavailableException(error);
+                // The previous transaction has been disposed. A fresh transaction first reads
+                // this same batch receipt and can safely recover a lost commit acknowledgement.
+                await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), cancellationToken);
+            }
+        }
+    }
+
+    private async Task<ArchiveBatchReceipt> CommitArchiveBatchTransactionAsync(Guid batchId, string requestHash, string actor, Guid sessionId,
+        IReadOnlyList<ArchiveBatchFile> ordered, CancellationToken cancellationToken)
+    {
         var planned = ordered.Select(file => file.DocumentId).ToHashSet();
         var projectId = ordered[0].Commit.ReferenceSnapshot.ProjectId;
         await using var connection = await OpenAsync(cancellationToken);
@@ -124,7 +145,12 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE reference_snapshot SET root_json=@RootJson,sha256=@Sha256 WHERE id=@Id AND root_document_id=@DocumentId",
                 new { RootJson = rootJson, snapshot.Sha256, Id = snapshot.SnapshotId, DocumentId = version.DocumentId }, transaction, cancellationToken: cancellationToken));
-            var document = result.Document;
+            // The document was read before its deferred version was inserted.
+            var document = result.Document with
+            {
+                DrawingVersionNumber = version.DrawingVersionNumber,
+                StoredVersionCount = result.Document.StoredVersionCount + 1
+            };
             if (document.Kind == DocumentKind.Drawing)
                 document = await AdoptArchivedReviewDrawingAsync(connection, transaction, document, version, cancellationToken);
             results[file.DocumentId] = result with { Version = version, Document = document };

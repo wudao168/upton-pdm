@@ -93,7 +93,7 @@ public static class MaterialImportWorkbook
         return result;
     }
 
-    private static IReadOnlyList<string> ReadSharedStrings(ZipArchive archive)
+    internal static IReadOnlyList<string> ReadSharedStrings(ZipArchive archive)
     {
         var entry = archive.GetEntry("xl/sharedStrings.xml");
         if (entry is null) return [];
@@ -103,7 +103,7 @@ public static class MaterialImportWorkbook
         return document.Descendants(ns + "si").Select(item => string.Concat(item.Descendants(ns + "t").Select(text => text.Value))).ToArray();
     }
 
-    private static Dictionary<int, string> ReadCells(XElement row, XNamespace ns, IReadOnlyList<string> sharedStrings)
+    internal static Dictionary<int, string> ReadCells(XElement row, XNamespace ns, IReadOnlyList<string> sharedStrings)
     {
         var values = new Dictionary<int, string>();
         foreach (var cell in row.Elements(ns + "c"))

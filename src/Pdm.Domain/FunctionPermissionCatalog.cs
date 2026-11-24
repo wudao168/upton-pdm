@@ -10,7 +10,7 @@ public static class FunctionPermissionCatalog
     public const string SchemaMarker = "system.permission-profile.v2";
     public static bool RequiresExplicitGrant(string code) => code is PermissionCodes.MaterialRelationActivity
         or PermissionCodes.MaterialRelationDelete or PermissionCodes.EngineeringKitDelete or PermissionCodes.ProjectBudgetAssessmentEdit
-        or PermissionCodes.UserDeactivate or PermissionCodes.UserDelete
+        or PermissionCodes.UserDeactivate or PermissionCodes.UserDelete or PermissionCodes.ProjectHistoricalImport
         || ProjectFileFormPermissions.RequiresExplicitGrant(code)
         || ProductionMobilePermissions.RequiresExplicitGrant(code)
         || QualityReviewPermissions.RequiresExplicitGrant(code)
@@ -25,6 +25,8 @@ public static class FunctionPermissionCatalog
         var result = existing.Select(Describe).ToList();
         result.AddRange(AuthorizationActions.Definitions);
         result.AddRange([
+            new(PermissionCodes.ProjectHistoricalImport, "导入历史项目", "项目管理", "在当前公司按原项目号、设备型号和序列号整批导入项目。", Sensitive: true)
+                { Scope = "company", Action = "create", Dependencies = [PermissionCodes.ProjectView, PermissionCodes.ProjectCreate], Routes = [new("POST", "/api/projects/history/import")] },
             new(PermissionCodes.ProjectExpenseView, "查看费用申请", "费用申请", "按申请人、审批或抄送关系及财务数据范围显示。", Sensitive: true)
                 { Scope = "project", Action = "view", ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("budget")] },
             new(PermissionCodes.ProjectExpenseSubmit, "发起费用申请", "费用申请", "预览、保存、提交及撤回本人申请。", Sensitive: true)
@@ -113,6 +115,7 @@ public static class FunctionPermissionCatalog
         foreach (var item in new[] { ("create", "创建发布包", "POST", "/release-packages"), ("edit", "编辑发布包草稿", "PUT", "/release-packages/{releasePackageId}/draft"), ("delete", "删除发布包草稿", "DELETE", "/release-packages/{releasePackageId}/draft"), ("submit", "提交发布包", "POST", "/release-packages/{releasePackageId}/submit"), ("withdraw", "撤回发布包", "POST", "/release-packages/{releasePackageId}/withdraw") })
             Add("release." + item.Item1, item.Item2, "审批发布", PermissionCodes.ReleaseManage, false, Route(item.Item3, item.Item4));
         Add("release.view", "查看发布记录", "审批发布", PermissionCodes.ProjectContentView, true, Route("GET", "/projects/{projectId}/release-packages"),
+            Route("GET", "/projects/{projectId}/release-packages/change-overview"),
             Route("GET", "/release-packages/{releasePackageId}/drawing-review/{documentId}/preview"),
             Route("POST", "/release-packages/{releasePackageId}/drawing-review/{documentId}/preview"));
         foreach (var category in new[] { ("mechanical", "标准件／非标件BOM", PermissionCodes.BomMechanicalEdit), ("electrical", "电气件BOM", PermissionCodes.BomElectricalEdit) })

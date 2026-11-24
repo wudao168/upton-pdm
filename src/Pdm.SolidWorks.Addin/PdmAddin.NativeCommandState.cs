@@ -46,7 +46,8 @@ public sealed partial class PdmAddin
         // Unlike FileOpenPostNotify, this event also covers lazily loaded references.
         // Record evidence only; never traverse or resolve CAD in the callback.
         var load = assemblyReferenceLoad;
-        if (load?.ForReuse == true && load.Observed.Contains(path)) load.Loaded.Add(path);
+        if (load != null && (load.ForReuse || load.DraftSnapshot) && load.Observed.Contains(path)) load.Loaded.Add(path);
+        if (savedAssemblyActivation?.Observed.Contains(path) == true) savedAssemblyActivation.OwnerReferenceProbeFailed = false;
         if (nativeFileOpenInProgress != 0 && PathsEqual(path, pendingOpenPath))
             nativeDocumentLoadedEpoch = nativeLoadEpoch;
         return 0;
@@ -69,6 +70,7 @@ public sealed partial class PdmAddin
 
     private void ObserveNativeFileOpening(string fileName)
     {
+        savedAssemblyActivation = null;
         nativeLoadEpoch++;
         ObserveAssemblyReferenceLoad(fileName);
         referenceActivationObservation = null;
@@ -91,6 +93,7 @@ public sealed partial class PdmAddin
 
     private int OnAssemblyComponentAdded(int entityType, string itemName)
     {
+        if (entityType == 2) savedAssemblyActivation = null;
         if (entityType == 2 && unknownLoadOwner != null && !NativeInsertionEvidenceAllowed())
             unknownAddedEpoch = unknownSavedEpoch = 0;
         if (entityType == 2 && unknownLoadOwner != null && !unknownRemovalObserved && NativeInsertionEvidenceAllowed()
@@ -104,12 +107,14 @@ public sealed partial class PdmAddin
 
     private int OnAssemblyComponentDeleted(int entityType, string itemName)
     {
+        if (entityType == 2) savedAssemblyActivation = null;
         if (entityType == 2) { unknownRemovalObserved = true; unknownAddedEpoch = unknownSavedEpoch = 0; }
         return OnAssemblyItemChanged(entityType, itemName);
     }
 
     private void ObserveNativeOwnerSaved(string fileName)
     {
+        ObserveSavedAssemblyReferenceLoads(fileName);
         if (unknownLoadOwner != null && ReferenceEquals(unknownLoadOwner, assemblyEventDocument)
             && PathsEqual(fileName, unknownLoadOwnerPath)) unknownSavedEpoch = 0;
         if (unknownLoadOwner != null && unknownAddedEpoch == nativeLoadEpoch && !unknownRemovalObserved
@@ -186,22 +191,41 @@ public sealed partial class PdmAddin
         "SolidWorks当前命令或文件加载尚未结束，请先完成或取消插入、配合等操作，再点击“存档”。"
         + "本次尚未开始存档，文件和未保存修改均已保留。";
 
-    private string ArchiveRequestBusyReason() => IsSolidWorksCommandActive() ? ArchiveBusyReminder : null;
+    private const string ArchiveLoadReminder = "SolidWorks 正在加载图档或引用，请等待加载完成后再点击“存档”。本次尚未开始存档。";
+    private const string ArchiveDraftReminder = "正在备份本机草稿，请等待备份和引用加载完成后再点击“存档”。本次尚未开始存档。";
+    private const string ArchiveSaveReminder = "已有本地保存请求，请等待保存完成后再点击“存档”。本次尚未开始存档。";
+
+    private string ArchiveRequestBusyReason()
+    {
+        if (Volatile.Read(ref draftSnapshotInProgress) != 0) return ArchiveDraftReminder;
+        if (Volatile.Read(ref nativeFileOpenInProgress) != 0) return ArchiveLoadReminder;
+        if (pendingManagedSave != null || managedSaveInProgress) return ArchiveSaveReminder;
+        return IsSolidWorksCommandActive() ? ArchiveBusyReminder : null;
+    }
+
+    private void ClearArchiveBusyReminders()
+    {
+        taskPaneControl?.ClearCheckoutReminder(ArchiveBusyReminder);
+        taskPaneControl?.ClearCheckoutReminder(ArchiveLoadReminder);
+        taskPaneControl?.ClearCheckoutReminder(ArchiveDraftReminder);
+    }
 
     private bool CanStartArchiveRequest()
     {
         ReconcileNativeCommandBeforeUserOperation();
         var reason = ArchiveRequestBusyReason();
-        if (reason == null) return true;
+        if (reason == null) { ClearArchiveBusyReminders(); return true; }
         taskPaneControl?.SetCheckoutReminder(reason, true);
         LogOperation("存档窗口尚未创建，等待当前命令或文件加载结束 nativeOpen="
             + Volatile.Read(ref nativeFileOpenInProgress) + " sourceCommand=" + nativeFileOpenCommandId);
-        TopMostMessageBox.Show(taskPaneControl, reason, "存档准备提醒", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (reason == ArchiveBusyReminder)
+            TopMostMessageBox.Show(taskPaneControl, reason, "存档准备提醒", MessageBoxButtons.OK, MessageBoxIcon.Information);
         return false;
     }
 
     private void ReconcileNativeCommandBeforeUserOperation()
     {
+        if (savedAssemblyActivation != null) savedAssemblyActivation.OwnerReferenceProbeFailed = false;
         TryCompleteFinishedNativeOpen();
         TryCompleteReturnedFileOpen();
         TryCompleteSavedInsertionForArchive();
@@ -297,7 +321,6 @@ public sealed partial class PdmAddin
                 if (nativeUiCommandId == sourceCommand) nativeUiCommandId = 0;
             }
             OnFileOpened(pendingOpenPath);
-            taskPaneControl?.ClearCheckoutReminder(ArchiveBusyReminder);
             LogOperation("已核对引用加载完成和总装激活，恢复设计树：" + path);
             return true;
         }

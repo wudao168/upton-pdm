@@ -2,6 +2,9 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
+public sealed class ArchiveBatchTemporarilyUnavailableException(Exception cause)
+    : Exception("存档数据库暂忙，原批次结果待确认。插件将继续核对原批次，本地工作文件会保留。", cause);
+
 public static class ArchiveBatchRules
 {
     public static void ValidateRestoreSession(PdmDocument document, string actor, Guid? expectedSessionId)

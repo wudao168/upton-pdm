@@ -276,8 +276,12 @@ public sealed partial class PdmAddin
 
     private CadTreeNodeEventArgs EnsureNativeTreeForOperation(CadTreeNodeEventArgs selection)
     {
-        if (nativeFileOpenInProgress != 0 && !TryCompleteReturnedFileOpen())
-            throw new InvalidOperationException("SolidWorks 仍在打开图档或执行命令，请完成或取消当前操作后重试。");
+        if (nativeFileOpenInProgress != 0)
+        {
+            ReconcileNativeCommandBeforeUserOperation();
+            if (nativeFileOpenInProgress != 0)
+                throw new InvalidOperationException("SolidWorks 仍在打开图档或执行命令，请完成或取消当前操作后重试。");
+        }
         if (currentTree != null && !currentTree.LocalStructureDeferred) return selection;
         Interlocked.Increment(ref nativeTreeForOperation);
         try { RefreshTree(true); }

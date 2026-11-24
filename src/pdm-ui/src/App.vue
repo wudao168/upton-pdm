@@ -194,7 +194,7 @@ const requestedQualitySection = ref('quality')
 const requestedBomKind = ref<'Overview' | 'Source' | 'WearPart' | 'Release' | import('./types').BomKind>()
 const visitedViews = ref(new Set<ActiveView>())
 // 这些页面自行按当前账号读取数据，不依赖项目工作区的全局初始化。
-const independentViews = new Set<ActiveView>(['ai-assistant', 'purchase-analysis', 'quality-review', 'spare-parts', 'work-hours', 'standard-library', 'stocked-materials', 'program-templates', 'production-drawings'])
+const independentViews = new Set<ActiveView>(['project-reports', 'ai-assistant', 'purchase-analysis', 'quality-review', 'spare-parts', 'work-hours', 'standard-library', 'stocked-materials', 'program-templates', 'production-drawings'])
 const activePageReady = computed(() => workspace.ready.value || (workspace.authenticated.value && independentViews.has(activeView.value) && canNavigate(activeView.value)))
 watch(activeView, (view, previous) => {
   workspace.setProjectPageActive(view === 'workspace')
@@ -1001,6 +1001,11 @@ async function openProjectCenter() {
   if (!canNavigate('project-center')) { await handleNavigation('tasks'); return }
   if (projectCenterOpening.value) return
   rememberNavigation('project-center')
+  if (!workspace.ready.value) {
+    activeView.value = 'project-center'
+    initialPageRestored = false
+    return
+  }
   if (workspace.project.value.id) {
     activeView.value = 'workspace'
     return
@@ -1384,6 +1389,27 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
   await openManagedProject(projectId, 'documents')
   if (!workspace.selectDocument(parentDocumentId)) ElMessage.warning('父装配体不在当前设计树中')
 }
+const adminSettingsReady = ref(false)
+const adminSettingsPending = ref(false)
+const adminSettingsError = ref('')
+async function loadAdminSettings() {
+  if (adminSettingsPending.value) return
+  adminSettingsPending.value = true
+  adminSettingsError.value = ''
+  try {
+    await workspace.loadAdminSettings()
+    adminSettingsReady.value = true
+  } catch {
+    adminSettingsError.value = '系统设置读取失败，请重试。'
+  } finally {
+    adminSettingsPending.value = false
+  }
+}
+watch([activeView, canManageSystem, workspace.authenticated], ([view, allowed, signedIn]) => {
+  if (!signedIn) adminSettingsReady.value = false
+  if (view === 'admin' && allowed && signedIn) void loadAdminSettings()
+}, { immediate: true })
+
 </script>
 
 <template>
@@ -1508,6 +1534,9 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :current-username="workspace.currentUsername.value"
           :administrator="workspace.hasPermission('settings.storage.manage')"
           :can-create="workspace.hasPermission('project.create')"
+          :can-import-history="workspace.hasPermission('project.history.import')"
+          :active-company-id="workspace.activeCompanyId.value"
+          :active-company-name="workspace.activeCompanyName.value"
           :can-edit="workspace.hasPermission('project.edit')"
           :can-delete="workspace.hasPermission('project.delete')"
           :can-create-subproject="workspace.hasPermission('project.child.create')"
@@ -1521,6 +1550,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :on-update-designers="workspace.updateChildProjectDesigners"
           :on-update-child-manager="workspace.updateChildProjectManager"
           @open="openManagedProject"
+          @imported="workspace.refreshProjectSummaries"
         />
         </div>
         <div v-if="visitedViews.has('project-applications')" v-show="activeView === 'project-applications'" class="pdm-navigation-page" data-navigation-page="project-applications">
@@ -1624,7 +1654,9 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           <StandardStructureLibrary :token="workspace.getAccessToken()" :projects="workspace.projects.value" :can-reference="workspace.hasPermission('bom.mechanical.edit')" :active="activeView === 'standard-structure'" />
         </div>
         <div v-if="canManageSystem && visitedViews.has('admin')" v-show="activeView === 'admin'" class="pdm-navigation-page" data-navigation-page="admin">
-        <SystemManagement
+        <div v-if="adminSettingsPending" role="status">正在读取系统设置…</div>
+        <div v-else-if="adminSettingsError" role="alert">{{ adminSettingsError }} <button type="button" @click="loadAdminSettings">重试</button></div>
+        <SystemManagement v-if="adminSettingsReady" v-show="!adminSettingsPending && !adminSettingsError"
           :active="activeView === 'admin'"
           :token="workspace.getAccessToken()"
           :customers="workspace.customers.value"
@@ -1689,7 +1721,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               <button type="button" @click="workspace.reload(workspace.project.value.id)">重试读取</button>
             </section>
             <div v-if="canViewTab(projectTab)" class="pdm-project-tab-content">
-            <SquareLoader v-if="projectTabPending" overlay show-label label="正在读取页面资料…" />
+            <SquareLoader v-if="projectTabPending" :overlay="projectTab !== 'overview'" show-label label="正在读取页面资料…" />
             <BomManager @release-review-documents="openDocumentReleaseReview" :can-add-spare-parts="workspace.hasPermission('spare-parts.maintain')" :active="activeView === 'workspace' && (projectTab === 'bom' || projectTab === 'release')" @release-preview-attention="(projectId, hasIssue) => { releasePreviewIssues[projectId] = hasIssue }" @release-confirmation="workspace.confirmBomRelease" :drawing-reviews="workspace.drawingReviews.value" :drawing-review-candidates="workspace.drawingReviewCandidates.value" :requested-bom-kind="requestedBomKind" @open-bom="openHierarchyBom" @kind-change="handleBomKindChange" @bom-request-handled="requestedBomKind = undefined" v-if="mountedBomProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.tab === 'bom' || ((projectTab === 'release' || projectTab === 'bom') && error.tab === 'release'))" v-show="projectTab === 'bom' || projectTab === 'release'" :source-data="workspace.bomSourceData.value" :source-data-loaded="workspace.bomSourceDataLoaded.value" :standard="workspace.standardBom.value" :non-standard="workspace.nonStandardBom.value" :unclassified="workspace.unclassifiedBom.value" :electrical="workspace.electricalBom.value" :reference-root="workspace.root.value" :documents="workspace.managedDocuments.value" :document-relations="workspace.documentRelations.value" :validation-rules="workspace.systemSettings.value.validationRules" :release-change-reason-types="workspace.systemSettings.value.releaseChangeReasonTypes" :change-reason-labels="workspace.systemSettings.value.releaseChangeReasonLabels" :formal-supplement-policies="workspace.systemSettings.value.formalSupplementPolicies" :declarations="workspace.bomEmptyDeclarations.value" :versions="workspace.bomVersions.value" :baselines="workspace.bomBaselines.value" :release-packages="workspace.releasePackages.value" :username="workspace.currentUsername.value" :upload-progress="workspace.uploadProgress.value" :operation-error="workspace.operationError.value" :can-manage-release="workspace.project.value.effectiveProjectPermissions?.includes('release.manage') === true" :can-manage-mechanical-release="workspace.project.value.effectiveProjectPermissions?.includes('release.manage') === true && workspace.project.value.effectiveProjectPermissions?.includes('release.mechanical') === true" :can-decide-approval="workspace.hasPermission('approval.decide')" :can-emergency-decide="workspace.hasPermission('approval.emergency-substitute')" :requested-release-package-id="requestedReleasePackageId" :pending="workspace.operationPending.value" :editable="bomEditable" :token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :project="workspace.project.value" :projects="workspace.projects.value" :preview-reconciliation="workspace.previewBomFromDrawings" @dirty-change="bomHasUnsavedChanges = $event" @save-multiplier="(kind, multiplier, expected) => runOperation(() => workspace.updateBomMultiplier(kind, multiplier, expected), 'BOM整套倍率已保存；发布将使用该倍率')" @save="(kind, items) => runOperation(() => workspace.saveBomItems(kind, items), 'BOM已保存；CAD来源物料的变更已进入SolidWorks待写回队列')" @import="(kind, file) => runOperation(() => workspace.importBomFile(kind, file), 'BOM已导入并保存')" @export="(kind, mode) => runOperation(() => workspace.exportBomFile(kind, mode), 'BOM已导出')" @export-wear-parts="mode => runOperation(() => workspace.exportWearPartBomFile(mode), '易损件BOM已导出')" @resolve="(itemId, action, targetKind) => runOperation(() => workspace.resolveBomItem(itemId, action, targetKind), '待处理项已更新，保存BOM后再写回SolidWorks')" @batch-retain="itemIds => runOperation(() => workspace.retainBomItems(itemIds), '所选待处理BOM项已确认保留')" @batch-update="(input) => runOperation(() => workspace.batchUpdateBomItems(input), 'BOM属性已更新，保存BOM后再写回SolidWorks')" @batch-delete="(itemIds, reason) => runOperation(() => workspace.batchDeleteBomItems(itemIds, reason), '所选BOM物料已移入回收站')" @batch-restore="(itemIds, mode) => runOperation(() => workspace.batchRestoreBomItems(itemIds, mode), mode === 'AsManual' ? '所选物料已转为人工物料并恢复' : '所选BOM物料已恢复')" @batch-permanently-delete-manual="itemIds => runOperation(() => workspace.permanentlyDeleteManualBomItems(itemIds), '所选人工来源BOM物料已彻底删除')" @release-exclusion="(itemIds, excluded, reason) => runOperation(() => workspace.setBomReleaseExclusion(itemIds, excluded, reason), excluded ? '所选物料已设为不发布' : '所选物料已恢复发布')" @restore-source="(itemIds) => runOperation(() => workspace.restoreBomItemsFromSource(itemIds), '所选BOM属性已恢复为最新图档源数据；分类与排序保持不变')" @release-create="(input) => runOperation(() => workspace.createPackage(input), '发布草稿已创建，范围与审批模板已固化')" @release-update-draft="(releasePackageId, input) => runOperation(() => workspace.updatePackageDraft(releasePackageId, input), '发布草稿已更新')" @release-delete-draft="releasePackageId => runOperation(() => workspace.deletePackageDraft(releasePackageId), '发布草稿已删除')" @release-upload="(releasePackageId, file) => runOperation(() => workspace.uploadPackageFile(releasePackageId, file), '发包文件已上传并通过SHA-256校验')" @release-submit="releasePackageId => submitReleasePackage(releasePackageId)" @release-withdraw="withdrawCurrentPackage" @release-retry-u9="releasePackageId => runOperation(() => workspace.retryLongLeadU9(releasePackageId), 'BOM料号申请已补建，正式料号齐全后将自动续传U9C')" @release-retry-preview="releasePackageId => runOperation(() => workspace.retryReleasePreview(releasePackageId), '转图已重新排队，完成后会在站内消息里反馈结果')" @release-decide="(taskId, decision, comment, note) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment, note), decision === 'Approved' ? '审批已流转' : '发布包已退回')" @release-transfer="(taskId, targetUsername, comment) => runOperation(() => workspace.transferApprovalTask(taskId, targetUsername, comment), '审批已转交')" @release-emergency-decide="(taskId, decision, reason) => runOperation(() => workspace.emergencyDecideApprovalTask(taskId, decision, reason), decision === 'Approved' ? '当前节点已紧急代批并继续流转' : '当前节点已紧急代退回')" @release-request-handled="requestedReleasePackageId = ''" @material-code-changed="workspace.reload(workspace.project.value.id)" />
             <WorkbenchHome
               :active="activeView === 'workspace' && projectTab === 'overview'"
@@ -1718,7 +1750,6 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               :token="workspace.getAccessToken()"
               :can-add-manager-note="canAddProjectManagerNote"
               @documents="openProjectTab('documents')"
-              @open-risk="openManagedProject"
               @bom="openOverviewBom"
               @opl="openProjectTab('opl')"
               @project-plan="taskId => { requestedPlanTaskId = taskId; openProjectTab('project-plan') }"

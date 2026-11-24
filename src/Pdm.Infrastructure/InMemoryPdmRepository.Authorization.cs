@@ -15,7 +15,8 @@ public sealed partial class InMemoryPdmRepository
             if (authorizationSettings is not null) return authorizationSettings;
             var defaults = AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(migrated));
             var unified = AuthorizationPolicy.BindRoles(
-                AuthorizationMigration.EnableDocumentReleaseDefaults(AuthorizationMigration.EnableUserManagementDefaults(defaults)));
+                AuthorizationMigration.EnableHistoricalProjectImportDefaults(
+                    AuthorizationMigration.EnableDocumentReleaseDefaults(AuthorizationMigration.EnableUserManagementDefaults(defaults))));
             SyncAuthorizationRoles(migrated, unified);
             return authorizationSettings = unified;
         }
@@ -36,7 +37,8 @@ public sealed partial class InMemoryPdmRepository
                 DingTalkSelfBindingDefaultsApplied = authorizationSettings.DingTalkSelfBindingDefaultsApplied,
                 AiWebDefaultsApplied = authorizationSettings.AiWebDefaultsApplied,
                 UserManagementDefaultsApplied = authorizationSettings.UserManagementDefaultsApplied,
-                DocumentReleaseDefaultsApplied = authorizationSettings.DocumentReleaseDefaultsApplied
+                DocumentReleaseDefaultsApplied = authorizationSettings.DocumentReleaseDefaultsApplied,
+                HistoricalProjectImportDefaultsApplied = authorizationSettings.HistoricalProjectImportDefaultsApplied
             };
             if (updateRoles) SyncAuthorizationRoles(authorizationSettings, next);
             authorizationSettings = next;

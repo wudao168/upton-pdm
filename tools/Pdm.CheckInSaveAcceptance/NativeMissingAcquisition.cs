@@ -90,6 +90,18 @@ internal static partial class Program
 
   internal static void InstallReader(object plugin,string rootPath,Row[] stored,Action onRead=null)
   {
+   InstallReader(plugin,(source,configuration,sha)=>
+   {
+    if(configuration!="Default"||string.Equals(source,rootPath,StringComparison.OrdinalIgnoreCase)
+     ||!string.Equals(WorkingReuseHash(rootPath),sha,StringComparison.OrdinalIgnoreCase))
+     throw new InvalidOperationException("原生读取未使用指定父版本和配置");
+    onRead?.Invoke();
+    return stored;
+   });
+  }
+
+  internal static void InstallReader(object plugin,Func<string,string,string,Row[]> storedForOwner)
+  {
    var field=plugin.GetType().GetField("readArchivedOccurrences",Flags);
    if(field==null)return; // Earlier plugin binaries can replay the same acquisition fixture.
    var parameters=field.FieldType.GetMethod("Invoke").GetParameters().Select(p=>Expression.Parameter(p.ParameterType,p.Name)).ToArray();
@@ -97,11 +109,9 @@ internal static partial class Program
    var resultType=invoke.ReturnType.GetGenericArguments().Single();
    var read=new Func<string,string,string,object>((source,configuration,sha)=>
    {
-    if(string.Equals(source,rootPath,StringComparison.OrdinalIgnoreCase)||configuration!="Default"
-     ||!string.Equals(WorkingReuseHash(source),sha,StringComparison.OrdinalIgnoreCase)
-     ||!string.Equals(WorkingReuseHash(rootPath),sha,StringComparison.OrdinalIgnoreCase))
-     throw new InvalidOperationException("原生读取未使用指定版本的独立原件和配置");
-    onRead?.Invoke();
+    if(!string.Equals(WorkingReuseHash(source),sha,StringComparison.OrdinalIgnoreCase))
+     throw new InvalidOperationException("原生读取未使用指定版本的原件内容");
+    var stored=storedForOwner(source,configuration,sha);
     var rows=Array.CreateInstance(resultType.GetElementType(),stored.Length);
     for(var index=0;index<stored.Length;index++)
     {

@@ -96,11 +96,14 @@ internal static class ManagedCadPaths
 
     internal static string Resolve(string directory, string relativePath)
     {
+        var segments = relativePath?.Split('\\', '/');
         if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath)
-            || relativePath.Split('\\', '/').Any(segment => string.IsNullOrWhiteSpace(segment)
+            || segments.Any(segment => string.IsNullOrWhiteSpace(segment)
                 || segment.IndexOfAny(InvalidNameCharacters) >= 0
                 || segment[segment.Length - 1] == '.' || segment[segment.Length - 1] == ' '))
             throw new InvalidDataException("PLM打开清单包含无效或越界的文件路径。");
+        if (segments.Any(Upton.Pdm.Domain.DocumentMetadataLimits.IsWindowsDeviceName))
+            throw new InvalidDataException("文件路径使用 Windows 保留名称「" + relativePath + "」，请核对图档名称和目录。");
 
         if (!Fits(directory, relativePath))
             throw new PathTooLongException("当前本地目录无法容纳图档原路径「" + relativePath + "」。");

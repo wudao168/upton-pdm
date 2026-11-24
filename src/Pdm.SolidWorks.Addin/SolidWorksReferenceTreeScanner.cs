@@ -168,17 +168,19 @@ internal sealed class SolidWorksReferenceTreeScanner
         bool parentVirtual)
     {
         ArchiveSession.Current?.Token.ThrowIfCancellationRequested();
-        var componentPath = ResolveComponentPath(component);
-        var componentName = component.Name2 ?? Path.GetFileNameWithoutExtension(componentPath);
+        var sourcePath = component.GetPathName();
+        var selectionName = component.Name2;
+        var componentPath = ResolveComponentPath(component, sourcePath, selectionName, out var loadedModel);
+        var componentName = selectionName ?? Path.GetFileNameWithoutExtension(componentPath);
         var documentName = string.IsNullOrWhiteSpace(componentPath) ? componentName : Path.GetFileNameWithoutExtension(componentPath);
         var currentPath = string.IsNullOrWhiteSpace(instancePath) ? componentName : instancePath;
         var node = new CadTreeNode
         {
             InstancePath = currentPath,
-            ComponentSelectionName = component.Name2 ?? string.Empty,
+            ComponentSelectionName = selectionName ?? string.Empty,
             FileName = Path.GetFileName(componentPath),
             FullPath = componentPath,
-            SourceReferencePath = component.GetPathName() ?? string.Empty,
+            SourceReferencePath = (loadedModel != null ? sourcePath : component.GetPathName()) ?? string.Empty,
             DisplayName = documentName,
             DrawingNumber = Path.GetFileNameWithoutExtension(componentPath),
             Kind = DocumentKindFromPath(componentPath, isRoot ? (int)swDocumentTypes_e.swDocASSEMBLY : 0),
@@ -194,10 +196,11 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
         try
         {
-            node.IsSuppressed = component.GetSuppression2() == (int)swComponentSuppressionState_e.swComponentSuppressed;
+            var suppression = component.GetSuppression2();
+            node.IsSuppressed = suppression == (int)swComponentSuppressionState_e.swComponentSuppressed;
             node.Status = parentVirtual && PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(componentPath)
-                ? CadReferenceStatus.Virtual : GetStatus(component, componentPath, true);
-            node.IsModifiedInSolidWorks = IsModified(component, true);
+                ? CadReferenceStatus.Virtual : GetStatus(component, componentPath, loadedModel, suppression, true);
+            node.IsModifiedInSolidWorks = IsModified(component, loadedModel, true);
             if (node.IsInterconnectImport && node.Status != CadReferenceStatus.Missing)
             {
                 // Activating an owner invalidates FeatureManager tree items. Finish the
@@ -328,10 +331,10 @@ internal sealed class SolidWorksReferenceTreeScanner
         finally { importedComponents.Clear(); }
     }
 
-    private string ResolveComponentPath(IComponent2 component)
+    private string ResolveComponentPath(IComponent2 component, string original, string selectionName, out IModelDoc2 loadedModel)
     {
-        var original = component.GetPathName();
-        var instance = strictStructure ? component.Name2 : null;
+        loadedModel = null;
+        var instance = strictStructure ? selectionName : null;
         string configuration = null;
         if (strictStructure)
         {
@@ -342,7 +345,9 @@ internal sealed class SolidWorksReferenceTreeScanner
         string loadedPath = null;
         try
         {
-            loadedPath = (component.GetModelDoc2() as IModelDoc2)?.GetPathName();
+            var candidate = component.GetModelDoc2() as IModelDoc2;
+            loadedPath = candidate?.GetPathName();
+            if (!string.IsNullOrWhiteSpace(loadedPath)) loadedModel = candidate;
         }
         catch
         {
@@ -1209,7 +1214,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             foreach (var model in ModelNodes(child)) yield return model;
     }
 
-    private static CadReferenceStatus GetStatus(IComponent2 component, string path, bool requireComplete = false)
+    private static CadReferenceStatus GetStatus(IComponent2 component, string path, IModelDoc2 loadedModel, int suppression, bool requireComplete)
     {
         try
         {
@@ -1220,7 +1225,6 @@ internal sealed class SolidWorksReferenceTreeScanner
 
             if (requireComplete && component.IsSpeedPak && DocumentRuleGate.ShouldBlock("B03", "组件使用SpeedPak简化配置：" + path))
                 throw new InvalidOperationException("组件使用SpeedPak简化配置，无法确认完整内部结构。请核对完整配置后存档：" + path);
-            var suppression = component.GetSuppression2();
             if (suppression == (int)swComponentSuppressionState_e.swComponentSuppressed)
             {
                 return CadReferenceStatus.Suppressed;
@@ -1247,7 +1251,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             // A partially resolved component can throw while its state is queried.
         }
 
-        if (string.IsNullOrWhiteSpace(path) || File.Exists(path))
+        if (loadedModel != null || string.IsNullOrWhiteSpace(path) || File.Exists(path))
         {
             return CadReferenceStatus.Normal;
         }
@@ -1269,11 +1273,11 @@ internal sealed class SolidWorksReferenceTreeScanner
         return CadReferenceStatus.Missing;
     }
 
-    private static bool IsModified(IComponent2 component, bool requireComplete = false)
+    private static bool IsModified(IComponent2 component, IModelDoc2 loadedModel, bool requireComplete)
     {
         try
         {
-            return component?.GetModelDoc2() is IModelDoc2 model && model.GetSaveFlag();
+            return (loadedModel ?? component?.GetModelDoc2() as IModelDoc2)?.GetSaveFlag() == true;
         }
         catch (Exception exception)
         {

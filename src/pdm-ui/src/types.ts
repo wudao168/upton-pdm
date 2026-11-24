@@ -32,6 +32,8 @@ export interface ProjectSummary {
   sourceApplicationId?: string
   sourceApplicationNumber?: string
   deliveryDate?: string
+  historicalUpdatedDate?: string
+  historicalRemarks?: string
   quantity: number
   parentProjectId?: string
   rootProjectId?: string
@@ -61,6 +63,25 @@ export interface ProjectSummary {
   canAssignDesigners: boolean
   canReadContent: boolean
   effectiveProjectPermissions?: string[]
+}
+
+export interface HistoricalProjectImportRow {
+  isSubproject?: boolean
+  code: string
+  name: string
+  projectAlias?: string
+  deviceModel: string
+  serialNumbers: string[]
+  customerName: string
+  signedDate?: string
+  deliveryDate?: string
+  historicalUpdatedDate?: string
+  historicalRemarks?: string
+}
+
+export interface HistoricalProjectImportResult {
+  created: boolean
+  rows: HistoricalProjectImportRow[]
 }
 
 export interface ProjectPermissionSettings {
@@ -276,6 +297,7 @@ export interface SaveProjectPlanTemplateInput {
 }
 
 export interface CreateProjectInput {
+  children?: CreateSubprojectInput[]
   organizationId: string
   projectTypeCode: string
   equipmentTypeCode: number
@@ -1203,6 +1225,14 @@ export interface ReleaseDrawingReview {
     preview?: { sourceSha256: string; format: string | number } | null
     notes: Array<{ status: string; comment: string; actor: string; actorName: string; at: string; versionId: string; approvalTaskId?: string; roundId?: string; token?: string }>
   }>
+}
+
+export type ReleaseChangeCategory = 'All' | 'Standard' | 'NonStandard' | 'Electrical'
+
+export interface ReleaseChangeOverviewGroup {
+  category: ReleaseChangeCategory
+  count: number
+  reasons: Array<{ reason: string; count: number }>
 }
 
 export interface ReleaseChangeReasonSelection {

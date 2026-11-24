@@ -23,10 +23,21 @@ public static class DocumentMetadataLimits
 
     public static string? GetArchiveFileNameIssue(string? fileName)
     {
+        if (IsWindowsDeviceName(fileName)) return "文件名使用 Windows 保留名称，请修改后再存档。";
         var length = fileName?.Trim().Length ?? 0;
         return length > MaximumArchiveFileNameLength
             ? $"文件名长度上限为{MaximumArchiveFileNameLength}，当前长度为{length}。"
             : null;
+    }
+
+    public static bool IsWindowsDeviceName(string? name)
+    {
+        if (name is null || name.Length == 0) return false;
+        var end = name.IndexOf('.');
+        var stem = (end < 0 ? name : name.Substring(0, end)).TrimEnd(' ').ToUpperInvariant();
+        return stem is "CON" or "PRN" or "AUX" or "NUL"
+            || stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal))
+            && (stem[3] is >= '1' and <= '9' or '¹' or '²' or '³');
     }
 
     // MySQL VARCHAR counts a supplementary character once. The add-in runs on .NET Framework.

@@ -39,9 +39,11 @@ public sealed partial class MySqlPdmRepository
                 continue;
             }
             if (stored.RolesUnified && stored.DingTalkSelfBindingDefaultsApplied && stored.AiWebDefaultsApplied
-                && stored.UserManagementDefaultsApplied && stored.DocumentReleaseDefaultsApplied) return stored;
+                && stored.UserManagementDefaultsApplied && stored.DocumentReleaseDefaultsApplied
+                && stored.HistoricalProjectImportDefaultsApplied) return stored;
             var defaults = AuthorizationMigration.EnableAiWebDefaults(AuthorizationMigration.EnableDingTalkSelfBindingDefaults(stored));
-            var upgraded = AuthorizationMigration.EnableDocumentReleaseDefaults(AuthorizationMigration.EnableUserManagementDefaults(defaults));
+            var upgraded = AuthorizationMigration.EnableHistoricalProjectImportDefaults(
+                AuthorizationMigration.EnableDocumentReleaseDefaults(AuthorizationMigration.EnableUserManagementDefaults(defaults)));
             try { return await CommitAuthorizationSettingsAsync(upgraded, stored.Revision, !stored.RolesUnified, ct); }
             catch (PdmConflictException)
             {
@@ -79,7 +81,8 @@ public sealed partial class MySqlPdmRepository
             DingTalkSelfBindingDefaultsApplied = previous.DingTalkSelfBindingDefaultsApplied || settings.DingTalkSelfBindingDefaultsApplied,
             AiWebDefaultsApplied = previous.AiWebDefaultsApplied || settings.AiWebDefaultsApplied,
             UserManagementDefaultsApplied = previous.UserManagementDefaultsApplied || settings.UserManagementDefaultsApplied,
-            DocumentReleaseDefaultsApplied = previous.DocumentReleaseDefaultsApplied || settings.DocumentReleaseDefaultsApplied
+            DocumentReleaseDefaultsApplied = previous.DocumentReleaseDefaultsApplied || settings.DocumentReleaseDefaultsApplied,
+            HistoricalProjectImportDefaultsApplied = previous.HistoricalProjectImportDefaultsApplied || settings.HistoricalProjectImportDefaultsApplied
         };
         if (updateRoles) await SyncAuthorizationRolesAsync(connection, transaction, previous, saved, ct);
         await connection.ExecuteAsync(new CommandDefinition(

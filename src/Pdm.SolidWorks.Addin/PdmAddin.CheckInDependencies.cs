@@ -98,7 +98,8 @@ public sealed partial class PdmAddin
             var brokenReference = BrokenReferencePredicate(owner, token);
             foreach (var source in sources)
             {
-                if (scope.Contains(source) || aliases.ContainsKey(source) || File.Exists(source)
+                if (owner.UnverifiedToolboxReferences.Contains(source)
+                    || scope.Contains(source) || aliases.ContainsKey(source) || File.Exists(source)
                     || TryGetRecoveredArchiveReference(owner.FullPath, source, out _)
                     || verifiedEmbedded.Contains(source)
                     || NativeArchiveManifest.TryGetSelectedVirtualStorageOwner(virtualOwners, source, out _)
@@ -122,7 +123,7 @@ public sealed partial class PdmAddin
         var nodes = selected.SelectMany(item => EnumerateArchiveNodes(item.Node))
             .Concat(EnumerateArchiveNodes(currentTree))
             .Where(node => node.Status != CadReferenceStatus.Virtual && !node.IsStoredImport
-                && !string.IsNullOrWhiteSpace(node.FullPath))
+                && !node.IsUnverifiedToolboxFallback && !string.IsNullOrWhiteSpace(node.FullPath))
             .GroupBy(node => Path.GetFullPath(node.FullPath), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(node => node.DocumentId.HasValue).First(),
                 StringComparer.OrdinalIgnoreCase);
@@ -138,7 +139,7 @@ public sealed partial class PdmAddin
             if (!inspected.Add(owner.FullPath)) continue;
             if (!new[] { ".SLDPRT", ".SLDASM", ".SLDDRW" }
                 .Contains(Path.GetExtension(owner.FullPath), StringComparer.OrdinalIgnoreCase)) continue;
-            owner.ReferenceWarnings.RemoveAll(message => !message.StartsWith(ArchiveMissingReferencePolicy.WarningPrefix, StringComparison.Ordinal));
+            owner.ReferenceWarnings.RemoveAll(message => !ArchiveMissingReferencePolicy.IsRecordedReferenceWarning(message));
             ArchiveSession.Current?.ReportFile(0, 0, owner.FileName, "检入前正在核对受控引用；保留原文件和设计关联…");
             var before = ArchiveFileFingerprint.Read(owner.FullPath);
             var values = ArchiveReadContext.Read(owner, "读取检入文件引用", () => application.GetDocumentDependencies2(ArchiveFileReadPath(owner), false, false, false)) as Array;
@@ -169,6 +170,7 @@ public sealed partial class PdmAddin
             foreach (var source in references.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 var path = ArchiveReferencePath.Resolve(source, Path.GetDirectoryName(owner.FullPath), "检入引用核对", owner.FullPath);
+                if (owner.UnverifiedToolboxReferences.Contains(path)) continue;
                 if (TryGetRecoveredArchiveReference(owner.FullPath, path, out var recovered)) path = recovered;
                 if (nativeAliases.TryGetValue(path, out var actual))
                 {

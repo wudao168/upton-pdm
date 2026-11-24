@@ -6,6 +6,7 @@ import './styles/fold-buttons.css'
 
 export function isFoldButton(button: HTMLButtonElement) {
   if (button.matches('.el-table__expand-icon, .el-table-v2__expand-icon, .pdm-tree-toggle, .bom-tree-node__toggle, .pdm-category-sidebar__toggle, .material-category-nav__toggle, .pdm-titlebar__sidebar-toggle, .pdm-project-collapse-action')) return true
+  if (/^(?:更多(?:操作)?|[⋮⋯…]|\.\.\.)$/.test(button.textContent?.trim() ?? '')) return false
   if (button.matches('[aria-haspopup], [role="combobox"], [role="treeitem"], [role="option"], .pdm-theme-trigger, .pdm-user-profile-trigger, .pdm-company-switcher, .pdm-project-switcher__display, .el-dropdown-selfdefine')) return false
   if (button.hasAttribute('aria-expanded') && !button.hasAttribute('aria-haspopup') && !button.matches('[role="combobox"], [role="treeitem"], [role="option"]')) return true
   const label = button.getAttribute('aria-label') || button.title || ''
@@ -59,6 +60,7 @@ const compactLabels: Record<string, string> = {
   创建主项目: '创建',
 }
 const generatedTitles = new WeakMap<HTMLButtonElement, string>()
+const rowActionContext = 'td, th, [role="cell"], [role="gridcell"], .pdm-row-actions'
 
 function updateLeadingIcons(control: HTMLElement) {
   if (control.closest('.layout-phone')) return
@@ -85,7 +87,17 @@ function updateButton(button: HTMLButtonElement) {
   if (fold) button.dataset.pdmFoldControl = 'true'
   else delete button.dataset.pdmFoldControl
   const text = button.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+  const previousIcon = button.dataset.pdmActionIcon
+  const generatedTitle = generatedTitles.get(button)
+  function clearActionIcon() {
+    delete button.dataset.pdmActionIcon
+    if (previousIcon && generatedTitle && button.title === generatedTitle) {
+      generatedTitles.delete(button)
+      button.removeAttribute('title')
+    }
+  }
   if (fold || button.closest(buttonNavigationSelector) || button.matches(buttonContentSelector) || button.closest('.pdm-overview-alerts') || button.querySelector('img, canvas')) {
+    clearActionIcon()
     delete button.dataset.pdmButtonKind
     delete button.dataset.pdmButtonLabel
     delete button.dataset.pdmButtonIconOnly
@@ -94,14 +106,29 @@ function updateButton(button: HTMLButtonElement) {
   }
   const label = text || button.getAttribute('aria-label') || button.title
   const action = label.replace(/^(?:批量|一键)/, '')
+  const actionName = button.getAttribute('aria-label') || action
+  const moreAction = /^(?:更多(?:操作)?|[⋮⋯…]|\.\.\.)$/.test(action) || /^更多/.test(actionName)
+    || button.matches('.pdm-project-action-trigger') || (action === '操作' && button.matches('[aria-haspopup="menu"]'))
+  const icon = /^(?:批量|确认|永久|彻底)*删除/.test(actionName) ? 'delete'
+    : /^(?:批量)?编辑/.test(actionName) ? 'edit'
+      : moreAction ? (button.closest(rowActionContext) ? 'more' : undefined)
+        : button.disabled && /^(?:正在|处理中)|中[.…]*$/.test(label) ? previousIcon : undefined
+  if (icon) {
+    button.dataset.pdmActionIcon = icon
+    if (!button.title || button.title === generatedTitle) {
+      const title = /^(?:[⋮⋯…]|\.\.\.)$/.test(actionName) ? '更多操作' : actionName
+      generatedTitles.set(button, title)
+      if (button.title !== title) button.title = title
+    }
+  } else clearActionIcon()
   if (/^(?:(?:立即|全量|正在|手动))*刷新/.test(action)) button.dataset.pdmButtonRefresh = 'true'
   else delete button.dataset.pdmButtonRefresh
   let kind = 'outline'
-  if (button.matches('.pdm-danger-action') || /^(?:确认|永久|彻底)?(?:删除|移除|清空)/.test(action)) kind = 'delete'
+  if (icon === 'delete' || button.matches('.pdm-danger-action') || /^(?:确认|永久|彻底)?(?:删除|移除|清空)/.test(action)) kind = 'delete'
   else if (/^(?:新增|新建|添加|增加|创建|加入)/.test(action)) kind = 'add'
   else if (button.hasAttribute('data-pdm-primary') || /^(?:确认|确定|保存|提交|同意|通过|批准)/.test(action)) kind = 'confirm'
   else if (button.disabled && /^(?:正在|处理中|请稍候)|中[.…]*$/.test(label)) kind = button.dataset.pdmButtonKind ?? kind
-  if (kind === 'outline' && button.matches('.pdm-text-action, .is-link, .el-button--text, .pdm-link-button, .pdm-project-assignment-button')) {
+  if (!icon && kind === 'outline' && button.matches('.pdm-text-action, .is-link, .el-button--text, .pdm-link-button, .pdm-project-assignment-button')) {
     delete button.dataset.pdmButtonKind
     delete button.dataset.pdmButtonLabel
     delete button.dataset.pdmButtonIconOnly
@@ -119,7 +146,7 @@ function updateButton(button: HTMLButtonElement) {
       const title = button.getAttribute('aria-label') || label
       generatedTitles.set(button, title)
       if (button.title !== title) button.title = title
-    } else if (compact === label && button.title === generatedTitles.get(button)) {
+    } else if (!icon && compact === label && button.title === generatedTitles.get(button)) {
       generatedTitles.delete(button)
       button.removeAttribute('title')
     }

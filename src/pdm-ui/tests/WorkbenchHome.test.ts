@@ -9,7 +9,7 @@ import type { DocumentNode, ProjectSummary } from '../src/types'
 const apiMocks = vi.hoisted(() => ({
   listProjectPlanVersions: vi.fn().mockResolvedValue([]),
   readProjectPlanPortfolio: vi.fn(),
-  readProjectRiskOverview: vi.fn(),
+  readReleaseChangeOverview: vi.fn(),
   readProjectValidationPlan: vi.fn(),
   getMaterialRelationCompleteness: vi.fn(),
   getProjectProcurementTracking: vi.fn(),
@@ -43,7 +43,7 @@ const project = {
   canManageMainStaffing: true,
   canAssignDesigners: true,
   canReadContent: true,
-  effectiveProjectPermissions: ['project.opl.view'],
+  effectiveProjectPermissions: ['project.opl.view', 'release.view'],
 } satisfies ProjectSummary
 
 const childProject = {
@@ -65,7 +65,7 @@ const childProject = {
   canManageMainStaffing: false,
   canAssignDesigners: true,
   canReadContent: true,
-  effectiveProjectPermissions: ['project.opl.view'],
+  effectiveProjectPermissions: ['project.opl.view', 'release.view'],
 } satisfies ProjectSummary
 
 const selected = {
@@ -104,7 +104,7 @@ describe('WorkbenchHome', () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
     vi.setSystemTime(new Date('2026-09-25T08:00:00+08:00'))
-    apiMocks.readProjectRiskOverview.mockResolvedValue([])
+    apiMocks.readReleaseChangeOverview.mockResolvedValue([{ category: 'All', count: 0, reasons: [] }])
     apiMocks.readProjectOpl.mockResolvedValue({ rows: [] })
     apiMocks.readProjectPlanPortfolio.mockResolvedValue({
       rootProjectId: 'project-root', currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedFinish: '2026-10-18',
@@ -455,7 +455,7 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('button[aria-label="查看待处理"] strong').text()).toBe('2')
     expect(wrapper.find('button[aria-label="查看关键物料"]').exists()).toBe(false)
     expect(wrapper.get('[aria-label="项目待办与风险"]').find('.pdm-overview-alerts').element.children).toHaveLength(3)
-    expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="项目风险"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="发布详情"]').exists()).toBe(true)
     expect(wrapper.get('[aria-label="项目核心业务概览"]').findAll('article')).toHaveLength(1)
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('P700001')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('设计')
@@ -511,47 +511,46 @@ describe('WorkbenchHome', () => {
     ;[...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '取消')!.click()
     await flushPromises()
     expect(wrapper.emitted('records')).toBeUndefined()
-    const riskPanel = wrapper.get('[aria-label="项目风险"]')
-    expect(riskPanel.text()).toContain('当前暂无风险')
-    expect(wrapper.find('[aria-label="项目团队"]').exists()).toBe(false)
-    const rootRisk = { project: { id: project.id, code: project.code, deliveryDate: '2026-09-22' }, plan: null, procurement: null, releases: [], incomplete: false }
-    const childRisk = {
-      project: { id: childProject.id, code: childProject.code }, plan: null, releases: [], incomplete: false,
-      procurement: { delayed: 2, items: [
-        { sequence: 1, materialCode: 'M001', materialName: '导轨', requiredOn: '2026-09-22', expectedOn: '2026-09-28', purchaseOrders: ['PO001'] },
-        { sequence: 2, materialCode: 'M002', materialName: '丝杆', requiredOn: '2026-09-23', expectedOn: '2026-09-30', purchaseOrders: ['PO002'] },
-      ] },
-    }
-    apiMocks.readProjectRiskOverview.mockResolvedValueOnce([rootRisk, childRisk])
+    const releasePanel = wrapper.get('[aria-label="发布详情"]')
+    expect(releasePanel.text()).toContain('暂无具体变更原因')
+    expect(releasePanel.get('[aria-label="增补／变更总次数"] strong').text()).toBe('0次')
+    const standardReason = { reason: '买错物料', count: 2 }
+    apiMocks.readReleaseChangeOverview.mockResolvedValueOnce([
+      { category: 'All', count: 3, reasons: [standardReason, { reason: '图纸错误', count: 1 }] },
+      { category: 'Standard', count: 2, reasons: [standardReason] },
+      { category: 'NonStandard', count: 1, reasons: [{ reason: '图纸错误', count: 1 }] },
+      { category: 'Electrical', count: 0, reasons: [] },
+    ])
     await wrapper.get('[aria-label="刷新项目概览"]').trigger('click')
     await flushPromises()
-    expect(riskPanel.text()).toContain('项目交期已逾期 3 天')
-    expect(riskPanel.findAll('tbody tr')).toHaveLength(3)
-    await riskPanel.get('[aria-label="查看 P700001-1 采购交付延期 M001 · 导轨"]').trigger('click')
-    await flushPromises()
-    const riskDetail = document.body.querySelector('[aria-label="风险明细"]')!
-    expect(riskDetail.textContent).toContain('PO001')
-    expect(riskDetail.textContent).not.toContain('PO002')
-    expect(wrapper.emitted('openRisk')).toBeUndefined()
-    ;[...document.body.querySelectorAll('button')].find(button => button.textContent === '前往备料')!.click()
-    await flushPromises()
-    expect(wrapper.emitted('openRisk')).toEqual([[childProject.id, 'procurement']])
+    expect(releasePanel.findAll('.release-count')).toHaveLength(1)
+    expect(releasePanel.get('[aria-label="增补／变更总次数"] strong').text()).toBe('3次')
+    expect(releasePanel.findAll('.release-reason-label').map(row => row.text())).toEqual(['买错物料', '图纸错误'])
+    await releasePanel.get('select').setValue('Standard')
+    expect(releasePanel.get('[aria-label="增补／变更总次数"] strong').text()).toBe('2次')
+    expect(releasePanel.findAll('.release-reason-label').map(row => row.text())).toEqual(['买错物料'])
+    await releasePanel.get('select').setValue('Electrical')
+    expect(releasePanel.text()).toContain('暂无具体变更原因')
 
-    apiMocks.readProjectRiskOverview.mockResolvedValueOnce([childRisk])
+    apiMocks.readReleaseChangeOverview.mockResolvedValueOnce([{ category: 'All', count: 1, reasons: [{ reason: '图纸错误', count: 1 }] }])
     await wrapper.setProps({ project: childProject })
     await flushPromises()
-    expect(riskPanel.text()).not.toContain('项目交期')
-    expect(riskPanel.findAll('tbody tr')).toHaveLength(2)
+    expect(apiMocks.readReleaseChangeOverview).toHaveBeenLastCalledWith(childProject.id, 'token', expect.any(AbortSignal))
+    expect(releasePanel.get('select').element.value).toBe('All')
+    expect(releasePanel.get('[aria-label="增补／变更总次数"] strong').text()).toBe('1次')
+    expect(releasePanel.findAll('.release-reason-label').map(row => row.text())).toEqual(['图纸错误'])
 
-    apiMocks.readProjectRiskOverview.mockRejectedValueOnce(new Error('读取失败'))
+    apiMocks.readReleaseChangeOverview.mockRejectedValueOnce(new Error('读取失败'))
     await wrapper.get('[aria-label="刷新项目概览"]').trigger('click')
     await flushPromises()
-    expect(riskPanel.text()).toContain('项目风险读取失败')
-    expect(riskPanel.text()).not.toContain('当前暂无风险')
-    await riskPanel.get('button').trigger('click')
+    expect(releasePanel.text()).toContain('发布统计读取失败')
+    expect(releasePanel.text()).not.toContain('暂无具体变更原因')
+    await releasePanel.get('button').trigger('click')
     await flushPromises()
-    expect(riskPanel.text()).toContain('当前暂无风险')
+    expect(releasePanel.text()).toContain('暂无具体变更原因')
 
+    await wrapper.setProps({ project: { ...childProject, effectiveProjectPermissions: [] }, projects: [project, { ...childProject, effectiveProjectPermissions: [] }] })
+    expect(wrapper.find('[aria-label="发布详情"]').exists()).toBe(false)
     await wrapper.findAll('button').find(button => button.text().includes('进入项目计划'))!.trigger('click')
 
     expect(wrapper.emitted('projectPlan')).toEqual([[]])

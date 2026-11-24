@@ -5,7 +5,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using SolidWorks.Interop.sldworks;
-using SolidWorks.Interop.swconst;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -69,35 +68,24 @@ public sealed partial class PdmAddin
         // Use the same backup and atomic replacement as post-archive cache sync.
         // The only loaded path eligible here is the root with exact live evidence.
         var copy = VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
-        void SynchronizeFile()
+        try
         {
+            // A sharing violation can persist after detaching the native model. Keep
+            // it attached so a failed replacement cannot strand the open document.
             if (!ControlledWorkspaceManager.SynchronizeConfirmedCache(workspace, manifest.ProjectCode, path,
                 stored.DocumentId, manifest.ProjectId, copy.CommittedVersion, copy.CopyPath, copy.SourceHash, Array.Empty<string>()))
                 throw new IOException("当前文件身份或提交副本需要核对。");
-        }
-        try
-        {
-            try { SynchronizeFile(); }
-            catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
-            {
-                // SOLIDWORKS can keep a non-delete-sharing handle even in read-only
-                // mode. Reattach in the original frame from the exact archived bytes.
-                using var search = new ControlledReferenceSearchScope(application, path, manifest);
-                VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
-                if (!copy.Model.Visible || copy.Model.ForceReleaseLocks() != 1) throw;
-                VerifyCommittedAssemblySource(directory, manifest.ProjectId, source, stored);
-                SynchronizeFile();
-                if (!copy.MatchesNativeState())
-                    throw new IOException("重新载入前发现窗口有新的修改，已保留当前窗口。");
-                if (copy.Model.ReloadOrReplace(true, null, true) != (int)swComponentReloadError_e.swReloadOkay)
-                    throw new IOException("SolidWorks未能在原窗口载入已存档总装。");
-            }
             var model = FindLoadedDocument(path);
             if (!ReferenceEquals(copy.Model, model) || !WorkingHeadDiskMatches(directory, manifest.ProjectId, stored)
                 || (!model.IsOpenedReadOnly() && (!model.SetReadOnlyState(true) || !model.IsOpenedReadOnly())))
                 throw new IOException("当前窗口和新工作基准需要核对。");
             LogOperation("原窗口获取权限前已同步刚存档的总装基准 file=" + path + " version=" + stored.VersionId);
             return model;
+        }
+        catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
+        {
+            LogDiagnostic("原窗口同步已存档总装时工作文件被占用", error);
+            throw new InvalidOperationException("总装工作文件正被占用，已保留当前窗口和图档，尚未获取编辑权限。请解除文件占用后重试。若占用来自当前窗口，请先保存需要保留的修改，再从工作区打开最新版本并获取权限。");
         }
         catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is COMException)
         {

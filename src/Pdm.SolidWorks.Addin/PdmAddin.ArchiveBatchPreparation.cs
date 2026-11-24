@@ -42,7 +42,7 @@ public sealed partial class PdmAddin
                 }, (done, total, file) => ArchiveSession.Current?.ReportFile(offset + done, items.Count, file, "本批图档身份已预留"), token);
             for (var index = 0; index < group.Length; index++)
             {
-                ApplyPreparedDocumentToMatchingInstances(group[index].Node, results[index], false);
+                ApplyReservedDocumentToMatchingInstances(group[index].Node, results[index]);
                 if (IsCheckedOutByCurrentUser(group[index].Node))
                 { group[index].Node.WorkState = CadWorkState.Editable; permissions++; }
             }

@@ -276,6 +276,7 @@ public sealed record CreateNumberedProjectCommand(
     string BomItemCategoryCode = "0302")
 {
     public ProjectApplicationApproval? ApplicationApproval { get; init; }
+    public IReadOnlyList<CreateSubprojectItem> Children { get; init; } = [];
 }
 
 public sealed record CreateSubprojectCommand(
@@ -285,7 +286,21 @@ public sealed record CreateSubprojectCommand(
     int Quantity,
     string? VaultRoot = null,
     string? ReleaseRoot = null,
-    int? EquipmentTypeCode = null);
+    int? EquipmentTypeCode = null)
+{
+    public CreateSubprojectsCommand ToBatch() =>
+        new(ParentProjectId, [new(Name, ProjectAlias, Quantity, EquipmentTypeCode)], VaultRoot, ReleaseRoot);
+}
+
+public sealed record CreateSubprojectItem(string Name, string? ProjectAlias, int Quantity, int? EquipmentTypeCode = null);
+
+public sealed record CreateSubprojectsCommand(
+    Guid ParentProjectId,
+    IReadOnlyList<CreateSubprojectItem> Items,
+    string? VaultRoot = null,
+    string? ReleaseRoot = null);
+
+public sealed record ProjectCodePreview(string ProjectCode, IReadOnlyList<string> ChildCodes);
 
 public sealed record UpdateProjectDetailsCommand(
     Guid? OrganizationId,
@@ -501,6 +516,7 @@ public interface IPdmRepository
     Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasChildProjectsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<Project> CreateProjectAsync(CreateProjectCommand command, string actor, CancellationToken cancellationToken);
+    Task<HistoricalProjectImportResult> ImportHistoricalProjectsAsync(IReadOnlyList<Project> projects, ProjectOrganization organization, bool preview, CancellationToken cancellationToken);
     Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ProjectNumberingOptions> GetProjectNumberingOptionsAsync(CancellationToken cancellationToken);
     Task<ProjectNumberingOptions> AdvanceOrganizationCountersAsync(Guid organizationId, int currentProjectSequence, int currentSerialSequence, CancellationToken cancellationToken);
@@ -555,9 +571,12 @@ public interface IPdmRepository
     Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, CancellationToken cancellationToken);
     Task<Project> SetChildProjectDesignersAsync(Guid projectId, IReadOnlyList<string> designers, string actor, CancellationToken cancellationToken);
     Task<Project> SetProjectPhaseOwnersAsync(Guid projectId, IReadOnlyDictionary<string, string> phaseOwners, string actor, CancellationToken cancellationToken);
-    Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken);
+    Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken, Action<Project>? authorizeChildren = null);
+    Task<string> PreviewNextProjectCodeAsync(Guid organizationId, string projectTypeCode, CancellationToken cancellationToken);
+    Task<IReadOnlyList<int>> ListUsedChildProjectSequencesAsync(Guid parentProjectId, CancellationToken cancellationToken);
     Task<string> ReserveBusinessNumberAsync(string prefix, CancellationToken cancellationToken);
     Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken);
+    Task<IReadOnlyList<Project>> CreateSubprojectsAsync(CreateSubprojectsCommand command, string? actor, CancellationToken cancellationToken);
     Task EnsureProjectFolderTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectFolder>> ListProjectFoldersAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectFolderTemplateNode>> ListFolderTemplateAsync(CancellationToken cancellationToken);

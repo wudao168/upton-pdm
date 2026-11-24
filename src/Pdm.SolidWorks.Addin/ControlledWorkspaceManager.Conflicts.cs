@@ -30,15 +30,18 @@ internal sealed partial class ControlledWorkspaceManager
     }
 
     internal WorkspaceCacheBackup BackupWorkingConflicts(ControlledOpenManifestDto manifest, WorkspaceCacheConflictException conflict,
-        CancellationToken token)
+        CancellationToken token, IReadOnlyCollection<string> editRecoveryPaths = null)
     {
         var directory = WorkingDirectory(manifest);
         if (!string.Equals(directory, conflict.Directory, StringComparison.OrdinalIgnoreCase)
             || !ServerWorkspaceRoots.Any(root => ManagedCadPaths.IsWithin(directory, root)))
             throw new IOException("备份目录与当前工作区不一致，未更新文件。");
         var conflictIds = new HashSet<Guid>(conflict.Files.Select(file => file.DocumentId));
+        const string recoveryManifest = "workspace-recovery.json";
+        var paths = ManifestPaths(manifest.Files.Where(file => conflictIds.Contains(file.DocumentId)))
+            .Concat(new[] { recoveryManifest }).Concat(editRecoveryPaths ?? Array.Empty<string>());
         var backup = new WorkspaceCacheBackup { WorkingDirectory = directory, ManifestKey = CacheManifestKey(manifest),
-            RecoveryDirectory = RecoveryDirectory("open-conflict", directory, ManifestPaths(manifest.Files.Where(file => conflictIds.Contains(file.DocumentId)))),
+            RecoveryDirectory = RecoveryDirectory("open-conflict", directory, paths),
             Files = conflict.Files.ToList() };
         foreach (var file in backup.Files)
         {
@@ -56,7 +59,7 @@ internal sealed partial class ControlledWorkspaceManager
                 throw new IOException("工作区备份未通过校验，原文件已保留：" + file.FileName);
         }
         var json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
-        File.WriteAllText(Path.Combine(backup.RecoveryDirectory, "workspace-recovery.json"), json.Serialize(backup), Encoding.UTF8);
+        File.WriteAllText(ManagedCadPaths.Resolve(backup.RecoveryDirectory, recoveryManifest), json.Serialize(backup), Encoding.UTF8);
         return backup;
     }
 
