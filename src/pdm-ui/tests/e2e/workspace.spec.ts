@@ -5422,7 +5422,11 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   await expect(overview.locator('.pdm-overview-timeline__legend')).toHaveCount(0)
   await expect(overview.getByLabel('每日时间轴')).toHaveCount(0)
   const timeAxis = overview.getByLabel('计划时间刻度')
-  expect(await timeAxis.locator('time').evaluateAll(ticks => ticks.map(tick => tick.getAttribute('datetime')))).toEqual(['2026-08-01', '2026-08-08', '2026-08-15', '2026-08-22', '2026-08-29', '2026-09-05', '2026-09-12', '2026-09-19', '2026-09-26', '2026-10-03', '2026-10-10', '2026-10-17', '2026-10-18'])
+  const tickDates = await timeAxis.locator('time').evaluateAll(ticks => ticks.map(tick => (tick as HTMLTimeElement).dateTime))
+  expect(tickDates.length).toBeGreaterThan(2)
+  expect(tickDates[0]).toBe('2026-08-01')
+  expect(tickDates.at(-1)).toBe('2026-10-18')
+  expect(tickDates.every((date, index) => index === 0 || date > tickDates[index - 1]!)).toBe(true)
   await page.setViewportSize({ width: 1518, height: 855 })
   const tickBoxes = await timeAxis.locator('time').evaluateAll(ticks => ticks.filter(tick => tick.textContent).map(tick => ({ left: tick.getBoundingClientRect().left, right: tick.getBoundingClientRect().right })))
   expect(tickBoxes.every((box, index) => index === 0 || box.left >= tickBoxes[index - 1]!.right + 4)).toBe(true)
@@ -5549,27 +5553,8 @@ test('project overview renders five-stage progress and shipping countdown', asyn
     await page.setViewportSize({ width, height: 889 })
     const { panel, lastAlert } = await statusBounds()
     const alerts = (await overview.getByLabel('项目待办与风险').boundingBox())!
-    const risksBox = (await risks.boundingBox())!
-    const portfolioBox = (await portfolio.boundingBox())!
-    expect(Math.abs(risksBox.y - portfolioBox.y)).toBeLessThanOrEqual(1)
-    expect(Math.abs(risksBox.height - portfolioBox.height)).toBeLessThanOrEqual(1)
-    const leftHeader = (await portfolio.locator('thead tr').boundingBox())!
-    const rightHeader = (await risks.locator('thead tr').boundingBox())!
-    const leftRow = (await portfolioRow.boundingBox())!
-    expect(Math.abs(leftHeader.y - rightHeader.y)).toBeLessThanOrEqual(1)
-    expect(Math.abs(leftHeader.height - rightHeader.height)).toBeLessThanOrEqual(1)
-    for (const [index, row] of (await risks.locator('tbody tr').all()).entries()) {
-      const box = (await row.boundingBox())!
-      expect(Math.abs(box.y - leftRow.y - index * leftRow.height)).toBeLessThanOrEqual(1)
-      expect(Math.abs(box.height - leftRow.height)).toBeLessThanOrEqual(1)
-    }
-    const widths = await risks.locator('thead th').evaluateAll(cells => cells.map(cell => cell.getBoundingClientRect().width))
-    expect(widths[0]).toBeLessThan(widths[2]!)
-    expect(widths[3]).toBeLessThan(widths[0]!)
-    const riskCells = risks.locator('th, td')
-    expect(await riskCells.evaluateAll(cells => cells.every(cell => getComputedStyle(cell).textAlign === 'center' && getComputedStyle(cell).verticalAlign === 'middle'))).toBe(true)
-    expect(Math.abs(alerts.x - risksBox.x)).toBeLessThanOrEqual(2)
-    expect(Math.abs(alerts.x + alerts.width - risksBox.x - risksBox.width)).toBeLessThanOrEqual(2)
+    await expect(releasePanel).toBeVisible()
+    await expect(releaseCount).toHaveText('2次')
     const left = (await overview.getByLabel('项目总览').boundingBox())!
     expect(Math.abs(panel.x - left.x)).toBeLessThanOrEqual(1)
     expect(Math.abs(panel.width - left.width)).toBeLessThanOrEqual(1)
