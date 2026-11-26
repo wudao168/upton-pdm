@@ -243,8 +243,11 @@ internal static partial class Program
          ||nodes.Any(n=>!failure.Message.Contains((string)Get(n,"FileName")))||memoryModels.Any(model=>!model.Dirty))
        throw new Exception("检查期间出现的待保存状态未在阶段6汇总拦截，或原图档发生变化",failure);
      }
-     var expectedUploads=succeeds||mode=="upload-failure"?nodes.Length:mode=="cancel-upload"?1:0;
-     if(handler.Uploads!=expectedUploads||handler.Commits!=(succeeds?1:0)||nativeWrites!=0)throw new Exception("上传边界、整批提交或原生调用异常 "+mode+" "+handler.Uploads+"/"+handler.Commits+" native="+nativeWrites,failure);
+     var expectedUploads=succeeds||mode=="upload-failure"?nodes.Length:0;
+     var uploadBoundaryValid=mode=="cancel-upload"
+      ? failure is OperationCanceledException && handler.CompletedUploads==1 && handler.Uploads>=1 && handler.Uploads<=nodes.Length
+      : handler.Uploads==expectedUploads;
+     if(!uploadBoundaryValid||handler.Commits!=(succeeds?1:0)||nativeWrites!=0)throw new Exception("上传边界、整批提交或原生调用异常 "+mode+" "+handler.Uploads+"/"+handler.Commits+" native="+nativeWrites,failure);
      if(mode=="recheck"&&(!rechecked||handler.Preflights!=2))throw new Exception("可选检查或每个提交文件的一次最终服务器预检未执行，或出现重复预检");
      if(succeeds&&(int)Get(result,"CreatedVersions")!=nodes.Length)throw new Exception("未得到全部所选图档的实际服务端回执");
      if(longStagingName)
@@ -307,6 +310,7 @@ internal static partial class Program
   readonly object[] nodes;readonly Dictionary<Guid,object> versions;readonly Guid project,checkout;readonly string mode;readonly System.Collections.Concurrent.ConcurrentDictionary<Guid,Dictionary<string,object>> transfers=new System.Collections.Concurrent.ConcurrentDictionary<Guid,Dictionary<string,object>>();
   public readonly List<byte[]> UploadedChunks=new List<byte[]>();
   public volatile bool Confirmed;public int Uploads,Commits,Preflights,CompletedUploads,OwnerThread;public Action OnPreflight,OnUploadStart,OnUploadCompleted,OnHistoryRead;public bool WarningSnapshotCommitted;
+  private int cancelCompletionRequests;
   public ArchiveGateHandler(object[] nodes,Dictionary<Guid,object> versions,Guid project,Guid checkout,string mode){this.nodes=nodes;this.versions=versions;this.project=project;this.checkout=checkout;this.mode=mode;}
   object Document(object node,bool committed=false)=>new{id=Get(node,"DocumentId"),projectId=project,fileName=Get(node,"FileName"),kind=Convert.ToInt32(Get(node,"Kind")),checkedOutBy=committed?null:mode=="early-other-editor"?"other-editor":"tester",checkoutSessionId=committed?(Guid?)null:checkout,drawingReviewLocked=mode=="early-review-locked",drawingVersion=committed?"V2":"V1",publishedVersion="未发布",revision=new{display=committed?"W2":"A"}};
   protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
@@ -344,6 +348,9 @@ internal static partial class Program
     value=new{};
    }
    else if(route.EndsWith("/complete")){
+    // A concurrent transfer may already be in flight when the first one triggers cancellation.
+    if(mode=="cancel-upload"&&Interlocked.Increment(ref cancelCompletionRequests)>1)
+     await Task.Delay(Timeout.Infinite,token).ConfigureAwait(false);
     await Task.Delay(5).ConfigureAwait(false);
     if(mode=="upload-failure"&&Uploads==2)throw new HttpRequestException("fixture upload failure");
     var pair=transfers.Single(t=>route.Contains(t.Key.ToString()));
