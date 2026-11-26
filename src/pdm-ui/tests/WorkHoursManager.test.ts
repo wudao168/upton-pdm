@@ -26,11 +26,11 @@ beforeEach(() => { vi.spyOn(calendar,'chinaToday').mockReturnValue('2026-10-20')
 afterEach(() => vi.restoreAllMocks())
 
 describe('移动端精简工时填报', () => {
-  it('仅显示五个字段和保存，管理员也不显示汇总、设置、日历及辅助操作', async () => {
+  it('显示填报字段、快捷工时、添加项目和保存，管理员也不显示汇总、设置与日历', async () => {
     vi.mocked(api.readWorkHours).mockResolvedValue({ ...view(), canManage: true, canManageSettings: true })
     const wrapper = mountManager({ mobile: true }); await flushPromises()
     expect(wrapper.findAll('.wh-mobile-fields > label').map(label => label.element.firstChild?.textContent?.trim())).toEqual(['日期', '所在地', '项目号', '项目名称', '工时数'])
-    expect(wrapper.findAll('button').map(item => item.text())).toEqual(['保存'])
+    expect(wrapper.findAll('button').map(item => item.text())).toEqual(['2小时', '4小时', '6小时', '8小时', '10小时', '添加项目', '保存'])
     expect(wrapper.find('.wh-tabs, .wh-summary, .wh-calendar, .wh-recent, .wh-entry, .wh-charts').exists()).toBe(false)
     expect(wrapper.text()).not.toMatch(/本月累计|未填工作日|复制|最近项目|修改记录|汇总工时|工时设置|当日记录/)
     expect((wrapper.get('[aria-label="自动带出项目名称"]').element as HTMLInputElement).value).toBe('')
