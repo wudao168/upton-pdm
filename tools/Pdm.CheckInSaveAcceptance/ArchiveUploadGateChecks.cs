@@ -118,12 +118,7 @@ internal static partial class Program
       foreach(var path in absentPaths){var missing=New("CadTreeNode");Set(missing,"FullPath",path);Set(missing,"FileName",Path.GetFileName(path));Set(missing,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));Set(missing,"Status",Enum.Parse(Type("CadReferenceStatus"),"Missing"));((IList)Get(nodes[0],"Children")).Add(missing);}
       var policy=Type("ArchiveMissingReferencePolicy");policy.GetProperty("BlockMissingReferences",Flags).SetValue(null,mode=="strict-missing-references");
       var selections=Array.CreateInstance(Type("CadTreeNode"),2);selections.SetValue(nodes[0],0);selections.SetValue(nodes[1],1);
-      Exception rejected=null;try{policy.GetMethod("Prepare",Flags).Invoke(null,new object[]{nodes[0],selections});}catch(TargetInvocationException error){rejected=error.InnerException;}
-      if(mode=="strict-missing-references")
-      {
-       if(rejected==null||!rejected.Message.Contains("已启用")||handler.Uploads!=0||handler.Commits!=0||nativeWrites!=0)throw new Exception("严格选项未在昂贵读取和上传前拒绝缺失引用",rejected);
-       Console.WriteLine("PASS: configured missing references block before native reads/uploads/commits");continue;
-      }
+      Exception rejected=null;try{policy.GetMethod("Prepare",Flags).Invoke(null,new object[]{nodes[0],selections,null});}catch(TargetInvocationException error){rejected=error.InnerException;}
       if(rejected!=null||((IList)Get(nodes[0],"ReferenceWarnings")).Count!=3)throw new Exception("默认缺失引用未转为可持久化提示",rejected);
       var inventory=nodes.Select(n=>(string)Get(n,"FullPath")).Concat(absentPaths).ToArray();
       Type("NativeArchiveManifest").GetMethod("ConfirmFileScope",Flags).Invoke(null,new object[]{nodes[0],inventory});
@@ -220,7 +215,7 @@ internal static partial class Program
       if(await Task.WhenAny(task,Task.Delay(15000))!=task){uploadContext.Release();TreeCall(session,"RequestCancellation");throw new Exception("上传依赖了主线程逐文件回调，或出现额外人工等待");}
       await task;result=Get(task,"Result");
      }catch(Exception error){failure=error;}finally{uploadContext.Release();driverStop.Cancel();}
-     var succeeds=mode=="confirm"||longStagingName||mode=="recheck"||mode=="missing-references"||mode=="missing-references-cache"||mode=="background-upload"||mode=="changed-after-commit"||mode=="cancel-after-commit"||mode=="chunked-final-sync"||memoryMode||pendingFromLaterProperties;
+     var succeeds=mode=="confirm"||longStagingName||mode=="recheck"||warningMode||mode=="background-upload"||mode=="changed-after-commit"||mode=="cancel-after-commit"||mode=="chunked-final-sync"||memoryMode||pendingFromLaterProperties;
      if(succeeds&&(failure!=null||result==null))throw new Exception("正常确认存档验证失败 "+mode,failure);
      if(!succeeds&&failure==null)throw new Exception("应停止的批次未停止 "+mode);
      if(mode=="payload-too-large"&&(failure==null||!failure.ToString().Contains("本次尚未上传文件")||handler.Uploads!=0||handler.Commits!=0))throw new Exception("提交容量超限未在上传前停止",failure);
@@ -274,7 +269,7 @@ internal static partial class Program
       if(((IEnumerable)Get(result,"BomWarnings")).Cast<string>().Any(w=>w.Contains("本机状态同步失败")||w.Contains("之后的本地修改")))throw new Exception("已提交内存副本被误判为未提交修改");
       Console.WriteLine("PASS: current memory payloads commit atomically, sources stay readonly and unchanged, source hashes are not mislabeled as new content");
      }
-     if(mode=="missing-references"||mode=="missing-references-cache")
+     if(warningMode)
      {
       if(absentPaths.Any(File.Exists)||!handler.WarningSnapshotCommitted||((IEnumerable)Get(nodes[0],"ReferenceWarnings")).Cast<string>().Count(w=>absentPaths.Any(path=>w.Contains(Path.GetFileName(path))))!=3)throw new Exception("缺失提示未随快照提交，或缺失文件被制造/范围被扩大");
       Console.WriteLine("PASS: missing-reference notices persist in committed snapshot; only two checked files upload and commit");
