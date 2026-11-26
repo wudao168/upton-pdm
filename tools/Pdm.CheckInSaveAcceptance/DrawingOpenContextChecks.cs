@@ -156,7 +156,7 @@ internal static partial class Program
       await task;for(var index=0;index<200&&(int)Field(plugin,"openOperationInProgress")!=0;index++)await Task.Delay(10);success=(bool)Get(task,"Result");
      }
      promptTimer.Stop();
-     var expected=mode.StartsWith("registered-")||mode.StartsWith("drawing-placeholder")||mode.StartsWith("archive-")||new[]{"clean","dirty-total","dirty-owned-part","saved-owned-part","loaded-owned-drawing","missing-drawing","latest-edit-owned","latest-edit-new","resolved-yes","context-yes","context-older-environment","lightweight-part"}.Contains(mode);
+     var expected=mode.StartsWith("registered-")||mode.StartsWith("drawing-placeholder")||mode.StartsWith("archive-")||new[]{"clean","dirty-total","dirty-owned-part","saved-owned-part","loaded-owned-drawing","missing-drawing","latest-edit-owned","latest-edit-new","resolved-yes","resolved-without-confirmation","resolved-yes-missing","resolved-yes-wrong-revision","context-yes","context-older-environment","lightweight-part"}.Contains(mode);
      var allowedClose=wrongView?1:0;
      if(!loaded.ContainsKey(rootPath)||loaded.ContainsKey(partPath)!=(!lightweight||expected)||contextCase&&!loaded.ContainsKey(parentPath)||closed.Count!=allowedClose||closed.Any(path=>path!=drawingPath))throw new Exception("Drawing open closed the user's part/total "+mode+": "+string.Join(";",closed));
      if(lightweight&&(!expected&&opened.Count!=0||expected&&(!opened.SequenceEqual(new[]{drawingPath})||active!=drawingPath)))

@@ -18,7 +18,6 @@ internal sealed class PdmTaskPaneControl : UserControl
     private const int StructureSelectionColumnWidth = 28;
     private const int StructureVersionColumnWidth = 105;
     private const int TaskPaneSideInset = 1;
-    private const int TabContentTopInset = 8;
     private const int StructureTreeLeftPadding = 4;
     private const int StructureTreeIndentWidth = 16;
     private const int StructureExpanderSize = 9;
@@ -68,7 +67,6 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly PdmSegmentedTabControl tabs = new PdmSegmentedTabControl();
     private readonly Panel tabsHost = new Panel();
     private readonly Control projectPanel;
-    private readonly Label pluginVersion = new Label();
     private readonly string installedPluginVersion;
     private readonly ProjectDocumentsControl projectDocuments = new ProjectDocumentsControl();
     private TabPage structureTab;
@@ -164,7 +162,6 @@ internal sealed class PdmTaskPaneControl : UserControl
         projectPanel = BuildProjectPanel();
         ConfigureCheckoutReminder();
         BuildTabs();
-        ConfigurePluginVersion();
         tabsHost.Dock = DockStyle.Fill;
         tabsHost.Padding = new Padding(TaskPaneSideInset, 0, TaskPaneSideInset, 0);
         tabsHost.BackColor = Color.FromArgb(244, 247, 251);
@@ -178,7 +175,6 @@ internal sealed class PdmTaskPaneControl : UserControl
         ApplyContentTypography(projectPanel);
         ApplyContentTypography(checkoutReminder);
         ApplyContentTypography(tabs);
-        pluginVersion.BringToFront();
     }
 
     protected override void Dispose(bool disposing)
@@ -680,17 +676,49 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private Control BuildHeader()
     {
-        var header = new Panel { Dock = DockStyle.Top, Height = 62, BackColor = Color.FromArgb(31, 49, 72), Padding = new Padding(12, 8, 9, 8) };
+        var header = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(0, 62),
+            BackColor = Color.FromArgb(31, 49, 72),
+            Padding = new Padding(10, 6, 9, 6),
+            ColumnCount = 3,
+            RowCount = 2
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+
         var logo = new PictureBox
         {
             Image = headerLogoImage,
             SizeMode = PictureBoxSizeMode.Zoom,
             BackColor = Color.Transparent,
-            Location = new Point(10, 10),
+            Anchor = AnchorStyles.None,
+            Margin = new Padding(0, 0, 10, 0),
             Size = new Size(38, 38)
         };
-        var title = new Label { Text = "UPLM", ForeColor = Color.White, Font = new Font("Microsoft YaHei UI", 10F), Location = new Point(58, 9), AutoSize = true };
-        var subtitle = new Label { Text = "阿普顿产品管理系统", ForeColor = Color.FromArgb(184, 201, 220), Location = new Point(58, 32), AutoSize = true };
+        var title = new Label
+        {
+            Text = "UPLM",
+            ForeColor = Color.White,
+            Font = new Font("Microsoft YaHei UI", 10F),
+            AutoSize = true,
+            Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
+            Margin = new Padding(0, 0, 0, 2)
+        };
+        var subtitle = new Label
+        {
+            Text = "阿普顿产品管理系统",
+            ForeColor = Color.FromArgb(184, 201, 220),
+            AutoSize = true,
+            Anchor = AnchorStyles.Left | AnchorStyles.Top,
+            Margin = new Padding(0, 2, 0, 0)
+        };
         serviceStatus.AccessibleName = "PLM连接状态";
         serviceStatus.AccessibleDescription = "未连接";
         serviceStatus.Online = false;
@@ -698,14 +726,14 @@ internal sealed class PdmTaskPaneControl : UserControl
         serviceStatus.Cursor = Cursors.Help;
         actionToolTip.SetToolTip(serviceStatus, "PLM未连接");
         serviceStatus.Size = new Size(48, 40);
-        serviceStatus.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        serviceStatus.Location = new Point(header.ClientSize.Width - header.Padding.Right - serviceStatus.Width, 11);
-        header.Controls.Add(logo);
-        header.Controls.Add(title);
-        header.Controls.Add(subtitle);
-        header.Controls.Add(serviceStatus);
-        header.Controls.Add(pluginVersion);
-        header.Layout += (_, _) => PositionPluginVersion();
+        serviceStatus.Anchor = AnchorStyles.None;
+        serviceStatus.Margin = new Padding(6, 0, 0, 0);
+        header.Controls.Add(logo, 0, 0);
+        header.SetRowSpan(logo, 2);
+        header.Controls.Add(title, 1, 0);
+        header.Controls.Add(subtitle, 1, 1);
+        header.Controls.Add(serviceStatus, 2, 0);
+        header.SetRowSpan(serviceStatus, 2);
         return header;
     }
 
@@ -867,7 +895,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.SizeChanged += (_, _) => ResizeTabHeaders();
         structureTab = BuildStructureTab();
         tabs.TabPages.Add(structureTab);
-        var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(0, TabContentTopInset, 0, 8) };
+        var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(0, 0, 0, 8) };
         projectDocuments.OpenRequested += (_, args) =>
         {
             tabs.SelectedTab = structureTab;
@@ -878,7 +906,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.TabPages.Add(projectTab);
         versionsTab = BuildVersionsTab();
         tabs.TabPages.Add(versionsTab);
-        diagnosticsTab = new TabPage("日志") { BackColor = Color.White, Padding = new Padding(0, TabContentTopInset, 0, 8) };
+        diagnosticsTab = new TabPage("日志") { BackColor = Color.White, Padding = new Padding(0, 0, 0, 8) };
         diagnosticsTab.Controls.Add(new DiagnosticLogControl(installedPluginVersion));
         tabs.TabPages.Add(diagnosticsTab);
         foreach (TabPage tab in tabs.TabPages)
@@ -894,19 +922,6 @@ internal sealed class PdmTaskPaneControl : UserControl
         };
     }
 
-    private void ConfigurePluginVersion()
-    {
-        pluginVersion.AutoSize = true;
-        pluginVersion.BackColor = Color.FromArgb(31, 49, 72);
-        pluginVersion.ForeColor = Color.FromArgb(184, 201, 220);
-        pluginVersion.Font = new Font("Microsoft YaHei UI", 8F);
-        pluginVersion.Text = FormatDisplayVersion(installedPluginVersion);
-        pluginVersion.AccessibleName = string.IsNullOrWhiteSpace(installedPluginVersion)
-            ? "插件版本未知"
-            : string.Concat("插件版本 ", installedPluginVersion);
-        actionToolTip.SetToolTip(pluginVersion, pluginVersion.AccessibleName);
-    }
-
     private void ResizeTabHeaders()
     {
         if (tabs.TabCount == 0 || tabs.ClientSize.Width <= 4) return;
@@ -919,31 +934,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         RunOnUiThread(() => tabs.ApplyTheme(theme));
     }
 
-    private void PositionPluginVersion()
-    {
-        var header = pluginVersion.Parent;
-        if (header == null || header.ClientSize.Width <= 0) return;
-        var title = header.Controls.OfType<Label>().FirstOrDefault(label => label.Text == "UPLM");
-        var left = (title?.Right ?? 96) + 8;
-        var right = header.ClientSize.Width - header.Padding.Right - serviceStatus.Width - 8;
-        var fullText = FormatDisplayVersion(installedPluginVersion);
-        var fullWidth = TextRenderer.MeasureText(fullText, pluginVersion.Font).Width;
-        var text = right - left >= fullWidth ? fullText : "V";
-        if (pluginVersion.Text != text) pluginVersion.Text = text;
-        pluginVersion.Location = new Point(Math.Max(left, right - pluginVersion.PreferredWidth), 12);
-        pluginVersion.BringToFront();
-    }
-
-    private static string FormatDisplayVersion(string version)
-    {
-        if (string.IsNullOrWhiteSpace(version)) return "版本未知";
-        var separator = version.IndexOf('-');
-        return string.Concat("V", separator > 0 ? version.Substring(0, separator) : version);
-    }
-
     private TabPage BuildStructureTab()
     {
-        var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(0, TabContentTopInset, 0, 0) };
+        var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = Padding.Empty };
         var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 35, ColumnCount = 7, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 5) };
         ConfigureStructureActionColumns(actions);
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -1925,7 +1918,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private TabPage BuildVersionsTab()
     {
-        var tab = new TabPage("版本信息") { BackColor = Color.White, Padding = new Padding(0, TabContentTopInset, 0, 8) };
+        var tab = new TabPage("版本信息") { BackColor = Color.White, Padding = new Padding(0, 0, 0, 8) };
         versionList.Dock = DockStyle.Fill;
         versionList.View = View.Details;
         versionList.FullRowSelect = true;
@@ -3393,7 +3386,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var fileExists = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         foreach (var node in EnumerateCadTree(rootNode))
         {
-            if (node == null || node.IsRenamePendingSave) continue;
+            if (node == null || node.IsRenamePendingSave || node.IsUnverifiedToolboxFallback) continue;
             var missing = node.Status == CadReferenceStatus.Missing;
             if (!missing && !string.IsNullOrWhiteSpace(node.FullPath))
             {
@@ -3408,7 +3401,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             if (!string.IsNullOrWhiteSpace(node.InstancePath)) instances.Add(node.InstancePath);
             if (!string.IsNullOrWhiteSpace(node.FullPath)) paths.Add(node.FullPath);
         }
-        return OpenReferenceFindings.Merge(issues);
+        return OpenReferenceFindings.Merge(issues.Where(issue => !OpenReferenceFindings.IsToolboxDiagnostic(issue)));
     }
 
     private void UpdateTreeHealth()

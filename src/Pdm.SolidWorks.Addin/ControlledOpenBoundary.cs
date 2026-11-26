@@ -13,6 +13,7 @@ internal sealed class ControlledOpenBoundary : IDisposable
     private readonly Dictionary<string, string> paths;
     private readonly Dictionary<string, RetainedLocalReference> localReferences;
     private readonly string rootFileName;
+    private readonly HashSet<string> archivedToolboxPaths;
     private readonly HashSet<string> blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     internal static bool IsActive => current != null;
 
@@ -21,6 +22,9 @@ internal sealed class ControlledOpenBoundary : IDisposable
         paths = Paths(directory, manifest);
         localReferences = manifest.RetainedLocalReferences;
         rootFileName = Path.GetFileName(manifest.RootRelativePath);
+        archivedToolboxPaths = new HashSet<string>((manifest.ReferenceIssues ?? new List<OpenReferenceIssueDto>())
+            .Where(issue => issue?.IsToolbox == true && issue.OwnerDocumentId.HasValue && !string.IsNullOrWhiteSpace(issue.OriginalPath))
+            .Select(issue => issue.OriginalPath), StringComparer.OrdinalIgnoreCase);
         previous = current;
         current = this;
     }
@@ -88,20 +92,26 @@ internal sealed class ControlledOpenBoundary : IDisposable
         var unexpected = blocked.Where(path => missingComponents?.Contains(path) != true).ToList();
         bool IsOptionalPart(string path) => string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(Path.GetFileName(path), rootFileName, StringComparison.OrdinalIgnoreCase);
-        // SolidWorks can omit a Toolbox occurrence from the returned tree when its
-        // open callback rejects the file. When missing references are allowed, the rejected request
-        // itself identifies the missing part. Loaded sources are checked separately.
-        if (missingComponents != null && application != null && unexpected.Any(IsOptionalPart))
+        // Confirmed Toolbox requests can be omitted from the returned tree even
+        // when the callback cancels their load. A managed file keeps its strict path rule.
+        if (unexpected.Any(IsOptionalPart))
         {
             var browser = SolidWorksToolboxPaths.BrowserDirectory(application);
-            if (browser != null)
-                unexpected.RemoveAll(path =>
-                {
-                    if (!IsOptionalPart(path) || !SolidWorksToolboxPaths.IsBrowserPart(path, browser)) return false;
-                    missingComponents.Add(path);
-                    return true;
-                });
+            unexpected.RemoveAll(path =>
+            {
+                if (!IsOptionalPart(path) || paths.ContainsKey(Path.GetFileName(path))
+                    || !archivedToolboxPaths.Contains(path) && !SolidWorksToolboxPaths.IsBrowserPart(path, browser)) return false;
+                PluginDiagnosticLog.Record("Toolbox引用提醒", "受控打开未加载包外标准件：" + path);
+                return true;
+            });
         }
+        unexpected.RemoveAll(path =>
+        {
+            if (paths.ContainsKey(Path.GetFileName(path))) return false;
+            missingComponents?.Add(path);
+            PluginDiagnosticLog.Record("受控引用提醒", "已跳过未入包的文件：" + path);
+            return true; // Reject already denied this load. No external bytes were accepted.
+        });
         if (unexpected.Count > 0)
             throw new InvalidOperationException("已阻止图档加载原目录或其他非受控文件，尚未完成打开；请核对PLM引用定位。原文件和已有窗口均保留：\r\n"
                 + string.Join("\r\n", unexpected.OrderBy(path => path, StringComparer.OrdinalIgnoreCase)));

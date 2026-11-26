@@ -354,27 +354,85 @@ internal static partial class Program
 
     static async Task DiscardDirtyReadOnlySiblingScenario()
     {
+        foreach(var mode in new[]{"read-only-recovered","backup-failed","writable-dirty"})
         using(var fixture=new DiscardPathFixture())
         {
             File.WriteAllText(fixture.CurrentPath,"selected edit to discard");DiscardCall(fixture.Plugin,"MarkDiscardedLocalEdit",fixture.Node);
-            var sibling=fixture.AddWorkingPart("DIRTY-SIBLING.SLDPRT");var siblingPath=(string)Get(sibling,"FullPath");File.SetAttributes(siblingPath,FileAttributes.ReadOnly);
+            var sibling=fixture.AddWorkingPart("DIRTY-SIBLING.SLDPRT");var siblingPath=(string)Get(sibling,"FullPath");
+            var readOnly=mode!="writable-dirty";
+            if(readOnly)File.SetAttributes(siblingPath,FileAttributes.ReadOnly);
             var ownerPath=Path.Combine(Path.GetDirectoryName(fixture.CurrentPath),"OWNER.SLDASM");File.WriteAllText(ownerPath,"unchanged parent assembly");
             var appType=fixture.Plugin.GetType().GetField("application",Flags).FieldType;var interop=appType.Assembly;var modelType=interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
-            object Part(string path,bool dirty)=>new Proxy(modelType,call=>{
-                switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return Path.GetFileName(path);case "GetType":return 1;case "GetSaveFlag":return dirty;case "IsOpenedReadOnly":return dirty;default:throw new Exception("Part memory must remain intact: "+call.MethodName);}
+            var backups=0;
+            var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>
+            {
+                if(call.MethodName!="SaveAs3"||((int)call.Args[2]&2)==0)throw new Exception("Expected a native copy only");
+                backups++;
+                var saved=mode!="backup-failed";
+                if(saved)File.WriteAllText((string)call.Args[0],"旁支未保存的内容");
+                call.Args[5]=saved?0:1;call.Args[6]=0;
+                return new ReturnMessage(saved,call.Args,call.ArgCount,call.LogicalCallContext,call);
+            }).GetTransparentProxy();
+            object Part(string path,bool dirty)=>new Proxy(modelType,call=>
+            {
+                switch(call.MethodName)
+                {
+                    case "GetPathName":return path;
+                    case "GetTitle":return Path.GetFileName(path);
+                    case "GetType":return 1;
+                    case "GetSaveFlag":return dirty;
+                    case "IsOpenedReadOnly":return dirty&&readOnly;
+                    case "get_Visible":return false;
+                    case "get_SelectionManager":return null;
+                    case "get_Extension":return extension;
+                    default:throw new Exception("Part memory must remain intact: "+call.MethodName);
+                }
             }).GetTransparentProxy();
             var a=Part(fixture.CurrentPath,false);var b=Part(siblingPath,true);
             object Component(object model,string path)=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>call.MethodName=="GetModelDoc2"?model:call.MethodName=="GetPathName"?path:throw new Exception(call.MethodName)).GetTransparentProxy();
-            var owner=new DiscardAssemblyProxy(modelType,call=>{
-                switch(call.MethodName){case "GetPathName":return ownerPath;case "GetTitle":return "OWNER.SLDASM";case "GetType":return 2;case "GetSaveFlag":return false;case "IsOpenedReadOnly":return true;case "GetComponents":return new[]{Component(a,fixture.CurrentPath),Component(b,siblingPath)};default:throw new Exception("Owner must not change: "+call.MethodName);}
+            var owner=new DiscardAssemblyProxy(modelType,call=>
+            {
+                switch(call.MethodName)
+                {
+                    case "GetPathName":return ownerPath;
+                    case "GetTitle":return "OWNER.SLDASM";
+                    case "GetType":return 2;
+                    case "GetSaveFlag":return false;
+                    case "IsOpenedReadOnly":return true;
+                    case "get_Visible":return false;
+                    case "GetComponents":return new[]{Component(a,fixture.CurrentPath),Component(b,siblingPath)};
+                    default:throw new Exception("Owner must not change: "+call.MethodName);
+                }
             }).GetTransparentProxy();
-            var closes=0;SetField(fixture.Plugin,"application",new Proxy(appType,call=>{
-                if(call.MethodName=="GetDocuments")return new[]{owner,a,b};if(call.MethodName=="CloseDoc"){closes++;return null;}throw new Exception("No native mutation expected: "+call.MethodName);
+            var loaded=new List<object>{owner,a,b};var closed=new List<string>();
+            SetField(fixture.Plugin,"application",new Proxy(appType,call=>
+            {
+                switch(call.MethodName)
+                {
+                    case "GetDocuments":return loaded.ToArray();
+                    case "get_ActiveDoc":return null;
+                    case "GetDocumentDependencies2":return Array.Empty<string>();
+                    case "CloseDoc":
+                        var title=(string)call.Args[0];closed.Add(title);
+                        if(title=="OWNER.SLDASM")loaded.RemoveAll(model=>ReferenceEquals(model,owner)||ReferenceEquals(model,b));
+                        else if(title=="PART.SLDPRT")loaded.RemoveAll(model=>ReferenceEquals(model,a));
+                        else throw new Exception("Unselected sibling was closed directly");
+                        return null;
+                    default:throw new Exception("Unexpected operation: "+call.MethodName);
+                }
             }).GetTransparentProxy());
-            var blocked=false;try{await fixture.Restore();}catch(InvalidOperationException error){blocked=error.Message.Contains("DIRTY-SIBLING");}
-            if(!blocked||closes!=0||fixture.Handler.Downloads!=0||File.ReadAllText(fixture.CurrentPath)!="selected edit to discard"
-                ||!fixture.Records().Where(entry=>(string)Get(entry,"SourcePath")==fixture.CurrentPath).All(entry=>(bool)Get(entry,"DiscardPending")))throw new Exception("Readonly dirty sibling could be unloaded without preserving its memory");
-            fixture.AssertOldUntouched();Console.WriteLine("PASS: unselected readonly dirty sibling blocks parent closure before download or native mutation");
+            var blocked=false;
+            try{await fixture.Restore();}
+            catch(InvalidOperationException error){blocked=error.Message.Contains("DIRTY-SIBLING");}
+            var shouldBlock=mode!="read-only-recovered";
+            var recovery=Path.Combine(fixture.DirectoryPath,"Recovery");
+            var savedCopies=Directory.Exists(recovery)?Directory.GetFiles(recovery,"DIRTY-SIBLING.SLDPRT",SearchOption.AllDirectories):Array.Empty<string>();
+            TreeCheck(blocked==shouldBlock && backups==(readOnly?1:0) && (shouldBlock?closed.Count==0:closed.SequenceEqual(new[]{"OWNER.SLDASM","PART.SLDPRT"}))
+                && File.ReadAllText(fixture.CurrentPath)==(shouldBlock?"selected edit to discard":DiscardPathFixture.Canonical)
+                && File.ReadAllText(siblingPath)==DiscardPathFixture.Canonical
+                && (shouldBlock?savedCopies.Length==0:savedCopies.Length==1&&File.ReadAllText(savedCopies[0])=="旁支未保存的内容"),
+                "放弃时须先保护可能卸载的旁支，且只恢复明确选中的文件："+mode);
+            fixture.AssertOldUntouched();Console.WriteLine("PASS: discard protects dirty sibling "+mode);
         }
     }
 

@@ -448,6 +448,7 @@ app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =
         PdmNotFoundException => StatusCodes.Status404NotFound,
         PdmConflictException => StatusCodes.Status409Conflict,
         ArchiveBatchTemporarilyUnavailableException => StatusCodes.Status503ServiceUnavailable,
+        LoginSecurityStateUnavailableException => StatusCodes.Status503ServiceUnavailable,
         PdmRuleException => StatusCodes.Status400BadRequest,
         UnauthorizedAccessException => StatusCodes.Status403Forbidden,
         _ => StatusCodes.Status500InternalServerError

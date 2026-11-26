@@ -11,6 +11,8 @@ internal sealed partial class BatchOperationDialog
     private readonly Dictionary<string, ArchiveSelectionState> archiveSelectionStates = new Dictionary<string, ArchiveSelectionState>(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource archiveAnalysisCancellation;
     private bool archiveAnalysisInProgress;
+    private bool archiveAnalysisReady;
+    private Task currentArchiveAnalysis = Task.CompletedTask;
     private bool archiveSelectionTouched;
     private HashSet<string> initialArchivePaths;
     private readonly HashSet<string> archiveModelUpdatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -28,6 +30,7 @@ internal sealed partial class BatchOperationDialog
             ArchiveSession.Current?.SetStage("已停止变更分析，请确认当前操作范围。");
         }
         archiveAnalysisCancellation = null;
+        archiveAnalysisReady = false;
         archiveAnalysisInProgress = false;
     }
 
@@ -71,12 +74,19 @@ internal sealed partial class BatchOperationDialog
         }
     }
 
-    private async Task AnalyzeArchiveSelectionAsync(bool selectChangedItems)
+    private Task AnalyzeArchiveSelectionAsync(bool selectChangedItems)
+    {
+        if (archiveAnalysisInProgress) return currentArchiveAnalysis;
+        return currentArchiveAnalysis = AnalyzeArchiveSelectionCoreAsync(selectChangedItems);
+    }
+
+    private async Task AnalyzeArchiveSelectionCoreAsync(bool selectChangedItems)
     {
         if (!checkIn.Checked || ArchiveToStandardLibrary || archiveAnalysisInProgress || IsDisposed) return;
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ArchiveSession.Current?.Token ?? CancellationToken.None);
         archiveAnalysisCancellation = cancellation;
         archiveAnalysisInProgress = true;
+        archiveAnalysisReady = false;
         execute.Enabled = false;
         recheck.Enabled = false;
         selectChanged.Enabled = false;
@@ -179,10 +189,17 @@ internal sealed partial class BatchOperationDialog
             RefreshFileTreePresentation();
             SetSelectionHint("未变更" + archiveSelectionStates.Values.Count(state => state == ArchiveSelectionState.Unchanged)
                 + "个，待核对" + archiveSelectionStates.Values.Count(state => state == ArchiveSelectionState.Pending) + "个");
+            archiveAnalysisReady = true;
             ArchiveSession.Current?.ReportAnalysisProgress(eligible.Length, eligible.Length, root.FileName,
                 "分析完成，请核对本次存档范围。", true);
         }
         catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (cancellation.IsCancellationRequested || IsDisposed) return;
+            PluginDiagnosticLog.Record("核对存档范围", error.ToString());
+            SetSelectionHint("暂未完成范围分析，请点击“重新检查”。");
+        }
         finally
         {
             if (ReferenceEquals(archiveAnalysisCancellation, cancellation))

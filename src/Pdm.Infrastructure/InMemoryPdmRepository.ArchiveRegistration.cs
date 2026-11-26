@@ -42,6 +42,24 @@ public sealed partial class InMemoryPdmRepository
         }
     }
 
+    public Task AbandonPreparedArchiveAsync(Guid batchId, Guid projectId, string actor, Guid sessionId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (archiveBatchReceipts.ContainsKey(batchId))
+                throw new PdmConflictException("原批次已提交，请先刷新核对原批次回执。");
+            var ownedUpload = archiveUploads.Values.Any(item => item.Session.ProjectId == projectId
+                && item.Session.Owner == actor && item.Session.ArchiveContext is { } context
+                && context.BatchId == batchId && context.CheckoutSessionId == sessionId);
+            var ownedDocuments = pendingArchiveDocuments.Values.Where(p => p.BatchId == batchId && p.Document.ProjectId == projectId
+                && p.Document.CheckedOutBy == actor && p.Document.CheckoutSessionId == sessionId).Select(p => p.Document.Id).ToArray();
+            if (!ownedUpload && ownedDocuments.Length == 0)
+                throw new PdmConflictException("原批次没有属于当前项目和编辑会话的暂存记录。");
+            abandonedArchiveBatches.Add(batchId);
+            foreach (var id in ownedDocuments) pendingArchiveDocuments.Remove(id);
+            return Task.CompletedTask;
+        }
+    }
     private static void RequireArchiveRegistrationOwner(PendingArchiveDocument pending, Guid batchId, Guid projectId, string actor, Guid sessionId)
     {
         if (pending.BatchId != batchId || pending.Document.ProjectId != projectId || pending.Document.CheckedOutBy != actor

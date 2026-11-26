@@ -83,14 +83,17 @@ public sealed class PartialStructureBomTests
         Assert.DoesNotContain(afterDelete.StandardItems,item=>!item.IsManuallyExcluded);
         Assert.DoesNotContain(afterDelete.NonStandardItems,item=>!item.IsManuallyExcluded);
     }
-    [Fact]
-    public async Task ArchiveFollowupAddsConfirmedPropertiesWithoutRequiringCompleteStructure()
+    [Theory]
+    [InlineData("PCS")]
+    [InlineData(" pc ")]
+    [InlineData("只")]
+    public async Task ArchiveFollowupAddsConfirmedPropertiesWithoutRequiringCompleteStructure(string unit)
     {
         var f = await CreateAsync();
         var part = await PartAsync(f, "PART", new Dictionary<string, string?>
         {
             ["全局/物料分类"] = "标准件", ["全局/物料编码"] = "CODE-1", ["全局/物料名称"] = "全局名称",
-            ["配置:A/物料名称"] = "配置名称", ["全局/品牌"] = "测试品牌"
+            ["配置:A/物料名称"] = "配置名称", ["全局/品牌"] = "测试品牌", ["全局/单位"] = unit
         });
         var blank = await PartAsync(f, "BLANK", new Dictionary<string, string?>());
         var root = await ArchiveBatchTests.Register(f.Repository, f.Project, "ROOT", DocumentKind.Assembly, f.Session);
@@ -106,6 +109,7 @@ public sealed class PartialStructureBomTests
         Assert.Equal("CODE-1", item.DrawingNumber);
         Assert.Equal("配置名称", item.Name);
         Assert.Equal("测试品牌", item.Brand);
+        Assert.Equal("001", item.Unit);
         Assert.Equal(2, item.Quantity);
         var unknown = Assert.Single(await f.Repository.GetBomAsync(f.Project.Id, BomKind.Unclassified, default));
         Assert.Equal(blank.DocumentId, unknown.SourceDocumentId);

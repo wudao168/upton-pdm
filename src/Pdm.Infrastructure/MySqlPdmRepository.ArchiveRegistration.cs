@@ -47,6 +47,35 @@ public sealed partial class MySqlPdmRepository
             new { BatchId = batchId, Actor = actor, SessionId = sessionId }, cancellationToken: cancellationToken));
     }
 
+    public async Task AbandonPreparedArchiveAsync(Guid batchId, Guid projectId, string actor, Guid sessionId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
+        var args = new { BatchId = batchId, ProjectId = projectId, Actor = actor, SessionId = sessionId, Hash = ArchiveBatchRules.AbandonedRequestHash };
+        // Serialize with a concurrent commit even when a batch has no new document reservations.
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT IGNORE INTO archive_batch_receipt(batch_id,project_id,actor,request_hash)
+            VALUES(@BatchId,@ProjectId,@Actor,@Hash)
+            """, args, transaction, cancellationToken: cancellationToken));
+        var markerOwned = await connection.ExecuteScalarAsync<bool>(new CommandDefinition("""
+            SELECT EXISTS(SELECT 1 FROM archive_batch_receipt
+                WHERE batch_id=@BatchId AND project_id=@ProjectId AND actor=@Actor AND request_hash=@Hash AND result_json IS NULL)
+            """, args, transaction, cancellationToken: cancellationToken));
+        if (!markerOwned)
+            throw new PdmConflictException("原批次已提交或归属不一致，请先刷新核对原批次回执。");
+        var hasOwnership = await connection.ExecuteScalarAsync<bool>(new CommandDefinition("""
+            SELECT EXISTS(SELECT 1 FROM archive_upload
+                          WHERE batch_id=@BatchId AND project_id=@ProjectId AND actor=@Actor AND checkout_session_id=@SessionId)
+                OR EXISTS(SELECT 1 FROM pending_archive_document
+                          WHERE batch_id=@BatchId AND project_id=@ProjectId AND actor=@Actor AND session_id=@SessionId)
+            """, args, transaction, cancellationToken: cancellationToken));
+        if (!hasOwnership) throw new PdmConflictException("原批次没有属于当前项目和编辑会话的暂存记录。");
+        await connection.ExecuteAsync(new CommandDefinition("""
+            DELETE FROM pending_archive_document WHERE batch_id=@BatchId AND project_id=@ProjectId AND actor=@Actor AND session_id=@SessionId
+            """, args, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     private async Task<PendingArchiveDocument?> FindPendingArchiveDocumentAsync(DbConnection connection, DbTransaction? transaction,
         Guid documentId, CancellationToken cancellationToken)
     {

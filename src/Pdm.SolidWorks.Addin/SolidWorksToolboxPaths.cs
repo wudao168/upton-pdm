@@ -12,6 +12,20 @@ internal static class SolidWorksToolboxPaths
         && string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
         && path.StartsWith(browser, StringComparison.OrdinalIgnoreCase);
 
+    internal static bool HasNativeToolboxType(IModelDoc2 model)
+    {
+        try
+        {
+            var type = model?.Extension?.ToolboxPartType ?? (int)swToolBoxPartType_e.swNotAToolboxPart;
+            return (type & (int)(swToolBoxPartType_e.swToolboxStandardPart | swToolBoxPartType_e.swToolboxCopiedPart)) != 0;
+        }
+        catch (Exception error)
+        {
+            PluginDiagnosticLog.Record("Toolbox零件类型核对", error.ToString());
+            return false;
+        }
+    }
+
     internal static string BrowserDirectory(ISldWorks application)
     {
         try

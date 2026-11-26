@@ -166,12 +166,11 @@ public sealed partial class PdmAddin
         watch.Restart();
         try
         {
-            if (snapshot.RecoverableBatch)
+            if (snapshot.RecoverableBatch && DateTime.UtcNow >= nextArchiveBatchRecoveryUtc)
             {
-                if (DateTime.UtcNow < nextArchiveBatchRecoveryUtc) return;
                 nextArchiveBatchRecoveryUtc = DateTime.UtcNow.AddSeconds(30);
                 await ReconcileArchiveBatchesAsync();
-                return; // Recovery can change the journal; consume a fresh snapshot next time.
+                if (sequence != journal.ChangeSequence || !CanMaintainEdits()) return;
             }
             // Archive reconciliation can yield to a foreground operation. Reserve
             // the same workspace gate while retrying acquisition rollback so a

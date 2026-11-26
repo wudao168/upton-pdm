@@ -103,10 +103,14 @@ internal static partial class Program
     if(mode=="published-context-unknown-config"&&((string)Get(model,"Configuration")!=""||(string)Get(((IList)Get(drawingSnapshot,"Children"))[0],"Configuration")!="Default"))throw new Exception("Unknown configuration was guessed or the archived view was rewritten");
     if(mode=="other-editor")
     {
-     var blocked=false;
-     try{task=(Task)Type("PdmAddin").GetMethod("UpdateLinkedDrawingsAsync",Flags).Invoke(plugin,new object[]{plan,project,CancellationToken.None});await task;}
-     catch(InvalidOperationException error){blocked=error.Message.Contains("尚未上传或升版");}
-     if(!blocked||string.IsNullOrEmpty((string)Get(drawing,"DrawingUpdatePendingReason")))throw new Exception("An unavailable paired drawing must stop this batch before upload or version creation");
+     task=(Task)Type("PdmAddin").GetMethod("UpdateLinkedDrawingsAsync",Flags).Invoke(plugin,new object[]{plan,project,CancellationToken.None});
+     await task;
+     var updated=Get(task,"Result");
+     var included=((IEnumerable)Get(updated,"Items")).Cast<object>().Select(item=>Get(item,"Node")).ToArray();
+     var deferred=((IEnumerable)Get(updated,"DeferredDrawings")).Cast<object>().ToArray();
+     if(!included.SequenceEqual(planned.Where(node=>node!=drawing))||!included.Contains(model)
+      ||!deferred.SequenceEqual(new[]{drawing})||string.IsNullOrEmpty((string)Get(drawing,"DrawingUpdatePendingReason")))
+      throw new Exception("配套图无法更新时应保留模型提交计划，并单独报告未提交图纸。");
     }
     if(mode=="unchanged"||mode=="other-editor")
     {
@@ -121,6 +125,86 @@ internal static partial class Program
     Console.WriteLine("PASS: associated drawing plan "+mode);
    }
    Directory.Delete(directory,true);
+  }
+ }
+ static void CommittedArchiveDrawingWindowScenario(string output)
+ {
+  Directory.CreateDirectory(output);
+  foreach(var mode in new[]{"saved","confirmed-memory","unconfirmed-memory","user-opened","window-replaced",
+      "later-memory-edit","later-disk-edit","close-not-confirmed"})
+  {
+   var directory=Path.Combine(output,mode);
+   Directory.CreateDirectory(directory);
+   var plugin=New("PdmAddin");
+   var path=Path.Combine(directory,"TEMP.SLDDRW");
+   var otherPath=Path.Combine(directory,"USER.SLDDRW");
+   File.WriteAllText(path,"已存档的工程图");File.WriteAllText(otherPath,"用户正在编辑的工程图");
+   var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+   var modelType=appType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true);
+   object Drawing(string file,bool dirty)=>new SheetReferenceModelProxy(modelType,true,call=>
+   {
+    switch(call.MethodName)
+    {
+     case "GetPathName":return file;
+     case "GetTitle":return Path.GetFileName(file);
+     case "GetType":return 3;
+     case "GetSaveFlag":return dirty;
+     case "GetUpdateStamp":return mode=="later-memory-edit"?75:74;
+     case "get_Visible":return true;
+     case "add_ModifyNotify":case "add_DestroyNotify2":case "add_FileReloadNotify":
+     case "remove_ModifyNotify":case "remove_DestroyNotify2":case "remove_FileReloadNotify":return null;
+     default:throw new Exception("关闭已存档工程图不应执行原生操作 "+call.MethodName);
+    }
+   },events:true).GetTransparentProxy();
+   var memorySnapshot=mode is "confirmed-memory" or "unconfirmed-memory" or "later-memory-edit";
+   var owned=Drawing(path,memorySnapshot);
+   var user=Drawing(otherPath,true);
+   var resident=mode=="window-replaced"?Drawing(path,true):owned;
+   var closed=new List<string>();var app=new Proxy(appType,call=>
+   {
+    if(call.MethodName=="GetOpenDocumentByName")
+    {
+     var lookup=(string)call.Args[0];
+     return lookup==path?resident:lookup==otherPath?user:null;
+    }
+    if(call.MethodName=="CloseDoc")
+    {
+     var title=(string)call.Args[0];closed.Add(title);
+     TreeCheck(title=="TEMP.SLDDRW","只允许关闭本批打开的工程图");
+     if(mode!="close-not-confirmed")resident=null;
+     return null;
+    }
+    throw new Exception("存档清理不应保存或重开窗口 "+call.MethodName);
+   }).GetTransparentProxy();
+   SetField(plugin,"application",app);
+   var stamp=TreeCallStatic("PdmAddin+ArchiveSourceStamp","Read",path);
+   if(mode=="later-disk-edit")File.AppendAllText(path,"存档之后的新保存");
+   var target=New("PdmAddin+CommittedArchiveDrawingWindow");
+   SetField(target,"Path",path);SetField(target,"Document",owned);SetField(target,"SourceStamp",stamp);
+   if(memorySnapshot)
+   {
+    var copyPath=Path.Combine(directory,"submitted-copy.SLDDRW");
+    File.WriteAllText(copyPath,"由插件更新、已有原生保存副本的工程图");
+    var memory=New("PdmAddin+ArchiveMemoryCopy",owned,path);
+    SetField(memory,"CopyPath",copyPath);
+    SetField(memory,"CopyHash","saved-hash");
+    SetField(memory,"Stamp",74);
+    var version=New("DocumentVersionDto");
+    Set(version,"Sha256",mode=="unconfirmed-memory"?"another-hash":"saved-hash");
+    SetField(memory,"CommittedVersion",version);
+    SetField(target,"Memory",memory);
+   }
+   var windows=Array.CreateInstance(target.GetType(),mode=="user-opened"?0:1);
+   if(windows.Length!=0)windows.SetValue(target,0);
+   var result=New("PdmAddin+BatchCheckInResult");
+   TreeCall(plugin,"CloseCommittedArchiveDrawingWindows",windows,result);
+   var warnings=(IList)Get(result,"BomWarnings");
+   var shouldClose=mode is "saved" or "confirmed-memory" or "close-not-confirmed";
+   TreeCheck(closed.Count==(shouldClose?1:0) && (resident==null)==(mode is "saved" or "confirmed-memory")
+    && warnings.Count==(mode is "unconfirmed-memory" or "later-memory-edit" or "later-disk-edit" or "close-not-confirmed"?1:0)
+    && File.ReadAllText(otherPath)=="用户正在编辑的工程图",
+    "关闭范围、后续修改保护及关闭结果核对 "+mode);
+   Console.WriteLine("PASS: 存档后清理临时工程图 "+mode);
   }
  }
  static object LinkedNode(string directory,string name,string kind)

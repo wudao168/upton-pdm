@@ -29,6 +29,23 @@ public sealed partial class MySqlPdmRepository
         return rows.Select(MapDocumentVersion).ToArray();
     }
 
+    public async Task<IReadOnlyList<DocumentVersionHeader>> ListDocumentVersionHeadersAsync(
+        IReadOnlyCollection<Guid> documentIds, CancellationToken cancellationToken)
+    {
+        if (documentIds.Count == 0) return [];
+        await using var connection = await OpenAsync(cancellationToken);
+        var headers = new List<DocumentVersionHeader>();
+        foreach (var ids in documentIds.Distinct().Chunk(200))
+        {
+            var rows = await connection.QueryAsync<(Guid Id, Guid DocumentId, string Revision, string Status, string CreatedBy, DateTime CreatedAt, string? Comment)>(
+                new CommandDefinition("SELECT id,document_id,revision_label,version_status,created_by,created_at,comment FROM document_version WHERE document_id IN @Ids",
+                    new { Ids = ids }, cancellationToken: cancellationToken));
+            headers.AddRange(rows.Select(row => new DocumentVersionHeader(row.Id, row.DocumentId, RevisionLabel.Parse(row.Revision),
+                Enum.Parse<DocumentVersionStatus>(row.Status), row.CreatedBy, AsUtc(row.CreatedAt), row.Comment ?? string.Empty)));
+        }
+        return headers;
+    }
+
     public async Task<IReadOnlyList<BomSourceVersionProperties>> ListBomSourceVersionPropertiesAsync(IReadOnlyCollection<Guid> documentIds, CancellationToken ct)
     {
         if (documentIds.Count == 0) return [];
@@ -192,14 +209,15 @@ public sealed partial class MySqlPdmRepository
     }
 
     private async Task<DocumentCheckInResult> CheckInVersionCoreAsync(MySqlConnection connection, DbTransaction transaction,
-        Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken, Guid? archiveBatchId = null)
+        Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken,
+        Guid? archiveBatchId = null, LockedDocumentRow? lockedByBatch = null)
     {
         // Match archive batches: serialize the project's current reference projection
         // before locking individual files. Parent CAD versions are never updated here.
         if (!archiveBatchId.HasValue)
             await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition("SELECT id FROM project WHERE id=@ProjectId FOR UPDATE",
                 new { commit.ReferenceSnapshot.ProjectId }, transaction, cancellationToken: cancellationToken));
-        var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
+        var locked = lockedByBatch ?? await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
         if (locked.LifecycleState == "InReview")
             throw new PdmConflictException("图档正在发布审批，不能提交存档。");
         await ValidateArchiveUploadAsync(connection, transaction, documentId, actor, sessionId, archiveBatchId, commit.File, cancellationToken);

@@ -97,7 +97,8 @@ internal sealed partial class BatchOperationDialog : Form
     private readonly Panel fileDetails = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
     internal Control FileListContainer => fileDetails;
     internal Control FileListContent => files;
-    internal Rectangle[] InformationRows(Control target) => new Control[] { projectSelector, changeNote, workflowSelectors }
+    private readonly Button selectAll;
+    internal Rectangle[] InformationRows(Control target) => new Control[] { projectSelector, changeNote, selectAll }
         .Select(control => target.RectangleToClient(control.Parent.RectangleToScreen(control.Bounds))).ToArray();
     private readonly ImageList selectionImages = BuildSelectionImages();
     private readonly ImageList structureImages = PdmTaskPaneControl.BuildStructureImages();
@@ -118,7 +119,7 @@ internal sealed partial class BatchOperationDialog : Form
         AutoSize = false,
         Dock = DockStyle.Fill
     };
-    private readonly Button execute = new Button { Text = "确认存档", DialogResult = DialogResult.OK };
+    private readonly Button execute = new Button { Text = "开始存档", DialogResult = DialogResult.OK };
     private readonly Button recheck = new Button { Text = "重新检查", DialogResult = DialogResult.None };
     private readonly Button operationCancel = new Button { Text = "取消存档", DialogResult = DialogResult.Cancel };
     private readonly Button selectChanged = new Button { Text = "勾选变更项" };
@@ -179,7 +180,6 @@ internal sealed partial class BatchOperationDialog : Form
         initialArchivePaths = selectedPaths;
         acquire.Checked = !startWithCheckIn;
         checkIn.Checked = startWithCheckIn;
-        projectSelector.ConfirmExistingArchiveTarget = startWithCheckIn;
         changeNote.Enabled = startWithCheckIn;
 
         Text = startWithCheckIn ? "登记新增引用并提交最新整套存档" : "整套装配操作";
@@ -367,7 +367,7 @@ internal sealed partial class BatchOperationDialog : Form
             WrapContents = true,
             Margin = Padding.Empty
         };
-        var selectAll = new Button { Text = "全选", AutoSize = false, Size = standardButtonSize };
+        selectAll = new Button { Text = "全选", AutoSize = false, Size = standardButtonSize };
         var clear = new Button { Text = "清除", AutoSize = false, Size = standardButtonSize };
         var supplement = new Button { Text = "补充工程图", AutoSize = false, Size = standardButtonSize };
         supplement.Click += (_, _) =>
@@ -387,7 +387,7 @@ internal sealed partial class BatchOperationDialog : Form
         selectChanged.Size = standardButtonSize;
         selectChanged.Enabled = startWithCheckIn;
         execute.AutoSize = false;
-        execute.Size = standardButtonSize;
+        execute.Size = new Size(standardButtonSize.Width + ArchiveConfirmExtraWidth(Font), standardButtonSize.Height);
         showCheckedOnly.AutoSize = false;
         showCheckedOnly.Size = standardButtonSize;
         showCheckedOnly.Anchor = AnchorStyles.Right;
@@ -500,7 +500,10 @@ internal sealed partial class BatchOperationDialog : Form
         InitializeArchiveWorkflowControls(operationPanel, selectionButtons);
         standardLibrary.Checked = initialStandardLibrary && canArchiveStandardLibrary && checkIn.Checked;
         FormClosed += (_, _) => standardLibraryTip.Dispose();
-        Shown += async (_, _) => { if (checkIn.Checked && !ArchiveToStandardLibrary) await AnalyzeArchiveSelectionAsync(false); };
+        Shown += async (_, _) =>
+        {
+            if (checkIn.Checked && !ArchiveToStandardLibrary) await AnalyzeArchiveSelectionAsync(false);
+        };
         projectSelector.SelectedProjectChanged += async (_, _) =>
         {
             CancelArchiveAnalysis();
@@ -684,7 +687,6 @@ internal sealed partial class BatchOperationDialog : Form
 
     private void RefreshOperationState(string username)
     {
-        projectSelector.ConfirmExistingArchiveTarget = checkIn.Checked && !ArchiveToStandardLibrary;
         if (ArchiveToStandardLibrary) return;
         if (!checkIn.Checked)
         {
@@ -710,13 +712,14 @@ internal sealed partial class BatchOperationDialog : Form
             _ = AnalyzeArchiveSelectionAsync(false);
     }
 
+
     private void ValidateBeforeClose(object sender, FormClosingEventArgs eventArgs)
     {
         if (DialogResult != DialogResult.OK)
         {
             return;
         }
-        if (checkIn.Checked && archiveAnalysisInProgress)
+        if (checkIn.Checked && !ArchiveToStandardLibrary && (!archiveAnalysisReady || archiveAnalysisInProgress))
         {
             eventArgs.Cancel = true;
             SetSelectionHint("正在核对存档范围，请等待分析完成。");
@@ -767,7 +770,7 @@ internal sealed partial class BatchOperationDialog : Form
         }
 
         var confirmationPaths = GetNewDocumentConfirmationPaths();
-        if (confirmationPaths.Count > 0
+        if (!checkIn.Checked && confirmationPaths.Count > 0
             && !ConfirmSelectedProject(confirmationPaths.Count))
         {
             eventArgs.Cancel = true;

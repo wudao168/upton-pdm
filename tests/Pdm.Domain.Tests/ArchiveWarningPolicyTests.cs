@@ -54,9 +54,9 @@ public sealed class ArchiveWarningPolicyTests
     public void StrictOnlyAppliesToSupportedWarningsAndKeepsCyclicMandatory()
     {
         var policy = new ArchiveWarningPolicy { BlockAll = true };
-        foreach (var rule in ArchiveWarningPolicy.Catalog) Assert.Equal(rule.Supported, policy.Blocks(rule.Code));
+        foreach (var rule in ArchiveWarningPolicy.Catalog) Assert.Equal(rule.Supported && !rule.DiagnosticOnly, policy.Blocks(rule.Code));
         policy = new() { BlockingCodes = ["MissingConfiguration"] };
-        Assert.True(policy.Blocks("MissingConfiguration"));
+        Assert.False(policy.Blocks("MissingConfiguration"));
         Assert.False(policy.Blocks("ConfigurationUnreadable"));
     }
 
@@ -76,7 +76,7 @@ public sealed class ArchiveWarningPolicyTests
         var saved = await repository.SaveArchiveWarningPolicyAsync(new() { BlockingCodes = ["MissingConfiguration"] }, default);
         Assert.Equal(1, saved.Revision);
         saved.BlockingCodes[0] = "MissingFile";
-        Assert.True((await repository.GetArchiveWarningPolicyAsync(default)).Blocks("MissingConfiguration"));
+        Assert.Contains("MissingConfiguration", (await repository.GetArchiveWarningPolicyAsync(default)).BlockingCodes);
         await Assert.ThrowsAsync<PdmConflictException>(() => repository.SaveArchiveWarningPolicyAsync(new(), default));
     }
 
@@ -93,9 +93,11 @@ public sealed class ArchiveWarningPolicyTests
         var warnings = new[] { ArchiveWarningPolicy.Format("MissingConfiguration", "PreviewCfg") };
         await Validate(warnings);
         await repository.SaveArchiveWarningPolicyAsync(new() { BlockingCodes = ["MissingConfiguration"] }, default);
-        var error = await Assert.ThrowsAsync<PdmRuleException>(() => Validate(warnings));
-        Assert.Contains("版本1", error.Message);
-        Assert.Contains("PreviewCfg", error.Message);
+        await Validate(warnings);
+        await repository.SaveArchiveWarningPolicyAsync(new() { Revision = 1, BlockAll = true,
+            BlockingCodes = ["PropertyIndexPending", "ReferenceTypeUnknown"] }, default);
+        await Validate(["属性索引待补齐：材质", ArchiveWarningPolicy.Format("ReferenceTypeUnknown", "旧引用")]);
+        await Assert.ThrowsAsync<PdmRuleException>(() => Validate([ArchiveWarningPolicy.Format("CyclicReference", "已核实循环")]));
         await Validate([]);
     }
 }

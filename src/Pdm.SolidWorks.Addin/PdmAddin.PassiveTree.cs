@@ -45,39 +45,54 @@ public sealed partial class PdmAddin
         var path = document.GetPathName() ?? string.Empty;
         var identity = string.IsNullOrWhiteSpace(path) ? document.GetTitle() ?? string.Empty : path;
         var sameDocument = currentTree != null && string.Equals(currentDocumentIdentity, identity, StringComparison.OrdinalIgnoreCase);
+        var tree = currentTree;
+        var projectId = currentProjectId;
+        if (!sameDocument)
+        {
+            lock (activeTreeCacheSync)
+                tree = activeTreeCache.Values.Select(entry => entry.Tree)
+                    .FirstOrDefault(cached => string.Equals(DocumentIdentity(cached), identity, StringComparison.OrdinalIgnoreCase));
+            if (tree == null)
+            {
+                var name = string.IsNullOrWhiteSpace(path) ? identity : Path.GetFileName(path);
+                var kind = document.GetType();
+                tree = new CadTreeNode { FullPath = path, FileName = name, DisplayName = Path.GetFileNameWithoutExtension(name),
+                    InstancePath = name, Kind = kind == 2 ? CadDocumentKind.Assembly
+                        : kind == 3 ? CadDocumentKind.Drawing : kind == 1 ? CadDocumentKind.Part : CadDocumentKind.Other,
+                    LocalStructureDeferred = true };
+                RestorePersistedDocumentIdentities(tree);
+            }
+            projectId = GetExplicitProjectId(path);
+        }
+
+        // Passive selection matches the active document's declared path. Other inventory
+        // entries may be missing locally and have no bearing on the displayed tree.
+        var context = controlledOpenManifests.FirstOrDefault(entry => IsPathWithinDirectory(path, entry.Key));
+        var loadedFile = context.Value?.Files.FirstOrDefault(file => PathsEqual(path, ControlledReferenceMaterializer.ManifestPath(context.Key, file)));
+        var modified = document.GetSaveFlag();
+        if (structureChanged) tree.LocalStructureDeferred = true;
+        if (loadedFile != null)
+        {
+            tree.OpenedVersionId = loadedFile.VersionId;
+            tree.OpenedRevision = tree.CurrentRevision = loadedFile.Revision;
+            tree.LoadedDrawingVersion = loadedFile.DrawingVersion;
+        }
+        tree.IsModifiedInSolidWorks = modified;
+        if (modified) tree.WorkState = CadWorkState.ModifiedUnsaved;
+        else if (tree.WorkState == CadWorkState.ModifiedUnsaved)
+            tree.WorkState = string.IsNullOrWhiteSpace(tree.CheckedOutBy) ? CadWorkState.None : CadWorkState.Editable;
+
+        // COM can fail during activation. Publish the identity only after reading the
+        // active document so the next idle can retry a failed switch.
         if (!sameDocument)
         {
             CancelMetadataRefresh();
             Interlocked.Increment(ref projectResolutionGeneration);
-            lock (activeTreeCacheSync)
-                currentTree = activeTreeCache.Values.Select(entry => entry.Tree)
-                    .FirstOrDefault(tree => string.Equals(DocumentIdentity(tree), identity, StringComparison.OrdinalIgnoreCase));
-            if (currentTree == null)
-            {
-                var name = string.IsNullOrWhiteSpace(path) ? identity : Path.GetFileName(path);
-                currentTree = new CadTreeNode { FullPath = path, FileName = name, DisplayName = Path.GetFileNameWithoutExtension(name),
-                    InstancePath = name, Kind = document.GetType() == 2 ? CadDocumentKind.Assembly
-                        : document.GetType() == 3 ? CadDocumentKind.Drawing : document.GetType() == 1 ? CadDocumentKind.Part : CadDocumentKind.Other,
-                    LocalStructureDeferred = true };
-                RestorePersistedDocumentIdentities(currentTree);
-            }
+            currentTree = tree;
             currentDocumentIdentity = identity;
             currentTreeCacheKey = identity + "\n";
-            currentProjectId = GetExplicitProjectId(path);
+            currentProjectId = projectId;
         }
-        if (structureChanged) currentTree.LocalStructureDeferred = true;
-        var context = controlledOpenManifests.FirstOrDefault(entry => IsPathWithinDirectory(path, entry.Key));
-        var loadedFile = context.Value?.Files.FirstOrDefault(file => PathsEqual(path, ControlledReferenceMaterializer.LocalPath(context.Key, file)));
-        if (loadedFile != null)
-        {
-            currentTree.OpenedVersionId = loadedFile.VersionId;
-            currentTree.OpenedRevision = currentTree.CurrentRevision = loadedFile.Revision;
-            currentTree.LoadedDrawingVersion = loadedFile.DrawingVersion;
-        }
-        currentTree.IsModifiedInSolidWorks = document.GetSaveFlag();
-        if (currentTree.IsModifiedInSolidWorks) currentTree.WorkState = CadWorkState.ModifiedUnsaved;
-        else if (currentTree.WorkState == CadWorkState.ModifiedUnsaved)
-            currentTree.WorkState = string.IsNullOrWhiteSpace(currentTree.CheckedOutBy) ? CadWorkState.None : CadWorkState.Editable;
         taskPaneControl.SetProjectContextAvailable(true);
         taskPaneControl.SelectProject(currentProjectId);
         taskPaneControl.SetTree(currentTree);

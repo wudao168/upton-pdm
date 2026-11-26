@@ -9,7 +9,7 @@ using System.Runtime.Remoting.Messaging;
 
 internal static partial class Program
 {
- static void OperationRuleScenario()
+ static void OperationRuleScenario(bool verifyEarlySameNameConflicts=false)
  {
   var folder=Path.Combine(Path.GetTempPath(),"pdm-formal-rules-"+Guid.NewGuid().ToString("N"));
   Directory.CreateDirectory(folder);
@@ -45,11 +45,26 @@ internal static partial class Program
    var duplicate=Path.Combine(folder,"old","PART.SLDPRT");File.WriteAllText(duplicate,"same bytes");
    var aliasesRoot=Node(rootPath);var a=Node(partPath,"Part");var b=Node(duplicate,"Part");
    ((IList)Get(aliasesRoot,"Children")).Add(a);((IList)Get(aliasesRoot,"Children")).Add(b);
+   var registrationSources=Array.CreateInstance(Type("CadTreeNode"),2);
+   registrationSources.SetValue(a,0);registrationSources.SetValue(b,1);
+   var validateRegistrationSources=Type("ArchiveFileAliases").GetMethod("ValidateRegistrationSources",Flags);
+   if(verifyEarlySameNameConflicts)validateRegistrationSources.Invoke(null,new object[]{registrationSources,CancellationToken.None});
    Type("ArchiveFileAliases").GetMethod("Normalize",Flags).Invoke(null,new[]{aliasesRoot});
    if((string)Get(a,"FullPath")!=(string)Get(b,"FullPath")||!File.Exists(duplicate))throw new Exception("Equal-content alias normalization failed or removed source");
    Set(b,"FullPath",duplicate);File.WriteAllText(duplicate,"different bytes");
    Type("ArchiveFileAliases").GetMethod("Normalize",Flags).Invoke(null,new[]{aliasesRoot});
    if((string)Get(a,"FullPath")== (string)Get(b,"FullPath"))throw new Exception("Different files silently merged");
+   if(verifyEarlySameNameConflicts)
+   {
+    blocked=false;
+    try{validateRegistrationSources.Invoke(null,new object[]{registrationSources,CancellationToken.None});}
+    catch(TargetInvocationException e) when(e.InnerException is InvalidOperationException)
+    {blocked=e.InnerException.Message.Contains(partPath)&&e.InnerException.Message.Contains(duplicate);}
+    if(!blocked||File.ReadAllText(partPath)!="same bytes"||File.ReadAllText(duplicate)!="different bytes")
+     throw new Exception("Same-batch conflict must report both paths without changing the drawings");
+    Set(b,"IsUnverifiedToolboxFallback",true);
+    validateRegistrationSources.Invoke(null,new object[]{registrationSources,CancellationToken.None});
+   }
    Console.WriteLine("PASS: D01 equal-content paths merge without deleting sources; real content conflicts stay distinct");
 
    var copy=Path.Combine(folder,"upload.copy");File.WriteAllText(copy,"frozen bytes");

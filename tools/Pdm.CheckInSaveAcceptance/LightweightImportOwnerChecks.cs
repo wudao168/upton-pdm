@@ -53,7 +53,7 @@ internal static partial class Program
                 children=new[]{new { fileName=Path.GetFileName(cache),configuration="Default",kind=0,
                     status=(int)Enum.Parse(Type("CadReferenceStatus"),"Virtual") }} }),Type("DocumentReferenceNodeDto"));
             return (bool)TreeCallStatic("PdmAddin","WorkingReuseLoadedContextForEditMatches",model,Path.GetDirectoryName(path),
-                manifest,snapshot,null,null,null,null,null,null,false,null,null,app,null);
+                manifest,snapshot,null,null,null,null,null,null,false,null,null,app,null,null);
         }
         proven=true;
         Check(MatchCheckout(ownerPath,imported),"获取时按原生特征核实归属，即使 SolidWorks IsVirtual 为 false，仍与存档内部实例一致");

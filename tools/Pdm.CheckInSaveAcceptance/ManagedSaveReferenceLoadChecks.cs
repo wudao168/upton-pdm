@@ -23,7 +23,8 @@ internal static partial class Program
             {
                 "seven-known", "idle", "newly-loaded-reference", "unknown-before-known", "failed-root-save",
                 "ui-command", "api-command", "blocked-root", "dirty-again", "different-active-document",
-                "new-load-after-save", "new-load-during-check", "command-during-check", "command-during-save"
+                "new-load-after-save", "new-load-during-check", "command-during-check", "command-during-save",
+                "read-only-parent-owned-child", "read-only-parent-unowned-child"
             })
             {
                 ManagedSaveReferenceLoadCase(Path.Combine(output, "View", mode), mode);
@@ -50,8 +51,13 @@ internal static partial class Program
         Set(tree, "FullPath", rootPath);
         Set(tree, "FileName", Path.GetFileName(rootPath));
         Set(tree, "Kind", Enum.Parse(Type("CadDocumentKind"), "Assembly"));
-        Set(tree, "CheckedOutBy", "tester");
-        Set(tree, "CheckoutSessionId", Field(plugin, "checkoutSessionId"));
+        var readOnlyParent = mode.StartsWith("read-only-parent-", StringComparison.Ordinal);
+        var ownedChild = mode == "read-only-parent-owned-child";
+        if (!readOnlyParent)
+        {
+            Set(tree, "CheckedOutBy", "tester");
+            Set(tree, "CheckoutSessionId", Field(plugin, "checkoutSessionId"));
+        }
         SetField(plugin, "authenticatedUsername", "tester");
         SetField(plugin, "currentTree", tree);
 
@@ -60,7 +66,8 @@ internal static partial class Program
         var componentType = appType.Assembly.GetType("SolidWorks.Interop.sldworks.Component2", true);
         var components = new List<object>();
         var references = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-        var paths = Enumerable.Range(1, 7).Select(i => Path.Combine(directory, "引用" + i + ".SLDPRT")).ToArray();
+        var paths = Enumerable.Range(1, 7).Select(i => Path.Combine(directory, "引用" + i
+            + (readOnlyParent && i == 1 ? ".SLDASM" : ".SLDPRT"))).ToArray();
         var unknown = Path.Combine(directory, "未关联.SLDPRT");
         var unexpected = new List<string>();
         object Unexpected(IMethodCallMessage call)
@@ -68,14 +75,29 @@ internal static partial class Program
             unexpected.Add(call.MethodName);
             throw new InvalidOperationException("隔离回归不允许的原生操作 " + call.MethodName);
         }
+        var childSaves = 0;
         foreach (var path in paths)
         {
+            var editedChild = readOnlyParent && path == paths.First();
             if (mode != "newly-loaded-reference" || path != paths.Last())
             {
                 var child = New("CadTreeNode");
                 Set(child, "FullPath", path);
                 Set(child, "FileName", Path.GetFileName(path));
                 Set(child, "Kind", Enum.Parse(Type("CadDocumentKind"), "Part"));
+                if (editedChild)
+                {
+                    var childId = Guid.NewGuid();
+                    File.WriteAllText(path, "子装配工作副本");
+                    Set(child, "Kind", Enum.Parse(Type("CadDocumentKind"), "Assembly"));
+                    Set(child, "DocumentId", childId);
+                    TreeCheck((bool)TreeCallStatic("PdmDocumentIdentityStore", "TryWrite", path, childId, (Guid?)Guid.NewGuid()), "绑定子装配失败");
+                    if (ownedChild)
+                    {
+                        Set(child, "CheckedOutBy", "tester");
+                        Set(child, "CheckoutSessionId", Field(plugin, "checkoutSessionId"));
+                    }
+                }
                 ((IList)Get(tree, "Children")).Add(child);
             }
             var model = new AssemblyProxy(modelType, call =>
@@ -83,7 +105,13 @@ internal static partial class Program
                 switch (call.MethodName)
                 {
                     case "GetPathName": return path;
-                    case "GetSaveFlag": return false;
+                    case "GetSaveFlag": return editedChild;
+                    case "GetType" when editedChild: return 2;
+                    case "IsOpenedReadOnly" when editedChild: return !ownedChild;
+                    case "Save3" when editedChild:
+                        TreeCheck(ownedChild && (int)call.Args[0] == 1, "仅允许独立保存本会话子装配");
+                        childSaves++;
+                        return new ReturnMessage(true, new object[] { call.Args[0], 0, 0 }, 3, call.LogicalCallContext, call);
                     case "GetBlockingState": return 0;
                     case "GetUpdateStamp": return 23;
                     default: return Unexpected(call);
@@ -117,7 +145,7 @@ internal static partial class Program
             {
                 case "GetPathName": return rootPath;
                 case "GetType": return 2;
-                case "IsOpenedReadOnly": return false;
+                case "IsOpenedReadOnly": return readOnlyParent;
                 case "GetSaveFlag": return dirty;
                 case "GetBlockingState": return afterSave && mode == "blocked-root" ? 1 : 0;
                 case "GetUpdateStamp": return 12;
@@ -175,6 +203,13 @@ internal static partial class Program
         TreeCall(plugin, "OnAssemblyComponentAdded", 2, "引用1-2");
         TreeCheck((bool)TreeCall(plugin, "TryQueueManagedSave", 2), "已签出装配未能排入保存");
         TreeCheck((bool)TreeCall(plugin, "TrySavePendingManagedDocument"), "已签出装配未执行受控保存");
+        if (readOnlyParent)
+        {
+            TreeCheck(scans == 1 && saves == 0 && childSaves == (ownedChild ? 1 : 0) && dirty
+                && File.ReadAllText(rootPath) == "验收工作副本" && unexpected.Count == 0,
+                "只读总装的普通保存只能写入当前会话已授权的子装配，不改变总装和其他图档");
+            return;
+        }
         TreeCheck(scans == 1 && saves == 1 && duringSaveProtected, "保存中应仅扫描一次、保存宿主一次并保持加载保护");
         TreeCheck((int)Field(plugin, "workspaceOperationInProgress") == 0 && !(bool)Field(plugin, "managedSaveInProgress"), "保存边界没有正常退出");
 

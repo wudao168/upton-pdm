@@ -46,12 +46,13 @@ internal static partial class Program
    throw new InvalidOperationException(call.MethodName);
   }).GetTransparentProxy();
   SetField(plugin,"application",app);
-  string message=null;
-  try { TreeCall(plugin,"RequireFullAssemblyForControlledOpen",docs[reviewPath]); }
-  catch(System.Reflection.TargetInvocationException e) { message=e.InnerException?.Message; }
-  check(message?.Contains("大型设计审阅")==true && message.Contains(reviewPath),"大型设计审阅模式在核对引用前提示确切受影响的装配体");
-  TreeCall(plugin,"RequireFullAssemblyForControlledOpen",docs[regularPath]);
-  check(docs.Count==3,"正常装配可以继续，预检期间无窗口被关闭");
+  var reviewManifest=New("ControlledOpenManifestDto");
+  var reviewFile=New("ControlledOpenFileDto");Set(reviewFile,"FileName",Path.GetFileName(reviewPath));Set(reviewFile,"RelativePath",Path.GetFileName(reviewPath));
+  var reviewFiles=(IList)Activator.CreateInstance(Property(reviewManifest,"Files").PropertyType);reviewFiles.Add(reviewFile);
+  Set(reviewManifest,"RootRelativePath",Path.GetFileName(reviewPath));Set(reviewManifest,"Files",reviewFiles);
+  TreeCall(plugin,"ValidateControlledLoadedSources",docs[reviewPath],reviewPath,reviewManifest,app,null,true);
+  check(((IList)Get(reviewManifest,"Warnings")).Cast<string>().Any(warning=>warning.Contains("大型设计审阅")&&warning.Contains(reviewPath)),"审阅装配取得来源验证并记录部分结构提醒");
+  check(!(bool)TreeCall(plugin,"IsAssemblyInLargeDesignReview",docs[regularPath])&&docs.Count==3,"普通装配保持正常，预检期间无窗口被关闭");
   var windowType=Type("PdmAddin").GetNestedType("PlmOpenWindow",Flags);
   TreeCall(plugin,"RestorePlmOpenWindows",Array.CreateInstance(windowType,0),reviewPath);
   check(docs.ContainsKey(reviewPath),"并发打开的审阅窗口在获取失败恢复后保留");
@@ -96,8 +97,25 @@ internal static partial class Program
    using(var boundary=(IDisposable)New("ControlledOpenBoundary",directory,manifest))
    {
     Check((int)TreeCall(plugin,"OnFileOpening",path)==1,"受控加载不使用原图或未登记的包外图档："+Path.GetFileName(path));
-    var rejected=false;try{TreeCall(boundary,"Verify",null,null);}catch(System.Reflection.TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}Check(rejected,"取消外部加载后不能误报打开成功");
+    var rejected=false;try{TreeCall(boundary,"Verify",null,null);}catch(System.Reflection.TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}Check(rejected==(Path.GetFileName(path)=="PART.SLDPRT"),"未入包的引用仅记录，受控文件的同名外部来源仍受保护");
    }
+   var toolboxPath=Path.Combine(original,"GB_FASTENER.SLDPRT");
+   var unverifiedPath=Path.Combine(output,"GB_FASTENER.SLDPRT");
+   File.WriteAllText(toolboxPath,"uncontrolled Toolbox file");
+   var issues=(IList)Activator.CreateInstance(Property(manifest,"ReferenceIssues").PropertyType);
+   var toolbox=New("OpenReferenceIssueDto");
+   Set(toolbox,"OriginalPath",toolboxPath);Set(toolbox,"OwnerDocumentId",Guid.NewGuid());Set(toolbox,"IsToolbox",true);
+   issues.Add(toolbox);Set(manifest,"ReferenceIssues",issues);
+   using(var boundary=(IDisposable)New("ControlledOpenBoundary",directory,manifest))
+   {
+    Check((int)TreeCall(plugin,"OnFileOpening",toolboxPath)==1,"明确登记的包外Toolbox文件仍不参与受控加载");
+    TreeCall(boundary,"Verify",null,null);
+    Check(true,"工具箱诊断在严格打开中也不会阻止返回受控模型");
+    Check((int)TreeCall(plugin,"OnFileOpening",unverifiedPath)==1,"同名的普通包外零件仍禁止加载");
+    var rejected=false;try{TreeCall(boundary,"Verify",null,null);}catch(System.Reflection.TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}
+    Check(!rejected,"未登记的包外同名零件未加载，可继续使用受控图档");
+   }
+   issues.Clear();
    foreach(var mode in new[]{"linked-parameter","linked-import","read-deps-failed","replacement-failed","replacement-not-persisted","resource-link-lost","untracked-present","untracked-missing"})
    {
     var folder=Path.Combine(output,"resource-"+mode);var external=Path.Combine(folder,"original");var localFolder=Path.Combine(folder,"View");Directory.CreateDirectory(external);Directory.CreateDirectory(localFolder);
@@ -197,7 +215,7 @@ internal static partial class Program
       case "ActivateDoc3":active=local;
        if(mode=="release-rebind-after-activation")identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)partPath,Get(source,"DocumentId"),project,Guid.NewGuid(),"W9",Get(source,"Sha256"),Get(source,"FileLength")});
        if(mode=="release-draft-after-activation")Set(((IDictionary)Field(addin,"localEdits"))[Get(source,"DocumentId")],"SessionId",Guid.NewGuid());
-       return local;case "GetCurrentWorkingDirectory":case "GetSearchFolders":return "";case "SetCurrentWorkingDirectory":case "SetSearchFolders":return true;case "GetUserPreferenceToggle":return search;case "SetUserPreferenceToggle":search=(bool)call.Args[1];return true;
+       return local;case "GetUserPreferenceStringValue":case "GetCurrentWorkingDirectory":case "GetSearchFolders":return "";case "SetCurrentWorkingDirectory":case "SetSearchFolders":return true;case "GetUserPreferenceToggle":return search;case "SetUserPreferenceToggle":search=(bool)call.Args[1];return true;
       default:nativeMutations++;throw new Exception("禁止新开、关闭、保存或重写模型："+call.MethodName);}
     }).GetTransparentProxy());
     var tree=New("CadTreeNode");Set(tree,"FullPath",partPath);Set(tree,"FileName","PART.SLDPRT");Set(tree,"DocumentId",Get(source,"DocumentId"));Set(tree,"OpenedVersionId",Get(source,"VersionId"));Set(tree,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));SetField(addin,"currentTree",tree);

@@ -87,7 +87,7 @@ internal static partial class Program
    object App()=>new Proxy(appType,call=>call.MethodName=="GetDocuments"?new object[0]:call.MethodName=="GetDocumentDependencies2"?Count():throw new Exception("不得打开、保存或重建图档："+call.MethodName)).GetTransparentProxy();
    object Count(){calls++;return new string[0];}
    materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{App(),root,manifest});check(calls==387,"首次引用预处理仍逐项核对受控范围");
-   materializer.GetMethod("RememberVerifiedOpen",Flags).Invoke(null,new[]{(object)root,manifest});calls=0;
+   materializer.GetMethod("RememberVerifiedOpen",Flags).Invoke(null,new[]{(object)root,manifest,false});calls=0;
    materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{App(),root,manifest});check(calls==0,"387项已成功核对的副本再次打开时不重复调用原生引用预处理");
    var key=(string)materializer.GetMethod("ReferencePreparationKey",Flags).Invoke(null,new[]{(object)output,manifest});
    bool Prepared(object file)=> (bool)materializer.GetMethod("HasPreparedReferences",Flags).Invoke(null,new[]{(object)Path.Combine(output,(string)Get(file,"FileName")),file,Get(manifest,"ProjectId"),key});
@@ -103,10 +103,18 @@ internal static partial class Program
    var externalMode=false;var source=Path.Combine(output,"missing.STEP");
    object UncertainApp()=>new Proxy(appType,call=>call.MethodName=="GetDocuments"?new object[0]:call.MethodName=="GetDocumentDependencies2"
     ?((string)call.Args[0]==unknownPath?(externalMode?new[]{"source",source}:null):new string[0]):throw new Exception("禁止的模型操作")).GetTransparentProxy();
-   materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{UncertainApp(),root,manifest});materializer.GetMethod("RememberVerifiedOpen",Flags).Invoke(null,new[]{(object)root,manifest});
+   materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{UncertainApp(),root,manifest});materializer.GetMethod("RememberVerifiedOpen",Flags).Invoke(null,new[]{(object)root,manifest,false});
    check(!Prepared(unknown),"依赖清单未完整读取时不生成可跳过检查的复用记录");externalMode=true;
-   materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{UncertainApp(),root,manifest});materializer.GetMethod("RememberVerifiedOpen",Flags).Invoke(null,new[]{(object)root,manifest});
+   materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{UncertainApp(),root,manifest});materializer.GetMethod("RememberVerifiedOpen",Flags).Invoke(null,new[]{(object)root,manifest,false});
    check(!Prepared(unknown),"旧外部来源缺失记录保留，每次仍核对，不冒充引用已完整受控");
+   var clean=files[4];Set(clean,"VersionId",Guid.NewGuid());var cleanPath=Path.Combine(output,(string)Get(clean,"FileName"));
+   store.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)cleanPath,Get(clean,"DocumentId"),Get(manifest,"ProjectId"),Get(clean,"VersionId"),"W1",Get(clean,"Sha256"),Get(clean,"FileLength")});
+   var missingNative=Path.Combine(output,"missing-native.SLDPRT");
+   object WithMissingNative()=>new Proxy(appType,call=>call.MethodName=="GetDocuments"?new object[0]:call.MethodName=="GetDocumentDependencies2"
+    ?((string)call.Args[0]==unknownPath?new[]{"part",missingNative}:new string[0]):throw new Exception("禁止的模型操作")).GetTransparentProxy();
+   materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{WithMissingNative(),root,manifest});
+   materializer.GetMethod("RememberVerifiedOpen",Flags).Invoke(null,new[]{(object)root,manifest,true});
+   check(Prepared(clean)&&!Prepared(unknown),"全局有缺件提醒时仍复用已确认的单个文件，含未受控引用的文件保留复核");
    File.WriteAllText(source,"external source appeared later");var blocked=false;
    try{materializer.GetMethod("Prepare",Flags).Invoke(null,new[]{UncertainApp(),root,manifest});}
    catch(System.Reflection.TargetInvocationException error){blocked=error.InnerException is IOException;}

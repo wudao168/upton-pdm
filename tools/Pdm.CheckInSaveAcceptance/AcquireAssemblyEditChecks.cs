@@ -26,6 +26,7 @@ internal static partial class Program
   try
   {
    var cases=new[]{"delete","undo","delete-after-own-archive","undo-after-own-archive","part-receipt-rebase","source-copy-archive","root-version-conflict","child-version-conflict","new-drawing-no-receipt","foreign-child-copy","unknown-component","component-configuration-change","source-modified-after-receipt","receipt-other-path","receipt-other-user","receipt-other-server","race-after-checkout","undo-clean-flag","foreign-lease","root-disk-change","removed-membership","removed-membership-part-rebase-after-archive","reinsert-known","reinsert-source-copy-archive","reinsert-altered-file","reinsert-foreign-project","reinsert-old-version","reinsert-wrong-configuration","reinsert-root-race","archived-suppressed-reference","archived-suppressed-reference-other-path","archived-suppressed-reference-resolved","archived-managed-reference","archived-managed-reference-lightweight","archived-managed-reference-other-path","archived-managed-reference-extra-instance","archived-managed-reference-resolved","native-write-transient","native-write-revoked","native-write-blocked","native-write-reported-false",
+    "retain-child-unsaved","retain-child-saved","retain-child-revoked","retain-child-unowned",
     "previous-session-suppressed-reference","previous-session-suppressed-reference-other-path","previous-session-structure-changed","previous-session-foreign-owner"}.Concat(ReuseReferenceLoadFixture.Cases).Concat(IndexedOccurrenceCases).Concat(ColdAcquisition.Cases);
    var suppliedNativeFixture=nativeMissing;
    foreach(var mode in suppliedNativeFixture==null?cases.Concat(NativeMissingAcquisition.Cases):NativeMissingAcquisition.Cases)
@@ -51,12 +52,19 @@ internal static partial class Program
     if(managedDeferred) ((IList)Get(root,"Children")).Add(part);
     var cold=mode.StartsWith("cold-occurrence-",StringComparison.Ordinal)?new ColdAcquisition(mode):null;
     var indexedOccurrence=cold!=null||mode.StartsWith("indexed-occurrence-",StringComparison.Ordinal);
+    var retainChild=mode.StartsWith("retain-child-",StringComparison.Ordinal);
     var nodes=new List<object>{root,part,removed};
     for(var i=0;i<212;i++)
     {
-     var assembly=cold!=null&&i==1;
+     var assembly=(cold!=null||retainChild)&&i==1;
      var name=assembly?"70002727.M1.SLDASM":indexedOccurrence&&i==0?"1-BC1-三色指示灯001.SLDPRT":"UNTOUCHED-"+i+".SLDPRT";
      nodes.Add(LinkedNode(folder,name,assembly?"Assembly":"Part"));
+    }
+    if(retainChild)
+    {
+     Set(nodes[4],"Configuration","Default");
+     ((IList)Get(root,"Children")).Add(nodes[4]);
+     ((IList)Get(nodes[4],"Children")).Add(part);
     }
     if(indexedOccurrence)
     {
@@ -161,6 +169,12 @@ internal static partial class Program
     }
     Dictionary<string,Tuple<string,FileAttributes>> CaptureFiles()=>Directory.GetFiles(folder)
      .ToDictionary(path=>path,path=>Tuple.Create(WorkingReuseHash(path),File.GetAttributes(path)));
+    var editedChildPath=retainChild?(string)Get(nodes[4],"FullPath"):null;
+    if(retainChild)
+    {
+     File.SetAttributes(editedChildPath,FileAttributes.Normal);
+     if(mode=="retain-child-saved")File.AppendAllText(editedChildPath,"saved local edit of the subassembly");
+    }
     var before=CaptureFiles();
     var initiallyDirty=mode!="undo-clean-flag"&&!indexedOccurrence;
     var dirty=initiallyDirty;var rootReadOnly=true;var unlocks=0;var nativeMutations=new List<string>();
@@ -181,7 +195,7 @@ internal static partial class Program
     var actualPartPath=partPath;if(mode=="foreign-child-copy"){actualPartPath=Path.Combine(directory,"foreign",Path.GetFileName(partPath));Directory.CreateDirectory(Path.GetDirectoryName(actualPartPath));File.Copy(partPath,actualPartPath);}
     var partModel=PartModel(actualPartPath);var removedModel=PartModel(removedPath);
     var nextId=0;
-    object Component(string path,object model,string config="Default",int state=2,int? originalId=null,string instance=null)
+    object Component(string path,object model,string config="Default",int state=2,int? originalId=null,string instance=null,object[] children=null)
     {
      var id=originalId??++nextId;
      return new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>
@@ -193,12 +207,28 @@ internal static partial class Program
       case "GetModelDoc2":return model;
       case "IsSuppressed":return state==0 || state==1 || state==4;
       case "GetSuppression":case "GetSuppression2":return state;
-      case "GetChildren":return new object[0];
+      case "GetChildren":return children??Array.Empty<object>();
       default:throw new Exception(call.MethodName);
      }
     }).GetTransparentProxy();
     }
     var components=new List<object>{Component(partPath,partModel,mode=="component-configuration-change"?"Other":"Default")};
+    object editedChild=null;
+    if(retainChild)
+    {
+     editedChild=new AssemblyProxy(modelType,call=>
+     {
+      switch(call.MethodName)
+      {
+       case "GetPathName":return editedChildPath;
+       case "GetSaveFlag":return mode!="retain-child-saved";
+       case "IsOpenedReadOnly":return false;
+       default:throw new Exception("上一级获取不得保存或切换下一级装配："+call.MethodName);
+      }
+     }).GetTransparentProxy();
+     components.Add(Component(removedPath,removedModel));
+     components.Add(Component(editedChildPath,editedChild,children:new[]{Component(partPath,partModel),Component(partPath,partModel)}));
+    }
     object loadedLamp=null;
     if(indexedOccurrence)
     {
@@ -265,7 +295,7 @@ internal static partial class Program
      if(nativeMissing!=null&&nativeMissing.TryCaller(call,rootPath,out var nativeValue))return nativeValue;
      if(reuseLoad!=null&&reuseLoad.NativeCall(call,out var nativeResult))return nativeResult;
      if(cold!=null&&cold.NativeCall(call,assemblyModel,out var coldResult))return coldResult;
-     if(call.MethodName=="GetDocuments")return new[]{assemblyModel,partModel,removedModel,loadedLamp}.Where(model=>model!=null).ToArray();
+     if(call.MethodName=="GetDocuments")return new[]{assemblyModel,partModel,removedModel,loadedLamp,editedChild}.Where(model=>model!=null).ToArray();
      if(call.MethodName=="GetRunningCommandInfo")return new ReturnMessage(null,new object[]{0,"",false},3,call.LogicalCallContext,call);
      if(call.MethodName=="GetDocumentDependencies2"&&(managedDeferred||archivedMissing))
      {
@@ -284,6 +314,17 @@ internal static partial class Program
      TreeCall(client,"SetActiveCompany",Guid.Empty);
      http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);
      SetField(plugin,"editJournal",New("EditDraftJournal",Path.Combine(directory,"journal"),"fixture"));SetField(plugin,"editJournalScope",(string)Get(client,"EditJournalScope")+"|"+((string)Field(plugin,"authenticatedUsername")).ToLowerInvariant());
+     if(retainChild && mode!="retain-child-unowned")
+     {
+      handler.RetainedChildId=(Guid)Get(nodes[4],"DocumentId");
+      var document=New("DocumentDto");
+      Set(document,"Id",handler.RetainedChildId.Value);
+      Set(document,"ProjectId",project);
+      Set(document,"CheckoutSessionId",session);
+      Set(document,"CheckedOutBy","tester");
+      Set(document,"CheckedOutAt",handler.RetainedCheckedOutAt);
+      TreeCall(plugin,"RememberLocalEdit",nodes[4],document);
+     }
      var previousSessionId=Guid.NewGuid();
      if(previousSession)
      {
@@ -358,6 +399,7 @@ internal static partial class Program
      }catch(Exception error){failure=error;}
      var ignoredDrawing=new[]{"new-drawing-no-receipt","source-modified-after-receipt","receipt-other-path","receipt-other-server","receipt-other-user"}.Contains(mode);
      var blocked=new[]{"root-version-conflict","child-version-conflict","foreign-child-copy","unknown-component","component-configuration-change","race-after-checkout","foreign-lease","root-disk-change","reinsert-altered-file","reinsert-foreign-project","reinsert-old-version","reinsert-wrong-configuration","reinsert-root-race","archived-suppressed-reference-other-path","archived-suppressed-reference-resolved","archived-managed-reference-other-path","archived-managed-reference-extra-instance","archived-managed-reference-resolved"}.Contains(mode);
+     blocked|=mode is "retain-child-unowned" or "retain-child-revoked";
      if(nativeMissing!=null)blocked=mode!="stored-missing-unchanged-pair";
      var nativeWriteFailure=mode is "native-write-revoked" or "native-write-blocked";
      var foreignCheckout=mode=="previous-session-foreign-owner";
@@ -368,7 +410,7 @@ internal static partial class Program
        throw new Exception("装配体获取结果不符："+mode,failure);
      reuseLoad?.Verify();
      if(!blocked&&(handler.Checkouts!=1||unlocks!=(retryUnlock?2:1)||rootReadOnly||dirty!=initiallyDirty))throw new Exception("未原位获取或丢掉未保存修改："+mode);
-     if(blocked&&!nativeWriteFailure&&(unlocks!=0||handler.Checkouts!=(mode=="race-after-checkout"||mode=="reinsert-root-race"||mode=="cold-occurrence-reference-race"||mode=="stored-missing-checkout-race"||foreignCheckout?1:0)))throw new Exception("冲突校验前已改变权限："+mode);
+     if(blocked&&!nativeWriteFailure&&(unlocks!=0||handler.Checkouts!=(mode=="race-after-checkout"||mode=="reinsert-root-race"||mode=="cold-occurrence-reference-race"||mode=="stored-missing-checkout-race"||mode=="retain-child-revoked"||foreignCheckout?1:0)))throw new Exception("冲突校验前已改变权限："+mode);
      if(previousSession&&handler.NativeLeaseReads!=(retryUnlock?1:0))
        throw new Exception("旧会话接续后的写入确认次数不符："+mode);
      if(previousSession&&!((IEnumerable)TreeCall(Field(plugin,"editJournal"),"ReadAll")).Cast<object>()
@@ -407,6 +449,8 @@ internal static partial class Program
   readonly object manifest;readonly Dictionary<Guid,object> versions;readonly Guid rootId,project,session;readonly string mode;readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=int.MaxValue};int manifestReads;
   public int Checkouts,OtherWrites,NativeLeaseReads,ArchivedDownloads;
   public Action OnCheckout;
+  public Guid? RetainedChildId;
+  public readonly DateTime RetainedCheckedOutAt=new DateTime(2026,11,25,10,0,0,DateTimeKind.Utc);
   readonly byte[] archivedBytes;
   public AssemblyEditAcquireHandler(object manifest,Dictionary<Guid,object> versions,Guid rootId,Guid project,Guid session,string mode,byte[] archivedBytes){this.manifest=manifest;this.versions=versions;this.rootId=rootId;this.project=project;this.session=session;this.mode=mode;this.archivedBytes=archivedBytes;}
   protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
@@ -430,11 +474,14 @@ internal static partial class Program
    else if(path.EndsWith("/open-manifest")){manifestReads++;value=manifest;if((mode=="race-after-checkout"||mode=="reinsert-root-race")&&manifestReads>1){value=json.Deserialize(json.Serialize(manifest),manifest.GetType());Set(value,"RootVersionId",Guid.NewGuid());}}
    else if(path.EndsWith("/documents"))value=versions.Select(pair=>new{id=pair.Key,projectId=mode=="reinsert-foreign-project"&&(string)Get(Get(pair.Value,"ReferenceSnapshot"),"FileName")=="REMOVED.SLDPRT"?Guid.NewGuid():project,
     fileName=Get(Get(pair.Value,"ReferenceSnapshot"),"FileName"),kind=Get(Get(pair.Value,"ReferenceSnapshot"),"Kind"),
-    checkedOutBy=pair.Key!=rootId?null:mode is "foreign-lease" or "previous-session-foreign-owner"?"another-user":previousSession?"tester":null,
-    checkoutSessionId=previousSession&&pair.Key==rootId?(Guid?)Guid.NewGuid():null}).ToArray();
+    checkedOutBy=pair.Key==RetainedChildId?"tester":pair.Key!=rootId?null:mode is "foreign-lease" or "previous-session-foreign-owner"?"another-user":previousSession?"tester":null,
+    checkedOutAt=pair.Key==RetainedChildId?(DateTime?)RetainedCheckedOutAt:null,
+    checkoutSessionId=pair.Key==RetainedChildId?(Guid?)(mode=="retain-child-revoked"&&Checkouts>0?Guid.NewGuid():session)
+     :previousSession&&pair.Key==rootId?(Guid?)Guid.NewGuid():null}).ToArray();
    else if(path.EndsWith("/versions")){var id=Guid.Parse(path.Split('/')[3]);value=new[]{versions[id]};}
    else if(path.EndsWith("/document-relations"))value=new object[0];
    else if(path.EndsWith("/checkout")){
+    if(RetainedChildId.HasValue&&!path.EndsWith("/"+rootId+"/checkout"))throw new Exception("获取上一级时重复获取了子装配");
     Checkouts++;OnCheckout?.Invoke();
     if(mode=="previous-session-foreign-owner")return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Conflict)
       {Content=new StringContent("{\"message\":\"图档正在由其他用户编辑\"}")});

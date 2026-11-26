@@ -134,31 +134,11 @@ internal static partial class Program
                 {
                     var window = ArchiveWindow(session);
                     var form = ((Panel)Field(window, "selection")).Controls.OfType<Form>().Single();
-                    window.BeginInvoke((Action)(() => ((Button)Field(form, "execute")).PerformClick()));
-                    return true;
-                });
-                await TreeWait(() => ArchiveUi(session, () => ((Panel)Field(ArchiveWindow(session), "confirmation")).Controls.OfType<Form>().Any(f => f.Text == "新增图档归属确认")), "归属确认没有进入原页面");
-                ArchiveUi(session, () =>
-                {
-                    var window = ArchiveWindow(session);
-                    var form = ((Panel)Field(window, "confirmation")).Controls.OfType<Form>().Single(f => f.Text == "新增图档归属确认");
-                    var records = (Panel)Field(window, "processRecords");
-                    TreeCheck(form.RectangleToScreen(form.ClientRectangle) == records.RectangleToScreen(records.ClientRectangle)
-                        && !((TextBox)Field(window, "history")).Visible
-                        && !((FlowLayoutPanel)Field(window, "confirmationActions")).Visible,
-                        "项目归属确认没有完整占用过程记录区域");
-                    var execute = ArchiveControls(form).OfType<Button>().Single(button => button.DialogResult == DialogResult.OK);
-                    var cancel = ArchiveControls(form).OfType<Button>().Single(button => button.DialogResult == DialogResult.Cancel);
-                    TreeCheck(!execute.Enabled && cancel.Visible && !form.TopLevel && !form.TopMost,
-                        "项目归属确认丢失二次确认、返回修改或所属窗口层级");
-                    using (var bitmap = new Bitmap(window.Width, window.Height))
-                    {
-                        window.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
-                        bitmap.Save(Path.Combine(output, "archive-project-admission.png"), ImageFormat.Png);
-                    }
-                    Console.WriteLine("PASS: Project admission fills the complete record area with both actions inside the original archive window");
-                    ArchiveControls(form).OfType<Button>().Single(button => button.Text == "确认").PerformClick();
-                    execute.PerformClick();
+                    var confirm = (Button)Field(form, "execute");
+                    TreeCheck(confirm.Enabled && confirm.Text == "确认范围并存档" && form.DialogResult != DialogResult.OK
+                        && !((Panel)Field(window, "confirmation")).Controls.OfType<Form>().Any(),
+                        "须在同一页核对项目和图档后才能提交");
+                    window.BeginInvoke((Action)(() => confirm.PerformClick()));
                     return true;
                 });
             }
@@ -178,7 +158,7 @@ internal static partial class Program
         TreeCheck(ArchiveUi(session, () => ArchiveWindow(session).Handle) == handle
             && ArchiveUi(session, () => ((Panel)Field(ArchiveWindow(session), "selection")).Controls.OfType<Form>().Any(f => !((Button)Field(f, "execute")).Enabled)),
             "确认后未保留原选择区域");
-        Console.WriteLine("PASS: File selection, nested project admission and frozen selection remain in the same session with safe UI-thread snapshots");
+        Console.WriteLine("PASS: 项目和图档范围在同一页确认一次，确认后保留选定范围");
         var originalHistory = ArchiveHistory(session);
         var originalStage = ArchiveUi(session, () => ((Label)Field(ArchiveWindow(session), "stage")).Text);
         var cancelDriver = Task.Run(async () =>
@@ -274,18 +254,18 @@ internal static partial class Program
             var session = ArchiveCurrent;
             await (Task)Get(session, "Ready");
             TreeCheck(timer.ElapsedMilliseconds < 1500, "存档窗口首帧等待过长：" + timer.ElapsedMilliseconds);
-            await TreeWait(() => handler.Started, "读取权限请求未进入慢网络边界");
+            await TreeWait(() => handler.ProjectRequests == 1 && handler.LibraryRequests == 1, "项目和标准库权限读取未进入慢网络边界");
             TreeCheck(ReferenceEquals(root, Field(plugin, "currentTree")), "工程图作为提交候选时切换了原3D上下文");
             var docked = Type("ArchiveSession").GetProperty("IsDocked", Flags)?.GetValue(session) as bool? == true;
             TreeCheck(IsWindowEnabled(host.Handle) == docked, "存档视图所属窗口状态不符合当前展示方式");
             var presentation = ArchiveWindow(session);
             var handle = ArchiveUi(session, () => ArchiveWindow(session).Handle);
             TreeCall(plugin, "OnCheckInRequested", null, args);
-            TreeCheck(ReferenceEquals(session, ArchiveCurrent) && handler.Requests == 1, "重复点击创建了新的会话或重复检查");
+            TreeCheck(ReferenceEquals(session, ArchiveCurrent) && handler.ProjectRequests == 1 && handler.LibraryRequests == 1 && handler.Requests == 2, "重复点击创建了新的会话或重复检查");
             Console.WriteLine("PASS: Real archive entry shows its first frame before blocked network work; duplicate click reuses session; firstFrameMs=" + timer.ElapsedMilliseconds);
             TreeCall(session, "RequestCancellation");
             await TreeWait(() => (bool)Get(session, "IsFinished"), "慢网络取消后未在原窗口结束");
-            TreeCheck(handler.Canceled && handler.Requests == 1 && (docked ? presentation.Handle : ArchiveUi(session, () => ArchiveWindow(session).Handle)) == handle,
+            TreeCheck(handler.Canceled && handler.ProjectRequests == 1 && handler.LibraryRequests == 1 && handler.Requests == 2 && (docked ? presentation.Handle : ArchiveUi(session, () => ArchiveWindow(session).Handle)) == handle,
                 "取消没有中断初始检查或启动了后续请求");
             TreeCheck(docked ? !presentation.IsDisposed && presentation.Visible : !(bool)Get(session, "IsClosed"), "取消结果没有保留在原显示区域");
             Console.WriteLine("PASS: Cancel during initial permission wait interrupts the request before structure reads or uploads and preserves the result window");
@@ -298,15 +278,18 @@ internal static partial class Program
 
     sealed class ArchiveDelayedHandler : HttpMessageHandler
     {
-        public volatile bool Started, Canceled;
-        public int Requests;
+        public bool Canceled => Volatile.Read(ref canceledRequests) == 2;
+        private int canceledRequests;
+        public int Requests, ProjectRequests, LibraryRequests;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Interlocked.Increment(ref Requests);
-            if (!request.RequestUri.AbsolutePath.EndsWith("/projects")) throw new Exception("Unexpected archive request: " + request.RequestUri.AbsolutePath);
-            Started = true;
+            var path = request.RequestUri.AbsolutePath;
+            if (path == "/api/projects") Interlocked.Increment(ref ProjectRequests);
+            else if (path == "/api/standard-structures/capabilities") Interlocked.Increment(ref LibraryRequests);
+            else throw new Exception("Unexpected archive request: " + path);
             try { await Task.Delay(Timeout.Infinite, token); }
-            catch (OperationCanceledException) { Canceled = true; throw; }
+            catch (OperationCanceledException) { Interlocked.Increment(ref canceledRequests); throw; }
             throw new Exception("Unreachable");
         }
     }

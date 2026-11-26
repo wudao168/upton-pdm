@@ -31,7 +31,7 @@ public sealed partial class PdmAddin
         {
             var frozen = parent.Files.SingleOrDefault(file => file.DocumentId == before.DocumentId);
             if (frozen == null || frozen.VersionId == before.VersionId || !WorkingHeadPathMatches(before, frozen)) continue;
-            var path = ControlledReferenceMaterializer.LocalPath(directory, before);
+            var path = ControlledReferenceMaterializer.ManifestPath(directory, before);
             var requiresReceipt = !requestedIds.Contains(before.DocumentId);
             if (requiresReceipt && !completedWorkingArchives.ContainsKey(path)) continue;
             if (!WorkingHeadDiskMatches(directory, working.ProjectId, before)) continue;
@@ -66,8 +66,8 @@ public sealed partial class PdmAddin
 
     private static bool WorkingHeadDiskMatches(string directory, Guid projectId, ControlledOpenFileDto file)
     {
-        var path = ControlledReferenceMaterializer.LocalPath(directory, file);
-        return WorkingReuseBindingMatches(path, projectId, file) && File.Exists(path)
+        var path = ControlledReferenceMaterializer.ManifestPath(directory, file);
+        return File.Exists(path) && WorkingReuseBindingMatches(path, projectId, file)
             && new FileInfo(path).Length == file.FileLength && !string.IsNullOrWhiteSpace(file.Sha256)
             && string.Equals(ComputeFileHash(path), file.Sha256, StringComparison.OrdinalIgnoreCase);
     }

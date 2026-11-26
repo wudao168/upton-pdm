@@ -60,14 +60,17 @@ public sealed class ArchiveContextReferenceTests
     }
 
     [Fact]
-    public async Task AdministratorCanBlockUnverifiedLinksEvenWithoutClientWarningText()
+    public async Task LegacyBlockingSettingPermitsArchivingUnverifiedLinksAndOpeningTheSameVersion()
     {
         var f = await Fixture.Create();
         await f.Repository.SaveArchiveWarningPolicyAsync(new() { BlockingCodes = ["ReferenceTypeUnknown"] }, default);
-        var error = await Assert.ThrowsAsync<PdmRuleException>(() => f.Commit('A', false, true));
-        Assert.Contains("管理员存档警告策略", error.Message);
-        Assert.Empty(await f.Repository.ListDocumentVersionsAsync(f.Layout.Id, default));
-        Assert.Empty(await f.Repository.ListDocumentVersionsAsync(f.Part.Id, default));
+        var receipt = await f.Commit('A', false, true);
+        var part = Assert.Single(await f.Repository.ListDocumentVersionsAsync(f.Part.Id, default));
+        Assert.Equal(part.Id, receipt.Results.Single(item => item.Document.Id == f.Part.Id).Version!.Id);
+        Assert.Contains("ReferenceTypeUnverified", System.Text.Json.JsonSerializer.Serialize(part.ReferenceSnapshot));
+        var manifest = await f.Workflow.CreateControlledOpenManifestAsync(f.Part.Id, part.Id, false, false,
+            "admin", UserRole.Administrator, default, treeScopeOnly: true);
+        Assert.Equal(part.Id, manifest.Files.Single(file => file.IsRoot).VersionId);
     }
 
     [Fact]

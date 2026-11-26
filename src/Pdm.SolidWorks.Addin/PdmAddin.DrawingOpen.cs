@@ -46,8 +46,7 @@ public sealed partial class PdmAddin
         {
             var activePath = (application.ActiveDoc as IModelDoc2)?.GetPathName();
             candidates = candidates.Where(pair => IsPathWithinDirectory(activePath, pair.Key)).ToArray();
-            if (candidates.Length != 1)
-                throw new InvalidOperationException("多个已打开装配包含这张工程图的模型，请切换到所需装配体后重新打开工程图。");
+            if (candidates.Length != 1) return false;
         }
         var context = candidates.OrderByDescending(pair => pair.Value.Files.Count).FirstOrDefault();
         if (context.Value == null)
@@ -55,11 +54,6 @@ public sealed partial class PdmAddin
             if (collisions.Length > 0) EnsureDrawingOpenHasNoConflictingWindows(requested);
             return false;
         }
-        var unresolvedWarnings = (requested.Warnings ?? new List<string>())
-            .Where(warning => !IsConfirmedReferenceVersionNotice(requested, warning)).ToArray();
-        if (unresolvedWarnings.Length > 0)
-            throw new InvalidOperationException("工程图引用尚不完整，已保留原窗口，未开始打开：" + string.Join("；", unresolvedWarnings.Take(3)));
-
         var contextIds = await VerifiedOpenContextIdsAsync(requested);
         var files = new List<ControlledOpenFileDto>();
         var retainedHashes = new Dictionary<Guid, string>();
@@ -84,7 +78,14 @@ public sealed partial class PdmAddin
             }
             if (!File.Exists(path))
             {
-                if (file.DocumentId != requested.RootDocumentId || existing != null) throw DrawingContextMismatch(file.FileName);
+                if (file.DocumentId != requested.RootDocumentId)
+                {
+                    if (collisions.Any(model => string.Equals(Path.GetFileName(model.GetPathName()), file.FileName, StringComparison.OrdinalIgnoreCase)))
+                        throw DrawingContextMismatch(file.FileName);
+                    RecordMissingDrawingModel(requested, file);
+                    continue;
+                }
+                if (existing != null) throw DrawingContextMismatch(file.FileName);
                 missingDrawing = file;
             }
             else
@@ -135,7 +136,7 @@ public sealed partial class PdmAddin
             manifest.ResumedDocumentIds.Add(pair.Key);
         }
         var opened = OpenControlledReadOnlyDocumentCore(rootPath, (int)swDocumentTypes_e.swDocDRAWING, string.Empty, manifest, true,
-            allowMissingComponents: true, requireDrawingModels: acquirePermission);
+            allowMissingComponents: true);
         if (opened == null) throw new IOException("工程图尚未打开，已保留原零件、总装窗口及修改，请查看本次操作日志。");
         foreach (var file in files.Where(file => context.Value.Files.All(existing => existing.DocumentId != file.DocumentId)))
         {
@@ -154,21 +155,21 @@ public sealed partial class PdmAddin
             + " files=" + files.Count + " closed=0 modelReplaced=0 acquire=" + acquirePermission);
         if (requested.Warnings?.Count > 0)
         {
-            LogOperation("工程图引用版本已按本次确认核对：" + string.Join("；", requested.Warnings));
-            taskPaneControl?.SetCheckoutReminder("已按本次确认采用最新受控引用；原存档版本保留，详情见日志。", true);
+            LogOperation("工程图已打开，引用提醒：" + string.Join("；", requested.Warnings));
+            taskPaneControl?.SetCheckoutReminder("工程图已打开，引用提醒详见日志。", true);
         }
         return true;
     }
 
-    private static bool IsConfirmedReferenceVersionNotice(ControlledOpenManifestDto manifest, string warning)
+    private static void RecordMissingDrawingModel(ControlledOpenManifestDto manifest, ControlledOpenFileDto model)
     {
-        // Only the server's completed version-resolution notice is informational.
-        // Confirmation is local to this request; missing/unknown warnings still block.
-        return manifest.LatestReferenceVersionsConfirmed && warning != null
-            && manifest.Files.Any(file => file.DocumentId != Guid.Empty && file.VersionId != Guid.Empty
-                && !string.IsNullOrWhiteSpace(file.FileName) && !string.IsNullOrWhiteSpace(file.Revision)
-                && warning.StartsWith("引用文件" + file.FileName + "在当前快照中记录了多个版本（", StringComparison.Ordinal)
-                && warning.EndsWith("），已统一使用最新受控版本" + file.Revision + "。", StringComparison.Ordinal));
+        var reason = "工程图配套模型在当前工作区缺失，按已保存视图继续：" + model.FileName;
+        RecordOpenWarning(manifest, reason);
+        var issue = new OpenReferenceIssueDto { OwnerDocumentId = manifest.RootDocumentId, InstancePath = manifest.RootRelativePath,
+            FileName = model.FileName, OriginalPath = model.RelativePath ?? model.FileName, Reason = reason };
+        manifest.ReferenceIssues ??= new List<OpenReferenceIssueDto>();
+        if (!manifest.ReferenceIssues.Any(item => string.Equals(item.Key, issue.Key, StringComparison.OrdinalIgnoreCase)))
+            manifest.ReferenceIssues.Add(issue);
     }
 
     private static InvalidOperationException DrawingContextMismatch(string fileName) => new InvalidOperationException(

@@ -93,6 +93,7 @@ public sealed partial class PdmAddin
     private async Task ValidateArchiveInputsBeforePreparationAsync(IReadOnlyList<BatchOperationItem> items, Guid projectId, CancellationToken token)
     {
         ValidateArchiveToolboxReferences(items, token, allowPendingInsertions: true);
+        ArchiveFileAliases.ValidateRegistrationSources(items.Select(item => item.Node), token);
         var documents = (await apiClient.GetDocumentsAsync(projectId, token)).ToDictionary(document => document.Id);
         var failures = new List<string>();
         foreach (var item in items)

@@ -151,14 +151,16 @@ internal sealed partial class PdmApiClient : IDisposable
         CancellationToken cancellationToken,
         bool resolveLegacyReferences = false,
         bool allowMissingComponents = true,
-        bool useLatestModelReferences = false)
+        bool useLatestModelReferences = false,
+        bool includeReferenceScopeStamp = false)
     {
         try
         {
             return await PostJsonAsync<ControlledOpenManifestDto>(
                 controlledOpenHttpClient,
                 string.Concat("api/documents/", documentId, "/open-manifest"),
-                new { versionId, releasedOnly, forEdit, resolveLegacyReferences, treeScopeOnly = true, allowMissingComponents, useLatestModelReferences },
+                new { versionId, releasedOnly, forEdit, resolveLegacyReferences, treeScopeOnly = true,
+                    allowMissingComponents, useLatestModelReferences, includeReferenceScopeStamp },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
@@ -170,7 +172,7 @@ internal sealed partial class PdmApiClient : IDisposable
             if (ConfirmReferenceVersions == null || !await ConfirmReferenceVersions(exception.Message))
                 throw new OperationCanceledException("已取消更新引用版本，原有窗口、文件和权限已保留。");
             var confirmed = await CreateControlledOpenManifestAsync(documentId, versionId, releasedOnly, forEdit,
-                cancellationToken, true, allowMissingComponents, useLatestModelReferences);
+                cancellationToken, true, allowMissingComponents, useLatestModelReferences, includeReferenceScopeStamp);
             confirmed.LatestReferenceVersionsConfirmed = true;
             return confirmed;
         }
@@ -225,13 +227,25 @@ internal sealed partial class PdmApiClient : IDisposable
     public Task<object> CancelArchiveRegistrationAsync(Guid batchId, Guid sessionId, CancellationToken token) =>
         PostJsonAsync<object>("api/archive-batches/" + batchId + "/cancel-registration", new { sessionId }, token);
 
+    internal async Task AbandonPreparedArchiveBatchAsync(InterruptedArchiveBatch batch, CancellationToken token)
+    {
+        var result = await PostJsonAsync<Dictionary<string, bool>>("api/archive-batches/" + batch.BatchId + "/cancel-registration",
+            new { batch.SessionId, batch.Prepared.ProjectId }, token).ConfigureAwait(false);
+        if (result == null || !result.TryGetValue("abandoned", out var abandoned) || !abandoned)
+            throw new InvalidOperationException("服务器未确认终止原批次，请刷新核对存档结果。");
+    }
+
     public Task<List<DocumentVersionDto>> GetVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? take = null) =>
         GetJsonAsync<List<DocumentVersionDto>>(string.Concat("api/documents/", documentId, "/versions", take.HasValue ? "?take=" + take.Value : string.Empty), cancellationToken);
 
     public async Task<DocumentDto> CheckoutAsync(Guid documentId, Guid sessionId, string machineName, CancellationToken cancellationToken, Guid? drawingReviewWritebackId = null)
     {
         if (BeforeCheckout != null) await BeforeCheckout(documentId, cancellationToken);
-        return await PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"), new { sessionId, machineName, drawingReviewWritebackId }, cancellationToken).ConfigureAwait(false);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var document = await PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"),
+            new { sessionId, machineName, drawingReviewWritebackId }, cancellationToken).ConfigureAwait(false);
+        PluginDiagnosticLog.Record("获取权限耗时", "服务器授权回执已读取，图档=" + documentId + "，耗时毫秒=" + watch.ElapsedMilliseconds);
+        return document;
     }
 
     public Task<DocumentDto> CompleteEditWithoutChangesAsync(Guid documentId, Guid checkoutSessionId, string sha256, CancellationToken cancellationToken) =>
@@ -391,15 +405,34 @@ internal sealed partial class PdmApiClient : IDisposable
         } };
     }
 
-    public async Task<ArchiveBatchReceiptDto> CommitArchiveBatchAsync(Guid batchId, Guid sessionId, IReadOnlyList<object> files, CancellationToken token)
+    public Task<ArchiveBatchReceiptDto> CommitArchiveBatchAsync(Guid batchId, Guid sessionId, IReadOnlyList<object> files, CancellationToken token) =>
+        CommitRecoverableArchiveBatchAsync(batchId, sessionId, files, token, null);
+
+    internal Task<ArchiveBatchReceiptDto> CommitRecoverableArchiveBatchAsync(Guid batchId, Guid sessionId, IReadOnlyList<object> files,
+        CancellationToken token, Action<string> beforeSubmit)
+    {
+        var json = serializer.Serialize(new { batchId, checkoutSessionId = sessionId, files });
+        var expectedIds = files.Select(file => Guid.Parse(Convert.ToString(file.GetType().GetProperty("documentId").GetValue(file)))).ToArray();
+        return SubmitFrozenArchiveAsync(batchId, expectedIds, json, false, beforeSubmit, token);
+    }
+
+    internal Task<ArchiveBatchReceiptDto> ResumeArchiveBatchAsync(InterruptedArchiveBatch batch, string json, CancellationToken token) =>
+        SubmitFrozenArchiveAsync(batch.BatchId, batch.Prepared.Files.Select(file => file.DocumentId).ToArray(), json, true, null, token);
+
+    private async Task<ArchiveBatchReceiptDto> SubmitFrozenArchiveAsync(Guid batchId, Guid[] expectedIds, string json,
+        bool checkReceiptFirst, Action<string> beforeSubmit, CancellationToken token)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromMinutes(15));
         var commitToken = deadline.Token;
-        var payload = new { batchId, checkoutSessionId = sessionId, files };
-        var expectedIds = files.Select(file => Guid.Parse(Convert.ToString(file.GetType().GetProperty("documentId").GetValue(file)))).ToArray();
-        var json = serializer.Serialize(payload);
-        await ValidateArchivePayloadSizeAsync(Encoding.UTF8.GetByteCount(json), files.Count, false, commitToken).ConfigureAwait(false);
+        if (checkReceiptFirst)
+        {
+            var existing = await GetArchiveBatchReceiptOrNullAsync(batchId, commitToken).ConfigureAwait(false);
+            if (existing != null) return RequireCompleteArchiveReceipt(existing, batchId, expectedIds);
+        }
+        await ValidateArchivePayloadSizeAsync(Encoding.UTF8.GetByteCount(json), expectedIds.Length, false, commitToken).ConfigureAwait(false);
+        commitToken.ThrowIfCancellationRequested();
+        beforeSubmit?.Invoke(json);
         try
         {
             return await RecoverArchiveConnectionAsync("整批提交结果", async (retryToken, retry) =>
@@ -421,14 +454,14 @@ internal sealed partial class PdmApiClient : IDisposable
                 {
                     var receipt = await GetArchiveBatchReceiptOrNullAsync(batchId, verify.Token).ConfigureAwait(false);
                     if (receipt != null) return RequireCompleteArchiveReceipt(receipt, batchId, expectedIds);
-                    if (original is InvalidOperationException && !(original is ArchiveConnectionTimeoutException)
-                        && !(original is ServiceUnavailableException) && !original.Data.Contains("ArchiveReceiptIncomplete")) original.Data["ArchiveBatchNotCommitted"] = true;
+                    if (original is InvalidOperationException
+                        && original.Data["ArchiveSubmitRejected"] is bool rejected && rejected)
+                        original.Data["ArchiveBatchNotCommitted"] = true;
                 }
                 catch (Exception verification) { PluginDiagnosticLog.Record("批次", "暂未取得整批存档回执：" + batchId + "，" + verification.GetType().Name); }
             }
             if (token.IsCancellationRequested) throw new OperationCanceledException(token);
-            if (original is InvalidOperationException && !(original is ArchiveConnectionTimeoutException)
-                && !(original is ServiceUnavailableException)) throw;
+            if (original.Data["ArchiveBatchNotCommitted"] is bool rejectedSubmit && rejectedSubmit) throw;
             var uncertain = new InvalidOperationException("整批提交结果暂未确认。本地文件已保留；连接恢复后插件会核对原批次，在结果明确前请勿重新提交。服务器按整批提交，不会产生部分存档。", original);
             uncertain.Data["ArchiveResultUncertain"] = true;
             throw uncertain;
@@ -1098,7 +1131,13 @@ internal sealed partial class PdmApiClient : IDisposable
                     ThrowAuthenticationExpiredIfNeeded(response);
                 }
                 ThrowServiceUnavailableIfNeeded(response);
-                throw ServiceError(response.StatusCode.ToString(), body);
+                var error = ServiceError(response.StatusCode.ToString(), body);
+                if (path == "api/archive-batches")
+                {
+                    if ((int)response.StatusCode is 400 or 403 or 404 or 409 or 413 or 422)
+                        error.Data["ArchiveSubmitRejected"] = true;
+                }
+                throw error;
             }
 
             return serializer.Deserialize<T>(body);
@@ -1129,7 +1168,6 @@ internal sealed partial class PdmApiClient : IDisposable
     /// </summary>
     internal static void ValidateCheckInReferences(CadTreeNode node, ICollection<string> plannedPaths = null)
     {
-        ValidateArchiveReferenceCompleteness(node);
         ToRequestNode(node, true, plannedPaths);
     }
 
@@ -1165,6 +1203,9 @@ internal sealed partial class PdmApiClient : IDisposable
             // A model contains its drawings, whose ReferencedModels point back to that model.
             if (current == null || !visited.Add(current)) continue;
             if (current.IsOutsideNativeFileScope) continue;
+            if (current != node && (current.Status == CadReferenceStatus.Missing
+                || current.Status == CadReferenceStatus.Suppressed || current.Status == CadReferenceStatus.Lightweight)
+                && ArchiveMissingReferencePolicy.TryOmitMissing(node, current.FullPath, current)) continue;
             if (NativeArchiveManifest.IsInterconnectCachePath(current.FullPath)
                 && (!current.IsStoredImport || !ImportedComponentStorage.IsStableOwner(current.ImportedStorageOwnerPath)))
                 Fail("B11", new InvalidOperationException("树内导入组件仅有临时缓存，尚未形成可确认的原生存档内容。请保存为稳定原生文件或真正嵌入父装配后重试：" + current.FileName));
@@ -1723,6 +1764,7 @@ internal sealed class ArchiveBatchReceiptDto
 internal sealed class ControlledOpenManifestDto
 {
     public bool UsesLatestModelReferences { get; set; }
+    public string ReferenceScopeStamp { get; set; }
     public List<OpenReferenceIssueDto> ReferenceIssues { get; set; } = new List<OpenReferenceIssueDto>();
     internal bool LatestReferenceVersionsConfirmed { get; set; }
     // Local proof for resuming an existing checkout, never supplied by the server
@@ -1731,10 +1773,13 @@ internal sealed class ControlledOpenManifestDto
     internal bool RequireWorkspaceRetainedReferences { get; set; }
     internal WorkspaceCacheBackup CacheBackup { get; set; }
     internal bool WorkspaceOpenCanceled { get; set; }
-    internal HashSet<string> CompletedReferencePrepasses { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // True when the owner's direct saved paths are confirmed independently of other open warnings.
+    internal Dictionary<string, bool> CompletedReferencePrepasses { get; } = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
     internal Dictionary<string, HashSet<string>> VerifiedNativePreloads { get; } = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
     internal HashSet<Guid> ResumedDocumentIds { get; } = new HashSet<Guid>();
     internal Dictionary<string, RetainedLocalReference> RetainedLocalReferences { get; } = new Dictionary<string, RetainedLocalReference>(StringComparer.OrdinalIgnoreCase);
+    // Only available for classifying loaded Toolbox files in a narrowed working scope.
+    internal IReadOnlyList<ControlledOpenFileDto> ToolboxWorkspaceFiles { get; set; }
     internal HashSet<string> UnverifiedToolboxSources { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     internal Dictionary<string, List<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>> VerifiedMissingToolboxReferences { get; }
         = new Dictionary<string, List<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>>(StringComparer.OrdinalIgnoreCase);

@@ -114,8 +114,9 @@ internal static class ControlledReferenceMaterializer
             if (HasPreparedReferencesForHash(owner, file, manifest.ProjectId, preparationKey, verifiedHash))
             { reused++; continue; }
             var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var untrackedResources = new List<string>();
+            var isolatedResources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var unresolvedSourceRecord = false;
+            var allDirectPathsKnown = true;
             try
             {
                 var dependencyTimer = System.Diagnostics.Stopwatch.StartNew();
@@ -134,9 +135,20 @@ internal static class ControlledReferenceMaterializer
                     {
                         if (!files.TryGetValue(Path.GetFileName(native), out var target))
                         {
+                            if (!string.IsNullOrWhiteSpace(native)) allDirectPathsKnown = false;
                             if (IsLinkedResource(native)) unresolvedSourceRecord = true;
                             if (IsLinkedResource(native) && (File.Exists(native)
-                                || File.Exists(Path.Combine(directory, Path.GetFileName(native))))) untrackedResources.Add(native);
+                                || File.Exists(Path.Combine(directory, Path.GetFileName(native)))))
+                            {
+                                // Redirect only the verified cache projection. Never copy unrelated
+                                // bytes or update an equation/table from the source workstation.
+                                var omitted = Path.Combine(directory, ".uplm-omitted", file.DocumentId.ToString("N")
+                                    + "-" + index + Path.GetExtension(native));
+                                if (File.Exists(omitted))
+                                    throw new IOException("未纳入存档的资源在隔离位置已有文件，不能采用其内容。");
+                                replacements[native] = omitted;
+                                isolatedResources.Add(native);
+                            }
                             continue;
                         }
                         var destination = LocalPath(directory, target);
@@ -148,12 +160,9 @@ internal static class ControlledReferenceMaterializer
             {
                 throw new IOException("无法核对原生引用来源，未继续打开图档，请稍后重试并查看诊断日志：" + file.FileName, error);
             }
-            if (untrackedResources.Count > 0)
-                throw new IOException("图档仍指向未纳入PLM清单的外部来源，未使用原目录文件或继续打开：" + file.FileName
-                    + "\r\n请先通过补齐引用将所需文件纳入PLM：\r\n" + string.Join("\r\n", untrackedResources));
             if (replacements.Count == 0)
             {
-                if (!unresolvedSourceRecord) manifest.CompletedReferencePrepasses.Add(owner);
+                if (!unresolvedSourceRecord) manifest.CompletedReferencePrepasses.Add(owner, allDirectPathsKnown);
                 continue;
             }
             var before = ArchiveFileFingerprint.Read(owner);
@@ -186,12 +195,15 @@ internal static class ControlledReferenceMaterializer
                         .SelectMany(index => (Convert.ToString(verified.GetValue(index * 2 + 1)) ?? string.Empty).Split('|')).ToArray();
                     if (paths.Any(path => IsLinkedResource(path) && files.TryGetValue(Path.GetFileName(path), out var target)
                             && !string.Equals(path, LocalPath(directory, target), StringComparison.OrdinalIgnoreCase))
-                        || requiredSources.Any(pair => !MatchesReferencePath(paths, pair.Value)))
+                        || requiredSources.Any(pair => !MatchesReferencePath(paths, pair.Value))
+                        || isolatedResources.Any(source => paths.Contains(source, StringComparer.OrdinalIgnoreCase)
+                            || File.Exists(replacements[source])))
                         throw new IOException("引用替换后的实际路径尚未与受控清单一致：" + file.FileName);
                 }
                 if (unchanged && !PdmDocumentIdentityStore.TryRecordResolvedReferences(owner, baseline, ArchiveFileFingerprint.Read(owner)))
                     throw new IOException("引用已定位，但无法记录本地副本校验信息：" + file.FileName);
-                if (!unresolvedSourceRecord) manifest.CompletedReferencePrepasses.Add(owner);
+                if (!unresolvedSourceRecord) manifest.CompletedReferencePrepasses.Add(owner,
+                    allDirectPathsKnown && requiredSources.Count == replacements.Count);
             }
             catch (Exception error)
             {
@@ -218,6 +230,8 @@ internal static class ControlledReferenceMaterializer
                     throw new IOException("引用定位未完成，当前工作副本仍被占用或无法恢复，未继续打开：" + file.FileName
                         + "。完整恢复副本已保留：" + backup, new AggregateException(error, recoveryError));
                 }
+                if (isolatedResources.Count > 0)
+                    throw new IOException("SolidWorks 未能隔离工作副本的包外资源，已恢复副本并保留原图档：" + file.FileName, error);
                 if (requiredSources.Count > 0 && !ResolvesControlledSources(app, owner, requiredSources, files, directory))
                     throw new IOException("引用来源未能安全定位到PLM工作区，已恢复原副本，未加载原目录来源：" + file.FileName, error);
                 if (requiredSources.Count > 0)
@@ -341,7 +355,7 @@ internal static class ControlledReferenceMaterializer
 
     private static string ReferencePreparationKey(string directory, ControlledOpenManifestDto manifest)
     {
-        var map = "2|" + Path.GetFullPath(directory).TrimEnd('\\', '/').ToUpperInvariant() + "|" + manifest.ProjectId
+        var map = "3|" + Path.GetFullPath(directory).TrimEnd('\\', '/').ToUpperInvariant() + "|" + manifest.ProjectId
             + "|" + string.Join("|", manifest.Files.OrderBy(file => file.FileName, StringComparer.OrdinalIgnoreCase)
                 .Select(file => file.DocumentId + ":" + file.FileName.ToUpperInvariant() + ":" + (file.RelativePath ?? file.FileName).ToUpperInvariant()));
         using (var hash = SHA256.Create()) return BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(map))).Replace("-", "");
@@ -359,7 +373,7 @@ internal static class ControlledReferenceMaterializer
         && !string.IsNullOrWhiteSpace(binding.PreparedReferenceSha256)
         && string.Equals(binding.PreparedReferenceSha256, verifiedHash, StringComparison.OrdinalIgnoreCase);
 
-    internal static void RememberVerifiedOpen(string rootPath, ControlledOpenManifestDto manifest)
+    internal static void RememberVerifiedOpen(string rootPath, ControlledOpenManifestDto manifest, bool hasReferenceWarnings = false)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(rootPath));
         var key = ReferencePreparationKey(directory, manifest);
@@ -367,7 +381,8 @@ internal static class ControlledReferenceMaterializer
         {
             if (manifest.RetainedWorkingHashes.ContainsKey(file.DocumentId)) continue;
             var path = LocalPath(directory, file);
-            if (!manifest.CompletedReferencePrepasses.Contains(path)) continue;
+            if (!manifest.CompletedReferencePrepasses.TryGetValue(path, out var directlyVerified)
+                || hasReferenceWarnings && !directlyVerified) continue;
             if (!TryReadVerifiedCopyHash(path, file, out var actual)
                 || !PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding)
                 || binding.DocumentId != file.DocumentId || binding.ProjectId != manifest.ProjectId || binding.VersionId != file.VersionId) continue;

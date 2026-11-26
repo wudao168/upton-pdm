@@ -12,7 +12,10 @@ internal static class ArchiveStepInfo
         "固定引用版本并检查提交条件，全部通过后才上传。", "文件上传后仍需等待整批提交确认。", "正在等待服务器整批确认，最终以存档结果为准。",
         "根据服务器确认结果更新本地图档状态。" };
     internal static string Title(int step)
-    { step = Math.Max(1, Math.Min(10, step)); return "步骤" + step + "/10：" + Names[step - 1]; }
+    {
+        var stage = step <= 2 ? "阶段1/3：确定范围" : step <= 7 ? "阶段2/3：准备文件" : "阶段3/3：提交并核对结果";
+        return stage + " · " + Names[Math.Max(1, Math.Min(10, step)) - 1];
+    }
     internal static string Hint(int step) => Title(step) + "。提示：" + Hints[Math.Max(1, Math.Min(10, step)) - 1];
     internal static string Bytes(long value) => value >= 1024L * 1024 * 1024 ? (value / (1024d * 1024 * 1024)).ToString("0.00") + " GB"
         : value >= 1024 * 1024 ? (value / (1024d * 1024)).ToString("0.0") + " MB"

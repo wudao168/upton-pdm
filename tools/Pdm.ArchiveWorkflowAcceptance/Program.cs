@@ -44,6 +44,13 @@ internal static class Program
         try
         {
             if (args.Length > 2 && args[2] == "cycle-only") { Run("模型工程图双向引用不递归溢出", ReferenceCycle); return 0; }
+            if (args.Length > 2 && args[2] == "prepared-only")
+            {
+                Run("整批提交响应丢失后复用同一批次，已提交回执可恢复成功", AtomicArchiveRetry);
+                Run("重启后核对已提交、未提交、并发完成和服务器不可达的批次", InterruptedBatchRecovery);
+                Run("已上传批次以原请求续提，清单损坏时停止并保留恢复记录", PreparedBatchRecovery);
+                return 0;
+            }
             Run("模型工程图双向引用不递归溢出", ReferenceCycle);
             Run("日志限量、并发记录、诊断汇总与凭据脱敏", Diagnostics);
             Run("上传分块中断后只续传剩余块", () => Upload(false));
@@ -79,6 +86,7 @@ internal static class Program
             Run("快照拒绝缺失身份，计划内与待服务端核对引用不猜测最新版本", IncompletePlannedSnapshot);
             Run("中断批次记录隔离服务器与账号，存活进程不被误清理", InterruptedBatchJournal);
             Run("重启后核对已提交、未提交、并发完成和服务器不可达的批次", InterruptedBatchRecovery);
+            Run("已上传批次以原请求续提，清单损坏时停止并保留恢复记录", PreparedBatchRecovery);
             if (args.Length > 2) Run("实际P700012发布版本与工作区编辑基准兼容", () => RealReleasedBaseline(args[2]));
             Console.WriteLine("PASS " + passed + " archive scenarios (protocol and COM-independent simulation)");
             return 0;
@@ -86,6 +94,47 @@ internal static class Program
         catch (Exception error) { Console.WriteLine("FAIL " + Unwrap(error)); return 1; }
     }
     static void Run(string name, Action action) { action(); passed++; Console.WriteLine("PASS " + name); }
+    static void PreparedBatchRecovery()
+    {
+        var batch = Guid.NewGuid();
+        var session = Guid.NewGuid();
+        var project = Guid.NewGuid();
+        var document = Guid.NewGuid();
+        var path = Path.Combine(directory, "prepared.SLDPRT");
+        var body = Json.Serialize(new { batchId = batch, checkoutSessionId = session, files = new[] { new { documentId = document } } });
+        Static("ArchiveBatchJournal", "Begin", batch, session, "server|company", "engineer");
+        try
+        {
+            var source = New("PreparedArchiveSource");
+            Set(source, "DocumentId", document); Set(source, "SourcePath", path);
+            var sources = Array.CreateInstance(T("PreparedArchiveSource"), 1); sources.SetValue(source, 0);
+            var prepared = New("PreparedArchiveBatch");
+            Set(prepared, "ProjectId", project); Set(prepared, "RootPath", path); Set(prepared, "Files", sources);
+            Static("ArchiveBatchJournal", "Prepare", batch, prepared, body);
+            var restored = ((IEnumerable)Static("ArchiveBatchJournal", "Recoverable", "server|company", "engineer")).Cast<object>()
+                .Single(item => Equals(Get(item, "BatchId"), batch));
+            Assert((string)Static("ArchiveBatchJournal", "ReadPayload", restored) == body, "cached request bytes changed");
+            Assert(!((IEnumerable)Static("ArchiveBatchJournal", "Recoverable", "server|company", "other")).Cast<object>()
+                .Any(item => Equals(Get(item, "BatchId"), batch)), "prepared batch leaked to another actor");
+            foreach (var alreadyCommitted in new[] { false, true })
+            {
+                using var handler = new AtomicReceiptHandler(batch, "resume")
+                {
+                    ExpectedBody = body, KnownDocuments = alreadyCommitted ? new[] { document } : null
+                };
+                using var client = (IDisposable)Client(handler);
+                var receipt = Await(Call(client, "ResumeArchiveBatchAsync", restored, body, CancellationToken.None));
+                Assert((Guid)Get(receipt, "BatchId") == batch && ((IList)Get(receipt, "Results")).Count == 1,
+                    "prepared receipt was not reconciled");
+                Assert(handler.Posts == (alreadyCommitted ? 0 : 1), "prepared batch skipped the receipt check or repeated a write");
+            }
+            var payload = Path.Combine(directory, "batches", batch.ToString("N") + ".payload");
+            File.AppendAllText(payload, " ");
+            Expect<InvalidDataException>(() => Static("ArchiveBatchJournal", "ReadPayload", restored));
+            Assert(File.Exists(payload), "unsuccessful verification removed recovery evidence");
+        }
+        finally { Static("ArchiveBatchJournal", "Complete", batch); }
+    }
     static void Upload(bool lostCompletion)
     {
         var path = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".SLDPRT"); File.WriteAllText(path, "abcdefghij");
@@ -297,6 +346,8 @@ internal static class Program
     sealed class AtomicReceiptHandler : HttpMessageHandler
     {
         readonly Guid batch; readonly string mode; public int Posts; Guid[] documents;
+        public string ExpectedBody;
+        public Guid[] KnownDocuments;
         public AtomicReceiptHandler(Guid batch, string mode) { this.batch = batch; this.mode = mode; }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
@@ -304,7 +355,11 @@ internal static class Program
                 return Task.FromResult(Reply(new { maxRequestBytes = 30000000L }));
             if (request.Method == HttpMethod.Post)
             {
-                Posts++; var body = Json.Deserialize<Dictionary<string, object>>(request.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+                Posts++;
+                Assert(request.RequestUri.AbsolutePath == "/api/archive-batches", "prepared batch attempted to stage another file");
+                var raw = request.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                if (ExpectedBody != null) Assert(raw == ExpectedBody, "prepared submission was rebuilt or changed");
+                var body = Json.Deserialize<Dictionary<string, object>>(raw);
                 documents = ((IList)body["files"]).Cast<Dictionary<string, object>>().Select(file => Guid.Parse((string)file["documentId"])).ToArray();
                 Assert(Guid.Parse((string)body["batchId"]) == batch, "retry used another batch");
                 if (Posts == 1 && mode == "retry") throw new HttpRequestException("simulated response loss");
@@ -314,6 +369,11 @@ internal static class Program
             {
                 Assert(request.RequestUri.AbsolutePath.EndsWith(batch.ToString()), "wrong receipt query");
                 if (mode == "retry" && Posts == 1) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+                if (mode == "resume" && documents == null)
+                {
+                    if (KnownDocuments == null) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+                    documents = KnownDocuments;
+                }
             }
             return Task.FromResult(Reply(new { batchId = batch, results = documents.Take(mode == "partial" ? 4 : documents.Length).Select(id => new { document = new { id } }).ToArray() }));
         }

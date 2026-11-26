@@ -151,9 +151,9 @@ internal sealed class PluginSettingsDialog : Form
         plannedTaskScrollInterval.Margin = Padding.Empty;
         plannedTaskScrollInterval.AccessibleName = "任务滚动间隔";
         taskLayout.Controls.Add(plannedTaskScrollInterval, 1, 0);
-        blockMissingReferences.Text = "存档警告由管理员在系统管理中统一配置";
+        blockMissingReferences.Text = "引用缺失记入诊断，存档与获取可继续";
         blockMissingReferences.Enabled = false;
-        blockMissingReferences.AccessibleName = "引用缺失时阻止存档";
+        blockMissingReferences.AccessibleName = blockMissingReferences.Text;
         blockMissingReferences.Checked = ArchiveMissingReferencePolicy.BlockMissingReferences;
         blockMissingReferences.Dock = DockStyle.Fill;
         taskLayout.Controls.Add(blockMissingReferences, 0, 1);

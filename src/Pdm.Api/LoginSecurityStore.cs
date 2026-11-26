@@ -7,8 +7,11 @@ using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Api;
 
+internal sealed class LoginSecurityStateUnavailableException(MySqlException inner)
+    : Exception("PLM暂时无法核对登录会话，请稍后重试。", inner);
+
 // 每个账号单独加行锁；同一账号的并发登录在多个 API 进程之间也只能依次取得名额。
-public sealed class LoginSecurityStore(IOptions<PdmDatabaseOptions> options)
+public sealed class LoginSecurityStore(IOptions<PdmDatabaseOptions> options, ILogger<LoginSecurityStore>? logger = null)
 {
     private readonly ConcurrentDictionary<string, string> memory = new();
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -22,12 +25,33 @@ public sealed class LoginSecurityStore(IOptions<PdmDatabaseOptions> options)
         if (!MySql) memory.TryGetValue(key, out value);
         else
         {
-            await using var connection = new MySqlConnection(options.Value.ConnectionString);
-            value = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
-                "SELECT state_json FROM login_security_state WHERE state_key=@key", new { key }, cancellationToken: ct));
+            try
+            {
+                value = await ReadMySqlStateAsync(key, ct);
+            }
+            catch (MySqlException error) when (!ct.IsCancellationRequested && IsTransientReadFailure(error))
+            {
+                logger?.LogWarning(error, "登录会话状态读取暂时失败，将重新核对。");
+                await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+                try { value = await ReadMySqlStateAsync(key, ct); }
+                catch (MySqlException retry) when (!ct.IsCancellationRequested && IsTransientReadFailure(retry))
+                {
+                    throw new LoginSecurityStateUnavailableException(retry);
+                }
+            }
         }
         return value is null ? new T() : JsonSerializer.Deserialize<T>(value, Json)!;
     }
+
+    private async Task<string?> ReadMySqlStateAsync(string key, CancellationToken ct)
+    {
+        await using var connection = new MySqlConnection(options.Value.ConnectionString);
+        return await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT state_json FROM login_security_state WHERE state_key=@key", new { key }, cancellationToken: ct));
+    }
+
+    private static bool IsTransientReadFailure(MySqlException error) =>
+        error.IsTransient || error.ErrorCode == MySqlErrorCode.CommandTimeoutExpired;
 
     public async Task<TResult> UpdateAsync<T, TResult>(string key, Func<T, TResult> update, CancellationToken ct) where T : new()
     {

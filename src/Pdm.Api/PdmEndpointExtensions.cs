@@ -1282,7 +1282,8 @@ public static class PdmEndpointExtensions
                 request.ResolveLegacyReferences,
                 request.TreeScopeOnly,
                 request.AllowMissingComponents,
-                request.UseLatestModelReferences));
+                request.UseLatestModelReferences,
+                request.IncludeReferenceScopeStamp));
         });
 
         api.MapGet("/documents/{documentId:guid}/versions/compare", async (Guid documentId, Guid left, Guid right, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1839,9 +1840,14 @@ public static class PdmEndpointExtensions
                 new ArchiveRegistrationContext(batchId, request.SessionId, request.MachineName)));
         });
         api.MapPost("/archive-batches/{batchId:guid}/cancel-registration", async (Guid batchId, CancelArchiveRegistrationRequest request,
-            HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+            HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
-            var (actor, _) = CurrentUser(context.User);
+            var (actor, role) = CurrentUser(context.User);
+            if (request.ProjectId is Guid projectId)
+            {
+                await workflow.AbandonPreparedArchiveAsync(batchId, projectId, actor, role, request.SessionId, cancellationToken);
+                return Results.Ok(new { cancelled = true, abandoned = true });
+            }
             await repository.CancelArchiveRegistrationAsync(batchId, actor, request.SessionId, cancellationToken);
             return Results.Ok(new { cancelled = true });
         });
@@ -2290,15 +2296,16 @@ public static class PdmEndpointExtensions
             var folders = await repository.ListProjectFoldersAsync(projectId, actor, role, cancellationToken);
             var visibleFolderIds = folders.Where(folder => (folder.EffectiveAccess & FolderAccess.View) != 0).Select(folder => folder.Id).ToHashSet();
             var documents = (await repository.ListDocumentsAsync(projectId, cancellationToken))
-                .Where(document => document.FolderId is Guid folderId && visibleFolderIds.Contains(folderId));
-            var versions = new List<ProjectVersionResponse>();
-            foreach (var document in documents)
+                .Where(document => document.FolderId is Guid folderId && visibleFolderIds.Contains(folderId))
+                .ToDictionary(document => document.Id);
+            var headers = await repository.ListDocumentVersionHeadersAsync(documents.Keys, cancellationToken);
+            var versions = headers.Select(version =>
             {
-                var documentVersions = await repository.ListDocumentVersionsAsync(document.Id, cancellationToken);
-                versions.AddRange(documentVersions.Select(version => new ProjectVersionResponse(
+                var document = documents[version.DocumentId];
+                return new ProjectVersionResponse(
                     version.Id, document.Id, document.DrawingNumber, document.Name, document.FileName,
-                    version.Revision, version.Status, version.CreatedBy, version.CreatedAt, version.ChangeNote)));
-            }
+                    version.Revision, version.Status, version.CreatedBy, version.CreatedAt, version.ChangeNote);
+            });
             return Results.Ok(versions.OrderByDescending(item => item.CreatedAt));
         });
 

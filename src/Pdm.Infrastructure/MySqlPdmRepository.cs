@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Text.Json;
 using Dapper;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MySqlConnector;
 using Upton.Pdm.Application;
@@ -12,16 +13,20 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 {
     private readonly string connectionString;
     private readonly bool retryTransientAuditWrites;
+    private readonly int archiveAuditCommandTimeoutSeconds;
     private readonly TimeProvider timeProvider;
+    private readonly ILogger<MySqlPdmRepository>? logger;
     private readonly IProjectContactInformationRepository? projectContacts;
     public Task<ProjectContactInformation?> FindProjectContactInformationAsync(Guid projectId, CancellationToken ct) =>
         projectContacts?.FindAsync(projectId, ct) ?? Task.FromResult<ProjectContactInformation?>(null);
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
-    public MySqlPdmRepository(IOptions<PdmDatabaseOptions> options, TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null)
+    public MySqlPdmRepository(IOptions<PdmDatabaseOptions> options, TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null,
+        ILogger<MySqlPdmRepository>? logger = null)
     {
         connectionString = options.Value.ConnectionString;
         retryTransientAuditWrites = options.Value.RetryTransientAuditWrites;
+        archiveAuditCommandTimeoutSeconds = Math.Clamp(options.Value.ArchiveAuditCommandTimeoutSeconds, 1, 600);
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             throw new InvalidOperationException("PLM MySQL连接字符串未配置。 ");
@@ -29,6 +34,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
         this.timeProvider = timeProvider;
         this.projectContacts = projectContacts;
+        this.logger = logger;
         DefaultTypeMap.MatchNamesWithUnderscores = true;
     }
 

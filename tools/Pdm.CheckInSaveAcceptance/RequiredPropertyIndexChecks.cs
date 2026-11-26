@@ -68,8 +68,14 @@ internal static partial class Program
    }
    IDictionary properties=null;Exception failure=null;
    try{properties=(IDictionary)TreeCall(plugin,"ReadSavedNativeProperties",node,hash,null);}catch(Exception error){failure=error;}
-   var shouldFail=mode=="partial"||mode=="missing-value"||mode=="name-count"||mode=="dirty"||mode=="open-stamp-changes"||mode=="open-source-changes"||mode=="wrong-path"||mode=="changed";
+   var partial=mode=="partial"||mode=="missing-value"||mode=="name-count";
+   var shouldFail=mode=="dirty"||mode=="open-stamp-changes"||mode=="open-source-changes"||mode=="wrong-path"||mode=="changed";
    if(shouldFail)Check(failure!=null&&(failure.ToString().Contains("源文件内容发生变化")||failure.ToString().Contains("自定义属性")||failure.ToString().Contains("尚未固定到提交副本的内存修改")),kind+"/"+mode+"：读取失败在上传前明确失败，不生成残缺属性索引");
+   else if(partial){
+    if(failure!=null)throw failure;
+    Check((string)properties["UPLM.CustomPropertiesRead"]=="0"&&((IList)Get(node,"ReferenceWarnings")).Count>0,kind+"/"+mode+"：不完整索引仅提醒");
+    Check(properties.Contains("全局/型号")==(mode!="missing-value")&&properties.Contains("全局/物料分类")==(mode=="name-count"),kind+"/"+mode+"：只记录确实读到的属性");
+   }
    else{
     if(failure!=null)throw failure;
     Check((string)properties["UPLM.CustomPropertiesRead"]=="1",kind+"/"+mode+"：完成读取与空属性有明确证据");
@@ -78,7 +84,7 @@ internal static partial class Program
      if(kind!="Drawing"&&mode!="missing-config")Check((string)properties["配置:A/物料名称"]=="配置A名称",kind+"/"+mode+"：保留引用配置属性，不用全局名称覆盖");
      if(mode=="multi-config"&&kind!="Drawing")Check((string)properties["配置:B/物料名称"]=="配置B名称",kind+"：同一文件所有引用配置均被采集");
     }else Check(!properties.Contains("全局/物料分类"),kind+"：确实无属性合法，不伪造分类或强制填写");
-    Check(((IList)Get(node,"ReferenceWarnings")).Count==0,kind+"/"+mode+"：已读属性不再留待补齐提示");
+    Check(!((IList)Get(node,"ReferenceWarnings")).Cast<string>().Any(warning=>warning.StartsWith("属性索引待补齐")),kind+"/"+mode+"：完整读取后属性提醒消除");
     var beforeReads=reads;var beforeCalls=calls.Count;
     Set(node,"ArchiveInspectedProperties",properties);Set(node,"ArchiveInspectedPropertiesSha256",hash);
     TreeCall(plugin,"ReadSavedNativeProperties",node,hash,null);

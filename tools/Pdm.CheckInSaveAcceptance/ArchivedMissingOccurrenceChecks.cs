@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -78,6 +79,173 @@ internal static partial class Program
             Console.WriteLine("PASS: archived missing occurrence " + mode);
         }
         VerifyArchivedOccurrenceReuseAsync(root).GetAwaiter().GetResult();
+        VerifyArchivedToolboxAdvisoryAsync(root).GetAwaiter().GetResult();
+        VerifyCachedToolboxOccurrences(root);
+    }
+
+    private static void VerifyCachedToolboxOccurrences(string directory)
+    {
+        const string assemblyName = "CACHE-OWNER.SLDASM";
+        const string partName = "hexagon socket head cap screws gb.sldprt";
+        const string partConfig = "GB_FASTENER_SCREWS_HSHCS M8X12-N";
+        const string instance = "hexagon socket head cap screws gb-2";
+        const string original = @"Z:\old-cache\GB_FASTENER_SCREWS_HSHCS M8X12-N.SLDPRT";
+        const string library = @"C:\SOLIDWORKS Data\browser\gb\hexagon socket head cap screws gb.sldprt";
+        var rootPath = Path.Combine(directory, assemblyName);
+        var cachedPath = Path.Combine(directory, partName);
+        File.WriteAllText(rootPath, "Assembly with a Toolbox reference excluded from the archive index");
+        File.WriteAllText(cachedPath, "Toolbox library copy cached as a project file");
+        const string ordinaryName = "NORMAL.SLDPRT";
+        var ordinaryPath = Path.Combine(directory, ordinaryName);
+        File.WriteAllText(ordinaryPath, "Ordinary controlled component");
+        var ordinaryId = Guid.NewGuid();
+        var parentId = Guid.NewGuid();
+        var partId = Guid.NewGuid();
+        var warning = "Toolbox引用提醒：" + original + "；Toolbox引用待核对，本次不上传；实例 ROOT-1/OWNER-1/" + instance
+            + "；实际来源 " + library + "；原有关联保留，结构待补全";
+        var interop = Type("PdmAddin").GetField("application", Flags).FieldType.Assembly;
+        System.Type NativeType(string name) => interop.GetType("SolidWorks.Interop.sldworks." + name, true);
+        object Native(string name, Func<System.Runtime.Remoting.Messaging.IMethodCallMessage, object> call)
+            => new Proxy(NativeType(name), call).GetTransparentProxy();
+        var config = Native("Configuration", call => call.MethodName == "get_Name" ? "Default" : throw new Exception(call.MethodName));
+        var manager = Native("ConfigurationManager", call => call.MethodName == "get_ActiveConfiguration" ? config : throw new Exception(call.MethodName));
+        var app = Native("ISldWorks", call => call.MethodName == "GetUserPreferenceStringValue" ? string.Empty : throw new Exception(call.MethodName));
+        var json = new System.Web.Script.Serialization.JavaScriptSerializer();
+        var ordinary = Native("Component2", call =>
+        {
+            switch (call.MethodName)
+            {
+                case "GetPathName": return ordinaryPath;
+                case "get_ReferencedConfiguration": return "Default";
+                case "get_IsVirtual": return false;
+                case "GetModelDoc2": return null;
+                default: throw new Exception(call.MethodName);
+            }
+        });
+        foreach (var mode in new[] { "archived-cached", "missing-after-archive", "wrong-owner", "wrong-instance",
+            "foreign-copy", "foreign-loaded-model", "native-copy", "ordinary-part", "ordinary-removed" })
+        {
+            var partPath = mode == "foreign-copy" ? Path.Combine(directory, "foreign", partName) : cachedPath;
+            var type = Native("ModelDocExtension", call => call.MethodName == "get_ToolboxPartType"
+                ? (object)(mode == "native-copy" ? 2 : 0) : throw new Exception(call.MethodName));
+            var part = Native("ModelDoc2", call =>
+            {
+                switch (call.MethodName)
+                {
+                    case "GetPathName": return mode == "foreign-loaded-model" ? Path.Combine(directory, "foreign", partName) : partPath;
+                    case "get_Extension": return type;
+                    default: throw new Exception(call.MethodName);
+                }
+            });
+            var child = Native("Component2", call =>
+            {
+                switch (call.MethodName)
+                {
+                    case "GetPathName": return partPath;
+                    case "get_Name2": return "OWNER-1/" + (mode == "wrong-instance" ? partName + "-3" : instance);
+                    case "get_ReferencedConfiguration": return partConfig;
+                    case "get_IsVirtual": return false;
+                    case "GetModelDoc2": return part;
+                    default: throw new Exception(call.MethodName);
+                }
+            });
+            var root = new AssemblyProxy(NativeType("ModelDoc2"), call =>
+            {
+                switch (call.MethodName)
+                {
+                    case "GetPathName": return rootPath;
+                    case "get_ConfigurationManager": return manager;
+                    case "GetComponents":
+                        return mode == "missing-after-archive" ? new[] { ordinary }
+                            : mode == "ordinary-removed" ? new[] { child } : new[] { ordinary, child };
+                    default: throw new Exception(call.MethodName);
+                }
+            }).GetTransparentProxy();
+            var manifest = json.Deserialize(json.Serialize(new
+            {
+                rootDocumentId = parentId,
+                files = new[] {
+                    new { documentId = parentId, fileName = assemblyName, relativePath = assemblyName },
+                    new { documentId = partId, fileName = partName, relativePath = partName },
+                    new { documentId = ordinaryId, fileName = ordinaryName, relativePath = ordinaryName } },
+                referenceIssues = mode is "native-copy" or "ordinary-part" ? new object[0] : new object[] {
+                    new { isToolbox = true, ownerDocumentId = mode == "wrong-owner" ? Guid.NewGuid() : parentId, reason = warning } }
+            }), Type("ControlledOpenManifestDto"));
+            var snapshot = json.Deserialize(json.Serialize(new
+            {
+                documentId = parentId, fileName = assemblyName, configuration = "Default",
+                children = new object[] { new { documentId = ordinaryId, fileName = ordinaryName, configuration = "Default", kind = 1 } }
+                    .Concat(mode == "missing-after-archive" ? new object[] {
+                        new { fileName = Path.GetFileName(original), instancePath = "OWNER-1/" + instance, configuration = partConfig, kind = 1 } }
+                        : Array.Empty<object>()).ToArray()
+            }), Type("DocumentReferenceNodeDto"));
+            var exactSnapshots = (IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(Guid), Type("DocumentReferenceNodeDto")));
+            exactSnapshots.Add(parentId, snapshot);
+            var conflict = string.Empty;
+            var result = (bool)TreeCallStatic("PdmAddin", "WorkingReuseLoadedContextForEditMatches", root, directory,
+                manifest, snapshot, exactSnapshots, null, null, (Action<string>)(reason => conflict = reason),
+                null, null, false, null, null, app, null, null);
+            TreeCheck(result == (mode is "archived-cached" or "missing-after-archive" or "native-copy"),
+                "Toolbox实例核对范围错误：" + mode + " " + conflict);
+            Console.WriteLine("PASS: Toolbox advisory preserves checkout reference scope " + mode);
+        }
+    }
+
+    private static async Task VerifyArchivedToolboxAdvisoryAsync(string root)
+    {
+        var missing = Path.Combine(root, "moved-standard-part.SLDPRT");
+        var version = Guid.NewGuid();
+        var documentId = Guid.NewGuid();
+        var owner = New("ControlledOpenFileDto");
+        Set(owner, "DocumentId", documentId);
+        Set(owner, "VersionId", version);
+        Set(owner, "FileName", "OWNER.SLDASM");
+        var componentType = Type("PdmAddin").GetField("application", Flags).FieldType.Assembly
+            .GetType("SolidWorks.Interop.sldworks.IComponent2", true);
+        var component = new Proxy(componentType, call =>
+        {
+            switch (call.MethodName)
+            {
+                case "GetPathName": return missing;
+                case "GetSuppression": case "GetSuppression2": return 1;
+                case "GetModelDoc2": return null;
+                case "get_IsVirtual": return false;
+                case "get_Name2": return "螺钉-1";
+                case "get_ReferencedConfiguration": return "Default";
+                default: throw new InvalidOperationException("unexpected native call " + call.MethodName);
+            }
+        }).GetTransparentProxy();
+        var components = Array.CreateInstance(componentType, 1);
+        components.SetValue(component, 0);
+        var scope = New("PdmAddin+WorkingAssemblyReferenceScope");
+        SetField(scope, "Components", components);
+        SetField(scope, "Configuration", "Default");
+        SetField(scope, "HistoricalMissingPaths", new[] { missing });
+        var policy = Type("ArchiveMissingReferencePolicy");
+        var parser = policy.GetMethod("ArchivedToolboxReferences", Flags);
+        var record = "Toolbox引用提醒：" + missing + "；Toolbox引用待核对，本次不上传；实例 OWNER/螺钉-1；实际来源 未加载";
+        var parsed = ((IEnumerable)parser.Invoke(null, new object[] { new[] { record,
+            "存档引用提示：" + missing + "；引用文件缺失，未勾选，本次不上传；原有关联保留" } })).Cast<object>().ToArray();
+        TreeCheck(parsed.Length == 1 && (string)Field(parsed[0], "InstancePath") == "OWNER/螺钉-1",
+            "只有明确登记的Toolbox提醒保留其原有实例信息");
+        var advisory = Array.CreateInstance(parsed[0].GetType(), 1);
+        advisory.SetValue(parsed[0], 0);
+        SetField(scope, "HistoricalToolboxReferences", advisory);
+        var plugin = New("PdmAddin");
+        var files = Array.CreateInstance(Type("ControlledOpenFileDto"), 0);
+        var proof = New("PdmAddin+WorkingAssemblyReferenceProof");
+        var direct = new Dictionary<Guid, HashSet<string>> { [documentId] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { missing } };
+        await (Task)TreeCall(plugin, "VerifyArchivedMissingOccurrencesAsync", scope, owner, files, proof, direct, null);
+        TreeCheck(((IEnumerable)Field(proof, "RetainedMissing")).Cast<string>().SequenceEqual(new[] { missing })
+            && ((IEnumerable)Field(proof, "RetainedToolbox")).Cast<object>().Count() == 1,
+            "同一归档父版本的Toolbox缺件只提醒，加载状态变化不触发普通缺件阻断");
+        var unrelated = New("PdmAddin+WorkingAssemblyReferenceProof");
+        direct[documentId].Clear();
+        SetField(scope, "Components", Array.CreateInstance(componentType, 0));
+        await (Task)TreeCall(plugin, "VerifyArchivedMissingOccurrencesAsync", scope, owner, files, unrelated, direct, null);
+        TreeCheck(!((IEnumerable)Field(unrelated, "RetainedMissing")).Cast<string>().Any(),
+            "来自别的装配的提醒不能放行当前父版本没有的引用");
+        Console.WriteLine("PASS: archived Toolbox advisory remains non-blocking and scoped to its saved owner");
     }
 
     private static async Task VerifyArchivedOccurrenceReuseAsync(string root)

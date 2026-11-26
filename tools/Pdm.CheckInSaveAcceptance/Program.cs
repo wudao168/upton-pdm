@@ -390,6 +390,12 @@ internal static partial class Program
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
+  if(args.Length>1&&args[1]=="--archive-registration-sources-regression")
+  {
+   try{OperationRuleScenario(verifyEarlySameNameConflicts:true);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   if(args.Length>1&&args[1]=="--controlled-source-search-regression")
   {
    try{ControlledSourceSearchScenario(args[2]);}
@@ -1043,6 +1049,12 @@ internal static partial class Program
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
+  if(args.Length>1&&args[1]=="--archive-temporary-drawing-close-regression")
+  {
+   try{CommittedArchiveDrawingWindowScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   if(args.Length>1&&(args[1]=="--linked-archive-regression"||args[1]=="--linked-drawing-plan-regression"))
   {
    using(var linkedHost=new Form{Opacity=0,ShowInTaskbar=false})
@@ -1454,7 +1466,7 @@ internal static partial class Program
    if(mode=="loaded-correct"||mode=="loaded-wrong")
    {
     var app=new Proxy(Type("PdmAddin").GetField("application",Flags).FieldType,call=>call.MethodName=="GetType"?Type("PdmAddin").GetField("application",Flags).FieldType:throw new Exception("Unexpected application access "+call.MethodName)).GetTransparentProxy();
-    var scanner=New("SolidWorksReferenceTreeScanner",app);var resolved=(string)Type("SolidWorksReferenceTreeScanner").GetMethod("ResolveComponentPath",Flags).Invoke(scanner,new[]{component});
+    var scanner=New("SolidWorksReferenceTreeScanner",app);var resolved=(string)Type("SolidWorksReferenceTreeScanner").GetMethod("ResolveComponentPath",Flags).Invoke(scanner,new object[]{component,old,null,null});
     if(resolved!=(mode=="loaded-correct"?path:old))throw new Exception("Scanner ignored actual loaded model path");
    }
    Console.WriteLine("PASS: Controlled reference validation "+mode+" F20-disabled="+pathsDisabled);
@@ -1581,7 +1593,7 @@ internal static partial class Program
    foreach(var sameProject in new[]{true,false})
    {
     identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new object[]{partPath,Guid.NewGuid(),sameProject?project:Guid.NewGuid(),Guid.NewGuid(),"W1","hash",4L});
-    var actual=(string)Type("SolidWorksReferenceTreeScanner").GetMethod("ResolveComponentPath",Flags).Invoke(scanner,new[]{component});
+    var actual=(string)Type("SolidWorksReferenceTreeScanner").GetMethod("ResolveComponentPath",Flags).Invoke(scanner,new object[]{component,old,null,null});
     if(actual!=(sameProject?partPath:old))throw new Exception("Unloaded controlled reference binding mismatch");
     Console.WriteLine("PASS: Scanner trusts bound same-project copy only; sameProject="+sameProject);
    }
@@ -2348,7 +2360,7 @@ internal static partial class Program
   public Func<bool,string,bool,int> OnReloadOrReplace;
   public bool ReadOnly=>readOnly;
   readonly System.Type nativeType;readonly List<Delegate> modifyHandlers=new List<Delegate>();readonly List<Delegate> destroyHandlers=new List<Delegate>();readonly List<Delegate> reloadHandlers=new List<Delegate>();
-  public int UpdateStamp=1,CopyError,SelectionCount=2;int heldSelection;public string MemoryPayload="current memory"; public string ActiveConfiguration="Default";
+  public int UpdateStamp=1,CopyError,SelectionCount=2,BlockingState;int heldSelection;public string MemoryPayload="current memory"; public string ActiveConfiguration="Default";
   public readonly Dictionary<string,string> MemoryProperties=new Dictionary<string,string>{{"物料名称","当前内存属性"}};
   public string TypeName{get=>nativeType.FullName;set{}}
   public bool CanCastTo(System.Type type,object obj)=>type.IsAssignableFrom(nativeType)||type.Name=="IModelDoc2"||type.Name=="ModelDoc2"
@@ -2393,6 +2405,7 @@ internal static partial class Program
     case "GetSaveFlag":value=Dirty;break;
     case "IsOpenedViewOnly":value=false;break;
     case "GetUpdateStamp":value=UpdateStamp;break;
+    case "GetBlockingState":value=BlockingState;break;
     case "GetComponents":value=Array.Empty<object>();break;
     case "get_Visible":value=true;break;
     case "ForceReleaseLocks":value=OnForceReleaseLocks?.Invoke()??0;break;

@@ -99,6 +99,9 @@ public sealed record StoredFile(
     string Sha256,
     DateTimeOffset StoredAt);
 
+public sealed record DocumentVersionHeader(Guid Id, Guid DocumentId, RevisionLabel Revision, DocumentVersionStatus Status,
+    string CreatedBy, DateTimeOffset CreatedAt, string ChangeNote);
+
 public sealed record DocumentVersionCommit(
     StoredFile File,
     string ChangeNote,
@@ -190,10 +193,15 @@ public sealed record ControlledOpenManifest(
     IReadOnlyList<string> Warnings)
 {
     public bool UsesLatestModelReferences { get; init; }
+    public string? ReferenceScopeStamp { get; init; }
     public IReadOnlyList<ControlledOpenReferenceIssue> ReferenceIssues { get; init; } = [];
 }
 
-public sealed record ControlledOpenReferenceIssue(string InstancePath, string FileName, string OriginalPath, string Reason);
+public sealed record ControlledOpenReferenceIssue(string InstancePath, string FileName, string OriginalPath, string Reason)
+{
+    public bool IsToolbox { get; init; }
+    public Guid? OwnerDocumentId { get; init; }
+}
 
 public sealed record RegisterDocumentCommand(
     Guid ProjectId,
@@ -618,6 +626,7 @@ public interface IPdmRepository
     Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken);
     Task<PdmDocument> ReserveArchiveDocumentAsync(RegisterDocumentCommand command, string actor, ArchiveRegistrationContext context, CancellationToken cancellationToken);
     Task CancelArchiveRegistrationAsync(Guid batchId, string actor, Guid sessionId, CancellationToken cancellationToken);
+    Task AbandonPreparedArchiveAsync(Guid batchId, Guid projectId, string actor, Guid sessionId, CancellationToken cancellationToken);
     Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken);
     async Task<IReadOnlyDictionary<Guid, Guid>> GetReadableDocumentProjectsAsync(IReadOnlyCollection<Guid> documentIds,
@@ -646,6 +655,15 @@ public interface IPdmRepository
         return result;
     }
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
+    async Task<IReadOnlyList<DocumentVersionHeader>> ListDocumentVersionHeadersAsync(
+        IReadOnlyCollection<Guid> documentIds, CancellationToken cancellationToken)
+    {
+        var headers = new List<DocumentVersionHeader>();
+        foreach (var documentId in documentIds.Distinct())
+            headers.AddRange((await ListDocumentVersionsAsync(documentId, cancellationToken)).Select(version => new DocumentVersionHeader(
+                version.Id, version.DocumentId, version.Revision, version.Status, version.CreatedBy, version.CreatedAt, version.ChangeNote)));
+        return headers;
+    }
     async Task<IReadOnlyList<BomSourceVersionProperties>> ListBomSourceVersionPropertiesAsync(IReadOnlyCollection<Guid> documentIds, CancellationToken ct)
     {
         var results = new List<BomSourceVersionProperties>();

@@ -49,8 +49,13 @@ internal static partial class Program
    Set(drawing,"DrawingViewsRead",true);Set(drawing,"RequiresModelUpdate",true);
    TreeCheck(Classify(part)=="Changed"&&Classify(drawing)=="DrawingUpdate","零件真实修改或配套2D更新被漏掉");Console.WriteLine("PASS: changed 7000093 model and its paired 2D remain actionable while other 213 files stay unchanged");
    var dto=New("ProjectDto");Set(dto,"Id",project);Set(dto,"Code","P700014-1");Set(dto,"Name","AAAA");Set(dto,"CanSubmitArchive",true);var projects=Array.CreateInstance(Type("ProjectDto"),1);projects.SetValue(dto,0);
+   var plugin=New("PdmAddin");SetField(plugin,"availableProjects",projects);SetField(plugin,"currentProjectId",Guid.NewGuid());
+   TreeCheck((Guid?)TreeCall(plugin,"ResolveArchiveProject",Get(root,"FullPath"))==project,"工作区图档的绑定项目优先于其他活动项目");
+   TreeCheck(TreeCall(plugin,"ResolveArchiveProject",Path.Combine(directory,"本地新图.SLDPRT"))==null,"本地新图在范围页选择项目");
    using(var dialog=(Form)New("BatchOperationDialog",root,LinkedItems(nodes.ToArray()),projects,project,"tester",Enum.Parse(Type("BatchOperationKind"),"CheckIn"),null,null,null,false,false,0))
    {
+    var confirm=(Button)Field(dialog,"execute");
+    TreeCheck(confirm.Text=="确认范围并存档"&&!confirm.Enabled,"范围分析前不能直接提交");
     var loader=dialog.GetType().GetProperty("LoadArchiveVersionsAsync",Flags);loader.SetValue(dialog,Delegate.CreateDelegate(loader.PropertyType,typeof(Program).GetMethod("ArchiveRuleVersionLoader",Flags).MakeGenericMethod(Type("CadTreeNode"),Type("DocumentVersionDto"))));
     await (Task)TreeCall(dialog,"AnalyzeArchiveSelectionAsync",true);
     var selected=((IEnumerable)Get(dialog,"SelectedItems")).Cast<object>().Select(item=>Get(item,"Node")).ToArray();
@@ -59,6 +64,11 @@ internal static partial class Program
     Console.WriteLine("PASS: actual 215-file selection checks exactly the modified part and paired drawing; unchanged supplier/import assemblies are disabled");
     dialog.TopLevel=false;host.ClientSize=dialog.ClientSize;host.Controls.Add(dialog);dialog.Show();
     while((bool)Field(dialog,"archiveAnalysisInProgress"))await Task.Delay(5);
+    TreeCheck((Guid?)Get(dialog,"SelectedProjectId")==project&&confirm.Enabled&&dialog.DialogResult!=DialogResult.OK,
+        "当前归属项目和可编辑范围同时显示，等待明确确认");
+    var selector=Field(dialog,"projectSelector");TreeCall(selector,"SelectProject",new object[]{null});
+    TreeCall(dialog,"UpdateWorkflowButtons");TreeCheck(!confirm.Enabled,"清空项目后不能提交已有勾选范围");
+    TreeCall(selector,"SelectProject",project);TreeCall(dialog,"UpdateWorkflowButtons");
     var recheck=(Button)Field(dialog,"recheck");recheck.PerformClick();
     while((bool)Field(dialog,"archiveAnalysisInProgress"))await Task.Delay(5);
     TreeCheck(!dialog.IsDisposed&&dialog.DialogResult!=DialogResult.OK&&((Button)Field(dialog,"execute")).Enabled,"重新检查错误提交或确认按钮仍不可用");

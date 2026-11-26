@@ -46,7 +46,7 @@ onMounted(load)
     </label>
     <p>默认256 MiB，可设置16至512 MiB。限制的是整批提交清单、引用结构和属性数据，不是图纸文件总容量。插件在上传前读取并核对；服务器按提交时的设置校验。</p>
     <div class="archive-warning-actions">
-      <label><input v-model="policy.blockAll" type="checkbox" :disabled="!loaded || !canEdit || pending" />全部已支持的警告阻止存档</label>
+      <label><input v-model="policy.blockAll" type="checkbox" :disabled="!loaded || !canEdit || pending" />对所有可配置警告阻止存档</label>
       <button type="button" :disabled="pending" @click="load">刷新</button>
       <button type="button" :disabled="!loaded || !canEdit || pending" @click="save">保存策略</button>
     </div>
@@ -56,7 +56,7 @@ onMounted(load)
       <thead><tr><th>警告</th><th>依据</th><th>处理方式</th></tr></thead>
       <tbody><tr v-for="item in catalog.filter(item => item.supported)" :key="item.code">
         <td>{{ item.name }}</td><td>{{ item.source }}</td>
-        <td><span v-if="item.alwaysBlocks">始终阻止</span><span v-else-if="!item.supported">暂不支持检测</span>
+        <td><span v-if="item.alwaysBlocks">始终阻止</span><span v-else-if="item.diagnosticOnly">仅记诊断，继续操作</span>
           <select v-else :aria-label="item.name" :value="policy.blockAll || policy.blockingCodes.includes(item.code) ? 'block' : 'warn'"
             :disabled="!loaded || !canEdit || pending || policy.blockAll" @change="setBlocked(item.code, ($event.target as HTMLSelectElement).value === 'block')">
             <option value="warn">仅提示并继续</option><option value="block">阻止存档</option>

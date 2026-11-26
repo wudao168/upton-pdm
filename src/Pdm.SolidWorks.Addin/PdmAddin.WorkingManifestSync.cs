@@ -126,8 +126,8 @@ public sealed partial class PdmAddin
         var newRoot = latest.Files.SingleOrDefault(file => file.DocumentId == latest.RootDocumentId);
         if (oldRoot == null || newRoot == null || oldRoot.VersionId != newRoot.VersionId
             || !WorkingConfigurationMatches(oldRoot, newRoot)) return previous;
-        var rootPath = ControlledReferenceMaterializer.LocalPath(directory, oldRoot);
-        if (!WorkingReuseBindingMatches(rootPath, previous.ProjectId, oldRoot)
+        var rootPath = ControlledReferenceMaterializer.ManifestPath(directory, oldRoot);
+        if (!File.Exists(rootPath) || !WorkingReuseBindingMatches(rootPath, previous.ProjectId, oldRoot)
             || !ControlledReferenceMaterializer.Matches(rootPath, oldRoot)) return previous;
         if (!WorkingReuseFileBytesMatch(oldRoot, newRoot)
             && !WorkingReuseStoredSourceVersionMatches(oldRoot, newRoot,
@@ -147,6 +147,12 @@ public sealed partial class PdmAddin
                 }
                 continue;
             }
+            var currentPath = ControlledReferenceMaterializer.ManifestPath(directory, current);
+            if (!current.IsRoot && !File.Exists(currentPath))
+            {
+                if (before != null) files.Add(before);
+                continue;
+            }
             if (before == null || before.VersionId != current.VersionId)
             {
                 var completed = CompletedWorkingFile(directory, latest, current);
@@ -155,10 +161,10 @@ public sealed partial class PdmAddin
             }
             if (!WorkingManifestConfigurationMatches(latest.RootDocumentId, before, current)
                 || !string.Equals(before.RelativePath ?? before.FileName, current.RelativePath ?? current.FileName, StringComparison.OrdinalIgnoreCase)) return previous;
-            var path = ControlledReferenceMaterializer.LocalPath(directory, before);
+            var path = ControlledReferenceMaterializer.ManifestPath(directory, before);
             // The caller verifies current bytes and any live draft before acquiring.
             // Preserve a child's own unsent edits while refreshing the parent's membership.
-            if (!WorkingReuseBindingMatches(path, previous.ProjectId, before)) return previous;
+            if (!File.Exists(path) || !WorkingReuseBindingMatches(path, previous.ProjectId, before)) return previous;
             if (!WorkingReuseFileBytesMatch(before, current)
                 && !WorkingReuseStoredSourceVersionMatches(before, current,
                     (await apiClient.GetVersionsAsync(current.DocumentId, lifetime.Token)).FirstOrDefault(item => item.Id == current.VersionId))) return previous;

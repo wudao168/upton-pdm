@@ -43,7 +43,7 @@ public static class U9UnitCatalog
         if (Codes.Contains(unit)) return unit;
         return unit.ToUpperInvariant() switch
         {
-            "EA" or "件" or "个" => "001",
+            "EA" or "PCS" or "PC" or "件" or "个" or "只" => "001",
             "台" => "002",
             "盒" => "004",
             "卷" => "005",

@@ -525,6 +525,26 @@ internal sealed class ProjectBrowserDialog : Form
             : mainProjects.SelectedItem == null ? "尚未选择项目" : "请选择图档归属";
     }
 
+    internal bool StandardLibraryDestination { get; private set; }
+
+    internal void ConfigureArchiveDestination(bool allowStandardLibrary)
+    {
+        Text = "选择存档归属";
+        confirm.Text = "选用项目";
+        if (!allowStandardLibrary) return;
+        var buttons = (FlowLayoutPanel)confirm.Parent;
+        ((TableLayoutPanel)buttons.Parent).ColumnStyles[2].SizeType = SizeType.AutoSize;
+        buttons.AutoSize = true;
+        var library = new Button { Text = "选用标准库", AutoSize = true };
+        buttons.Controls.Add(library);
+        library.Click += (_, _) =>
+        {
+            StandardLibraryDestination = true;
+            DialogResult = DialogResult.OK;
+            Close();
+        };
+    }
+
     private void ConfirmProjectSelection()
     {
         if (confirm.Enabled && SelectedProject is { } selected && (!requireSubmissionAccess || selected.CanSubmitArchive))

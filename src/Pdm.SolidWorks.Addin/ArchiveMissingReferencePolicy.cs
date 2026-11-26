@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -9,20 +10,35 @@ namespace Upton.Pdm.SolidWorks;
 internal static class ArchiveMissingReferencePolicy
 {
     internal const string WarningPrefix = "存档引用提示：";
-    private const string ToolboxWarningPrefix = "Toolbox引用提醒：";
+    private const string ToolboxWarningPrefix = ArchiveWarningPolicy.ToolboxReferenceWarningPrefix;
     private const string MissingReason = "引用文件缺失，未勾选，本次不上传";
-    private const string ToolboxReason = "Toolbox引用待核对，本次不上传";
+    private const string ToolboxReason = ArchiveWarningPolicy.ToolboxReferenceWarningReason;
     internal static IEnumerable<string> ArchivedMissingPaths(IEnumerable<string> warnings)
+        => ReadArchivedMissingReferences(warnings).Select(reference => reference.Path);
+
+    internal static IEnumerable<ToolboxReferenceEvidence> ArchivedToolboxReferences(IEnumerable<string> warnings)
+        => ReadArchivedMissingReferences(warnings).Where(reference => reference.Toolbox)
+            .Select(reference => new ToolboxReferenceEvidence(reference.Path, reference.Path, reference.Instance, true));
+
+    private static IEnumerable<(string Path, bool Toolbox, string Instance)> ReadArchivedMissingReferences(IEnumerable<string> warnings)
     {
         foreach (var warning in warnings ?? Array.Empty<string>())
         {
             if (!IsRecordedReferenceWarning(warning)) continue;
-            var start = warning.StartsWith(ToolboxWarningPrefix, StringComparison.Ordinal) ? ToolboxWarningPrefix.Length : WarningPrefix.Length;
+            if (ArchiveWarningPolicy.TryReadToolboxReferenceWarning(warning, out var toolboxPath, out var instance))
+            {
+                yield return (toolboxPath, true, instance);
+                continue;
+            }
+            var toolbox = warning.StartsWith(ToolboxWarningPrefix, StringComparison.Ordinal);
+            var start = toolbox ? ToolboxWarningPrefix.Length : WarningPrefix.Length;
             var end = warning.IndexOf("；" + MissingReason + "；", start, StringComparison.Ordinal);
-            if (end < 0) end = warning.IndexOf("；" + ToolboxReason + "；", start, StringComparison.Ordinal);
+            var toolboxEnd = warning.IndexOf("；" + ToolboxReason + "；", start, StringComparison.Ordinal);
+            if (end < 0) end = toolboxEnd;
             if (end <= start) continue;
             var path = warning.Substring(start, end - start);
-            if (Path.IsPathRooted(path)) yield return path;
+            if (!Path.IsPathRooted(path)) continue;
+            yield return (path, false, string.Empty);
         }
     }
     internal static bool IsRecordedReferenceWarning(string warning) => warning != null
@@ -45,13 +61,11 @@ internal static class ArchiveMissingReferencePolicy
 
     internal static void ReportEarly(CadTreeNode root)
     {
-        var missing = Walk(root).Where(node => node.Status == CadReferenceStatus.Missing)
+        var missing = Walk(root).Where(node => node.Status == CadReferenceStatus.Missing && !node.IsUnverifiedToolboxFallback)
             .GroupBy(node => node.FullPath ?? node.FileName, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
         if (missing.Length == 0) return;
-        ArchiveSession.Current?.SetStage("发现" + missing.Length + "项引用路径待核对；"
-            + (BlockMissingReferences ? "已启用缺失引用阻止选项，确认范围后优先检查。" : "默认仅提示，将按勾选范围存档。"));
         foreach (var node in missing)
-            ArchiveSession.Current?.ReportMissingReference(node.FullPath, node.FileName);
+            PluginDiagnosticLog.Record("存档缺件", node.FileName + "；" + node.FullPath);
     }
 
     internal static void Prepare(CadTreeNode context, IReadOnlyList<CadTreeNode> selected,
@@ -81,10 +95,9 @@ internal static class ArchiveMissingReferencePolicy
     internal static bool TryOmitMissing(CadTreeNode owner, string path, CadTreeNode reference = null)
     {
         if (reference?.IsUnverifiedToolboxFallback == true || owner?.UnverifiedToolboxReferences.Contains(path) == true) return true;
-        if (owner?.ConfirmedArchivePaths == null || owner.ConfirmedArchivePaths.Contains(path) || File.Exists(path)) return false;
-        if (BlockMissingReferences)
-            throw new ArchiveWarningBlockedException("管理员已启用“引用缺失时阻止存档”：" + owner.FileName + " → " + Path.GetFileName(path)
-                + "；路径：" + path + "。尚未上传；请联系管理员核对策略。");
+        if (owner == null || ReferenceEquals(owner, reference)
+            || string.Equals(owner.FullPath, path, StringComparison.OrdinalIgnoreCase)
+            || owner.ConfirmedArchivePaths?.Contains(path) == true || File.Exists(path)) return false;
         Record(owner, path, MissingReason);
         foreach (var node in Walk(owner).Where(node => node != owner && string.Equals(node.FullPath, path, StringComparison.OrdinalIgnoreCase)))
             node.IsOutsideNativeFileScope = true;
@@ -163,6 +176,6 @@ internal static class ArchiveMissingReferencePolicy
         var message = prefix + reason + "；原有关联保留，结构待补全";
         owner.ReferenceWarnings.Add(message);
         PluginDiagnosticLog.Record("引用提示", owner.FileName + "：" + message);
-        ArchiveSession.Current?.SetStage(owner.FileName + "：" + message);
+
     }
 }

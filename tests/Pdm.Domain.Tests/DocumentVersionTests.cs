@@ -1620,6 +1620,17 @@ public sealed class DocumentVersionTests
         var historical = await workflow.CreateControlledOpenManifestAsync(assembly.Id, assemblyVersion.Id, false, false,
             "engineer", UserRole.Administrator, default);
         Assert.Contains(historical.Files, file => file.DocumentId == part.Id && file.Revision == "W1" && file.Sha256 == new string('1', 64));
+
+        Assert.Null(manifest.ReferenceScopeStamp);
+        var firstCheckout = await workflow.CreateControlledOpenManifestAsync(assembly.Id, null, false, true,
+            "engineer", UserRole.Administrator, default, includeReferenceScopeStamp: true);
+        var repeatedCheckout = await workflow.CreateControlledOpenManifestAsync(assembly.Id, null, false, true,
+            "engineer", UserRole.Administrator, default, includeReferenceScopeStamp: true);
+        var newerReferences = await workflow.CreateControlledOpenManifestAsync(assembly.Id, null, false, true,
+            "engineer", UserRole.Administrator, default, resolveLegacyReferences: true, includeReferenceScopeStamp: true);
+        Assert.NotNull(firstCheckout.ReferenceScopeStamp);
+        Assert.Equal(firstCheckout.ReferenceScopeStamp, repeatedCheckout.ReferenceScopeStamp);
+        Assert.NotEqual(firstCheckout.ReferenceScopeStamp, newerReferences.ReferenceScopeStamp);
     }
 
     [Fact]
@@ -1753,7 +1764,8 @@ public sealed class DocumentVersionTests
         drawing = await repository.CheckoutAsync(drawing.Id, "engineer", CancellationToken.None);
         var drawingRoot = new DocumentReferenceNode(
             Guid.NewGuid(), drawing.Id, "P-WITH-DRAWING-DRAWING", drawing.FileName, drawing.Name,
-            DocumentKind.Drawing, "图纸", 1, ReferenceNodeStatus.Normal, drawing.Revision, "engineer", []);
+            DocumentKind.Drawing, "图纸", 1, ReferenceNodeStatus.Normal, drawing.Revision, "engineer", [])
+            { StructureIndexPending = true };
         drawing = (await repository.CheckInVersionAsync(
             drawing.Id,
             "engineer",
@@ -1787,7 +1799,8 @@ public sealed class DocumentVersionTests
         await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "LEGACY-DRAWING", "旧工程图", drawing.FileName, DocumentKind.Drawing, RelatedModelDocumentId: second.Id), "engineer", default);
         drawing = await repository.CheckoutAsync(drawing.Id, "engineer", default);
         var archived = await repository.CheckInVersionAsync(drawing.Id, "engineer", Commit(project, drawing,
-            ReferenceRoot(drawing, "engineer"), new string('9', 64), "旧工程图未记录引用版本"), default);
+            ReferenceRoot(drawing, "engineer") with { StructureIndexPending = true },
+            new string('9', 64), "旧工程图未记录引用版本"), default);
         var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
         await Assert.ThrowsAsync<Application.PdmReferenceVersionConfirmationException>(() => workflow.CreateControlledOpenManifestAsync(drawing.Id, null, false, false, "engineer", UserRole.Engineer, default));
         var confirmed = await workflow.CreateControlledOpenManifestAsync(drawing.Id, null, false, false, "engineer", UserRole.Engineer, default, resolveLegacyReferences: true);
@@ -1796,6 +1809,10 @@ public sealed class DocumentVersionTests
         Assert.Contains(confirmed.Files, file => file.DocumentId == second.Id);
         Assert.NotEmpty(confirmed.Warnings);
         await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CreateControlledOpenManifestAsync(drawing.Id, archived.Version!.Id, false, false, "engineer", UserRole.Engineer, default, resolveLegacyReferences: true));
+        var historical = await workflow.CreateControlledOpenManifestAsync(drawing.Id, archived.Version!.Id,
+            false, false, "engineer", UserRole.Engineer, default, allowMissingComponents: true);
+        Assert.Equal(drawing.Id, Assert.Single(historical.Files).DocumentId);
+        Assert.Contains("未固定关联模型版本", Assert.Single(historical.ReferenceIssues).Reason);
         Assert.Empty((await repository.FindDocumentVersionAsync(drawing.Id, archived.Version!.Id, default))!.ReferenceSnapshot.Children);
     }
 

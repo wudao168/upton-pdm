@@ -171,7 +171,7 @@ public sealed partial class PdmAddin
             && !IsReadOnlyPreviewPath(pair.Key) && !IsHistoricalDerivedPath(pair.Key)
             && pair.Value.Files.Any(file => file.DocumentId == root.DocumentId
                 && string.Equals(file.FileName, root.FileName, StringComparison.OrdinalIgnoreCase)
-                && (!opensCurrentReference || PathsEqual(referencePath, ControlledReferenceMaterializer.LocalPath(pair.Key, file))))
+                && (!opensCurrentReference || PathsEqual(referencePath, ControlledReferenceMaterializer.ManifestPath(pair.Key, file))))
             && (!opensCurrentReference || loadedDocuments.Any(model => PathsEqual(model.GetPathName(),
                 ManagedCadPaths.Resolve(pair.Key, pair.Value.RootRelativePath))))
             && (loaded.Length > 0
@@ -201,11 +201,8 @@ public sealed partial class PdmAddin
             // loaded owner still requires an in-bound existing file and binding.
             if (!WorkingReuseBindingMatches(ControlledReferenceMaterializer.LocalPath(context.Key, owner), requested.ProjectId, owner))
                 throw WorkingModelContextMismatch(owner.FileName);
-            RequireFullAssemblyForControlledOpen(loadedDocuments.FirstOrDefault(model => PathsEqual(model.GetPathName(),
-                ControlledReferenceMaterializer.LocalPath(context.Key, owner))));
         }
-        RequireFullAssemblyForControlledOpen(loadedRoot);
-        if (loadedRoot != null && !string.IsNullOrWhiteSpace(root.Configuration)
+        if (loadedRoot != null && !IsAssemblyInLargeDesignReview(loadedRoot) && !string.IsNullOrWhiteSpace(root.Configuration)
             && !string.Equals(loadedRoot.ConfigurationManager?.ActiveConfiguration?.Name, root.Configuration, StringComparison.OrdinalIgnoreCase))
             throw WorkingModelContextMismatch(root.FileName);
         var contextIds = await VerifiedOpenContextIdsAsync(requested, opensCurrentReference);
@@ -222,6 +219,11 @@ public sealed partial class PdmAddin
         {
             var isContext = contextIds.Contains(file.DocumentId);
             var source = context.Value.Files.FirstOrDefault(candidate => candidate.DocumentId == file.DocumentId);
+            if (isContext && (source == null || !File.Exists(ControlledReferenceMaterializer.ManifestPath(context.Key, source))))
+            {
+                LogOperation("打开所选图档时略过未缓存的环境文件：" + file.FileName);
+                continue;
+            }
             // A manifest stores one file per document. Separate assembly occurrences
             // can use different configurations from those same versioned bytes.
             // Apply the same file identity rule to every open/checkout entry point;
@@ -301,7 +303,8 @@ public sealed partial class PdmAddin
             RootVersionId = releasedPromotionIds.Contains(localRoot.DocumentId) ? localRoot.VersionId : requested.RootVersionId,
             RootRelativePath = localRoot.RelativePath ?? localRoot.FileName,
             RootRevision = releasedPromotionIds.Contains(localRoot.DocumentId) ? localRoot.Revision : requested.RootRevision, Files = files,
-            ReferenceIssues = OpenReferenceFindings.Merge(requested.ReferenceIssues), Warnings = requested.Warnings };
+            ReferenceIssues = OpenReferenceFindings.Merge(requested.ReferenceIssues), Warnings = requested.Warnings,
+            ToolboxWorkspaceFiles = context.Value.Files };
         if (savedAssemblyHashes.ContainsKey(root.DocumentId))
         {
             // Only the active, verified checkout contributes saved additions. Keep this

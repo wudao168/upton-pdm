@@ -7,6 +7,10 @@ public sealed class ArchiveBatchTemporarilyUnavailableException(Exception cause)
 
 public static class ArchiveBatchRules
 {
+    // A terminal marker shares the same unique row and lock as a commit receipt.
+    // A real request hash is hexadecimal, so this value cannot represent a request.
+    public const string AbandonedRequestHash = "abandoned";
+
     public static void ValidateRestoreSession(PdmDocument document, string actor, Guid? expectedSessionId)
     {
         if (document.DeletedAt.HasValue || document.PurgedAt.HasValue || document.State is DocumentLifecycleState.InReview or DocumentLifecycleState.Obsolete)

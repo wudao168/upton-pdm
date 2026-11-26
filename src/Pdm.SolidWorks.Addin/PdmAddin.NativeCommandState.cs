@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
@@ -18,6 +19,7 @@ public sealed partial class PdmAddin
     private IModelDoc2 unknownLoadOwner;
     private string unknownLoadOwnerPath;
     private string pendingOpenPath;
+    private string lastNativeOpenCompletionPath;
     private IModelDoc2 pendingOpenHost;
     private string pendingOpenHostPath;
     private long pendingOpenStarted;
@@ -30,16 +32,9 @@ public sealed partial class PdmAddin
 
     private sealed class ReferenceActivationObservation
     {
-        internal int Epoch, IdleSequence, Count, AssemblyStamp, ReferenceStamp;
+        internal int Epoch, CommandSequence, IdleSequence, Count, AssemblyStamp, ReferenceStamp;
         internal IModelDoc2 Assembly, Reference;
     }
-
-    // swCommands_Circle can remain as the last UI command after a sketch has
-    // closed. It is not an open, insert, or assembly structure command.
-    private const int SketchCircleCommand = 46;
-    // swCommands_Open_Comp_File can remain as the last command when rebuilding
-    // an assembly loads another reference without a matching FileOpenPostNotify.
-    private const int OpenComponentFileCommand = 970;
 
     private int OnNativeDocumentLoaded(string title, string path)
     {
@@ -266,10 +261,13 @@ public sealed partial class PdmAddin
     {
         var epoch = nativeLoadEpoch;
         var sourceCommand = nativeFileOpenCommandId;
-        var confirmAcrossIdle = sourceCommand == SketchCircleCommand || sourceCommand == OpenComponentFileCommand;
+        var commandSequence = nativeCommandSequence;
+        // The last UI command can be left behind when activating an existing assembly loads a reference.
+        // File Open and assembly-editing commands have their own completion checks.
+        var confirmAcrossIdle = sourceCommand > 0 && sourceCommand != 2 && AssemblyStructureOperation(sourceCommand) == null;
         var activationNotified = nativeDocumentLoadedEpoch == epoch && nativeActivationCompletedEpoch == epoch;
         bool Proof() => nativeFileOpenInProgress != 0
-            && nativeFileOpenCommandId == sourceCommand
+            && nativeFileOpenCommandId == sourceCommand && nativeCommandSequence == commandSequence
             && (confirmAcrossIdle || sourceCommand == 0 && activationNotified)
             && pendingOpenIdleEpoch == epoch && nativeLoadEpoch == epoch && unknownAddedEpoch == 0 && !unknownRemovalObserved
             && NativeInsertionEvidenceAllowed();
@@ -286,9 +284,15 @@ public sealed partial class PdmAddin
             lock (activeTreeCacheSync)
                 if (!activeTreeCache.Values.Any(entry => PathsEqual(DocumentIdentity(entry.Tree), path)
                     && (!confirmAcrossIdle || entry.Tree.Kind == CadDocumentKind.Assembly))) return false;
-            if (!controlledOpenManifests.Any(context => context.Value.Files.Any(file => file.IsRoot
-                    && PathsEqual(ControlledReferenceMaterializer.LocalPath(context.Key, file), path))
-                && context.Value.Files.Any(file => PathsEqual(ControlledReferenceMaterializer.LocalPath(context.Key, file), pendingOpenPath)))) return false;
+            if (!controlledOpenManifests.Any(context =>
+            {
+                if (!context.Value.Files.Any(file => file.IsRoot
+                    && PathsEqual(ControlledReferenceMaterializer.ManifestPath(context.Key, file), path))) return false;
+                // An unloaded sibling in the inventory is not evidence of an open request.
+                var declaredPaths = new HashSet<string>(context.Value.Files.Select(file =>
+                    ControlledReferenceMaterializer.ManifestPath(context.Key, file)), StringComparer.OrdinalIgnoreCase);
+                return declaredPaths.Contains(pendingOpenPath) && pendingNativeOpenPaths.IsSubsetOf(declaredPaths);
+            })) return false;
             var loaded = application.GetOpenDocumentByName(pendingOpenPath) as IModelDoc2;
             if (loaded == null || !PathsEqual(loaded.GetPathName(), pendingOpenPath) || loaded.GetBlockingState() != 0) return false;
             var stamp = active.GetUpdateStamp();
@@ -305,13 +309,13 @@ public sealed partial class PdmAddin
                 // document-load/activation events. Confirm the same objects, stamps
                 // and document count on two separate native idle notifications.
                 var prior = referenceActivationObservation;
-                if (prior == null || prior.Epoch != epoch || prior.Count != count
+                if (prior == null || prior.Epoch != epoch || prior.CommandSequence != commandSequence || prior.Count != count
                     || prior.AssemblyStamp != stamp || prior.ReferenceStamp != referenceStamp
                     || !ReferenceEquals(prior.Assembly, active) || !ReferenceEquals(prior.Reference, loaded))
                 {
                     referenceActivationObservation = new ReferenceActivationObservation
                     {
-                        Epoch = epoch, IdleSequence = nativeIdleSequence, Count = count,
+                        Epoch = epoch, CommandSequence = commandSequence, IdleSequence = nativeIdleSequence, Count = count,
                         Assembly = active, AssemblyStamp = stamp, Reference = loaded, ReferenceStamp = referenceStamp
                     };
                     return false;

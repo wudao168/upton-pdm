@@ -182,7 +182,7 @@ public sealed partial class PdmAddin
         }
         manifest.ReferenceIssues = OpenReferenceFindings.Merge((manifest.ReferenceIssues ?? new List<OpenReferenceIssueDto>())
             .Concat(new[] { new OpenReferenceIssueDto { FileName = Path.GetFileName(source), OriginalPath = source,
-                InstancePath = Path.GetFileName(owner), Reason = toolbox == null ? "存档基准中的引用文件缺失，已保留原引用，未猜测替代文件。"
+                InstancePath = Path.GetFileName(owner), IsToolbox = toolbox != null, Reason = toolbox == null ? "存档基准中的引用文件缺失，已保留原引用，未猜测替代文件。"
                     : "Toolbox原文件缺失，已核对存档模板的配置并保留原引用。" } }));
         LogOperation("已核对存档原有缺失引用，未认定为本次编辑新增：" + source);
     }

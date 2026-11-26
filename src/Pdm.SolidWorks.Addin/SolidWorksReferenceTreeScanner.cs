@@ -1116,6 +1116,19 @@ internal sealed class SolidWorksReferenceTreeScanner
 
     public void UpdateDrawingReferences(IModelDoc2 document, CadTreeNode drawing)
     {
+        try { ReadDrawingViews(document, drawing); }
+        catch (System.Runtime.InteropServices.COMException error)
+        {
+            drawing.DrawingViewsRead = false;
+            drawing.HasUnresolvedDrawingViews = true;
+            drawing.StructureIndexPending = true;
+            PluginDiagnosticLog.Record("工程图视图待补读", drawing.FullPath + "：" + error);
+            ArchiveWarningGate.Record(drawing, "DrawingOutOfSync", "工程图视图未完整读取，保留当前图纸及已知模型关联。");
+        }
+    }
+
+    private void ReadDrawingViews(IModelDoc2 document, CadTreeNode drawing)
+    {
         if (document?.GetType() != (int)swDocumentTypes_e.swDocDRAWING) return;
         var inheritedScope = drawing.NativeFileScopePaths;
         var missingDrawingRoot = inheritedScope != null && !inheritedScope.Contains(drawing.FullPath);
@@ -1123,6 +1136,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             || !File.Exists(drawing.FullPath)))
             throw new InvalidOperationException("当前打开的工程图与待存档图档路径不一致，未更新工程图引用：" + drawing.FileName);
         drawing.DrawingViewsRead = false;
+        drawing.HasUnresolvedDrawingViews = false;
         var expectedModels = drawing.ReferencedModels.ToArray();
         var references = new List<CadTreeNode>();
         var sheets = (document as IDrawingDoc)?.GetViews() as object[];
@@ -1130,7 +1144,8 @@ internal sealed class SolidWorksReferenceTreeScanner
             || ((object[])sheet).Skip(1).Any(view => !(view is IView))))
         {
             drawing.StructureIndexPending = true;
-            PluginDiagnosticLog.Record("工程图结构待补全", drawing.FileName + "：视图尚未完整读取，保留文件及原有关联。");
+            drawing.HasUnresolvedDrawingViews = true;
+            ArchiveWarningGate.Record(drawing, "MissingFile", "工程图视图未完整读取，保留已保存图纸及视图。");
             return;
         }
         drawing.StructureIndexPending = false;
@@ -1139,6 +1154,12 @@ internal sealed class SolidWorksReferenceTreeScanner
             var loaded = view.ReferencedDocument as IModelDoc2;
             var path = loaded?.GetPathName();
             if (string.IsNullOrWhiteSpace(path)) path = view.GetReferencedModelName();
+            if (loaded == null && (string.IsNullOrWhiteSpace(path) || !File.Exists(path)))
+            {
+                drawing.HasUnresolvedDrawingViews = true;
+                drawing.StructureIndexPending = true;
+                ArchiveWarningGate.Record(drawing, "MissingFile", "视图“" + view.Name + "”的关联模型未解析，保留已保存视图。");
+            }
             if (!string.IsNullOrWhiteSpace(path))
             {
                 var configuration = view.ReferencedConfiguration ?? "默认";

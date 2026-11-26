@@ -62,6 +62,45 @@ internal static partial class Program
             Console.WriteLine("PASS: Same-document rebuild preserves selection/expansion; another document resets selection");
         }
 
+        using (var fixture = new TreeRefreshFixture(host))
+        {
+            await fixture.WaitForTree();
+            var assembly = fixture.Root;
+            var folder = System.IO.Path.GetDirectoryName(fixture.Path);
+            var partPath = System.IO.Path.Combine(folder, "part.SLDPRT");
+            var part = New("CadTreeNode");
+            Set(part, "FullPath", partPath);
+            Set(part, "FileName", "part.SLDPRT");
+            TreeCall(fixture.Plugin, "CacheActiveTree", fixture.Path + "\n", assembly, (Guid?)null);
+            SetField(fixture.Plugin, "currentTree", part);
+            SetField(fixture.Plugin, "currentDocumentIdentity", partPath);
+            TreeCall(fixture.Pane, "SetTree", part);
+            await fixture.WaitForTree();
+            var json = new JavaScriptSerializer();
+            var manifest = json.Deserialize(json.Serialize(new
+            {
+                files = new[] {
+                    new { fileName = "absent.SLDPRT", relativePath = "absent.SLDPRT", revision = "V1" },
+                    new { fileName = "root.SLDASM", relativePath = "root.SLDASM", revision = "V2" } }
+            }), Type("ControlledOpenManifestDto"));
+            ((IDictionary)Field(fixture.Plugin, "controlledOpenManifests")).Add(folder, manifest);
+            var modelClass = Type("PdmAddin").GetField("application", Flags).FieldType.Assembly
+                .GetType("SolidWorks.Interop.sldworks.ModelDoc2", true);
+            var active = new Proxy(modelClass, call =>
+            {
+                if (call.MethodName == "GetPathName") return fixture.Path;
+                if (call.MethodName == "GetSaveFlag") return false;
+                throw new InvalidOperationException("切换窗口时不应解析模型：" + call.MethodName);
+            }).GetTransparentProxy();
+            var generation = fixture.Generation;
+            TreeCall(fixture.Plugin, "RefreshPassiveTree", active, false);
+            await fixture.WaitForTree();
+            TreeCheck(ReferenceEquals(Field(fixture.Plugin, "currentTree"), assembly)
+                && (string)Get(assembly, "CurrentRevision") == "V2" && fixture.Generation > generation,
+                "缺失的旁支文件阻止了总装设计树切换");
+            Console.WriteLine("PASS: 从零件切回总装立即换树，未缓存的旁支不阻止显示");
+        }
+
         foreach (var gate in new[] { "batchDialogInProgress", "refreshSuppressionDepth", "workspaceOperationInProgress" })
         using (var fixture = new TreeRefreshFixture(host))
         {

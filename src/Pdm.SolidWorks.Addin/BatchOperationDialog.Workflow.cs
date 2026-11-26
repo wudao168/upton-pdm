@@ -7,6 +7,9 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed partial class BatchOperationDialog
 {
+    private const string ArchiveConfirmCaption = "确认范围并存档";
+    internal static int ArchiveConfirmExtraWidth(System.Drawing.Font font) =>
+        Math.Max(0, TextRenderer.MeasureText(ArchiveConfirmCaption, font).Width + 12 - 80);
     private Control workflowHeader;
     private Control workflowSelectors;
     private bool workflowDisplayOnly;
@@ -38,8 +41,9 @@ internal sealed partial class BatchOperationDialog
     {
         if (workflowHeader == null || IsDisposed) return;
         var busy = workflowDisplayOnly;
-        execute.Text = acquire.Checked ? "获取权限" : "确认存档";
+        execute.Text = acquire.Checked ? "获取权限" : ArchiveConfirmCaption;
         execute.Enabled = !workflowFinished && !archiveAnalysisInProgress && !busy
+            && (!checkIn.Checked || ArchiveToStandardLibrary || archiveAnalysisReady && projectSelector.SelectedProject?.CanSubmitArchive == true)
             && SelectedItems.Any(item => !IsEmbedded(item.Node) && CanSelectNode(item.Node));
         recheck.Enabled = !workflowFinished && !busy && !archiveAnalysisInProgress && checkIn.Checked && !ArchiveToStandardLibrary;
     }
@@ -48,6 +52,8 @@ internal sealed partial class BatchOperationDialog
     {
         CancelArchiveAnalysis();
         workflowDisplayOnly = true;
+        workflowSelectors.Enabled = true;
+        files.Enabled = true;
         workflowHeader.Enabled = false;
         foreach (var button in workflowSelectors.Controls.OfType<Button>()) button.Enabled = false;
         showCheckedOnly.Enabled = showUncheckedOnly.Enabled = true;

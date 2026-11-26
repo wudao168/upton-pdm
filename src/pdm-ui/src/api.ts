@@ -3611,7 +3611,7 @@ export const saveStockedMaterialSettings = (settings: import('./stockedMaterials
   requestJson<import('./stockedMaterials').StockedMaterialSettingsView>('/api/stocked-materials/settings', { method: 'PUT', body: JSON.stringify({ settings, expectedRowVersion }) }, token)
 
 export interface ArchiveWarningPolicy { revision: number; blockAll: boolean; blockingCodes: string[]; maxBatchRequestMiB?: number | null }
-export interface ArchiveWarningDefinition { code: string; name: string; source: string; supported: boolean; alwaysBlocks: boolean }
+export interface ArchiveWarningDefinition { code: string; name: string; source: string; supported: boolean; alwaysBlocks: boolean; diagnosticOnly?: boolean }
 export const getArchiveWarningPolicy = (token: string) => requestJson<ArchiveWarningPolicy>('/api/archive-warning-policy', {}, token)
 export const getArchiveWarningCatalog = (token: string) => requestJson<ArchiveWarningDefinition[]>('/api/archive-warning-policy/catalog', {}, token)
 export const saveArchiveWarningPolicy = (policy: ArchiveWarningPolicy, token: string) => requestJson<ArchiveWarningPolicy>('/api/archive-warning-policy', { method: 'PUT', body: JSON.stringify(policy) }, token)

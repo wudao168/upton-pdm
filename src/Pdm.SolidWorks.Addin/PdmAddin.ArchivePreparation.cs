@@ -18,33 +18,17 @@ public sealed partial class PdmAddin
         IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> cards,
         IReadOnlyDictionary<string, IReadOnlyList<string>> configurations = null)
     {
-        // A confirmed missing native configuration blocks; a temporarily unreadable
-        // configuration index remains pending without discarding the native file.
-        if (node.Kind != CadDocumentKind.Drawing && configurations != null
-            && configurations.TryGetValue(node.FullPath, out var referenced))
-            foreach (var configuration in referenced.Where(value => !string.Equals(value, node.Configuration, StringComparison.OrdinalIgnoreCase)))
-                if (string.IsNullOrWhiteSpace(configuration) || document.GetConfigurationByName(configuration) == null)
-                {
-                    string[] available = null;
-                    try { available = (document.GetConfigurationNames() as Array)?.Cast<object>().Select(Convert.ToString).ToArray(); }
-                    catch (Exception error) { LogDiagnostic("配置目录暂未读取：" + node.FileName, error); }
-                    if (!string.IsNullOrWhiteSpace(configuration) && available?.Length > 0
-                        && !available.Contains(configuration, StringComparer.OrdinalIgnoreCase))
-                        throw new InvalidOperationException("文件“" + node.FileName + "”确实不存在引用配置“" + configuration + "”，请补齐配置或修正引用后再存档。本地文件和修改均已保留。");
-                    node.StructureIndexPending = true;
-                    archiveWarnings.Add("文件“" + node.FileName + "”的引用配置“" + configuration + "”待核对；原生文件继续存档，未自动替换配置，补全前不能正式发布。");
-                }
-        try
-        {
-            return MergeReferencedConfigurationProperties(document, node,
-                ReadCheckInProperties(document, node, useCached: true, nativePropertyCards: cards, requireComplete: true), configurations);
-        }
-        catch (Exception error)
-        {
-            LogDiagnostic("自定义属性读取失败，未继续存档：" + node.FullPath, error);
-            throw new InvalidOperationException("未能完整读取图档自定义属性：" + node.FileName
-                + "。本批尚未上传，原文件和修改已保留；请核对该图档的自定义属性及读取权限，技术原因已记入诊断日志。", error);
-        }
+        var scopes = SavedPropertyConfigurations(node);
+        if (configurations != null && configurations.TryGetValue(node.FullPath, out var additional))
+            scopes.UnionWith(additional.Where(name => !string.IsNullOrWhiteSpace(name)));
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        ReadArchivePropertyScopes(document, node, scopes, values);
+        var card = ResolveActiveNativePropertyCard(node, cards ?? DiscoverNativePropertyCards());
+        if (card?.IsAvailable == true)
+            foreach (var field in card.Fields)
+                Upton.Pdm.Domain.CadPropertyCardSnapshot.AddField(values, field.PropertyName,
+                    field.ConfigurationSpecific && node.Kind != CadDocumentKind.Drawing);
+        return values;
     }
 
     private Task PrepareArchiveSnapshotsAsync(IEnumerable<PreparedArchiveFile> files,
@@ -106,32 +90,93 @@ public sealed partial class PdmAddin
         ThrowArchivePreflightFailures(failures);
     }
 
-    private static IReadOnlyDictionary<string, string> MergeReferencedConfigurationProperties(
-        IModelDoc2 document, CadTreeNode node, IReadOnlyDictionary<string, string> primary,
-        IReadOnlyDictionary<string, IReadOnlyList<string>> referencedConfigurations)
+    // Only used around optional native metadata calls. File identity and source-byte checks have their own failure path.
+    private static bool IsPropertyReadError(Exception error) => error is System.Runtime.InteropServices.COMException
+        || error is InvalidOperationException || error is IOException || error is ArgumentException || error is UnauthorizedAccessException;
+
+    private static bool ReadArchivePropertyScopes(IModelDoc2 document, CadTreeNode node, HashSet<string> configurations,
+        IDictionary<string, string> values)
     {
-        if (node.Kind == CadDocumentKind.Drawing || referencedConfigurations == null
-            || !referencedConfigurations.TryGetValue(node.FullPath, out var configurations)) return primary;
-        var merged = primary.ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
-        foreach (var configuration in configurations.Distinct(StringComparer.OrdinalIgnoreCase)
-            .Where(configuration => !string.Equals(configuration, node.Configuration, StringComparison.OrdinalIgnoreCase)))
+        bool complete = true;
+        void Pending(string scope, Exception error)
         {
-            var prefix = "配置:" + configuration + "/";
-            foreach (var entry in ReadModelProperties(document, configuration, useCached: true, requireComplete: true)
-                .Where(entry => entry.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
-                merged[entry.Key] = entry.Value;
+            complete = false;
+            LogDiagnostic("属性待补读：" + node.FileName + "；" + scope, error);
         }
-        return merged;
+        if (node.Kind == CadDocumentKind.Drawing) configurations.Clear();
+        else if (configurations.Count == 0)
+        {
+            try
+            {
+                var active = document.ConfigurationManager?.ActiveConfiguration?.Name;
+                if (!string.IsNullOrWhiteSpace(active)) configurations.Add(active);
+                else Pending("当前配置", new InvalidOperationException("未返回当前配置名称"));
+            }
+            catch (Exception error) when (IsPropertyReadError(error)) { Pending("当前配置", error); }
+        }
+        Array available = null;
+        if (configurations.Count > 0)
+        {
+            try { available = document.GetConfigurationNames() as Array; }
+            catch (Exception error) when (IsPropertyReadError(error)) { Pending("配置目录", error); }
+            if (available == null || available.Length == 0) complete = false;
+        }
+        foreach (var configuration in new[] { string.Empty }.Concat(configurations))
+        {
+            var scope = configuration.Length == 0 ? "全局" : "配置:" + configuration;
+            try
+            {
+                if (configuration.Length != 0 && available?.Length > 0 && !available.Cast<object>()
+                    .Any(name => string.Equals(Convert.ToString(name), configuration, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ArchiveWarningGate.Record(node, "MissingConfiguration", "引用配置“" + configuration + "”不存在。");
+                    continue;
+                }
+                ReadPropertyManager(document.Extension?.CustomPropertyManager[configuration], scope, values, true, true,
+                    (key, error) => Pending(key, error));
+            }
+            catch (Exception error) when (IsPropertyReadError(error))
+            { Pending(scope, error); }
+        }
+        values[CustomPropertiesReadMarker] = complete ? "1" : "0";
+        values[CustomPropertyConfigurationsMarker] = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(
+            configurations.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray());
+        RecordArchivePropertyReadResult(node, complete);
+        return complete;
     }
 
-    private static IReadOnlyDictionary<string, string> PreserveInspectedConfigurationProperties(
-        CadTreeNode node, IReadOnlyDictionary<string, string> prepared, IReadOnlyDictionary<string, string> inspected)
+    private static void RecordArchivePropertyReadResult(CadTreeNode node, bool complete)
     {
-        if (node.Kind == CadDocumentKind.Drawing || inspected == null) return prepared;
-        var primary = "配置:" + node.Configuration + "/";
-        var merged = prepared.ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in inspected.Where(entry => entry.Key.StartsWith("配置:", StringComparison.OrdinalIgnoreCase)
-            && !entry.Key.StartsWith(primary, StringComparison.OrdinalIgnoreCase))) merged[entry.Key] = entry.Value;
+        node.ReferenceWarnings.RemoveAll(value => value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal));
+        if (!complete)
+            node.ReferenceWarnings.Add(DrawingPropertyIndexWarning + "部分属性未能核实，已读值保留，其余待补读。");
+    }
+
+    private IReadOnlyDictionary<string, string> PreserveInspectedCustomProperties(
+        PreparedArchiveFile file, IReadOnlyDictionary<string, string> inspected)
+    {
+        if (!HasNativeArchiveCustomProperties(file.Node)) return file.Properties;
+        var merged = file.Properties.ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+        var configurationPrefixes = SavedPropertyConfigurations(file.Node).Select(name => "配置:" + name + "/").ToArray();
+        // The API overlays submitted values on reused file metadata. Clear removed
+        // fields in the scopes we inspected, even when the native file has no fields.
+        var baselineKeys = merged.Keys.Concat(file.Latest?.PropertySnapshot?.Keys ?? Enumerable.Empty<string>())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var pending = inspected.TryGetValue(CustomPropertiesReadMarker, out var marker) && marker == "0";
+        foreach (var key in baselineKeys)
+            if (!inspected.ContainsKey(key) && (key.StartsWith("全局/", StringComparison.OrdinalIgnoreCase)
+                || configurationPrefixes.Any(prefix => key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))))
+            {
+                if (!pending) merged[key] = string.Empty;
+                else if (file.Latest?.PropertySnapshot != null && file.Latest.PropertySnapshot.TryGetValue(key, out var prior))
+                    merged[key] = prior;
+            }
+
+        foreach (var entry in inspected)
+            if (entry.Key.StartsWith("全局/", StringComparison.OrdinalIgnoreCase)
+                || entry.Key.StartsWith("配置:", StringComparison.OrdinalIgnoreCase)
+                || entry.Key == CustomPropertiesReadMarker || entry.Key == CustomPropertyConfigurationsMarker)
+                merged[entry.Key] = entry.Value;
         return merged;
     }
 

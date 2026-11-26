@@ -30,7 +30,7 @@ internal static class ArchiveWarningGate
         {
             node.ReferenceWarnings.Add(message);
             PluginDiagnosticLog.Record("存档警告", node.FileName + "：" + message);
-            ArchiveSession.Current?.SetStage(node.FileName + "：" + message);
+            if (!ArchiveWarningPolicy.IsReferenceDiagnostic(code)) ArchiveSession.Current?.SetStage(node.FileName + "：" + message);
         }
     }
 }

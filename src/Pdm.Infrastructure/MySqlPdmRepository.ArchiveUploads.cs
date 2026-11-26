@@ -33,6 +33,27 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("暂存文件已过期或不属于当前存档批次，请重新存档。");
     }
 
+    private static async Task AdoptArchiveUploadsAsync(DbConnection connection, DbTransaction transaction,
+        IEnumerable<DocumentCheckInResult> results, CancellationToken cancellationToken)
+    {
+        foreach (var files in results.Where(result => result.VersionCreated && result.Version is not null).Chunk(100))
+        {
+            var parameters = new DynamicParameters();
+            var keys = new string[files.Length];
+            for (var index = 0; index < files.Length; index++)
+            {
+                var result = files[index];
+                parameters.Add($"Id{index}", result.Document.Id);
+                parameters.Add($"Path{index}", result.Version!.StorageRelativePath.Replace('\\', '/'));
+                keys[index] = $"(@Id{index},@Path{index})";
+            }
+
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE archive_upload SET state='Adopted' WHERE (document_id,relative_path) IN (" + string.Join(",", keys) + ")",
+                parameters, transaction, cancellationToken: cancellationToken));
+        }
+    }
+
     public async Task<IReadOnlyList<ArchiveUploadCleanup>> ClaimExpiredArchiveUploadsAsync(int limit, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

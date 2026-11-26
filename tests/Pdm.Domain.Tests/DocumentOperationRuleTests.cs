@@ -43,6 +43,34 @@ public sealed class DocumentOperationRuleTests
     }
 
     [Fact]
+    public async Task ArchivedToolboxDiagnosticTravelsWithItsOwnerWithoutAddingAnExternalFile()
+    {
+        var repository = BusinessTestRepository.Create(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("QA-TOOLBOX", "标准件诊断", "admin", "vault", "release"), "admin", default);
+        var session = Guid.NewGuid();
+        var assembly = await ArchiveBatchTests.Register(repository, project, "OWNER", DocumentKind.Assembly, session);
+        const string toolbox = @"C:\旧目录\FASTENER.SLDPRT";
+        var warning = $"Toolbox引用提醒：{toolbox}；Toolbox引用待核对，本次不上传；实例 OWNER/螺钉-1；实际来源 未加载";
+        var node = ArchiveBatchTests.Node(assembly) with
+        {
+            ReferenceWarnings = [warning, @"存档引用提示：C:\旧目录\普通零件.SLDPRT；引用文件缺失，未勾选，本次不上传；原有关联保留"]
+        };
+        await repository.CheckInVersionAsync(assembly.Id, "admin", session, ArchiveBatchTests.Commit(project, assembly, node, 'A', true), default);
+        var workflow = new PdmWorkflowService(repository, new MetadataStorage(), new AtomicReleasePackagePublisher(TimeProvider.System), TimeProvider.System);
+        var manifest = await workflow.CreateControlledOpenManifestAsync(assembly.Id, null, false, false, "admin", UserRole.Administrator, default);
+        Assert.Equal(assembly.Id, Assert.Single(manifest.Files).DocumentId);
+        var diagnostic = Assert.Single(manifest.ReferenceIssues, issue => issue.IsToolbox);
+        var missingPart = Assert.Single(manifest.ReferenceIssues, issue => !issue.IsToolbox);
+        Assert.Equal(assembly.Id, missingPart.OwnerDocumentId);
+        Assert.Contains("普通零件.SLDPRT", missingPart.Reason);
+        Assert.True(diagnostic.IsToolbox);
+        Assert.Equal(assembly.Id, diagnostic.OwnerDocumentId);
+        Assert.Equal(toolbox, diagnostic.OriginalPath);
+        Assert.Equal("OWNER/螺钉-1", diagnostic.InstancePath);
+        Assert.Null(ArchiveWarningPolicy.CodeOf(warning));
+    }
+
+    [Fact]
     public async Task PartialIndexArchivesFileAndFinishesFollowupWithoutRemovingExistingBom()
     {
         var repository = global::Upton.Pdm.Domain.Tests.BusinessTestRepository.Create(TimeProvider.System);

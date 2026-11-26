@@ -328,7 +328,7 @@ public sealed partial class PdmAddin
         }
         if (changed.Count == 0) return;
         var paths = new HashSet<string>(changed.Select(group => group.Key), StringComparer.OrdinalIgnoreCase);
-        var closing = DiscardAffectedDocuments(paths);
+        DiscardAffectedDocuments(paths);
         var stagingId = Guid.NewGuid().ToString("N");
         var staging = Path.Combine(Path.GetTempPath(), "UPLM", "discard-restore", stagingId);
         var restoreFiles = new Dictionary<Guid, string>();
@@ -350,7 +350,7 @@ public sealed partial class PdmAddin
             editJournal.ValidateDiscardedFile(entry, restoreFiles[entry.DocumentId], file.Sha256);
             PlanDiscardWorkingReferences(restoreFiles[entry.DocumentId], entry.SourcePath, manifest, selectedWorkingPaths);
         }
-        closing = DiscardAffectedDocuments(paths); // CAD state may change while HTTP is pending.
+        var (closing, retained) = PlanDiscardWindows(paths); // CAD state may change while HTTP is pending.
         var ambiguous = CaptureLoadedDocumentSnapshots().GroupBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault(group => group.Select(item => item.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1
                 && closing.Any(item => string.Equals(item.Title, group.Key, StringComparison.OrdinalIgnoreCase)));
@@ -358,7 +358,8 @@ public sealed partial class PdmAddin
             throw new IOException("同名图档的工作路径不唯一，未按标题关闭任何窗口；待恢复记录已保留：" + ambiguous.Key);
         var previousWindows = CapturePlmOpenWindows();
         var closingPaths = new HashSet<string>(closing.Select(document => document.Path), StringComparer.OrdinalIgnoreCase);
-        PreserveReadOnlyContextStates(closing.Where(item => !paths.Contains(item.Path)));
+        // Closing an owner can unload hidden references in sibling branches.
+        PreserveReadOnlyContextStates(retained);
         foreach (var document in closing.OrderByDescending(item => item.DocumentType == (int)swDocumentTypes_e.swDocASSEMBLY))
         {
             application.CloseDoc(document.Title);
@@ -708,6 +709,9 @@ public sealed partial class PdmAddin
     }
 
     private LoadedDocumentSnapshot[] DiscardAffectedDocuments(HashSet<string> discarded)
+        => PlanDiscardWindows(discarded).Closing;
+
+    private (LoadedDocumentSnapshot[] Closing, LoadedDocumentSnapshot[] Retained) PlanDiscardWindows(HashSet<string> discarded)
     {
         var snapshots = CaptureLoadedDocumentSnapshots();
         var models = (application?.GetDocuments() as Array)?.OfType<IModelDoc2>().ToArray() ?? Array.Empty<IModelDoc2>();
@@ -723,12 +727,13 @@ public sealed partial class PdmAddin
         }
         var affected = new HashSet<string>(closing, StringComparer.OrdinalIgnoreCase);
         foreach (var owner in closing.Where(references.ContainsKey)) affected.UnionWith(references[owner]);
-        var dirty = snapshots.FirstOrDefault(item => affected.Contains(item.Path) && !discarded.Contains(item.Path)
-            && item.HasUnsavedChanges && (!item.HasDiscardableReadOnlySaveFlag || !closing.Contains(item.Path)));
+        var dirtyContext = snapshots.Where(item => affected.Contains(item.Path) && !discarded.Contains(item.Path)
+            && item.HasUnsavedChanges).ToArray();
+        var dirty = dirtyContext.FirstOrDefault(item => !item.HasDiscardableReadOnlySaveFlag);
         if (dirty != null)
             throw new InvalidOperationException("本地恢复暂不能继续，关联图档仍有未保存状态：" + dirty.Title
                 + "。请先保留并处理该图档的修改后重试；当前窗口和文件均保留。");
-        return snapshots.Where(item => closing.Contains(item.Path)).ToArray();
+        return (snapshots.Where(item => closing.Contains(item.Path)).ToArray(), dirtyContext);
     }
 
     private static string[] LoadedModelReferencePaths(IModelDoc2 model)

@@ -41,7 +41,7 @@ public sealed partial class PdmAddin
             || !VersionMatchesLocalFile(latest, node.FullPath, sourceHash ?? ComputeRegistrationFileHash(node)))
             ReadAvailableSavedPropertyIndex(node, properties,
                 MemoryCopy(node)?.SourceHash ?? sourceHash ?? ComputeRegistrationFileHash(node), requireExactPath);
-        node.ReferenceWarnings.RemoveAll(value => value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal));
+        RecordArchivePropertyReadResult(node, HasReadCustomProperties(properties, node));
         properties["FileName"] = node.FileName;
         properties["Extension"] = Path.GetExtension(node.FullPath);
         properties["LastWriteTimeUtc"] = new FileInfo(node.FullPath).LastWriteTimeUtc.ToString("o");
@@ -71,6 +71,9 @@ public sealed partial class PdmAddin
         return configurations;
     }
 
+    private static bool HasNativeArchiveCustomProperties(CadTreeNode node) =>
+        IsNativeModelReference(node.FullPath) || string.Equals(Path.GetExtension(node.FullPath), ".SLDDRW", StringComparison.OrdinalIgnoreCase);
+
     private async Task<IReadOnlyDictionary<string, string>> ReadBatchArchivePreflightPropertiesAsync(CadTreeNode node,
         IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> nativePropertyCards,
         IReadOnlyDictionary<string, IReadOnlyList<string>> referenceConfigurations, DocumentVersionDto latest,
@@ -80,25 +83,27 @@ public sealed partial class PdmAddin
         {
             return ReadArchivePreflightPropertiesCore(node, nativePropertyCards, referenceConfigurations, latest, sourceHash);
         }
-        catch (ArchiveSavedPropertyPathConflictException conflict) when (MemoryCopy(node) == null
+        catch (ArchiveSavedPropertyPathConflictException) when (MemoryCopy(node) == null
             && node.Status != CadReferenceStatus.Virtual
-            && (CanArchiveSavedModelBytes(node, false) || CanArchiveSavedDrawingBytes(node, false, sourceHash)))
+            && (CanArchiveSavedModelBytes(node, false) || CanArchiveSavedDrawingBytes(node, false, sourceHash)
+                || ((node.Role == CadReferenceRole.ExternalFileDependency || node.HistoricalRepair != null) && HasNativeArchiveCustomProperties(node))))
         {
             ArchiveSession.Current?.ReportFile(0, 0, node.FileName, "发现不同路径的同名图档，正在独立会话中读取所选文件的属性…");
             try
             {
                 var properties = await ArchiveNativeProcessWorkspace.ReadSavedPropertiesAsync(application, node.FullPath,
                     (int)node.Kind, SavedPropertyConfigurations(node).ToArray(), sourceHash, null, token);
-                if (!HasReadCustomProperties(properties, node))
-                    throw new InvalidOperationException("独立会话未返回完整的图档属性。");
-                node.ReferenceWarnings.RemoveAll(value => value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal));
+                RecordArchivePropertyReadResult(node, HasReadCustomProperties(properties, node));
                 return properties;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception error)
             {
                 LogDiagnostic("独立读取所选图档的属性：" + node.FullPath, error);
-                throw new InvalidOperationException(conflict.Message + " 独立读取未完成：" + ArchivePreflightError(error), error);
+                CheckInUploadHashes.VerifySource(node.FullPath, sourceHash, token);
+                var properties = new Dictionary<string, string>(latest?.PropertySnapshot ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase);
+                MarkSavedPropertiesPending(node, properties);
+                return properties;
             }
         }
     }
@@ -135,6 +140,13 @@ public sealed partial class PdmAddin
         var properties = addin.ReadSavedNativePropertiesCore(node, sourceHash, null, requireExactPath: true);
         CheckInUploadHashes.VerifySource(path, sourceHash, CancellationToken.None);
         return properties;
+    }
+
+    private static void MarkSavedPropertiesPending(CadTreeNode node, IDictionary<string, string> properties)
+    {
+        properties[CustomPropertiesReadMarker] = "0";
+        properties[CustomPropertyConfigurationsMarker] = "[]";
+        RecordArchivePropertyReadResult(node, false);
     }
 
     private bool ReadAvailableSavedPropertyIndex(CadTreeNode node, IDictionary<string, string> properties, string sourceHash,
@@ -180,8 +192,21 @@ public sealed partial class PdmAddin
                 {
                     application.DocumentVisible(false, type);
                     var errors = 0; var warnings = 0;
-                    document = application.OpenDoc6(node.FullPath, type, (int)options, string.Empty, ref errors, ref warnings);
+                    try { document = application.OpenDoc6(node.FullPath, type, (int)options, string.Empty, ref errors, ref warnings); }
+                    catch (System.Runtime.InteropServices.COMException error)
+                    {
+                        LogDiagnostic("属性只读加载待补读：" + node.FullPath, error);
+                        CheckInUploadHashes.VerifySource(node.FullPath, sourceHash, CancellationToken.None);
+                        MarkSavedPropertiesPending(node, properties);
+                        return false;
+                    }
                     PluginDiagnosticLog.Record("图档属性读取", "只读打开；图档=" + node.FullPath + "；错误码=" + errors + "；警告码=" + warnings);
+                    if (document == null && (errors & (int)swFileLoadError_e.swFileWithSameTitleAlreadyOpen) == 0)
+                    {
+                        CheckInUploadHashes.VerifySource(node.FullPath, sourceHash, CancellationToken.None);
+                        MarkSavedPropertiesPending(node, properties);
+                        return false;
+                    }
                     ValidateSavedPropertyOpenPath(node, document, errors);
                     opened = true;
                     archiveBatchReads?.Invalidate();
@@ -196,23 +221,8 @@ public sealed partial class PdmAddin
             if (memory == null && !opened && document.GetSaveFlag())
                 throw new ArchiveUnsavedPropertySourceException();
             var configurations = SavedPropertyConfigurations(node);
-            if (node.Kind != CadDocumentKind.Drawing)
-            {
-                if (configurations.Count == 0 && document.ConfigurationManager?.ActiveConfiguration?.Name is string active && !string.IsNullOrWhiteSpace(active))
-                    configurations.Add(active);
-            }
-            var available = configurations.Count > 0 ? document.GetConfigurationNames() as Array : null;
             var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var configuration in new[] { string.Empty }.Concat(configurations))
-            {
-                var scope = string.IsNullOrEmpty(configuration) ? "全局" : "配置:" + configuration;
-                // A configuration warning must not prevent reading actual global
-                // properties. The earlier configuration check owns missing names.
-                if (!string.IsNullOrEmpty(configuration)
-                    && available?.Length > 0
-                    && !available.Cast<object>().Any(value => string.Equals(Convert.ToString(value), configuration, StringComparison.OrdinalIgnoreCase))) continue;
-                ReadPropertyManager(document.Extension.CustomPropertyManager[configuration], scope, values, useCached: true, requireComplete: true);
-            }
+            var complete = ReadArchivePropertyScopes(document, node, configurations, values);
             if (memory != null) ValidateCurrentMemoryCopy(node);
             else if (opened && (dirtyOnOpen != document.GetSaveFlag()
                 || dirtyOnOpen && (document.GetUpdateStamp() != openStamp || !document.IsOpenedReadOnly())))
@@ -235,12 +245,10 @@ public sealed partial class PdmAddin
             }
             foreach (var key in properties.Keys.Where(key => (key.StartsWith("全局/", StringComparison.OrdinalIgnoreCase)
                 || configurations.Any(configuration => key.StartsWith("配置:" + configuration + "/", StringComparison.OrdinalIgnoreCase)))
-                && !values.ContainsKey(key)).ToArray()) properties[key] = string.Empty;
+                && complete && !values.ContainsKey(key)).ToArray()) properties[key] = string.Empty;
             foreach (var value in values) properties[value.Key] = value.Value;
-            properties[CustomPropertiesReadMarker] = "1";
-            properties[CustomPropertyConfigurationsMarker] = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(configurations.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray());
-            PluginDiagnosticLog.Record("图档属性读取", "已完整读取；图档=" + node.FullPath + "；属性数=" + values.Count + "；只读加载=" + opened);
-            return true;
+            PluginDiagnosticLog.Record("图档属性读取", "读取完整=" + complete + "；图档=" + node.FullPath + "；只读加载=" + opened);
+            return complete;
         }
         catch (Exception error)
         {
@@ -258,7 +266,11 @@ public sealed partial class PdmAddin
         finally
         {
             if (opened && document != null && !CloseArchiveReadDocument(document))
-                throw new InvalidOperationException("自定义属性的临时读取窗口未能关闭，已停止存档并保留原文件：" + node.FileName);
+            {
+                var warning = node.FileName + "：临时只读属性窗口仍在使用，已保留窗口。";
+                archiveWarnings.Add(warning);
+                PluginDiagnosticLog.Record("图档属性读取", warning);
+            }
         }
     }
 

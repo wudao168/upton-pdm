@@ -95,17 +95,28 @@ public sealed partial class PdmAddin
         if (requested.ProjectId != projectId || requested.RootDocumentId != id || requested.RootVersionId != latest.Id
             || drawing == null || drawing.VersionId != latest.Id || !string.Equals(drawing.FileName, node.FileName, StringComparison.OrdinalIgnoreCase))
             throw Conflict("服务器返回的工程图版本或引用清单不一致");
+        var unavailable = new HashSet<Guid>();
         foreach (var reference in requested.Files.Where(file => file.DocumentId != id))
-            if (!context.Value.Files.Any(file => file.DocumentId == reference.DocumentId
-                && string.Equals(file.FileName, reference.FileName, StringComparison.OrdinalIgnoreCase)
-                && WorkingConfigurationMatches(file, reference)))
-                throw Conflict("新版工程图所需的配套图档尚未在当前工作区核对：" + reference.FileName);
+        {
+            var local = context.Value.Files.FirstOrDefault(file => file.DocumentId == reference.DocumentId);
+            if (context.Value.Files.Any(file => file.DocumentId != reference.DocumentId
+                && string.Equals(file.FileName, reference.FileName, StringComparison.OrdinalIgnoreCase))
+                || local != null && (!string.Equals(local.FileName, reference.FileName, StringComparison.OrdinalIgnoreCase)
+                    || !WorkingConfigurationMatches(local, reference)))
+                throw Conflict("当前工作区存在与工程图引用身份或配置冲突的文件：" + reference.FileName);
+            if (local != null && File.Exists(ControlledReferenceMaterializer.ManifestPath(context.Key, local))) continue;
+            var loadedByName = application.GetOpenDocumentByName(reference.FileName) as IModelDoc2;
+            if (loadedByName != null) throw Conflict("已打开的同名模型无法核对来源：" + reference.FileName);
+            unavailable.Add(reference.DocumentId);
+            RecordMissingDrawingModel(requested, reference);
+        }
         drawing.RelativePath = context.Value.Files.First(file => file.DocumentId == id
             && PathsEqual(path, ControlledReferenceMaterializer.ManifestPath(context.Key, file))).RelativePath ?? node.FileName;
-        var files = context.Value.Files.Where(file => file.DocumentId != id
+        var files = context.Value.Files.Where(file => file.DocumentId != id && !unavailable.Contains(file.DocumentId)
             && DocumentKindFromPath(file.FileName) != CadDocumentKind.Drawing).Concat(new[] { drawing }).ToList();
         var manifest = new ControlledOpenManifestDto { ProjectId = projectId, RootDocumentId = id,
-            RootVersionId = latest.Id, RootRelativePath = drawing.RelativePath, RootRevision = latest.Revision?.Display, Files = files };
+            RootVersionId = latest.Id, RootRelativePath = drawing.RelativePath, RootRevision = latest.Revision?.Display, Files = files,
+            Warnings = requested.Warnings, ReferenceIssues = OpenReferenceFindings.Merge(requested.ReferenceIssues) };
         ControlledOpenBoundary.RequireLoadedSources(application, path, manifest);
         var stagingId = Guid.NewGuid().ToString("N");
         const string backupName = "previous.bak";
@@ -178,7 +189,7 @@ public sealed partial class PdmAddin
                     if (error != 0 || !installed || reopened == null || !PathsEqual(reopened.GetPathName(), path))
                         throw Conflict("工程图最新版重载尚未完成，原副本备份已保留");
                     if (!(reopened is IDrawingDoc)) throw new IOException("SolidWorks返回的文件不是工程图，未获取权限。");
-                    ValidateControlledLoadedSources(reopened, path, manifest, application, missing, allowMissingDrawingModels: false);
+                    ValidateControlledLoadedSources(reopened, path, manifest, application, missing, allowMissingDrawingModels: true);
                 }
                 finally { events.FileCloseNotify -= prepare; }
             }
@@ -191,7 +202,13 @@ public sealed partial class PdmAddin
                 && PathsEqual(path, Path.Combine(pair.Key, file.RelativePath ?? file.FileName)));
             if (index < 0) continue;
             pair.Value.Files[index] = drawing;
-            if (pair.Value.RootDocumentId == id) { pair.Value.RootVersionId = latest.Id; pair.Value.RootRevision = latest.Revision?.Display; }
+            if (pair.Value.RootDocumentId == id)
+            {
+                pair.Value.RootVersionId = latest.Id;
+                pair.Value.RootRevision = latest.Revision?.Display;
+                pair.Value.ReferenceIssues = OpenReferenceFindings.Merge(manifest.ReferenceIssues);
+                pair.Value.Warnings = manifest.Warnings;
+            }
         }
         node.OpenedVersionId = latest.Id;
         node.CurrentRevision = latest.Revision?.Display;
@@ -206,6 +223,9 @@ public sealed partial class PdmAddin
         catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
         { LogDiagnostic("清理工程图取回临时副本", error); }
         LogOperation("工程图取回最新版完成；document=" + id + "；old=" + binding.Revision + "；latest=" + latest.Revision?.Display + "；模型保存=0；模型切换=0");
-        ReportMissingComponentsOnOpen(missing, "已取回工程图");
+        foreach (var issue in manifest.ReferenceIssues.Where(issue => !OpenReferenceFindings.IsToolboxDiagnostic(issue) && !string.IsNullOrWhiteSpace(issue.FileName)))
+            missing.Add(issue.FileName);
+        if (manifest.Warnings?.Count > 0) LogOperation("工程图取回提醒：" + string.Join("；", manifest.Warnings));
+        ReportMissingComponentsOnOpen(missing, "已取回工程图", path);
     }
 }

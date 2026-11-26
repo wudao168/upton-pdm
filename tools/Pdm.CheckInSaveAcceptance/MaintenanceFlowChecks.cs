@@ -16,11 +16,13 @@ internal static partial class Program
         foreach (var mode in new[] { "complete", "no-post", "no-activation", "no-idle", "same-document", "command", "blocked", "new-load", "insertion", "uncached",
             "sketch-tool", "sketch-tool-busy", "sketch-tool-reference-changed", "sketch-tool-other-path", "sketch-tool-unloaded",
             "component-open", "component-open-busy", "component-open-reference-changed", "component-open-assembly-changed",
-            "component-open-insertion", "component-open-foreign", "component-open-unloaded", "component-open-new-load", "file-open-command" })
+            "component-open-insertion", "component-open-foreign", "component-open-unloaded", "component-open-new-load", "file-open-command",
+            "dimension-tool", "dimension-tool-busy", "dimension-tool-new-command", "dimension-tool-unrelated-open", "assembly-mate" })
         {
             var sketch = mode.StartsWith("sketch-tool", StringComparison.Ordinal);
             var componentOpen = mode.StartsWith("component-open", StringComparison.Ordinal);
-            var confirmAcrossIdle = sketch || componentOpen;
+            var dimension = mode.StartsWith("dimension-tool", StringComparison.Ordinal);
+            var confirmAcrossIdle = sketch || componentOpen || dimension;
             var plugin = New("PdmAddin"); var folder = Path.GetFullPath(output);
             var owner = Path.Combine(folder, "总装.SLDASM"); var child = Path.Combine(folder, "零件.SLDPRT");
             Directory.CreateDirectory(folder); File.WriteAllText(owner, "mock owner"); File.WriteAllText(child, "mock child");
@@ -35,6 +37,13 @@ internal static partial class Program
             {
                 var file = New("ControlledOpenFileDto"); Set(file, "FileName", name); Set(file, "RelativePath", name);
                 Set(file, "IsRoot", name.EndsWith("SLDASM")); files.Add(file);
+            }
+            if (dimension)
+            {
+                var uncached = New("ControlledOpenFileDto");
+                Set(uncached, "FileName", "未下载的旁支.SLDPRT");
+                Set(uncached, "RelativePath", "未下载的旁支.SLDPRT");
+                files.Insert(1, uncached);
             }
             Set(manifest, "Files", files); ((IDictionary)Field(plugin, "controlledOpenManifests")).Add(folder, manifest);
             var assemblyStamp = 7; var referenceStamp = 7;
@@ -66,7 +75,11 @@ internal static partial class Program
                 }
             }).GetTransparentProxy());
             SetField(plugin, "nativeFileOpenInProgress", 1); SetField(plugin, "nativeLoadEpoch", 1);
-            if (confirmAcrossIdle || mode == "file-open-command") SetField(plugin, "nativeFileOpenCommandId", sketch ? 46 : componentOpen ? 970 : 2);
+            if (confirmAcrossIdle || mode is "file-open-command" or "assembly-mate")
+                SetField(plugin, "nativeFileOpenCommandId", sketch ? 46 : componentOpen ? 970 : dimension ? 38 : mode == "assembly-mate" ? 90 : 2);
+            var pendingPaths = (HashSet<string>)Field(plugin, "pendingNativeOpenPaths");
+            pendingPaths.Add(child);
+            if (mode == "dimension-tool-unrelated-open") pendingPaths.Add(Path.Combine(folder, "OTHER.SLDASM"));
             SetField(plugin, "pendingOpenPath", child); SetField(plugin, "pendingOpenIdleEpoch", mode == "no-idle" ? -1 : 1);
             if (!confirmAcrossIdle && mode != "no-post") TreeCall(plugin, "OnNativeDocumentLoaded", "零件", child);
             if (!confirmAcrossIdle && mode != "no-activation") TreeCall(plugin, "OnActiveModelDocumentChanged");
@@ -77,10 +90,18 @@ internal static partial class Program
                 TreeCheck(!recovered && !(bool)TreeCall(plugin, "TryCompleteFinishedNativeOpen"), "同一空闲回调不得重复作为两次稳定证据");
                 if (mode.EndsWith("-reference-changed", StringComparison.Ordinal)) referenceStamp++;
                 if (mode == "component-open-assembly-changed") assemblyStamp++;
+                if (mode == "dimension-tool-new-command") SetField(plugin, "nativeCommandSequence", 1);
                 SetField(plugin, "nativeIdleSequence", 1);
                 recovered = (bool)TreeCall(plugin, "TryCompleteFinishedNativeOpen");
             }
-            if (recovered != (mode == "complete" || mode == "sketch-tool" || mode == "component-open")
+            if (dimension)
+            {
+                var busyReason = (string)TreeCall(plugin, "ArchiveRequestBusyReason");
+                TreeCheck((busyReason == null) == recovered, "存档入口和设计树必须使用同一个加载状态：" + mode);
+                if (recovered)
+                    TreeCheck((bool)TreeCall(plugin, "CanStartArchiveRequest"), "总装的引用加载已验证结束，存档入口仍拒绝启动");
+            }
+            if (recovered != (mode is "complete" or "sketch-tool" or "component-open" or "dimension-tool")
                 || ((int)Field(plugin, "nativeFileOpenInProgress") == 0) != recovered
                 || recovered && (int)Field(plugin, "pendingTreeRefresh") == 0)
                 throw new Exception("引用加载后的切换恢复判定错误：" + mode);

@@ -182,6 +182,7 @@ internal sealed class CadTreeNode
     public bool StructureIndexPending { get; set; }
     // Candidate discovery is not proof that every native drawing view was read.
     public bool DrawingViewsRead { get; set; }
+    internal bool HasUnresolvedDrawingViews { get; set; }
     // Server state is separate from the completeness of the latest local scan.
     public bool? LatestStructureIndexPending { get; set; }
     public bool HasUnverifiedDrawingIndex => Kind == CadDocumentKind.Drawing

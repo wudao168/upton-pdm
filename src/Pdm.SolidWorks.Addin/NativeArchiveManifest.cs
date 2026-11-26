@@ -74,7 +74,7 @@ internal static class NativeArchiveManifest
                     if (!File.Exists(path))
                     {
                         var peer = Path.Combine(directory, Path.GetFileName(path));
-                        if (File.Exists(peer) && (!controlled || PdmDocumentIdentityStore.TryReadLocalMetadata(peer, out var peerBinding)
+                        if (actualPaths.Contains(peer) && File.Exists(peer) && (!controlled || PdmDocumentIdentityStore.TryReadLocalMetadata(peer, out var peerBinding)
                             && peerBinding.ProjectId == rootBinding.ProjectId && peerBinding.VersionId.HasValue))
                         {
                             PluginDiagnosticLog.Record("原生来源定位", "旧地址不可用，采用同套目录内的实际文件：" + path + " → " + peer);
@@ -163,7 +163,10 @@ internal static class NativeArchiveManifest
                 if (!embeddedNodes.Contains(node)) AddFailure("B11", "树内虚拟组件的保存归属尚未确认：" + node.FileName);
             }
             else if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
-                failures.Add("实际引用文件缺失，不能完整存档：" + node.FileName + "；路径：" + node.FullPath);
+            {
+                if (!ArchiveMissingReferencePolicy.TryOmitMissing(root, node.FullPath, node))
+                    failures.Add("待存档文件无法读取：" + node.FileName + "；路径：" + node.FullPath);
+            }
             else if (new FileInfo(node.FullPath).Length == 0)
                 failures.Add("实际引用文件为空，不能完整存档：" + node.FileName);
         }

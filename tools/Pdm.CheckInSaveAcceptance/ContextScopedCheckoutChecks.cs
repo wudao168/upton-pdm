@@ -123,15 +123,19 @@ internal static partial class Program
                 "context-subassembly", "context-incomplete", "context-real-driver-clean", "context-open-and-acquire",
                 "context-acquire-open-subassembly-blank-environment", "context-acquire-open-part",
                 "context-acquire-open-subassembly", "context-acquire-open-latest-subassembly", "context-acquire-open-dirty-parent",
-                "context-standalone-part-after-checkin" })
+                "context-standalone-part-after-checkin", "context-missing-sibling", "context-new-uncached-sibling", "context-acquire-open-missing-sibling", "context-subassembly-toolbox-dirty-parent",
+                "context-subassembly-toolbox-stamped", "context-subassembly-toolbox-stamp-changed", "context-scope-race-stamped" })
             {
-                var standaloneAfterCheckin = mode == "context-standalone-part-after-checkin";
+                var toolboxInParentOnly = mode.StartsWith("context-subassembly-toolbox-", StringComparison.Ordinal);
+                var scopeRaces = mode is "context-scope-race" or "context-scope-race-stamped";
+                var standaloneAfterCheckin = mode is "context-standalone-part-after-checkin" or "context-missing-sibling" or "context-new-uncached-sibling";
+                var missingSibling = mode is "context-missing-sibling" or "context-new-uncached-sibling" or "context-acquire-open-missing-sibling";
                 var allowed = mode is "parent-advanced" or "context-parent-advanced" or "context-522-files"
                     or "context-parent-race" or "context-sibling-advanced" or "context-loaded-part"
                     or "context-subassembly" or "context-real-driver-clean" or "context-open-and-acquire"
                     or "context-acquire-open-subassembly-blank-environment" or "context-acquire-open-part"
                     or "context-acquire-open-subassembly" or "context-acquire-open-latest-subassembly" or "context-acquire-open-dirty-parent"
-                    || standaloneAfterCheckin;
+                    || standaloneAfterCheckin || missingSibling || toolboxInParentOnly;
                 var acquireThenOpen = mode.StartsWith("context-acquire-open-", StringComparison.Ordinal);
                 var subassembly = mode.Contains("subassembly");
                 var openAndAcquire = mode == "context-open-and-acquire";
@@ -153,6 +157,37 @@ internal static partial class Program
                 var project = (Guid)Get(manifest, "ProjectId"); var root = files[0]; var target = files[1]; var sibling = files[2];
                 if (subassembly) { Set(target, "FileName", "子装配.SLDASM"); Set(target, "RelativePath", Get(target, "FileName")); }
                 var rootId = (Guid)Get(root, "DocumentId"); var targetId = (Guid)Get(target, "DocumentId");
+                const string toolboxName = "hexagon socket head cap screws gb.sldprt";
+                const string toolboxInstance = "hexagon socket head cap screws gb-2";
+                const string toolboxConfig = "GB_FASTENER_SCREWS_HSHCS M8X12-N";
+                const string toolboxOriginal = @"Z:\cad-cache\GB_FASTENER_SCREWS_HSHCS M8X12-N.SLDPRT";
+                object ordinaryPart = null;
+                if (toolboxInParentOnly)
+                {
+                    ordinaryPart = CloneFixtureFile(sibling, "受控零件.SLDPRT");
+                    files.Add(ordinaryPart);
+                    Set(sibling, "FileName", toolboxName);
+                    Set(sibling, "RelativePath", toolboxName);
+                    var warning = New("OpenReferenceIssueDto");
+                    Set(warning, "IsToolbox", true);
+                    Set(warning, "OwnerDocumentId", targetId);
+                    Set(warning, "OriginalPath", toolboxOriginal);
+                    Set(warning, "FileName", Path.GetFileName(toolboxOriginal));
+                    Set(warning, "InstancePath", "总装-1/子装配-1/" + toolboxInstance);
+                    Set(warning, "Reason", "Toolbox引用提醒：" + toolboxOriginal
+                        + "；Toolbox引用待核对，本次不上传；实例 总装-1/子装配-1/" + toolboxInstance
+                        + @"；实际来源 C:\SOLIDWORKS Data\browser\gb\" + toolboxName + "；原有关联保留，结构待补全");
+                    ((IList)Get(manifest, "ReferenceIssues")).Add(warning);
+                }
+                object CloneFixtureFile(object original, string name)
+                {
+                    var file = New("ControlledOpenFileDto");
+                    foreach (var property in original.GetType().GetProperties()) property.SetValue(file, property.GetValue(original));
+                    Set(file, "DocumentId", Guid.NewGuid());
+                    Set(file, "FileName", name);
+                    Set(file, "RelativePath", name);
+                    return file;
+                }
                 Guid? drawingId = null;
                 if (standaloneAfterCheckin)
                 {
@@ -178,6 +213,7 @@ internal static partial class Program
                 foreach (var file in files)
                 {
                     Set(file, "Configuration", "Default");
+                    if (missingSibling && file == sibling) continue;
                     var local = Path.Combine(folder, (string)Get(file, "FileName")); File.WriteAllBytes(local, bytes);
                     File.SetAttributes(local, FileAttributes.ReadOnly);
                     TreeCheck((bool)TreeCallStatic("PdmDocumentIdentityStore", "TryWriteControlledVersion", local,
@@ -193,7 +229,10 @@ internal static partial class Program
                 if (mode.Contains("latest-subassembly")) Set(latestFiles[0], "Sha256", new string('B', 64));
                 if (mode == "context-sibling-advanced" || mode == "context-real-driver") Set(latestFiles[2], "VersionId", Guid.NewGuid());
                 if (mode == "context-target-advanced") Set(latestFiles[1], "VersionId", Guid.NewGuid());
+                if (missingSibling) Set(latestFiles[2], "VersionId", Guid.NewGuid());
+                if (mode == "context-new-uncached-sibling") files.Remove(sibling);
                 var modelManifest = Clone(latest); var modelFiles = (IList)Get(modelManifest, "Files");
+                if (toolboxInParentOnly) modelFiles.RemoveAt(2);
                 if (!isContext) { while (modelFiles.Count > 2) modelFiles.RemoveAt(modelFiles.Count - 1); modelFiles.RemoveAt(0); }
                 foreach (var file in modelFiles) { Set(file, "IsRoot", Get(file, "DocumentId").Equals(targetId)); if (Get(file, "DocumentId").Equals(rootId)) Set(file, "Configuration", acquireThenOpen && !mode.Contains("blank-environment") ? "Default" : ""); }
                 Set(modelManifest, "RootDocumentId", targetId); Set(modelManifest, "RootVersionId", Get(latestFiles[1], "VersionId")); Set(modelManifest, "RootRelativePath", Get(target, "FileName"));
@@ -203,7 +242,7 @@ internal static partial class Program
                 if (pane != null) SetField(plugin, "taskPaneControl", pane);
                 var appType = Type("PdmAddin").GetField("application", Flags).FieldType; var interop = appType.Assembly;
                 var parent = new DiscardAssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call =>
-                    call.MethodName == "GetPathName" ? parentPath : call.MethodName == "IsOpenedReadOnly" ? mode != "context-acquire-open-dirty-parent"
+                    call.MethodName == "GetPathName" ? parentPath : call.MethodName == "IsOpenedReadOnly" ? mode != "context-acquire-open-dirty-parent" && !toolboxInParentOnly
                         : call.MethodName == "GetSaveFlag" ? (object)true
                         : throw new Exception("不得读取上级结构或修改上级窗口：" + call.MethodName)).GetTransparentProxy();
                 var events = new List<string>();
@@ -213,6 +252,49 @@ internal static partial class Program
                 var config = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration", true), call => call.MethodName == "get_Name" ? "Default" : throw new Exception(call.MethodName)).GetTransparentProxy();
                 var manager = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ConfigurationManager", true), call => call.MethodName == "get_ActiveConfiguration" ? config : throw new Exception(call.MethodName)).GetTransparentProxy();
                 var extension = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension", true), call => call.MethodName == "ListExternalFileReferences2" ? null : throw new Exception(call.MethodName)).GetTransparentProxy();
+                object toolboxComponent = null;
+                object ordinaryComponent = null;
+                var toolboxNativeType = true;
+                if (toolboxInParentOnly)
+                {
+                    var toolboxPath = Path.Combine(folder, toolboxName);
+                    var toolboxExtension = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension", true),
+                        call => call.MethodName == "get_ToolboxPartType"
+                            ? (object)(toolboxNativeType ? 1 : 0) : throw new Exception(call.MethodName)).GetTransparentProxy();
+                    var toolboxModel = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call =>
+                    {
+                        if (call.MethodName == "GetPathName") return toolboxPath;
+                        if (call.MethodName == "get_Extension") return toolboxExtension;
+                        throw new Exception("不得保存或修改Toolbox模型：" + call.MethodName);
+                    }).GetTransparentProxy();
+                    var ordinaryPath = Path.Combine(folder, (string)Get(ordinaryPart, "FileName"));
+                    ordinaryComponent = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2", true), call =>
+                    {
+                        switch (call.MethodName)
+                        {
+                            case "GetPathName": return ordinaryPath;
+                            case "get_Name2": return "子装配-1/受控零件-1";
+                            case "GetSuppression": return 2;
+                            case "get_ReferencedConfiguration": return "Default";
+                            case "get_IsVirtual": return false;
+                            case "GetModelDoc2": return null;
+                            default: throw new Exception("不得修改普通组件：" + call.MethodName);
+                        }
+                    }).GetTransparentProxy();
+                    toolboxComponent = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2", true), call =>
+                    {
+                        switch (call.MethodName)
+                        {
+                            case "GetPathName": return toolboxPath;
+                            case "get_Name2": return "子装配-1/" + toolboxInstance;
+                            case "GetSuppression": return 2;
+                            case "get_ReferencedConfiguration": return toolboxConfig;
+                            case "get_IsVirtual": return false;
+                            case "GetModelDoc2": return toolboxModel;
+                            default: throw new Exception("不得修改Toolbox实例：" + call.MethodName);
+                        }
+                    }).GetTransparentProxy();
+                }
                 var openTarget = new DiscardAssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call =>
                 {
                     switch (call.MethodName)
@@ -220,7 +302,7 @@ internal static partial class Program
                         case "GetPathName": return path;
                         case "GetTitle": return Path.GetFileName(path);
                         case "GetType": return subassembly ? 2 : 1;
-                        case "GetComponents": return Array.Empty<object>();
+                        case "GetComponents": return toolboxInParentOnly ? new[] { ordinaryComponent, toolboxComponent } : Array.Empty<object>();
                         case "GetSaveFlag": return false;
                         case "IsOpenedReadOnly": return openTargetReadOnly;
                         case "SetReadOnlyState": openTargetReadOnly = (bool)call.Args[0]; return true;
@@ -230,13 +312,13 @@ internal static partial class Program
                         default: throw new Exception("打开并获取不得保存或修改模型：" + call.MethodName);
                     }
                 }).GetTransparentProxy();
-                var nativeModels = openAndAcquire || acquireThenOpen || standaloneAfterCheckin ? new[] { parent, openTarget }
+                var nativeModels = openAndAcquire || acquireThenOpen || standaloneAfterCheckin || toolboxInParentOnly ? new[] { parent, openTarget }
                     : mode is "context-loaded-part" or "context-foreign-source" ? new[] { parent, loadedTarget.GetTransparentProxy() } : new[] { parent };
                 var searchOptions = new Dictionary<int, bool>();
                 SetField(plugin, "application", new Proxy(appType, call =>
                 {
                     if (call.MethodName == "GetDocuments") return nativeModels;
-                    if (openAndAcquire || acquireThenOpen || standaloneAfterCheckin) switch (call.MethodName)
+                    if (openAndAcquire || acquireThenOpen || standaloneAfterCheckin || toolboxInParentOnly) switch (call.MethodName)
                     {
                         case "get_ActiveDoc": case "ActivateDoc3": return openTarget;
                         case "GetCurrentWorkingDirectory": case "GetSearchFolders": return "";
@@ -265,7 +347,15 @@ internal static partial class Program
                 using (var handler = new ReferenceRecoveryHandler(request =>
                 {
                     var url = request.RequestUri.AbsolutePath; object result;
-                    if (url.EndsWith("/open-manifest")) result = url.Contains(targetId.ToString()) ? modelManifest : latest;
+                    if (url.EndsWith("/open-manifest"))
+                    {
+                        var selectedScope = url.Contains(targetId.ToString());
+                        result = selectedScope ? modelManifest : latest;
+                        if (selectedScope && mode.Contains("stamp"))
+                            Set(modelManifest, "ReferenceScopeStamp",
+                                checkouts > 0 && (scopeRaces || mode.EndsWith("stamp-changed", StringComparison.Ordinal))
+                                    ? "changed scope signature" : "stable scope signature");
+                    }
                     else if (url.EndsWith("/document-operation-rules")) result = new { disabledRuleIds = Array.Empty<string>() };
                     else if (url.EndsWith("/document-relations")) result = drawingId.HasValue
                         ? new object[] { new { modelDocumentId = targetId, drawingDocumentId = drawingId.Value } }
@@ -281,9 +371,16 @@ internal static partial class Program
                         var children = (IList)Get(snapshot, "Children");
                         if (id == targetId && isContext && mode != "context-incomplete")
                         {
-                            children.Add(Reference(root, !(mode == "context-scope-race" && checkouts > 0)));
+                            children.Add(Reference(root, !(scopeRaces && checkouts > 0)));
                             if (mode is "context-real-driver" or "context-real-driver-clean") children.Add(Reference(sibling, false));
                             if (mode == "context-double-role") children.Add(Reference(root, false));
+                            if (toolboxInParentOnly)
+                            {
+                                var child = Reference(ordinaryPart, false);
+                                Set(child, "Role", 0);
+                                Set(child, "Configuration", "Default");
+                                children.Add(child);
+                            }
                         }
                         var version = New("DocumentVersionDto"); Set(version, "Id", Get(file, "VersionId")); Set(version, "DocumentId", id);
                         Set(version, "Sha256", Get(file, "Sha256")); Set(version, "FileLength", (long)bytes.Length); Set(version, "ReferenceSnapshot", snapshot);
@@ -332,6 +429,33 @@ internal static partial class Program
                         && (File.GetAttributes(parentPath) & FileAttributes.ReadOnly) != 0, "不保存、重建或解锁上级：" + mode);
                     TreeCheck(((File.GetAttributes(path) & FileAttributes.ReadOnly) == 0) == allowed
                         && loadedTarget.ReadOnly == (mode != "context-loaded-part") && (!openAndAcquire || !openTargetReadOnly), "只解锁通过核对的零件：" + mode);
+                    if (missingSibling)
+                        TreeCheck(!File.Exists(Path.Combine(folder, (string)Get(sibling, "FileName"))) && checkouts == 1,
+                            "未缓存的环境零件无需下载，也不取得编辑权限：" + mode);
+                    if (toolboxInParentOnly)
+                    {
+                        if (mode.Contains("stamp"))
+                        {
+                            var readsForPart = reads[(Guid)Get(ordinaryPart, "DocumentId")];
+                            TreeCheck(readsForPart == (mode.EndsWith("stamped", StringComparison.Ordinal) ? 1 : 2),
+                                "同一引用范围复用首次证据，范围戳变化时重新读版本：" + mode + "；读取次数=" + readsForPart);
+                        }
+                        var open = (Task)TreeCall(plugin, "TryOpenModelInLoadedContextCoreAsync", modelManifest, false, path);
+                        await open;
+                        TreeCheck((bool)Get(open, "Result"), "单独打开子装配时识别已核实的装配工作区Toolbox");
+                        toolboxNativeType = false;
+                        try
+                        {
+                            await (Task)TreeCall(plugin, "TryOpenModelInLoadedContextCoreAsync", modelManifest, false, path);
+                            throw new Exception("普通零件从父工作区越过了所选子装配的引用来源检查");
+                        }
+                        catch (InvalidOperationException error)
+                        { TreeCheck(error.Message.Contains(toolboxInstance), "正常文件越界诊断须指出实际实例"); }
+                        TreeCheck(!openTargetReadOnly && !reads.ContainsKey((Guid)Get(sibling, "DocumentId"))
+                            && (File.GetAttributes(Path.Combine(folder, toolboxName)) & FileAttributes.ReadOnly) != 0,
+                            "总装有未保存修改时仅原位获取子装配，父清单中的Toolbox继续只读且不查询其版本");
+
+                    }
                     if (standaloneAfterCheckin)
                         TreeCheck(!openTargetReadOnly && drawingCheckouts == 1 && !reads.ContainsKey(rootId),
                             "单独打开的 W2 零件原位再次获取，配套 W2 工程图一并授权，不校验旧环境总装");

@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Dapper;
+using Microsoft.Extensions.Logging;
 using MySqlConnector;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
@@ -23,12 +25,16 @@ public sealed partial class MySqlPdmRepository
         const int maxAttempts = 3;
         for (var attempt = 1; ; attempt++)
         {
+            var trace = new ArchiveDatabaseTrace(logger, batchId, attempt, ordered.Count);
             try
             {
-                return await CommitArchiveBatchTransactionAsync(batchId, requestHash, actor, sessionId, ordered, cancellationToken);
+                return await CommitArchiveBatchTransactionAsync(batchId, requestHash, actor, sessionId, ordered, trace, cancellationToken);
             }
-            catch (MySqlException error) when (!cancellationToken.IsCancellationRequested && IsTransientMySqlWriteFailure(error))
+            catch (Exception error)
             {
+                trace.Fail(error);
+                if (error is not MySqlException databaseError || cancellationToken.IsCancellationRequested
+                    || !IsTransientMySqlWriteFailure(databaseError)) throw;
                 if (attempt == maxAttempts) throw new ArchiveBatchTemporarilyUnavailableException(error);
                 // The previous transaction has been disposed. A fresh transaction first reads
                 // this same batch receipt and can safely recover a lost commit acknowledgement.
@@ -38,30 +44,41 @@ public sealed partial class MySqlPdmRepository
     }
 
     private async Task<ArchiveBatchReceipt> CommitArchiveBatchTransactionAsync(Guid batchId, string requestHash, string actor, Guid sessionId,
-        IReadOnlyList<ArchiveBatchFile> ordered, CancellationToken cancellationToken)
+        IReadOnlyList<ArchiveBatchFile> ordered, ArchiveDatabaseTrace trace, CancellationToken cancellationToken)
     {
         var planned = ordered.Select(file => file.DocumentId).ToHashSet();
         var projectId = ordered[0].Commit.ReferenceSnapshot.ProjectId;
         await using var connection = await OpenAsync(cancellationToken);
+        trace.Thread = connection.ServerThread;
+        trace.Enter("批次锁与项目锁");
         await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT IGNORE INTO archive_batch_receipt(batch_id,project_id,actor,request_hash) VALUES(@BatchId,@ProjectId,@Actor,@Hash)",
             new { BatchId = batchId, ProjectId = projectId, Actor = actor, Hash = requestHash }, transaction, cancellationToken: cancellationToken));
-        var json = await connection.QuerySingleAsync<string?>(new CommandDefinition(
-            "SELECT result_json FROM archive_batch_receipt WHERE batch_id=@BatchId FOR UPDATE", new { BatchId = batchId }, transaction, cancellationToken: cancellationToken));
-        if (!string.IsNullOrWhiteSpace(json)) return ArchiveBatchRules.RequireMatchingReceipt(JsonSerializer.Deserialize<ArchiveBatchReceipt>(json, jsonOptions)!, actor, requestHash);
+        var state = await connection.QuerySingleAsync<ArchiveBatchState>(new CommandDefinition(
+            "SELECT request_hash AS RequestHash,result_json AS ResultJson FROM archive_batch_receipt WHERE batch_id=@BatchId FOR UPDATE",
+            new { BatchId = batchId }, transaction, cancellationToken: cancellationToken));
+        if (state.RequestHash == ArchiveBatchRules.AbandonedRequestHash)
+            throw new PdmConflictException("原存档批次已结束，请按当前图档重新存档。");
+        if (!string.IsNullOrWhiteSpace(state.ResultJson))
+        {
+            trace.Enter("沿用已提交回执");
+            return ArchiveBatchRules.RequireMatchingReceipt(JsonSerializer.Deserialize<ArchiveBatchReceipt>(state.ResultJson, jsonOptions)!, actor, requestHash);
+        }
         await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition("SELECT id FROM project WHERE id=@ProjectId FOR UPDATE",
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         var project = await FindProjectAsync(connection, transaction, projectId, cancellationToken);
         if (project is null || !project.IsActive) throw new PdmConflictException("项目不存在或已停用，不能提交存档。");
-        await MaterializeArchiveRegistrationsAsync(connection, transaction, batchId, projectId, actor, sessionId,
-            ordered.Select(file => file.DocumentId).ToArray(), cancellationToken);
+        trace.Enter("转入新图档登记");
+        await MaterializeArchiveRegistrationsAsync(connection, transaction, batchId, projectId, actor, sessionId, planned, cancellationToken);
         var ids = ordered.Select(file => file.DocumentId).Concat(ordered.SelectMany(file => ArchiveBatchRules.References(file.Commit.ReferenceSnapshot.Root))
             .Where(node => node.DocumentId.HasValue).Select(node => node.DocumentId!.Value)).Distinct().Order().ToArray();
         var lockedDocuments = new Dictionary<Guid, PdmDocument>();
+        var lockedRows = new Dictionary<Guid, LockedDocumentRow>();
+        trace.Enter("锁定本批图档及引用");
         foreach (var id in ids)
         {
-            await LockDocumentAsync(connection, transaction, id, cancellationToken);
+            lockedRows.Add(id, await LockDocumentAsync(connection, transaction, id, cancellationToken));
             var locked = await FindDocumentAsync(connection, transaction, id, cancellationToken);
             if (locked is null || locked.ProjectId != projectId) throw new PdmRuleException("整批存档包含其他项目的图档，已取消提交。");
             lockedDocuments.Add(id, locked);
@@ -71,6 +88,7 @@ public sealed partial class MySqlPdmRepository
         var verifiedReferences = new HashSet<(Guid DocumentId, string Revision)>();
         var previousDocuments = new List<PdmDocument>();
         var results = new Dictionary<Guid, DocumentCheckInResult>();
+        trace.Enter("核对引用与更新图档状态");
         foreach (var file in ordered)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -109,8 +127,19 @@ public sealed partial class MySqlPdmRepository
                     verifiedReferences.Add(reference);
                 }
             }
-            results[file.DocumentId] = await CheckInVersionCoreAsync(connection, transaction, file.DocumentId, actor, sessionId,
-                commit, file.DrawingReviewWritebackId, cancellationToken, batchId);
+            try
+            {
+                results[file.DocumentId] = await CheckInVersionCoreAsync(connection, transaction, file.DocumentId, actor, sessionId,
+                    commit, file.DrawingReviewWritebackId, cancellationToken, batchId,
+                    file.RestoreHistoricalVersion ? null : lockedRows[file.DocumentId]);
+            }
+            catch (MySqlException error)
+            {
+                // A slow rollback can mask the original timeout. Keep the failing
+                // statement and server thread before transaction disposal begins.
+                trace.Fail(error, file.DocumentId);
+                throw;
+            }
             lockedDocuments[file.DocumentId] = results[file.DocumentId].Document;
             if (results[file.DocumentId].Version is { } preparedVersion)
                 verifiedReferences.Add((file.DocumentId, preparedVersion.Revision.Display));
@@ -131,6 +160,7 @@ public sealed partial class MySqlPdmRepository
                         transaction, cancellationToken: cancellationToken));
             }
         }
+        trace.Enter("写入不可变版本和引用快照");
         foreach (var file in ordered)
         {
             var result = results[file.DocumentId];
@@ -155,26 +185,51 @@ public sealed partial class MySqlPdmRepository
                 document = await AdoptArchivedReviewDrawingAsync(connection, transaction, document, version, cancellationToken);
             results[file.DocumentId] = result with { Version = version, Document = document };
         }
+        trace.Enter("刷新工作引用");
         await RefreshWorkingReferenceRootsAsync(connection, transaction, projectId, actor, timeProvider.GetUtcNow(), cancellationToken);
+        trace.Enter("归属已暂存文件");
         var receipt = new ArchiveBatchReceipt(batchId, projectId, actor, requestHash, ordered.Select(file => results[file.DocumentId]).ToArray()) { FollowupPending = true };
-        foreach (var result in receipt.Results.Where(result => result.VersionCreated && result.Version is not null))
-            await connection.ExecuteAsync(new CommandDefinition("UPDATE archive_upload SET state='Adopted' WHERE document_id=@Id AND relative_path=@Path",
-                new { Id = result.Document.Id, Path = result.Version!.StorageRelativePath.Replace('\\','/') }, transaction, cancellationToken: cancellationToken));
-        foreach (var file in ordered)
-            await connection.ExecuteAsync(new CommandDefinition("""
-                INSERT INTO audit_entry(id,occurred_at,actor,action_name,entity_type,entity_id,detail_json)
-                VALUES(@Id,@Now,@Actor,@Action,'PdmDocument',@DocumentId,@Detail)
-                """, new { Id = Guid.NewGuid(), Now = timeProvider.GetUtcNow().UtcDateTime, Actor = actor,
-                    Action = file.RestoreHistoricalVersion ? "document.version.restore" : "document.checkin.batch",
-                    DocumentId = file.DocumentId.ToString(), Detail = JsonSerializer.Serialize(new { detail = "整批存档：" + batchId }, jsonOptions) },
-                transaction, cancellationToken: cancellationToken));
+        await AdoptArchiveUploadsAsync(connection, transaction, receipt.Results, cancellationToken);
+        trace.Enter("写入存档操作审计");
+        var auditTime = timeProvider.GetUtcNow();
+        await InsertAuditEntriesAsync(connection, transaction, ordered.Select(file => new AuditEntry(
+            Guid.CreateVersion7(auditTime), auditTime, actor,
+            file.RestoreHistoricalVersion ? "document.version.restore" : "document.checkin.batch",
+            "PdmDocument", file.DocumentId.ToString(), "整批存档：" + batchId)), cancellationToken, archiveAuditCommandTimeoutSeconds);
+        trace.Enter("登记存档后续任务");
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO archive_batch_followup(batch_id,project_id,followup_json,next_attempt_at) VALUES(@BatchId,@ProjectId,@Json,@Now)",
             new { BatchId = batchId, ProjectId = projectId, Json = JsonSerializer.Serialize(new ArchiveBatchFollowup(receipt, previousDocuments), jsonOptions),
                 Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        trace.Enter("保存存档提交回执");
         await connection.ExecuteAsync(new CommandDefinition("UPDATE archive_batch_receipt SET result_json=@Json,committed_at=@Now WHERE batch_id=@BatchId",
             new { BatchId = batchId, Json = JsonSerializer.Serialize(receipt, jsonOptions), Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        trace.Enter("事务提交落盘");
         await transaction.CommitAsync(cancellationToken);
+        trace.Enter("提交完成");
         return receipt;
+    }
+
+    private sealed record ArchiveBatchState(string RequestHash, string? ResultJson);
+
+    private sealed class ArchiveDatabaseTrace(ILogger? logger, Guid batchId, int attempt, int count)
+    {
+        private readonly Stopwatch elapsed = Stopwatch.StartNew();
+        private long last;
+        private string phase = "打开数据库连接";
+        public int Thread { get; set; }
+
+        internal void Enter(string next)
+        {
+            var now = elapsed.ElapsedMilliseconds;
+            logger?.LogInformation("存档写入 {BatchId} 尝试 {Attempt} 连接 {DbThread} 文件 {FileCount} 阶段 {Phase} 耗时 {StageMs} 毫秒 累计 {ElapsedMs} 毫秒 下一阶段 {NextPhase}",
+                batchId, attempt, Thread, count, phase, now - last, now, next);
+            phase = next;
+            last = now;
+        }
+
+        internal void Fail(Exception error, Guid? documentId = null) =>
+            logger?.LogWarning(error, "存档写入 {BatchId} 尝试 {Attempt} 连接 {DbThread} 阶段 {Phase} 图档 {DocumentId} 累计 {ElapsedMs} 毫秒",
+                batchId, attempt, Thread, phase, documentId, elapsed.ElapsedMilliseconds);
     }
 }

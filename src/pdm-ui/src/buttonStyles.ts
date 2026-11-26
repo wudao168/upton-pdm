@@ -60,7 +60,7 @@ const compactLabels: Record<string, string> = {
   创建主项目: '创建',
 }
 const generatedTitles = new WeakMap<HTMLButtonElement, string>()
-const rowActionContext = 'td, th, [role="cell"], [role="gridcell"], .pdm-row-actions'
+const rowActionContext = 'td, [role="cell"], [role="gridcell"], .pdm-row-actions'
 
 function updateLeadingIcons(control: HTMLElement) {
   if (control.closest('.layout-phone')) return
@@ -109,9 +109,9 @@ function updateButton(button: HTMLButtonElement) {
   const actionName = button.getAttribute('aria-label') || action
   const moreAction = /^(?:更多(?:操作)?|[⋮⋯…]|\.\.\.)$/.test(action) || /^更多/.test(actionName)
     || button.matches('.pdm-project-action-trigger') || (action === '操作' && button.matches('[aria-haspopup="menu"]'))
-  const icon = /^(?:批量|确认|永久|彻底)*删除/.test(actionName) ? 'delete'
+  const icon = !button.closest(rowActionContext) ? undefined : /^(?:批量|确认|永久|彻底)*删除/.test(actionName) ? 'delete'
     : /^(?:批量)?编辑/.test(actionName) ? 'edit'
-      : moreAction ? (button.closest(rowActionContext) ? 'more' : undefined)
+      : moreAction ? 'more'
         : button.disabled && /^(?:正在|处理中)|中[.…]*$/.test(label) ? previousIcon : undefined
   if (icon) {
     button.dataset.pdmActionIcon = icon
@@ -155,13 +155,25 @@ function updateButton(button: HTMLButtonElement) {
 
 /** 仅附加表现属性，保留 Vue 管理的子节点、事件、可访问名称及原有尺寸。 */
 export function installButtonStyles(app: App) {
+  const controls = 'button, [role="tab"], .pdm-more-actions > summary'
+  const updateControl = (control: HTMLElement) => {
+    if (control instanceof HTMLButtonElement) updateButton(control)
+    else if (control.matches('.pdm-more-actions > summary')) {
+      if (control.closest(rowActionContext)) {
+        control.dataset.pdmActionIcon = 'more'
+        control.dataset.pdmButtonKind = 'outline'
+        if (!control.title) control.title = '更多操作'
+      } else if (control.dataset.pdmActionIcon) {
+        delete control.dataset.pdmActionIcon
+        delete control.dataset.pdmButtonKind
+        control.removeAttribute('title')
+      }
+    } else updateLeadingIcons(control)
+  }
   const update = (node: Node) => {
     if (!(node instanceof Element)) return
-    if (node instanceof HTMLButtonElement) updateButton(node)
-    else if (node instanceof HTMLElement && node.matches('[role="tab"]')) updateLeadingIcons(node)
-    node.querySelectorAll<HTMLElement>('button, [role="tab"]').forEach(control => {
-      if (control instanceof HTMLButtonElement) updateButton(control); else updateLeadingIcons(control)
-    })
+    if (node instanceof HTMLElement && node.matches(controls)) updateControl(node)
+    node.querySelectorAll<HTMLElement>(controls).forEach(updateControl)
   }
   const observer = new MutationObserver(records => {
     for (const record of records) {

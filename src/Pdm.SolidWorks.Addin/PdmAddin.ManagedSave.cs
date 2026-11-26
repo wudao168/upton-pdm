@@ -28,7 +28,7 @@ public sealed partial class PdmAddin
         var node = FindCadNodeByPath(currentTree, path);
         if (node?.DocumentId == null || !PdmDocumentIdentityStore.IsControlledWorkspacePath(path)
             || !PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding) || binding.DocumentId != node.DocumentId) return false;
-        if (!IsCheckedOutByCurrentUser(node))
+        if (!IsCheckedOutByCurrentUser(node) && !(document is IAssemblyDoc))
         {
             taskPaneControl?.SetCheckoutReminder("请先获取当前图档的编辑权限，再保存修改。未修改的引用图档无需一并获取。", true);
             return true;
@@ -48,8 +48,8 @@ public sealed partial class PdmAddin
         {
             var node = FindCadNodeByPath(currentTree, path);
             if (!ReferenceEquals(application.ActiveDoc, document) || !PathsEqual(document.GetPathName(), path)
-                || node == null || !IsCheckedOutByCurrentUser(node))
-                throw new InvalidOperationException("图档或编辑权限已切换，本次尚未保存。请切回原图档并核对权限后重试。");
+                || node?.DocumentId == null)
+                throw new InvalidOperationException("图档已切换，本次尚未保存。请切回原图档后重试。");
             if (!TryBeginWorkspaceOperation("正在保存已获取权限的图档"))
             {
                 pendingManagedSave = document; pendingManagedSavePath = path;
@@ -62,8 +62,7 @@ public sealed partial class PdmAddin
             var saved = false;
             try
             {
-                SaveManagedDocumentScope(document, node);
-                saved = true;
+                saved = SaveManagedDocumentScope(document, node);
                 if (load?.Observed.Count > 0)
                     load.References.UnionWith(EnumerateTree(node).Where(child => child != node).Select(child => child.FullPath));
                 InvalidateCurrentTreeCache(); ScheduleTreeRefresh(forceScan: false);
@@ -83,7 +82,7 @@ public sealed partial class PdmAddin
         return true;
     }
 
-    private void SaveManagedDocumentScope(IModelDoc2 document, CadTreeNode root)
+    private bool SaveManagedDocumentScope(IModelDoc2 document, CadTreeNode root)
     {
         var plan = new List<Tuple<IModelDoc2, CadTreeNode>>();
         var skipped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -108,7 +107,13 @@ public sealed partial class PdmAddin
             foreach (var item in loaded.Where(item => !seen.Contains(item.Key) && item.Value.GetSaveFlag()))
                 skipped.Add(Path.GetFileName(item.Key));
         }
-        plan.Add(Tuple.Create(document, root));
+        if (IsCheckedOutByCurrentUser(root)) plan.Add(Tuple.Create(document, root));
+        else if (document.GetSaveFlag()) skipped.Add(root.FileName);
+        if (plan.Count == 0)
+        {
+            taskPaneControl?.SetCheckoutReminder("当前范围没有可保存的已授权图档。已有修改已保留。", true);
+            return false;
+        }
         // Check the complete save scope before the first write, then recheck each
         // target immediately before writing. Never infer permission from read/write.
         foreach (var item in plan) RequireManagedSaveTarget(item.Item1, item.Item2);
@@ -119,9 +124,10 @@ public sealed partial class PdmAddin
             LogOperation("已保存获取权限的工作图档，未级联另存引用：" + item.Item2.FullPath);
         }
         var reminder = skipped.Count == 0 ? "已保存本次已获取权限的图档。" :
-            "已保存获取权限的图档；以下未获取权限的引用仍有未保存状态，已保留窗口和修改，未另存："
+            "已保存获取权限的图档；以下图档尚未获取权限，未保存状态已保留："
             + string.Join("、", skipped.Take(6)) + "。如需保留这些修改，请核对并获取对应图档权限。";
         taskPaneControl?.SetCheckoutReminder(reminder, skipped.Count > 0);
+        return true;
     }
 
     private void RequireManagedSaveTarget(IModelDoc2 document, CadTreeNode node)

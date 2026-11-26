@@ -23,6 +23,8 @@ public sealed partial class PdmAddin
         public string Key;
         public string Configuration;
         public string[] HistoricalMissingPaths = Array.Empty<string>();
+        public ArchiveMissingReferencePolicy.ToolboxReferenceEvidence[] HistoricalToolboxReferences
+            = Array.Empty<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>();
         public IDictionary<string, ArchivedMissingOccurrence[]> ArchivedOccurrences;
     }
 
@@ -30,6 +32,8 @@ public sealed partial class PdmAddin
     {
         public Guid OwnerId;
         public readonly HashSet<string> RetainedMissing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence> RetainedToolbox
+            = new HashSet<ArchiveMissingReferencePolicy.ToolboxReferenceEvidence>();
         public readonly Dictionary<string, Guid> DeferredReferences = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -201,6 +205,18 @@ public sealed partial class PdmAddin
         // An ancestor warning may refer to a descendant's omission. Read only the actual owner.
         unknown.UnionWith(scope.HistoricalMissingPaths);
         unknown.IntersectWith(direct);
+        foreach (var advisory in scope.HistoricalToolboxReferences.Where(reference => unknown.Contains(reference.SourcePath)
+            && components.All(component => !PathsEqual(component.GetPathName(), reference.SourcePath)
+                || !component.IsVirtual && component.GetModelDoc2() == null)))
+        {
+            proof.RetainedToolbox.Add(advisory);
+            proof.RetainedMissing.Add(advisory.SourcePath);
+        }
+        foreach (var path in proof.RetainedToolbox.Select(reference => reference.SourcePath).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            unknown.Remove(path);
+            LogOperation("获取权限保留已存档的Toolbox引用提醒：" + owner.FileName + " → " + path);
+        }
         if (unknown.Count == 0) return;
         var key = owner.VersionId + "|" + scope.Configuration;
         var cache = scope.ArchivedOccurrences ?? new Dictionary<string, ArchivedMissingOccurrence[]>(StringComparer.OrdinalIgnoreCase);

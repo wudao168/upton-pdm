@@ -690,6 +690,7 @@ public sealed partial class PdmAddin : ISwAddin
 
     private void CompleteNativeFileOpen(string fileName)
     {
+        lastNativeOpenCompletionPath = fileName;
         savedAssemblyActivation = null;
         pendingNativeOpenPaths.Clear();
         if (assemblyReferenceLoad?.Completed == true) assemblyReferenceLoad = null;
@@ -716,7 +717,10 @@ public sealed partial class PdmAddin : ISwAddin
         archiveBatchReads?.Invalidate();
         if (Volatile.Read(ref draftSnapshotInProgress) != 0) return 0;
         nextEditMaintenanceUtc = DateTime.MinValue;
-        foreach (var entry in localEdits.Values.Where(entry => PathsEqual(entry.SourcePath, fileName))) entry.ObservedOpen = true;
+        // Closing the plugin's own archived window does not count as the user
+        // closing a newly retained editing session.
+        if (!PathsEqual(closingCommittedArchiveDrawingPath, fileName))
+            foreach (var entry in localEdits.Values.Where(entry => PathsEqual(entry.SourcePath, fileName))) entry.ObservedOpen = true;
         InvalidateTreeCacheForPath(fileName);
         var closedCurrentDocument = IsCurrentDocument(fileName);
         if (closedCurrentDocument)
@@ -1348,7 +1352,14 @@ public sealed partial class PdmAddin : ISwAddin
         {
             try
             {
+                using var batchLock = ArchiveBatchJournal.TryLock(batch.BatchId);
+                if (batchLock == null) continue;
                 var receipt = await apiClient.GetArchiveBatchReceiptOrNullAsync(batch.BatchId, lifetime.Token);
+                if (receipt == null && batch.Prepared != null)
+                {
+                    taskPaneControl.SetCheckoutReminder("上次存档的上传已保留。打开原图档后点击“存档”可继续原批次。", true);
+                    continue;
+                }
                 if (receipt == null)
                 {
                     // Cancellation locks the same pending records as commit. A concurrently
@@ -1359,6 +1370,8 @@ public sealed partial class PdmAddin : ISwAddin
                         ClearCanceledArchiveIdentities(currentTree == null ? Array.Empty<CadTreeNode>() : EnumerateArchiveNodes(currentTree),
                             batch.ReservedDocumentIds ?? new List<Guid>());
                 }
+                if (receipt != null && batch.Prepared != null)
+                    await CompletePreparedArchiveRecoveryAsync(batch, receipt);
                 var message = receipt != null
                     ? "上次中断的存档已在服务器整批完成，请刷新项目核对。批次：" + batch.BatchId
                     : "上次中断的存档未提交，暂存登记已清理，本地文件保留。请重新整体存档。批次：" + batch.BatchId;
@@ -3171,7 +3184,6 @@ public sealed partial class PdmAddin : ISwAddin
                 controlledWorkspace.ProtectedPaths = CaptureLoadedCachePaths();
                 rootPath = await PrepareWorkspaceWithRecoveryAsync(manifest, editableDocumentIds, newEditCheckouts);
                 if (rootPath == null) return false;
-                RequireFullAssemblyForControlledOpen(FindLoadedDocument(rootPath));
                 if (!string.IsNullOrEmpty(controlledWorkspace.LocalCacheNotice)) openWarning = controlledWorkspace.LocalCacheNotice;
                 if (requestsLatestEdit)
                 {
@@ -3255,7 +3267,7 @@ public sealed partial class PdmAddin : ISwAddin
                         ToSolidWorksDocumentType(DocumentKindFromPath(rootPath)), ControlledOpenModelConfiguration(manifest, manifest.RootDocumentId),
                         readOnly: !editableDocumentIds.Contains(manifest.RootDocumentId));
                     if (opened == null) throw new IOException("SolidWorks未能打开编辑工作文件，原图和草稿已保留。");
-                    ValidateControlledLoadedSources(opened, rootPath, manifest, application, missingComponents, allowMissingDrawingModels: false);
+                    ValidateControlledLoadedSources(opened, rootPath, manifest, application, missingComponents, allowMissingDrawingModels: true);
                     if (requestedOpenDocumentId != manifest.RootDocumentId)
                     {
                         var requestedPath = controlledWorkspace.GetWorkingFilePath(manifest, requestedOpenDocumentId);
@@ -3264,7 +3276,7 @@ public sealed partial class PdmAddin : ISwAddin
                             readOnly: !editableDocumentIds.Contains(requestedOpenDocumentId));
                         if (requestedModel == null)
                             throw new IOException("未能恢复所选图档窗口，原图和草稿已保留。");
-                        ValidateControlledLoadedSources(requestedModel, rootPath, manifest, application, missingComponents, allowMissingDrawingModels: false);
+                        ValidateControlledLoadedSources(requestedModel, rootPath, manifest, application, missingComponents, allowMissingDrawingModels: true);
                     }
                     search.VerifyLoadedSources(missingComponents);
                 }
@@ -5739,7 +5751,7 @@ public sealed partial class PdmAddin : ISwAddin
         if (ArchiveSession.Current?.WorkflowStarted == true) { ArchiveSession.Current.BringToFront(); return; }
         if (taskPaneControl.InvokeRequired)
         {
-            taskPaneControl.BeginInvoke((Action)(() => OpenBatchOperationDialog(preferredProjectId, initialOperation, initiallySelectedPaths)));
+            taskPaneControl.BeginInvoke((Action)(() => OpenBatchOperationDialog(preferredProjectId, initialOperation, initiallySelectedPaths, initialStandardLibrary, initialStandardDrawingType)));
             return;
         }
         if (Volatile.Read(ref workspaceOperationInProgress) != 0)
@@ -5804,13 +5816,22 @@ public sealed partial class PdmAddin : ISwAddin
         }
 
         var operationToken = ArchiveOperationToken;
-        ArchiveSession.Current?.SetStage("正在读取项目和标准库权限…");
-        await RefreshArchiveProjectsAsync(operationToken);
-        StandardStructureViewDto standardLibraryView = null;
-        try { standardLibraryView = await apiClient.GetStandardStructureCapabilitiesAsync(operationToken); }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception error) { LogDiagnostic("读取存档窗口标准库权限", error); }
-        standardLibraryArchiveAllowed = standardLibraryView?.CanArchive == true;
+        var session = ArchiveSession.Current;
+        if (initialOperation == BatchOperationKind.CheckIn && session != null)
+        {
+            if (!await PrepareArchiveContextAsync(session, initialStandardLibrary)) return;
+            initialStandardLibrary = session.StartInStandardLibrary;
+            preferredProjectId = session.ArchiveProjectId;
+            if (!PathsEqual(session.ArchiveRootPath, (application.ActiveDoc as IModelDoc2)?.GetPathName()))
+                throw new InvalidOperationException("活动图档已切换，请从目标图档重新开始存档。");
+        }
+        else
+        {
+            await RefreshArchiveProjectsAsync(operationToken);
+            try { standardLibraryArchiveAllowed = (await apiClient.GetStandardStructureCapabilitiesAsync(operationToken))?.CanArchive == true; }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception error) { standardLibraryArchiveAllowed = false; LogDiagnostic("读取存档窗口标准库权限", error); }
+        }
         if (availableProjects.Count == 0 && !standardLibraryArchiveAllowed)
         {
             ShowError("当前账号没有可用项目，无法执行整套操作。");
@@ -5853,7 +5874,8 @@ public sealed partial class PdmAddin : ISwAddin
         // The selection page uses the loaded structure. Expand suppressed assemblies
         // only inside the confirmed archive scope, never before the user selects files.
 
-        var initialProjectId = preferredProjectId ?? GetExplicitProjectId(currentTree.FullPath) ?? currentProjectId;
+        var initialProjectId = initialOperation == BatchOperationKind.CheckIn && session != null ? session.ArchiveProjectId
+            : preferredProjectId ?? GetExplicitProjectId(currentTree.FullPath) ?? currentProjectId;
         if (initialOperation == BatchOperationKind.CheckIn && initialProjectId.HasValue)
             await RefreshArchiveSelectionAccessAsync(currentTree, initialProjectId.Value, operationToken);
         if (initialOperation == BatchOperationKind.CheckIn && initialProjectId.HasValue)
@@ -5863,9 +5885,12 @@ public sealed partial class PdmAddin : ISwAddin
         LogCheckInCheckpoint("batch-dialog-create", currentTree.FullPath);
         ArchiveSelection dialog;
         var includePairedChanges = true;
+        var selectionClient = apiClient;
+        var selectionActor = authenticatedUsername;
+        var selectionScope = selectionClient.EditJournalScope;
         while (true)
         {
-            ArchiveSession.Current?.SetStep(2, "请选择本次存档项目和图档，点击确认存档后将自动检查并完成提交。", 1);
+            session?.SetStep(1, "请核对归属项目，勾选本次存档的图档。", 1);
             dialog = ShowArchiveSelection(() => CreateBatchOperationDialog(
                 currentTree,
                 items,
@@ -5900,6 +5925,15 @@ public sealed partial class PdmAddin : ISwAddin
                 ArchiveSession.Current?.CancelBeforeSubmission();
                 return;
             }
+            if (initialOperation == BatchOperationKind.CheckIn && session != null)
+            {
+                if (selectionClient != apiClient || selectionActor != authenticatedUsername || selectionScope != apiClient.EditJournalScope
+                    || !PathsEqual(session.ArchiveRootPath, (application.ActiveDoc as IModelDoc2)?.GetPathName()))
+                    throw new InvalidOperationException("确认范围期间活动图档或登录身份已切换，请从目标图档重新存档。");
+                session.ArchiveProjectId = dialog.SelectedProjectId;
+                session.ConfirmedSourcePaths = dialog.SelectedItems.Select(item => item.Node.FullPath)
+                    .Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            }
             break;
         }
 
@@ -5931,6 +5965,7 @@ public sealed partial class PdmAddin : ISwAddin
             {
                 if (dialog.Operation == BatchOperationKind.CheckIn)
                 {
+                    if (await TryResumePreparedArchiveAsync(currentTree.FullPath, selectedProjectId, selectedItems, operationToken)) return;
                     if (!await ReconcileArchiveBatchesAsync())
                     {
                         ShowError("上次整批存档结果尚未核对，请确认服务器连接后重试。本地文件和恢复记录已保留。");
@@ -6037,7 +6072,7 @@ public sealed partial class PdmAddin : ISwAddin
                     previousBatchSynchronizationContext = SynchronizationContext.Current;
                     SynchronizationContext.SetSynchronizationContext(new TaskPaneSynchronizationContext(taskPaneControl));
                     batchSynchronizationContextInstalled = true;
-                    reportBatchStage("阶段1/4：正在分析本地变更…");
+                    reportBatchStage("正在分析本地变更…");
 
                     var checkInPlan = await TryBuildUnchangedArchivePlanAsync(selectedItems, reportBatchStage, batchCancellation.Token);
                     if (checkInPlan == null)
@@ -6065,24 +6100,11 @@ public sealed partial class PdmAddin : ISwAddin
                     LogOperation(string.Concat(
                         "Batch check-in plan end included=", checkInPlan.Items.Count,
                         " skipped=", checkInPlan.SkippedFiles));
-                    checkInPlan.ConfirmNewReferences(selectedProjectId, registrationDecisions);
                     checkInPlan = await UpdateLinkedDrawingsAsync(checkInPlan, selectedProjectId, batchCancellation.Token);
+                    checkInPlan.ConfirmNewReferences(selectedProjectId, registrationDecisions);
                     ValidateHistoricalReferenceScope(currentTree, checkInPlan.Items);
 
-                    // The operation dialog already confirms the selected scope. Ask again
-                    // only if preparation really adds a file beyond that selection.
-                    if (checkInPlan.Items.Any(item => !selectedItems.Any(selected => PathsEqual(selected.Node.FullPath, item.Node.FullPath))))
-                    {
-                        var rows = BuildArchiveScopeRows(selectedItems, checkInPlan);
-                        if (ArchiveSession.Current != null)
-                        {
-                            if (ArchiveSession.Current.ShowDialog(() => new ArchiveScopeReviewDialog(rows, checkInPlan.Items.Count, checkInPlan.SkippedFiles),
-                                (_, answer) => answer) != DialogResult.OK) return;
-                        }
-                        else using (var scopeReview = new ArchiveScopeReviewDialog(rows, checkInPlan.Items.Count, checkInPlan.SkippedFiles))
-                            if (scopeReview.ShowDialog(progressDialog) != DialogResult.OK) return;
-                        batchCancellation.Token.ThrowIfCancellationRequested();
-                    }
+                    batchCancellation.Token.ThrowIfCancellationRequested();
                     reportBatchStage("正在准备全部文件权限…");
                     LogOperation(string.Concat("Batch check-in execution start items=", checkInPlan.Items.Count));
                     var result = await CheckInBatchAsync(
@@ -6095,7 +6117,7 @@ public sealed partial class PdmAddin : ISwAddin
                         null,
                         registrationDecisions,
                         checkInPlan.Preflights, dialog.KeepEditing, dialog.HandoffTo);
-                    foreach (var pendingDrawing in EnumerateCadNodes(currentTree).Where(node => !string.IsNullOrWhiteSpace(node.DrawingUpdatePendingReason)))
+                    foreach (var pendingDrawing in checkInPlan.DeferredDrawings)
                         result.BomWarnings.Add(pendingDrawing.FileName + "：关联工程图待更新，本次未提交该工程图；更新并审核后才能用于本次变更发布。原因：" + pendingDrawing.DrawingUpdatePendingReason);
                     LogOperation(string.Concat(
                         "Batch check-in execution end created=", result.CreatedVersions,
@@ -6159,6 +6181,7 @@ public sealed partial class PdmAddin : ISwAddin
                     ClosePreloadedArchiveDocuments(preloadedDocuments);
                 preloadedArchiveDrawings.Clear();
                 preloadedOwnedDrawings.Clear();
+                archiveOpenedDrawingWindows.Clear();
                 foreach (var node in EnumerateArchiveNodes(currentTree)) node.HistoricalRepair = null;
                 if (batchSynchronizationContextInstalled)
                 {
@@ -6427,27 +6450,7 @@ public sealed partial class PdmAddin : ISwAddin
             node.CurrentRevision = metadata.Revision;
         }
         // Older add-ins stored a copyable ID only. Never silently adopt it at a new path.
-        var legacyMatches = DistinctBatchItems(selectedItems)
-            .Where(item => !item.Node.DocumentId.HasValue
-                && PdmDocumentIdentityStore.IsControlledWorkspacePath(item.Node.FullPath)
-                && PdmDocumentIdentityStore.TryReadProvenance(item.Node.FullPath, out var legacyId, out _)
-                && projectDocuments.Any(document => document.Id == legacyId))
-            .ToArray();
-        if (legacyMatches.Length > 0)
-        {
-            var choice = TopMostMessageBox.Show(taskPaneControl,
-                $"{legacyMatches.Length}个文件带有目标项目的旧图档编号，但没有本机位置关联记录。\r\n"
-                + "只有确认继续编辑目标项目的原图档，才应恢复关联；复制件用于新项目时，请取消并选择新项目。\r\n\r\n"
-                + string.Join("\r\n", legacyMatches.Take(8).Select(item => item.Node.FileName))
-                + "\r\n\r\n确认恢复为目标项目的原图档？这不会修改原图档内容。",
-                "确认旧图档关联", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-            if (choice != DialogResult.OK) throw new InvalidOperationException("已取消恢复旧关联，尚未开始提交。可以从PLM重新获取，或选择其他目标项目独立入库。");
-            foreach (var item in legacyMatches)
-            {
-                PdmDocumentIdentityStore.TryReadProvenance(item.Node.FullPath, out var legacyId, out _);
-                ApplyRegisteredDocumentToMatchingInstances(item.Node, projectDocuments.Single(document => document.Id == legacyId));
-            }
-        }
+        // Registration preflight resolves identities without trusting copied legacy metadata.
         var projectDocumentIds = new HashSet<Guid>(projectDocuments.Select(document => document.Id));
         var mismatch = selectedItems.FirstOrDefault(item =>
             item?.Node?.DocumentId != null && !projectDocumentIds.Contains(item.Node.DocumentId.Value));
@@ -7543,7 +7546,7 @@ public sealed partial class PdmAddin : ISwAddin
             cancellationToken.ThrowIfCancellationRequested();
             var item = items[index];
             var node = item.Node;
-            reportStage?.Invoke(string.Concat("阶段1/4：正在分析变更 ", index + 1, " / ", items.Count, "：", node.FileName));
+            reportStage?.Invoke(string.Concat("正在分析变更 ", index + 1, " / ", items.Count, "：", node.FileName));
             ArchiveSession.Current?.ReportAnalysisProgress(index, items.Count, node.FileName, "正在分析选定图档的本地变更…", false);
             LogOperation(string.Concat("Batch preflight start path=", node.FullPath));
             if (SuppressedAssemblyArchive.CanReuse(node) && !IsCheckedOutByCurrentUser(node)
@@ -7686,7 +7689,7 @@ public sealed partial class PdmAddin : ISwAddin
             cancellationToken.ThrowIfCancellationRequested();
             var batch = missingPreflights.Skip(offset).Take(preflightBatchSize).ToArray();
             reportStage?.Invoke(string.Concat(
-                "阶段1/4：正在批量读取PLM版本 ",
+                "正在批量读取PLM版本 ",
                 Math.Min(offset + batch.Length, missingPreflights.Length),
                 " / ", missingPreflights.Length));
             ArchiveSession.Current?.ReportAnalysisProgress(offset, missingPreflights.Length, null, "正在分析图档版本及存档条件…", false);
@@ -7826,7 +7829,11 @@ public sealed partial class PdmAddin : ISwAddin
                 }
             }
         }
-        finally { savedArchiveSourceHashes.Clear(); }
+        finally
+        {
+            savedArchiveSourceHashes.Clear();
+            archiveOpenedDrawingWindows.Clear();
+        }
     }
 
     private sealed class ArchiveLateEditsException : InvalidOperationException
@@ -7883,7 +7890,7 @@ public sealed partial class PdmAddin : ISwAddin
             await apiClient.RequireUnverifiedReferencesSupportAsync(cancellationToken);
         if (items.SelectMany(item => EnumerateArchiveNodes(item.Node)).Any(node => node.IsContextReference))
             await apiClient.RequireContextReferencesSupportAsync(cancellationToken);
-        if (items.Any(item => item.Node.ReferenceWarnings.Count > 0))
+        if (items.Any(item => item.Node.ReferenceWarnings.Any(warning => !Upton.Pdm.Domain.ArchiveWarningPolicy.IsToolboxReferenceWarning(warning))))
             await apiClient.RequireReferenceWarningsSupportAsync(cancellationToken);
         ValidateHistoricalReferenceScope(currentTree, items);
         ValidateHistoricalRepairProofs(items, projectId, cancellationToken);
@@ -8051,7 +8058,7 @@ public sealed partial class PdmAddin : ISwAddin
             foreach (var item in items)
                 foreach (var warning in item.Node.ReferenceWarnings)
                     ArchiveWarningGate.Check(Upton.Pdm.Domain.ArchiveWarningPolicy.CodeOf(warning), item.Node.FileName + "：" + warning);
-            if (items.Any(item => item.Node.ReferenceWarnings.Count > 0))
+            if (items.Any(item => item.Node.ReferenceWarnings.Any(warning => !Upton.Pdm.Domain.ArchiveWarningPolicy.IsToolboxReferenceWarning(warning))))
                 await apiClient.RequireReferenceWarningsSupportAsync(cancellationToken);
             try { ArchiveBatchJournal.Begin(batchId, checkoutSessionId, apiClient.EditJournalScope, authenticatedUsername); }
             catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
@@ -8068,7 +8075,7 @@ public sealed partial class PdmAddin : ISwAddin
                 try
                 {
                     PdmApiClient.ValidateCheckInReferences(node, submissionPaths);
-                    reportProgress?.Invoke(index, registrationItems.Length, node?.FileName, "阶段2/4：正在准备文件权限…");
+                    reportProgress?.Invoke(index, registrationItems.Length, node?.FileName, "正在准备文件权限…");
                     if (await PrepareBatchCheckInPermissionAsync(item, projectId, cancellationToken, registrationDecisions, batchId, reservedDocumentIds)
                         && node.HistoricalRepair == null)
                         result.PreparedPermissions++;
@@ -8122,9 +8129,15 @@ public sealed partial class PdmAddin : ISwAddin
                     reportProgress?.Invoke(readyCopies, orderedItems.Length, node.FileName, "正在核对副本准备方式（" + (index + 1) + "/" + orderedItems.Length + "）…");
                     var prepared = await PrepareBatchCheckInFileCoreAsync(node, cancellationToken, identity,
                         preflight, nativePropertyCards, initialSaveFlags, true);
-                    inspectedProperties.TryGetValue(node.FullPath, out var inspected);
+                    var inspected = inspectedProperties[node.FullPath];
+                    var inspectedHash = prepared.MemorySnapshot ? prepared.UploadCopySha256 : prepared.SourceHash;
+                    if (!string.Equals(inspectedHashes[node.FullPath], inspectedHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!prepared.MemorySnapshot) DeleteCheckInUploadCopy(prepared.UploadCopyPath);
+                        throw new InvalidOperationException("图档内容在属性读取后发生变化，未提交不匹配的属性：" + node.FileName);
+                    }
                     preparedFiles[node.FullPath] = new PreparedArchiveFile(node,
-                        PreserveInspectedConfigurationProperties(node, prepared.Properties, inspected), prepared.UploadCopyPath,
+                        PreserveInspectedCustomProperties(prepared, inspected), prepared.UploadCopyPath,
                         prepared.SourceHash, prepared.Latest, prepared.StoredFile, prepared.UploadCopySha256, prepared.SourceLength) { MemorySnapshot = prepared.MemorySnapshot };
                     if (prepared.StoredFile != null || !string.IsNullOrWhiteSpace(prepared.UploadCopyPath)) readyCopies++;
                 }
@@ -8190,7 +8203,7 @@ public sealed partial class PdmAddin : ISwAddin
             ValidateBatchSavedState(orderedItems, initialSaveFlags);
 
             ValidateHistoricalRepairProofs(items, projectId, cancellationToken);
-            var staged = new List<StagedArchiveFile>();
+            var staged = new List<StagedArchiveFile>(orderedItems.Length);
             var totalUploadBytes = preparedFiles.Values.Where(file => file.StoredFile == null && !string.IsNullOrWhiteSpace(file.UploadCopyPath))
                 .Sum(file => new FileInfo(file.UploadCopyPath).Length);
             long completedUploadBytes = 0;
@@ -8240,75 +8253,71 @@ public sealed partial class PdmAddin : ISwAddin
             ArchiveSession.Current?.SetPhase(4, "校验已通过，正在上传本次图档并等待整批提交…");
             var uploadTimer = Stopwatch.StartNew();
             long lastUploadProgress = -250;
-            void ReportUpload(int completed, string fileName, string message)
-            {
-                var now = uploadTimer.ElapsedMilliseconds;
-                if (completed != orderedItems.Length && now - lastUploadProgress < 250) return;
-                lastUploadProgress = now;
-                reportProgress?.Invoke(completed, orderedItems.Length, fileName, message);
-            }
             Stopwatch uploadReturnTimer = null;
             await Task.Run(async () =>
             {
-                for (var index = 0; index < uploadJobs.Length; index++)
+                // Each document has its own transfer journal. Commit once, in plan order,
+                // after all workers have stopped and every frozen request is present.
+                var limit = int.TryParse(System.Environment.GetEnvironmentVariable("UPLM_ARCHIVE_UPLOAD_CONCURRENCY"), out var configured)
+                    ? Math.Max(1, Math.Min(4, configured)) : 2;
+                if (uploadJobs.Select(job => job.Item.Node.DocumentId).Distinct().Count() != uploadJobs.Length) limit = 1;
+                var workerCount = Math.Min(limit, uploadJobs.Length);
+                var results = new StagedArchiveFile[uploadJobs.Length];
+                var transferProgress = new object();
+                var completed = 0;
+                var next = -1;
+                Exception firstFailure = null;
+                using var transfers = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                async Task TransferFilesAsync()
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var job = uploadJobs[index];
-                    var item = job.Item;
-                    var node = item.Node;
-                    if (failedItems.Contains(item)) continue;
-                    LogOperation(string.Concat("Batch check-in file start path=", node?.FullPath));
-                    try
+                    while (!transfers.IsCancellationRequested)
                     {
-                        if (node.Kind == CadDocumentKind.Assembly)
+                        var index = Interlocked.Increment(ref next);
+                        if (index >= uploadJobs.Length) return;
+                        var job = uploadJobs[index];
+                        var node = job.Item.Node;
+                        long acknowledged = 0;
+                        void Report(long uploaded, long total, bool finished)
                         {
-                            var failedDescendants = failedItems
-                                .Where(failed => BatchCheckInDependencyRule.BlocksParentAssembly(
-                                        failed.Node.Kind == CadDocumentKind.Drawing)
-                                    && failed.Ancestors.Any(ancestor => PathsEqual(ancestor.FullPath, node.FullPath)))
-                                .Select(failed => failed.Node?.FileName)
-                                .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
-                                .Distinct(StringComparer.OrdinalIgnoreCase)
-                                .ToArray();
-                            if (failedDescendants.Length > 0)
+                            lock (transferProgress)
                             {
-                                throw new InvalidOperationException(
-                                    $"子图档{string.Join("、", failedDescendants)}提交失败，父装配体未提交，避免生成不完整版本。");
+                                completedUploadBytes += Math.Max(0, uploaded - acknowledged);
+                                acknowledged = Math.Max(acknowledged, uploaded);
+                                if (finished) completed++;
+                                var now = uploadTimer.ElapsedMilliseconds;
+                                if (now - lastUploadProgress < 250 && completed != uploadJobs.Length) return;
+                                lastUploadProgress = now;
+                                reportProgress?.Invoke(completed, uploadJobs.Length, node.FileName, finished ? "文件已暂存，等待整批提交。"
+                                    : "正在上传：" + ArchiveStepInfo.Bytes(uploaded) + "/" + ArchiveStepInfo.Bytes(total)
+                                    + "；本批 " + ArchiveStepInfo.Bytes(completedUploadBytes) + "/" + ArchiveStepInfo.Bytes(totalUploadBytes));
                             }
                         }
-
-                        ReportUpload(index, node.FileName, "正在上传已校验的存档副本…");
-                        staged.Add(await UploadPreparedArchiveFileAsync(
-                            preparedFiles[node.FullPath],
-                            projectId,
-                            job.Comment,
-                            job.IsRoot,
-                            cancellationToken,
-                            job.Identity,
-                            job.Writeback,
-                            (uploaded, total) => ReportUpload(
-                                index,
-                                node.FileName,
-                                string.Concat(
-                                    "正在上传：本文件 ", ArchiveStepInfo.Bytes(uploaded), "/", ArchiveStepInfo.Bytes(total),
-                                    "；本批 ", ArchiveStepInfo.Bytes(completedUploadBytes + uploaded), "/", ArchiveStepInfo.Bytes(totalUploadBytes))),
-                            submissionPaths, uploadSessionId, job.BaseVersion, batchId, keepEditing, handoffTo));
-                        if (preparedFiles[node.FullPath].StoredFile == null)
-                            completedUploadBytes += new FileInfo(preparedFiles[node.FullPath].UploadCopyPath).Length;
-                        ReportUpload(index + 1, node.FileName, "文件已暂存，等待整批提交。");
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception exception)
-                    {
-                        failedItems.Add(item);
-                        LogDiagnostic(string.Concat("CheckInBatch.", node?.FileName), exception);
-                        throw new InvalidOperationException("整批存档已停止，本批次尚未产生存档版本：" + node?.FileName + "：" + ArchivePreflightError(exception), exception);
+                        try
+                        {
+                            results[index] = await UploadPreparedArchiveFileAsync(preparedFiles[node.FullPath], projectId,
+                                job.Comment, job.IsRoot, transfers.Token, job.Identity, job.Writeback,
+                                (uploaded, total) => Report(uploaded, total, false), submissionPaths, uploadSessionId,
+                                job.BaseVersion, batchId, keepEditing, handoffTo).ConfigureAwait(false);
+                            var bytes = preparedFiles[node.FullPath].StoredFile == null
+                                ? new FileInfo(preparedFiles[node.FullPath].UploadCopyPath).Length : 0;
+                            Report(bytes, bytes, true);
+                        }
+                        catch (OperationCanceledException) when (transfers.IsCancellationRequested) { return; }
+                        catch (Exception error)
+                        {
+                            LogDiagnostic("上传存档副本：" + node.FileName, error);
+                            Interlocked.CompareExchange(ref firstFailure, new InvalidOperationException(
+                                "整批存档已停止，本批次尚未产生存档版本：" + node.FileName + "：" + ArchivePreflightError(error), error), null);
+                            transfers.Cancel();
+                            return;
+                        }
                     }
                 }
-                LogOperation("后台顺序上传完成；文件数=" + staged.Count + "；耗时毫秒=" + uploadTimer.ElapsedMilliseconds);
+                await Task.WhenAll(Enumerable.Range(0, workerCount).Select(_ => TransferFilesAsync())).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (firstFailure != null) throw firstFailure;
+                staged.AddRange(results);
+                LogOperation("暂存上传完成；并行数=" + workerCount + "；文件数=" + staged.Count + "；耗时毫秒=" + uploadTimer.ElapsedMilliseconds);
                 uploadReturnTimer = Stopwatch.StartNew();
             }, cancellationToken);
             LogOperation("整批上传返回主线程；排队毫秒=" + uploadReturnTimer.ElapsedMilliseconds);
@@ -8316,14 +8325,39 @@ public sealed partial class PdmAddin : ISwAddin
             // E03: all uploads and reference snapshots are frozen. Later local edits
             // remain in the working file and must not invalidate this immutable batch.
             LogOperation("整批存档提交编号：" + batchId);
-            reportProgress?.Invoke(0, 0, string.Empty, "阶段4/4：全部" + orderedItems.Length + "个文件暂存完成，正在提交整批版本，等待服务器确认…");
+            reportProgress?.Invoke(0, 0, string.Empty, "全部" + orderedItems.Length + "个文件暂存完成，正在提交整批版本，等待服务器确认…");
             ArchiveSession.Current?.SetStep(9, "全部文件已暂存，正在等待服务器确认整批提交…", 1);
-            commitAttempted = true;
             ArchiveBatchReceiptDto receipt;
-            try { receipt = await apiClient.CommitArchiveBatchAsync(batchId, checkoutSessionId, staged.Select(file => file.Request).ToArray(), cancellationToken); }
+            var resumePrepared = false;
+            try
+            {
+                receipt = await apiClient.CommitRecoverableArchiveBatchAsync(batchId, checkoutSessionId, staged.Select(file => file.Request).ToArray(), cancellationToken, json =>
+                {
+                    if (drawingReviewWritebackIds == null && !string.IsNullOrWhiteSpace(originalDocumentPath))
+                    {
+                        ArchiveBatchJournal.Prepare(batchId, new PreparedArchiveBatch
+                        {
+                            ProjectId = projectId,
+                            ProjectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code,
+                            RootPath = originalDocumentPath,
+                            ConfirmedSourcePaths = ArchiveSession.Current?.ConfirmedSourcePaths,
+                            Files = staged.Select(file => new PreparedArchiveSource
+                            {
+                                DocumentId = file.Node.DocumentId.Value, SourcePath = file.Node.FullPath, SourceHash = file.SourceHash,
+                                MemorySnapshot = file.MemorySnapshot,
+                                SyncIdentity = file.Node.HistoricalRepair == null && !file.Node.NativeIsolationOnly && !file.NativeIsolation
+                            }).ToArray()
+                        }, json);
+                        resumePrepared = true;
+                    }
+                    commitAttempted = true;
+                });
+            }
             catch (Exception error)
             {
-                if (error.Data["ArchiveBatchNotCommitted"] is bool notCommitted && notCommitted) commitAttempted = false;
+                if (!resumePrepared && error.Data["ArchiveBatchNotCommitted"] is bool notCommitted && notCommitted) commitAttempted = false;
+                if (resumePrepared && error.Data["ArchiveResultUncertain"] is bool uncertain && uncertain)
+                    throw PreparedArchiveUncertain(error);
                 throw;
             }
             committed = true;
@@ -8335,6 +8369,7 @@ public sealed partial class PdmAddin : ISwAddin
             else if (receipt.FollowupPending)
                 result.BomWarnings.Add("图档版本已整批保存，BOM及通知正在服务器后台更新；无需重复存档，稍后刷新即可。");
             var synchronizedFiles = 0;
+            var drawingWindows = new List<CommittedArchiveDrawingWindow>();
             var syncUser = authenticatedUsername; var syncScope = apiClient?.EditJournalScope;
             var committedIndex = new ArchiveCommittedInstanceIndex(currentTree,
                 activeTreeCache.Values.SelectMany(entry => EnumerateArchiveNodes(entry.Tree)), operationNodes);
@@ -8371,8 +8406,9 @@ public sealed partial class PdmAddin : ISwAddin
                     var file = syncChunk[syncIndex];
                     var syncJob = syncJobs[syncIndex];
                     var localSync = syncResults[syncIndex];
-                    reportProgress?.Invoke(synchronizedFiles, staged.Count, file.Node.FileName, "阶段4/4：服务器已提交，正在同步本地图档状态…");
-                    foreach (var notice in file.Node.ReferenceWarnings)
+                    reportProgress?.Invoke(synchronizedFiles, staged.Count, file.Node.FileName, "服务器已提交，正在同步本地图档状态…");
+                    var visibleArchiveWarnings = file.Node.ReferenceWarnings.Where(notice => !Upton.Pdm.Domain.ArchiveWarningPolicy.IsReferenceDiagnosticMessage(notice)).ToArray();
+                    foreach (var notice in visibleArchiveWarnings)
                         result.BomWarnings.Add((notice.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal) ? "" : "引用提示：") + file.Node.FileName + "；" + notice);
                     var saved = receiptById[file.Node.DocumentId.Value];
                     var beforeVersion = file.Latest?.DrawingVersion ?? file.Node.DrawingVersion;
@@ -8420,6 +8456,13 @@ public sealed partial class PdmAddin : ISwAddin
                             result.Successes.Add(file.Node.FileName + "：存档后继续保留编辑权限");
                         }
                         else if (!string.IsNullOrWhiteSpace(handoffTo)) result.Successes.Add(file.Node.FileName + "：已存档并交接给" + handoffTo + "，预留5分钟接手");
+                        if (!laterChanges && !localSync.PreserveWarning && localSync.JournalError == null
+                            && string.IsNullOrWhiteSpace(localSync.Warning) && localSync.SourceStamp?.Exists == true
+                            && (!keepEditing || !file.MemorySnapshot)
+                            && archiveOpenedDrawingWindows.TryGetValue(file.Node.FullPath, out var archiveWindow))
+                            drawingWindows.Add(new CommittedArchiveDrawingWindow { Path = file.Node.FullPath,
+                                Document = archiveWindow, SourceStamp = localSync.SourceStamp,
+                                Memory = file.MemorySnapshot ? MemoryCopy(file.Node) : null });
                     }
                     catch (Exception syncError)
                     {
@@ -8436,8 +8479,8 @@ public sealed partial class PdmAddin : ISwAddin
                     var confirmedVersion = saved.Document.DrawingVersion ?? saved.Version?.DrawingVersion ?? file.Node.DrawingVersion;
                     ArchiveSession.Current?.TrackFile(file.Node,
                         file.Node.HistoricalRepair != null ? "历史资料已补齐（服务器已确认，不计工程变更）"
-                            : saved.VersionCreated ? (file.Node.ReferenceWarnings.Any(value => !value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal))
-                                ? "已存档（有引用提示）" : file.Node.ReferenceWarnings.Count > 0 ? "已存档（属性索引待补齐）" : "已存档（服务器已确认）") + (string.IsNullOrWhiteSpace(beforeVersion) ? string.Empty : "：" + beforeVersion + " → " + confirmedVersion)
+                            : saved.VersionCreated ? (visibleArchiveWarnings.Any(value => !value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal))
+                                ? "已存档（有引用提示）" : visibleArchiveWarnings.Length > 0 ? "已存档（属性索引待补齐）" : "已存档（服务器已确认）") + (string.IsNullOrWhiteSpace(beforeVersion) ? string.Empty : "：" + beforeVersion + " → " + confirmedVersion)
                             : "未变更，已按选择处理权限（不升版）",
                         (confirmedVersion ?? "版本待刷新") + " / " + (saved.Document.PublishedVersion ?? "未发布"));
                     if (saved.VersionCreated)
@@ -8452,12 +8495,13 @@ public sealed partial class PdmAddin : ISwAddin
                     }
                     else { result.UnchangedFiles++; result.Successes.Add(file.Node.FileName + (file.NativeIsolation
                         ? "：独立固化副本已保存，原工程版本不升版" : keepEditing ? "：无变更，继续编辑" : !string.IsNullOrWhiteSpace(handoffTo) ? "：无变更，已交接编辑权限（不升版）" : "：无变更，已结束编辑（不升版）")); }
-                    reportProgress?.Invoke(++synchronizedFiles, staged.Count, string.Empty, "阶段4/4：本地图档状态已同步：" + file.Node.FileName);
+                    reportProgress?.Invoke(++synchronizedFiles, staged.Count, string.Empty, "本地图档状态已同步：" + file.Node.FileName);
                 }
                 RefreshCheckoutReminder();
             }
             await RefreshCommittedWorkingMembershipsAsync(staged.Where(file => file.Node.Kind == CadDocumentKind.Assembly)
                 .Select(file => file.Node.DocumentId.Value));
+            CloseCommittedArchiveDrawingWindows(drawingWindows, result);
         }
         finally
         {
@@ -8545,7 +8589,7 @@ public sealed partial class PdmAddin : ISwAddin
             var node = item.Node;
             try
             {
-                reportProgress?.Invoke(index, orderedItems.Count, node?.FileName, "阶段3/4：正在执行存档前校验…");
+                reportProgress?.Invoke(index, orderedItems.Count, node?.FileName, "正在执行存档前校验…");
                 BatchDocumentIdentity identity = null;
                 identities?.TryGetValue(node.FullPath, out identity);
                 Guid? drawingReviewWritebackId = null;
@@ -8572,7 +8616,7 @@ public sealed partial class PdmAddin : ISwAddin
                     prepared?.ReferenceSnapshot, prepared?.NativeIsolationKeepEditing ?? (node.HistoricalRepair == null && keepEditing),
                     node.NativeIsolationOnly ? null : node.HistoricalRepair == null ? handoffTo : null);
                 LogOperation(string.Concat("Batch check-in preflight passed path=", node.FullPath));
-                reportProgress?.Invoke(index + 1, orderedItems.Count, node.FileName, "阶段3/4：存档前校验已通过");
+                reportProgress?.Invoke(index + 1, orderedItems.Count, node.FileName, "存档前校验已通过");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -8669,7 +8713,12 @@ public sealed partial class PdmAddin : ISwAddin
         IReadOnlyDictionary<string, IReadOnlyList<string>> referenceConfigurations,
         DocumentVersionDto knownVersion, string sourceHash)
     {
-        if (node.Role == CadReferenceRole.ExternalFileDependency || node.HistoricalRepair != null) return new Dictionary<string, string>();
+        if (node.Role == CadReferenceRole.ExternalFileDependency || node.HistoricalRepair != null)
+        {
+            if (HasNativeArchiveCustomProperties(node))
+                return ReadSavedNativeProperties(node, sourceHash ?? ComputeRegistrationFileHash(node), knownVersion);
+            return new Dictionary<string, string>();
+        }
         if (MemoryCopy(node) is ArchiveMemoryCopy memory)
         {
             ValidateCurrentMemoryCopy(node);
@@ -8704,8 +8753,6 @@ public sealed partial class PdmAddin : ISwAddin
             // Configuration names are checked before expensive preparation. A missing
             // configuration COM object alone does not prove a missing configuration.
             var properties = ReadArchiveProperties(document, node, nativePropertyCards, referenceConfigurations);
-            if (node.Kind == CadDocumentKind.Drawing)
-                node.ReferenceWarnings.RemoveAll(value => value.StartsWith(DrawingPropertyIndexWarning, StringComparison.Ordinal));
             if (readAlias)
             {
                 ValidateArchiveReadAlias(node, document);
@@ -9345,7 +9392,7 @@ public sealed partial class PdmAddin : ISwAddin
         {
             await session.Ready;
             session.Token.ThrowIfCancellationRequested();
-            StartCheckInRequest(eventArgs);
+            if (await PrepareArchiveContextAsync(session)) StartCheckInRequest(eventArgs);
         }
         catch (OperationCanceledException) when (session.Token.IsCancellationRequested) { }
         catch (Exception error) { LogDiagnostic("打开存档窗口", error); session.Fail(ArchivePreflightError(error)); }
@@ -9381,7 +9428,11 @@ public sealed partial class PdmAddin : ISwAddin
                 throw new InvalidOperationException("这张新工程图位于只读预览目录。请先打开该工程图，再从工程图页面提交存档。");
             try
             {
+                var target = ArchiveSession.Current;
+                if (target?.ArchiveProjectId is Guid project && currentProjectId.HasValue && project != currentProjectId)
+                    throw new InvalidOperationException("预览中新增的配图属于当前模型项目，请在该项目存档。");
                 node = PrepareDrawingCheckInContext(node);
+                if (target != null) target.ArchiveRootPath = node.FullPath;
                 requestedNodes = new[] { node };
             }
             catch (Exception exception)
@@ -9399,7 +9450,7 @@ public sealed partial class PdmAddin : ISwAddin
             return;
         }
 
-        if (!standardLibraryArchiveAllowed && currentProjectId.HasValue && !EnsureProjectArchiveAccess(currentProjectId.Value, "提交存档"))
+        if (ArchiveSession.Current?.ArchiveContextPrepared != true && !standardLibraryArchiveAllowed && currentProjectId.HasValue && !EnsureProjectArchiveAccess(currentProjectId.Value, "提交存档"))
         {
             return;
         }
@@ -10351,39 +10402,6 @@ public sealed partial class PdmAddin : ISwAddin
         catch (Exception exception) { ShowError(exception.Message); }
     }
 
-    private IReadOnlyDictionary<string, string> ReadCheckInProperties(IModelDoc2 document, CadTreeNode node, bool useCached = false,
-        IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> nativePropertyCards = null, bool requireComplete = false)
-    {
-        var properties = ReadModelProperties(document, node.Configuration, useCached,
-                includeConfiguration: node.Kind != CadDocumentKind.Drawing, requireComplete: requireComplete)
-            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-        // Preserve legacy markers for PDF stamp cleanup without writing to the native drawing.
-        if (node.Kind == CadDocumentKind.Drawing && !useCached)
-        {
-            foreach (var propertyName in new[]
-            {
-                "UPLM_QR_CONTENT",
-                "UPLM_QR_RULE_VERSION",
-                "UPLM_QR_SOURCE_PROPERTY",
-                "UPLM_QR_RENDER_VERSION",
-                "UPLM_QR_POSITION"
-            })
-            {
-                var value = ReadResolvedCustomProperty(document, string.Empty, propertyName);
-                if (!string.IsNullOrWhiteSpace(value))
-                    properties[string.Concat("全局/", propertyName)] = value;
-            }
-        }
-        var card = ResolveActiveNativePropertyCard(node, nativePropertyCards ?? DiscoverNativePropertyCards());
-        if (card?.IsAvailable == true)
-        {
-            foreach (var field in card.Fields)
-                Upton.Pdm.Domain.CadPropertyCardSnapshot.AddField(properties, field.PropertyName,
-                    field.ConfigurationSpecific && node.Kind != CadDocumentKind.Drawing);
-        }
-        return properties;
-    }
-
     private static string ReadSnapshotProperty(IReadOnlyDictionary<string, string> properties, string propertyName)
     {
         if (properties == null || string.IsNullOrWhiteSpace(propertyName)) return string.Empty;
@@ -10409,24 +10427,38 @@ public sealed partial class PdmAddin : ISwAddin
         return result;
     }
 
-    private static void ReadPropertyManager(CustomPropertyManager manager, string scope, IDictionary<string, string> target, bool useCached = false, bool requireComplete = false)
+    private static void ReadPropertyManager(CustomPropertyManager manager, string scope, IDictionary<string, string> target, bool useCached = false, bool requireComplete = false,
+        Action<string, Exception> incomplete = null)
     {
         if (requireComplete && manager == null) throw new InvalidOperationException("无法读取" + scope + "属性管理器。");
         var rawNames = manager?.GetNames() as Array;
         var names = rawNames?.Cast<object>().OfType<string>().ToArray() ?? Array.Empty<string>();
-        if (requireComplete && (manager.Count != names.Length || rawNames != null && rawNames.Length != names.Length))
-            throw new InvalidOperationException("无法完整读取" + scope + "属性名称，请保存并重新检查。");
+        if (requireComplete)
+        {
+            try
+            {
+                if (manager.Count != names.Length || rawNames != null && rawNames.Length != names.Length)
+                    throw new InvalidOperationException("未能完整枚举" + scope + "属性名称。");
+            }
+            catch (Exception error) when (incomplete != null && IsPropertyReadError(error))
+            { incomplete(scope, error); }
+        }
         foreach (var name in names)
         {
-            var raw = string.Empty;
-            var resolved = string.Empty;
-            var wasResolved = false;
-            var linked = false;
-            var readResult = manager.Get6(name, useCached, out raw, out resolved, out wasResolved, out linked);
-            if (requireComplete && readResult == (int)swCustomInfoGetResult_e.swCustomInfoGetResult_NotPresent)
-                throw new InvalidOperationException("属性在读取期间不存在或读取失败：" + scope + "/" + name);
-            // A cached evaluated value is usable even when WasResolved is false.
-            target[string.Concat(scope, "/", name)] = wasResolved || (useCached && !string.IsNullOrEmpty(resolved)) ? resolved : raw;
+            try
+            {
+                var raw = string.Empty;
+                var resolved = string.Empty;
+                var wasResolved = false;
+                var linked = false;
+                var readResult = manager.Get6(name, useCached, out raw, out resolved, out wasResolved, out linked);
+                if (requireComplete && readResult == (int)swCustomInfoGetResult_e.swCustomInfoGetResult_NotPresent)
+                    throw new InvalidOperationException("属性在读取期间不存在或读取失败：" + scope + "/" + name);
+                // A cached evaluated value is usable even when WasResolved is false.
+                target[string.Concat(scope, "/", name)] = wasResolved || (useCached && !string.IsNullOrEmpty(resolved)) ? resolved : raw;
+            }
+            catch (Exception error) when (incomplete != null && IsPropertyReadError(error))
+            { incomplete(scope + "/" + name, error); }
         }
     }
 
@@ -10590,7 +10622,7 @@ public sealed partial class PdmAddin : ISwAddin
                     ToSolidWorksDocumentType(DocumentKindFromPath(derivedRootPath)), string.Empty, false);
                 if (opened == null) throw new IOException("历史编辑副本未能打开，原文件和恢复记录已保留。");
                 ValidateHistoricalControlledOpenReferences(opened, derivedRootPath, manifest, application, historicalMissing);
-                ValidateControlledLoadedSources(opened, derivedRootPath, manifest, application, historicalMissing, false);
+                ValidateControlledLoadedSources(opened, derivedRootPath, manifest, application, historicalMissing, true);
                 search.VerifyLoadedSources(historicalMissing);
             }
             EnsureLoadedDocumentEditable(derivedRootPath);
@@ -12196,7 +12228,10 @@ public sealed partial class PdmAddin : ISwAddin
 
     private void ApplyCheckoutDocumentToMatchingInstances(
         IEnumerable<CadTreeNode> nodes,
-        DocumentDto document)
+        DocumentDto document) => ApplyCheckoutDocumentToMatchingInstancesCore(nodes, document, refreshTree: true);
+
+    private void ApplyCheckoutDocumentToMatchingInstancesCore(
+        IEnumerable<CadTreeNode> nodes, DocumentDto document, bool refreshTree)
     {
         RememberNavigationReceipt(document);
         var sources = (nodes ?? Array.Empty<CadTreeNode>()).Where(node => node != null).ToArray();
@@ -12207,7 +12242,9 @@ public sealed partial class PdmAddin : ISwAddin
         {
             ApplyCheckoutDocument(node, document);
         }
-        if (currentTree != null) taskPaneControl?.SetTree(currentTree);
+        if (currentTree == null) return;
+        if (refreshTree) taskPaneControl?.SetTree(currentTree);
+        else ScheduleTreeRefresh(forceScan: false);
     }
 
     private async Task<IReadOnlyList<DocumentVersionDto>> GetTreeVersionsAsync(
@@ -13276,27 +13313,6 @@ public sealed partial class PdmAddin : ISwAddin
         public bool MemorySnapshot { get; set; }
     }
 
-    private static IReadOnlyList<string[]> BuildArchiveScopeRows(IReadOnlyList<BatchOperationItem> selected, BatchCheckInPlan plan)
-    {
-        var planned = new HashSet<string>(plan.Items.Select(item => item.Node.FullPath), StringComparer.OrdinalIgnoreCase);
-        return selected.Concat(plan.Items).GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group =>
-        {
-            var node = group.First().Node;
-            var included = planned.Contains(node.FullPath);
-            var reason = "未变化，沿用已存档版本";
-            if (included)
-            {
-                plan.Preflights.TryGetValue(node.FullPath, out var preflight);
-                var latest = preflight?.Versions.FirstOrDefault();
-                reason = !node.DocumentId.HasValue || latest == null ? "首次登记存档" :
-                    !VersionMatchesLocalFile(latest, node.FullPath, preflight.LocalSha256) ? "保存的文件内容或属性有变化" :
-                    node.Kind == CadDocumentKind.Drawing ? "核对本次关联模型版本及工程图" :
-                    node.Kind == CadDocumentKind.Assembly ? "所选范围内的装配引用、配置或子件版本有变化" : "核对本次属性及引用变化";
-            }
-            return new[] { node.FileName, node.Configuration, included ? "拟提交" : "复用已有版本", reason };
-        }).ToArray();
-    }
-
     private sealed class BatchCheckInPlan
     {
         public BatchCheckInPlan(
@@ -13311,6 +13327,7 @@ public sealed partial class PdmAddin : ISwAddin
 
         public IReadOnlyList<BatchOperationItem> Items { get; }
         public int SkippedFiles { get; }
+        public IReadOnlyList<CadTreeNode> DeferredDrawings { get; set; } = Array.Empty<CadTreeNode>();
         public IReadOnlyDictionary<string, BatchCheckInPreflight> Preflights { get; }
         public Guid RegistrationProjectId { get; private set; }
         public IReadOnlyDictionary<string, RegistrationDecision> NewReferences { get; private set; }

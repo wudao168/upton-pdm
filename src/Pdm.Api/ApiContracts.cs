@@ -279,7 +279,7 @@ public sealed record SaveProjectFolderPermissionsRequest(IReadOnlyList<SaveFolde
 
 public sealed record CheckoutRequest(Guid SessionId, string MachineName, Guid? DrawingReviewWritebackId = null);
 public sealed record ReserveArchiveDocumentRequest(RegisterDocumentRequest Document, Guid SessionId, string MachineName);
-public sealed record CancelArchiveRegistrationRequest(Guid SessionId);
+public sealed record CancelArchiveRegistrationRequest(Guid SessionId, Guid? ProjectId = null);
 
 public sealed record EditSessionHeartbeatRequest(string MachineName, IReadOnlyList<Guid> DocumentIds);
 
@@ -336,7 +336,7 @@ public sealed record RestoreVersionRequest(string ChangeNote, Guid? OperationId 
 
 public sealed record PublishDocumentVersionRequest(Guid SourceVersionId, Guid ReleasePackageId, Guid ApprovalTaskId);
 
-public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false, bool TreeScopeOnly = false, bool AllowMissingComponents = false, bool UseLatestModelReferences = false);
+public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false, bool TreeScopeOnly = false, bool AllowMissingComponents = false, bool UseLatestModelReferences = false, bool IncludeReferenceScopeStamp = false);
 
 public sealed record CreateReleasePackageRequest(
     Guid ProjectId,

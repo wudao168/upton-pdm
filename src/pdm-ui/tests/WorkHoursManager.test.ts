@@ -29,7 +29,7 @@ describe('移动端精简工时填报', () => {
   it('仅显示五个字段和保存，管理员也不显示汇总、设置、日历及辅助操作', async () => {
     vi.mocked(api.readWorkHours).mockResolvedValue({ ...view(), canManage: true, canManageSettings: true })
     const wrapper = mountManager({ mobile: true }); await flushPromises()
-    expect(wrapper.findAll('.wh-mobile-fields > label').map(label => label.element.firstChild?.textContent)).toEqual(['日期', '所在地', '项目号', '项目名称', '工时数'])
+    expect(wrapper.findAll('.wh-mobile-fields > label').map(label => label.element.firstChild?.textContent?.trim())).toEqual(['日期', '所在地', '项目号', '项目名称', '工时数'])
     expect(wrapper.findAll('button').map(item => item.text())).toEqual(['保存'])
     expect(wrapper.find('.wh-tabs, .wh-summary, .wh-calendar, .wh-recent, .wh-entry, .wh-charts').exists()).toBe(false)
     expect(wrapper.text()).not.toMatch(/本月累计|未填工作日|复制|最近项目|修改记录|汇总工时|工时设置|当日记录/)
@@ -308,6 +308,24 @@ describe('工时填报与汇总', () => {
     expect(day.findAll('.wh-day-record')[1]!.attributes('title')).toContain('厂外')
     await day.trigger('click'); await flushPromises()
     expect(wrapper.findAll('.wh-entry')).toHaveLength(2)
+    const field = (label: string) => (wrapper.get(`[aria-label="${label}"]`).element as HTMLInputElement).value
+    expect(field('填报项目')).toBe('child')
+    expect(field('自动带出项目名称')).toBe('上料单元')
+    expect(field('工时数')).toBe('3.5')
+    expect(field('所在地')).toBe('厂内')
+    expect(api.readWorkHours).toHaveBeenCalledTimes(1)
+    await button(wrapper, '6小时').trigger('click')
+    expect(field('工时数')).toBe('6')
+    await button(wrapper, '取消修改').trigger('click')
+    expect(field('工时数')).toBe('3.5')
+    await wrapper.get('[aria-label="工时数"]').setValue('2.5')
+    await wrapper.get('.wh-day-editor form').trigger('submit'); await flushPromises()
+    expect(api.saveWorkHours).toHaveBeenCalledWith(expect.objectContaining({ entries: [
+      { date: '2026-10-19', projectId: 'child', location: '厂外', hours: 4.5 },
+      { date: '2026-10-19', projectId: 'child', location: '厂内', hours: 2.5 },
+    ] }), 'token')
+    await wrapper.get('[data-work-hours-date="2026-10-20"]').trigger('click')
+    for (const label of ['填报项目', '自动带出项目名称', '所在地', '工时数']) expect(field(label)).toBe('')
     wrapper.unmount()
   })
   it('默认月历，项目名称自动带出，保存半小时工时并重新读取', async () => {
@@ -317,6 +335,7 @@ describe('工时填报与汇总', () => {
     wrapper.findComponent(ElSelect).vm.$emit('update:modelValue','child'); await flushPromises()
     expect((wrapper.get('input[aria-label="自动带出项目名称"]').element as HTMLInputElement).value).toBe('上料单元')
     await wrapper.get('input[aria-label="工时数"]').setValue('4.5')
+    await wrapper.get('[aria-label="所在地"]').setValue('厂内')
     await wrapper.get('form').trigger('submit'); await flushPromises()
     expect(api.saveWorkHours).toHaveBeenCalledWith({ from:'2026-10-20',to:'2026-10-20',entries:[{ date:'2026-10-20',projectId:'child',location:'厂内',hours:4.5 }],versions:[{month:'2026-10',rowVersion:2}] }, 'token')
     expect(api.readWorkHours).toHaveBeenCalledTimes(2)
@@ -339,6 +358,7 @@ describe('工时填报与汇总', () => {
     const wrapper = mountManager(); await flushPromises()
     wrapper.findComponent(ElSelect).vm.$emit('update:modelValue','child'); await flushPromises()
     await wrapper.get('input[aria-label="工时数"]').setValue('6.5')
+    await wrapper.get('[aria-label="所在地"]').setValue('厂内')
     await wrapper.get('button[aria-label="2026-10-19 8小时"]').trigger('click')
     expect((wrapper.get('input[aria-label="填报日期"]').element as HTMLInputElement).value).toBe('2026-10-20')
     await wrapper.get('form').trigger('submit'); await flushPromises()
@@ -384,6 +404,7 @@ describe('工时日历填写图标', () => {
     expect(api.saveWorkHours).not.toHaveBeenCalled()
     await wrapper.get('[aria-label="填报项目"]').setValue('child')
     await wrapper.get('[aria-label="工时数"]').setValue('0.5')
+    await wrapper.get('[aria-label="所在地"]').setValue('厂内')
     vi.mocked(api.saveWorkHours).mockRejectedValueOnce(new Error('保存失败，请重试'))
     await wrapper.get('.wh-day-editor form').trigger('submit'); await flushPromises()
     expect(wrapper.get(`${date} .wh-day-indicator`).classes()).not.toContain('is-filled')

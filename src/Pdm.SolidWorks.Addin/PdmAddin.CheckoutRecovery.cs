@@ -45,13 +45,17 @@ public sealed partial class PdmAddin
                 localEdits[id] = entry;
             }
         }
+        var receiptTimer = System.Diagnostics.Stopwatch.StartNew();
         var document = await apiClient.CheckoutAsync(id, checkoutSessionId, checkoutMachineName, lifetime.Token);
+        LogOperation("获取权限耗时，回执已返回主线程，图档=" + id + "，耗时毫秒=" + receiptTimer.ElapsedMilliseconds);
+        receiptTimer.Restart();
         if (entry != null)
         {
             entry.CheckedOutAt = document.CheckedOutAt ?? DateTime.MinValue;
             editJournal.Save(entry);
         }
         TrackCheckoutDocument(document);
+        LogOperation("获取权限耗时，回执及本机编辑记录已登记，图档=" + id + "，耗时毫秒=" + receiptTimer.ElapsedMilliseconds);
         return document;
     }
 

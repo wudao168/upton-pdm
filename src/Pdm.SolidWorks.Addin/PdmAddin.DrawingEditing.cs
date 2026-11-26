@@ -64,7 +64,7 @@ public sealed partial class PdmAddin
     {
         var pending = documents.Where(document => document.HasUnsavedChanges && document.HasDiscardableReadOnlySaveFlag).ToArray();
         if (pending.Length == 0) return;
-        var directory = Path.Combine(WorkspaceSettingsStore.GetWorkspaceRoot(), "Recovery", "编辑切换", Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(PdmDocumentIdentityStore.CurrentWorkspaceRoot, "Recovery", "编辑切换", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         foreach (var snapshot in pending)
         {

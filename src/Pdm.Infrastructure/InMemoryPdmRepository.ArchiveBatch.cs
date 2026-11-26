@@ -6,6 +6,7 @@ namespace Upton.Pdm.Infrastructure;
 public sealed partial class InMemoryPdmRepository
 {
     private readonly Dictionary<Guid, ArchiveBatchReceipt> archiveBatchReceipts = new();
+    private readonly HashSet<Guid> abandonedArchiveBatches = new();
     private readonly Dictionary<Guid, (ArchiveBatchFollowup Work, DateTimeOffset NextAttempt)> archiveBatchFollowups = new();
 
     public Task<ArchiveBatchReceipt?> FindArchiveBatchAsync(Guid batchId, CancellationToken cancellationToken)
@@ -16,6 +17,8 @@ public sealed partial class InMemoryPdmRepository
     {
         lock (gate)
         {
+            if (abandonedArchiveBatches.Contains(batchId))
+                throw new PdmConflictException("原存档批次已结束，请按当前图档重新存档。");
             if (archiveBatchReceipts.TryGetValue(batchId, out var existing))
                 return Task.FromResult(ArchiveBatchRules.RequireMatchingReceipt(existing, actor, requestHash));
             var oldDocuments = documents.ToDictionary(); var oldVersions = versions.ToDictionary();

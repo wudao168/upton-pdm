@@ -167,7 +167,10 @@ public sealed partial class PdmAddin
                 (currentTree == null ? new[] { reference } : EnumerateCadNodes(currentTree).Where(model => model.Kind != CadDocumentKind.Drawing
                     && PathsEqual(model.FullPath, reference.FullPath)).DefaultIfEmpty(reference))
                 .Any(model => model.IsModifiedInSolidWorks || model.WorkState == CadWorkState.PendingCheckIn || model.WorkState == CadWorkState.ModifiedUnsaved)))
-                throw new InvalidOperationException("配套工程图关联的模型仍有未存档修改，请将对应模型一并勾选存档；本次尚未上传或升版：" + drawing.FileName);
+            {
+                RecordUnresolvedDrawingViews(drawing, "配套模型有本批以外的修改，保留当前工程图视图和模型修改。");
+                continue;
+            }
             drawing.RequiresModelUpdate = drawing.RequiresModelUpdate || modelChanged || !referencesMatch;
             if (drawing.RequiresModelUpdate && !planned.Any(existing => PathsEqual(existing.Node.FullPath, drawing.FullPath))) planned.Add(item);
         }
@@ -188,6 +191,53 @@ public sealed partial class PdmAddin
             || string.Equals(Path.GetFileName(path), model.FileName, StringComparison.OrdinalIgnoreCase)
             || model.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata)
                 && metadata.DocumentId == model.DocumentId));
+    }
+
+    private readonly Dictionary<string, IModelDoc2> archiveOpenedDrawingWindows =
+        new Dictionary<string, IModelDoc2>(StringComparer.OrdinalIgnoreCase);
+    private string closingCommittedArchiveDrawingPath;
+
+    private sealed class CommittedArchiveDrawingWindow
+    {
+        internal string Path;
+        internal IModelDoc2 Document;
+        internal ArchiveSourceStamp SourceStamp;
+        internal ArchiveMemoryCopy Memory;
+    }
+
+    private void CloseCommittedArchiveDrawingWindows(IReadOnlyList<CommittedArchiveDrawingWindow> windows, BatchCheckInResult result)
+    {
+        foreach (var window in windows)
+        {
+            try
+            {
+                var loaded = application.GetOpenDocumentByName(window.Path) as IModelDoc2;
+                if (loaded == null || !ReferenceEquals(window.Document, loaded) || !PathsEqual(loaded.GetPathName(), window.Path))
+                    continue;
+                // A new save or memory edit can occur while other files are synchronized.
+                if (!window.SourceStamp.Matches(window.Path) || (loaded.GetSaveFlag()
+                    && (window.Memory == null || !ReferenceEquals(window.Memory.Model, loaded)
+                        || !window.Memory.MatchesMemory() || window.Memory.CommittedVersion == null
+                        || !string.Equals(window.Memory.CommittedVersion.Sha256, window.Memory.CopyHash, StringComparison.OrdinalIgnoreCase))))
+                {
+                    result.BomWarnings.Add(Path.GetFileName(window.Path) + "：存档后仍有本地修改，临时窗口已保留。");
+                    continue;
+                }
+                bool closeRequested;
+                closingCommittedArchiveDrawingPath = window.Path;
+                try { closeRequested = CloseArchiveReadDocument(loaded); }
+                finally { closingCommittedArchiveDrawingPath = null; }
+                if (!closeRequested || application.GetOpenDocumentByName(window.Path) is IModelDoc2 remaining
+                        && PathsEqual(remaining.GetPathName(), window.Path) && remaining.Visible)
+                    throw new InvalidOperationException("临时工程图窗口仍然打开。");
+                LogOperation("存档成功后已关闭临时工程图：" + window.Path);
+            }
+            catch (Exception error)
+            {
+                LogDiagnostic("存档后关闭临时工程图：" + window.Path, error);
+                result.BomWarnings.Add(Path.GetFileName(window.Path) + "：服务器已存档，临时窗口关闭未确认。");
+            }
+        }
     }
 
     private async Task<BatchCheckInPlan> UpdateLinkedDrawingsAsync(BatchCheckInPlan plan, Guid projectId, CancellationToken token)
@@ -213,6 +263,7 @@ public sealed partial class PdmAddin
                 drawing = ReadLinkedDrawingForArchive(node, plan, projectId, out opened);
                 if (!PathsEqual(drawing?.GetPathName(), node.FullPath))
                     throw new InvalidOperationException("未能加载对应的工程图，请核对当前窗口中的图档路径。");
+                if (opened) archiveOpenedDrawingWindows[node.FullPath] = drawing;
                 if (node.ConfirmedArchivePaths != null && !node.ConfirmedArchivePaths.Contains(node.FullPath))
                     node.ConfirmedArchivePaths = new HashSet<string>(node.ConfirmedArchivePaths, StringComparer.OrdinalIgnoreCase)
                     { node.FullPath };
@@ -220,10 +271,28 @@ public sealed partial class PdmAddin
                 var expected = expectedModels.Where(model => model.DocumentId.HasValue).Select(model => model.DocumentId.Value).Distinct().ToArray();
                 scanner.UpdateDrawingReferences(drawing, node);
                 ArchiveSession.Current?.ReportFile(index, drawings.Length, node.FileName, "正在按本次模型更新配套工程图…");
-                RebuildLinkedDrawingSheets(drawing, node, expectedModels);
-                scanner.UpdateDrawingReferences(drawing, node);
+                if (node.HasUnresolvedDrawingViews || node.ReferencedModels.Count == 0
+                    || node.ReferencedModels.Any(model => !expectedModels.Any(reference => PathsEqual(reference.FullPath, model.FullPath))))
+                {
+                    RecordUnresolvedDrawingViews(node);
+                    continue;
+                }
+                try
+                {
+                    RebuildLinkedDrawingSheets(drawing, node, expectedModels);
+                    scanner.UpdateDrawingReferences(drawing, node);
+                }
+                catch (Exception error) when (error is InvalidOperationException || error is System.Runtime.InteropServices.COMException)
+                {
+                    LogDiagnostic("配套工程图视图重建待核对：" + node.FileName, error);
+                    RecordUnresolvedDrawingViews(node, "视图重建未完成，按当前可保存的工程图继续存档。");
+                    continue;
+                }
                 if (node.StructureIndexPending || expected.Any(id => !node.ReferencedModels.Any(model => model.DocumentId == id)))
-                    throw new InvalidOperationException("工程图实际视图与本次模型关联不一致，或视图尚未完整读取。请核对该工程图引用的模型；已保留文件和待更新状态。");
+                {
+                    RecordUnresolvedDrawingViews(node);
+                    continue;
+                }
                 // Loading/rebuilding drawing views can dirty a model configuration. Keep
                 // the drawing open, persist only models already in this batch, then save
                 // the drawing against that settled model state. Unselected references stay untouched.
@@ -239,13 +308,20 @@ public sealed partial class PdmAddin
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception error)
             {
+                if (PathsEqual(node.FullPath, currentTree?.FullPath)) throw;
+                ThrowOnArchiveConnectionFailure(error);
                 LogDiagnostic("关联工程图待更新：" + node.FileName, error);
                 node.DrawingUpdatePendingReason = ArchivePreflightError(error);
                 pending.Add(node.FullPath);
             }
             finally
             {
-                try { if (opened && drawing != null && !drawing.GetSaveFlag()) CloseArchiveReadDocument(drawing); }
+                try
+                {
+                    if (opened && drawing != null && PathsEqual(drawing.GetPathName(), node.FullPath)
+                        && !drawing.GetSaveFlag() && CloseArchiveReadDocument(drawing))
+                        archiveOpenedDrawingWindows.Remove(node.FullPath);
+                }
                 catch (Exception error) { LogDiagnostic("工程图临时窗口保留：" + node.FileName, error); }
             }
         }
@@ -254,12 +330,20 @@ public sealed partial class PdmAddin
             var errors = 0;
             application.ActivateDoc3(active, false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref errors);
         }
-        if (pending.Count > 0)
-            throw new InvalidOperationException("配套工程图更新未完成，已停止本批次存档，尚未上传或升版。请核对工程图视图、引用及保存状态后重试："
-                + string.Join("；", plan.Items.Where(item => pending.Contains(item.Node.FullPath))
-                    .Select(item => item.Node.FileName + "：" + item.Node.DrawingUpdatePendingReason)));
+        if (pending.Count == 0) return plan;
         return new BatchCheckInPlan(plan.Items.Where(item => !pending.Contains(item.Node.FullPath)).ToArray(),
-            plan.SkippedFiles + pending.Count, plan.Preflights);
+            plan.SkippedFiles, plan.Preflights)
+        {
+            DeferredDrawings = drawings.Where(item => pending.Contains(item.Node.FullPath)).Select(item => item.Node).ToArray()
+        };
+    }
+
+    private static void RecordUnresolvedDrawingViews(CadTreeNode drawing, string reason = "部分工程图视图未能核对模型，按图纸已保存状态存档。")
+    {
+        drawing.RequiresModelUpdate = false;
+        drawing.StructureIndexPending = true;
+        drawing.DrawingUpdatePendingReason = null;
+        ArchiveWarningGate.Record(drawing, "DrawingOutOfSync", reason);
     }
 
     private void RebuildLinkedDrawingSheets(IModelDoc2 document, CadTreeNode node, IReadOnlyList<CadTreeNode> expectedModels)

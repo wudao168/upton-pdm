@@ -39,6 +39,11 @@ internal sealed class ArchiveSession : IDisposable
     public bool IsClosed => closed.Task.IsCompleted;
     public bool IsFinished => Volatile.Read(ref finished) != 0;
     public bool WorkflowStarted { get; set; }
+    internal Guid? ArchiveProjectId { get; set; }
+    internal string[] ConfirmedSourcePaths { get; set; }
+    internal bool ArchiveContextPrepared { get; set; }
+    internal bool StartInStandardLibrary { get; set; }
+    internal string ArchiveRootPath { get; set; }
     internal IntPtr OwnerHandle { get; private set; }
     internal IntPtr PresentationOwnerHandle { get; private set; }
     public event EventHandler CancelRequested;
@@ -177,8 +182,7 @@ internal sealed class ArchiveSession : IDisposable
     internal void ReportMissingReference(string path, string fileName)
     {
         lock (reportedMissingReferences) if (!reportedMissingReferences.Add(path ?? fileName)) return;
-        SetStage("发现缺失引用：" + fileName + "；路径：" + path + "；"
-            + (ArchiveMissingReferencePolicy.BlockMissingReferences ? "已启用阻止选项，确认范围后优先检查。" : "默认仅提示，将按勾选范围存档。"));
+        PluginDiagnosticLog.Record("缺失引用", fileName + "；" + path);
     }
     public void ReportFile(int completed, int total, string fileName, string message) =>
         QueueProgress(new ProgressUpdate { Message = message, FileName = fileName, Completed = completed, Total = total, RecordedAt = DateTime.Now });
@@ -369,13 +373,13 @@ internal sealed class ArchiveSessionWindow : Form
         information.Controls.Add(informationHeader, 0, 0); information.Controls.Add(processRecords, 0, 1);
         information.Resize += (_, __) => AlignProcessRecords();
         var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(4) };
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 820));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 820 + BatchOperationDialog.ArchiveConfirmExtraWidth(Font)));
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         selection.Margin = Padding.Empty;
         body.Controls.Add(selection, 0, 0); body.Controls.Add(information, 1, 0);
         selection.Controls.Add(new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter,
-            Text = "正在读取图档与结构，请稍候。检查完成后在此选择项目和图档。" });
+            Text = "正在准备图档清单。请在此核对归属项目、勾选图档并确认存档。" });
         var initialActions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40,
             FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 4, 8, 4) };
         stop.Dock = DockStyle.None; initialActions.Controls.Add(stop); selection.Controls.Add(initialActions);
@@ -570,7 +574,7 @@ internal sealed class ArchiveSessionWindow : Form
                 history.Hide();
                 confirmationTitle.Hide();
                 historyTitle.Text = inlineProject ? "选择项目" : "确认项目归属";
-                ApplyProgress(inlineProject ? "请选择图档归属项目，确认后继续存档。" : "请核对图档归属项目，确认后继续存档。", null, 0, 0, session.Phase);
+                ApplyProgress(inlineProject ? "请选择图档归属项目，然后核对本次存档范围。" : "请核对图档归属项目，确认后继续存档。", null, 0, 0, session.Phase);
                 progress.Hint = inlineProject ? "等待选择项目" : "等待确认项目归属";
             }
             else { form.Dock = DockStyle.Top; form.Height = Math.Max(220, form.Height); }

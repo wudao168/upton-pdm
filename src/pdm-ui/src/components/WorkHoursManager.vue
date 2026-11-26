@@ -44,10 +44,11 @@ const ownChecks = computed(() => own.value?.compliance?.find(x => x.username.toL
 const missed = computed(() => ownChecks.value.filter(x => x.date >= month.value && x.date <= monthEnd.value && x.status === '未填写').map(x => x.date))
 const incomplete = computed(() => ownChecks.value.filter(x => x.date >= month.value && x.date <= monthEnd.value && x.status === '填写不完整').map(x => x.date))
 const daily = computed(() => entries.value.filter(x => x.date === selected.value))
-const editing = ref(''), form = reactive({ projectId: '', location: '厂内', hours: 4 }), formBaseline = ref('')
+const editing = ref(''), form = reactive({ projectId: '', location: '', hours: '' as number | '' }), formBaseline = ref('')
 const mobileExtraRows = ref<{ key: number; projectId: string; hours: number }[]>([])
 const mobileRows = computed(() => [form, ...mobileExtraRows.value])
 const mobileQuickHours = [2, 4, 6, 8, 10]
+const dayQuickHours = [1, 2, 3, 4, 6, 8, 10, 12]
 const mobileDateLabel = computed(() => selected.value.replace(/^(\d{4})-0?(\d+)-0?(\d+)$/, '$1年$2月$3日'))
 const formDirty = computed(() => JSON.stringify(form) !== formBaseline.value)
 let rowSequence = 0, ownGeneration = 0, reportGeneration = 0
@@ -63,10 +64,10 @@ const allProjects = computed(() => {
   return [...result.values()]
 })
 const recent = computed(() => [...new Set([...entries.value].sort((a, b) => b.date.localeCompare(a.date)).map(x => x.projectId))].slice(0, 5).map(id => allProjects.value.find(x => x.id === id)!).filter(Boolean))
-const projectName = computed(() => allProjects.value.find(x => x.id === form.projectId)?.name ?? (props.mobile ? '' : '选择项目后自动带出'))
+const projectName = computed(() => allProjects.value.find(x => x.id === form.projectId)?.name ?? '')
 const mobileProjectSearch = ref('')
 const mobileProjects = computed(() => allProjects.value.filter(project => `${project.code} ${project.name}`.toLowerCase().includes(mobileProjectSearch.value.trim().toLowerCase())))
-function syncMobileEntry(row: { projectId: string; hours: number }) {
+function syncMobileEntry(row: { projectId: string; hours: number | '' }) {
   if (!props.mobile || saving.value) return
   const entry = daily.value.find(item => item.projectId === row.projectId && item.location === form.location)
   if (entry) row.hours = entry.hours
@@ -99,10 +100,20 @@ function visibleDayStatus(day: string) {
 }
 function resetForm(entry?: WorkHourEntry) {
   editing.value = entry?.id ?? ''
-  const defaultLocation = props.mobile ? '厂内' : entries.value.at(-1)?.location ?? '厂内'
-  Object.assign(form, { projectId: entry?.projectId ?? '', location: entry?.location ?? defaultLocation, hours: entry?.hours ?? 4 })
+  form.projectId = entry?.projectId ?? ''
+  form.location = entry?.location ?? (props.mobile ? '厂内' : '')
+  form.hours = entry?.hours ?? (props.mobile ? 4 : '')
   if (props.mobile) mobileExtraRows.value = []
   formBaseline.value = JSON.stringify(form)
+}
+function cancelDayEdit() {
+  resetForm(daily.value.find(entry => entry.id === editing.value) ?? daily.value[0])
+}
+function selectEditorDate(event: Event) {
+  const input = event.target as HTMLInputElement
+  const date = input.value
+  input.value = selected.value
+  if (date && date <= today.value) void selectDay(date)
 }
 function makeRow(projectId = '', location = '厂内'): WeekRow { return { key: ++rowSequence, projectId, location, values: Object.fromEntries(week.value.map(day => [day, ''])) } }
 function resetWeek() {
@@ -128,7 +139,7 @@ async function loadOwn() {
     if (generation !== ownGeneration) return
     const preserveMobileForm = props.mobile && !!own.value
     own.value = result
-    if (!preserveMobileForm) resetForm()
+    if (!preserveMobileForm) resetForm(props.mobile ? undefined : daily.value[0])
     if (!props.mobile) resetWeek()
     prefillProject(); syncMobileEntries(); emit('changed')
     if (tab.value === 'settings' && !(result.canManageSettings ?? result.canManage)) tab.value = 'entry'
@@ -140,7 +151,7 @@ async function selectDay(day: string) {
   if (!mayLeave()) return
   selected.value = day
   if (month.value.slice(0, 7) !== day.slice(0, 7)) { month.value = day.slice(0, 7) + '-01'; await loadOwn() }
-  else { if (!props.mobile) { resetForm(); resetWeek() }; syncMobileEntries() }
+  else { if (!props.mobile) { resetForm(daily.value[0]); resetWeek() }; syncMobileEntries() }
 }
 function selectMobileDay(event: Event) {
   const input = event.target as HTMLInputElement
@@ -490,7 +501,24 @@ if (!props.mobile) void loadGlobalStatusContent().then(data => { holidays.value 
       <div v-if="mode === 'calendar'" class="wh-calendar-layout">
         <aside class="pdm-panel wh-day-editor"><header><strong>{{ selected }} · 当日工时</strong><span>合计 {{ number(total(daily)) }} 小时</span></header>
           <div class="wh-controls"><button type="button" :disabled="saving || loading || dirty || !daily.length" @click="copyDay">复制当日工时</button><button type="button" :disabled="saving || loading || dirty || !dayClipboard || selected === dayClipboard.date || selected > today" @click="pasteDay">粘贴工时到此日</button><span v-if="dayClipboard" class="wh-note">{{ dayClipboard.mode === 'cut' ? '待剪切' : '已复制' }} {{ dayClipboard.date }}</span></div>
-          <form @submit.prevent="saveDay"><label>日期<input type="date" :value="selected" :max="today" :disabled="saving || loading" aria-label="填报日期" @change="selectDay(($event.target as HTMLInputElement).value)"></label><fieldset :disabled="saving || loading || !own || selected > today"><label>所在地<select v-model="form.location" aria-label="所在地"><option>厂内</option><option>厂外</option></select></label><label>项目号<el-select v-model="form.projectId" filterable placeholder="搜索主项目号、子项目号或名称" aria-label="填报项目" :disabled="saving || loading || selected > today"><el-option v-for="project in allProjects" :key="project.id" :value="project.id" :label="`${project.code} · ${project.name}`" /></el-select></label><label>项目名称<input :value="projectName" readonly aria-label="自动带出项目名称"></label><label>工时数<input v-model.number="form.hours" type="number" min="0.5" max="24" step="0.5" required aria-label="工时数"></label><div class="wh-controls"><button v-for="value in [1,2,3,4,6,8,10,12]" :key="value" type="button" @click="form.hours = value">{{ value }}小时</button></div><div class="wh-controls"><button type="submit" class="pdm-primary-action">{{ editing ? '保存修改' : '保存并继续' }}</button><button v-if="formDirty || editing" type="button" @click="resetForm()">取消修改</button><button type="button" :disabled="dirty || !calendarReady" @click="copyPreviousDay">复制上一工作日</button></div></fieldset></form>
+          <form @submit.prevent="saveDay">
+            <label>日期<input type="date" :value="selected" :max="today" :disabled="saving || loading" aria-label="填报日期" @change="selectEditorDate"></label>
+            <fieldset :disabled="saving || loading || !own || selected > today">
+              <label>所在地<select v-model="form.location" aria-label="所在地" required><option value="">请选择所在地</option><option>厂内</option><option>厂外</option></select></label>
+              <label>项目号<el-select v-model="form.projectId" filterable placeholder="搜索主项目号、子项目号或名称" aria-label="填报项目" :disabled="saving || loading || selected > today"><el-option v-for="project in allProjects" :key="project.id" :value="project.id" :label="`${project.code} · ${project.name}`" /></el-select></label>
+              <label>项目名称<input :value="projectName" readonly aria-label="自动带出项目名称"></label>
+              <label>工时数<input v-model.number="form.hours" type="number" min="0.5" max="24" step="0.5" required aria-label="工时数"></label>
+              <div class="wh-day-quick-hours" role="group" aria-label="快捷填写工时">
+                <button v-for="value in dayQuickHours" :key="value" type="button" :aria-pressed="form.hours === value" :class="{ active: form.hours === value }" @click="form.hours = value">{{ value }}小时</button>
+              </div>
+              <div class="wh-controls">
+                <button type="submit" class="pdm-primary-action">{{ editing ? '保存修改' : '保存并继续' }}</button>
+                <button v-if="formDirty || (daily.length && !editing)" type="button" @click="cancelDayEdit">取消修改</button>
+                <button v-if="editing" type="button" :disabled="dirty" @click="resetForm()">新增工时</button>
+                <button type="button" :disabled="dirty || !calendarReady" @click="copyPreviousDay">复制上一工作日</button>
+              </div>
+            </fieldset>
+          </form>
           <p v-if="selected > today" class="wh-note">未来日期仅供查看，实际工时请在当天或之后填写。</p>
           <div v-if="recent.length" class="wh-recent"><span>最近项目</span><button v-for="p in recent" :key="p.id" :disabled="saving || selected > today" @click="form.projectId = p.id">{{ p.code }} · {{ p.name }}</button></div>
           <h3>当日记录</h3><p v-if="!daily.length" class="wh-empty">暂无记录，填写后保存即可计入汇总。</p><div v-for="entry in daily" :key="entry.id" class="wh-entry"><div><b>{{ entry.projectCode }}</b> · {{ entry.projectName }}<small>{{ entry.location }} · {{ number(entry.hours) }} 小时</small></div><button :disabled="saving || dirty" @click="resetForm(entry)">修改</button><button :disabled="saving || dirty" @click="removeDay(entry)">删除</button></div>

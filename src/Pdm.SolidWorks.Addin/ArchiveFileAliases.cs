@@ -2,11 +2,33 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 
 namespace Upton.Pdm.SolidWorks;
 
 internal static class ArchiveFileAliases
 {
+    internal static void ValidateRegistrationSources(IEnumerable<CadTreeNode> nodes, CancellationToken cancellationToken)
+    {
+        var groups = nodes.Where(node => !node.DocumentId.HasValue && node.Status != CadReferenceStatus.Virtual
+                && !node.IsOutsideNativeFileScope && !node.IsUnverifiedToolboxFallback && !string.IsNullOrWhiteSpace(node.FullPath))
+            .Select(node => node.FullPath).Distinct(StringComparer.OrdinalIgnoreCase)
+            .GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
+        var conflicts = new List<string>();
+        foreach (var group in groups.Where(group => group.Count() > 1))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var paths = group.Where(File.Exists).ToArray();
+            if (paths.Length < 2 || paths.Select(path => ArchiveFileFingerprint.Read(path, cancellationToken))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Count() < 2) continue;
+            conflicts.Add(string.Join("\r\n  ", paths));
+        }
+
+        if (conflicts.Count != 0)
+            throw new InvalidOperationException("本批待登记图档有同名文件且内容不同，尚未上传或升版。请核对各装配和工程图的引用来源后重试。\r\n\r\n"
+                + string.Join("\r\n\r\n", conflicts));
+    }
+
     internal static IReadOnlyDictionary<string, string> Normalize(CadTreeNode root)
     {
         var nodes = new List<CadTreeNode>();

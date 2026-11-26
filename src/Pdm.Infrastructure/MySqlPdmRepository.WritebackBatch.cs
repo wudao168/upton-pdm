@@ -1,4 +1,5 @@
 using Dapper;
+using System.Data.Common;
 using System.Text.Json;
 using Upton.Pdm.Domain;
 
@@ -50,6 +51,13 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE bom_item SET property_writeback_status='Pending',updated_at=@Now WHERE id IN @Ids",
                 new { Ids = ids, Now = now }, transaction, cancellationToken: cancellationToken));
+        await InsertAuditEntriesAsync(connection, transaction, audits, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private async Task InsertAuditEntriesAsync(DbConnection connection, DbTransaction transaction,
+        IEnumerable<AuditEntry> audits, CancellationToken cancellationToken, int? commandTimeoutSeconds = null)
+    {
         foreach (var batch in audits.Chunk(100))
         {
             var parameters = new DynamicParameters();
@@ -68,8 +76,7 @@ public sealed partial class MySqlPdmRepository
             }
             await connection.ExecuteAsync(new CommandDefinition(
                 "INSERT INTO audit_entry(id,occurred_at,actor,action_name,entity_type,entity_id,detail_json) VALUES" + string.Join(",", values),
-                parameters, transaction, cancellationToken: cancellationToken));
+                parameters, transaction, commandTimeout: commandTimeoutSeconds, cancellationToken: cancellationToken));
         }
-        await transaction.CommitAsync(cancellationToken);
     }
 }

@@ -149,6 +149,27 @@ public sealed class ArchiveBatchTests
     }
 
     [Fact]
+    public async Task OnlyTheOwningSessionCanEndAnUncommittedPreparedBatch()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("RESUME-" + Guid.NewGuid().ToString("N"), "续提", "admin", "vault", "release"), "admin", default);
+        var batch = Guid.NewGuid();
+        var session = Guid.NewGuid();
+        var part = await repository.ReserveArchiveDocumentAsync(
+            new(project.Id, "PART", "PART", "PART.SLDPRT", DocumentKind.Part) { SourceSha256 = new string('A', 64) },
+            "admin", new(batch, session, "QA"), default);
+        await Assert.ThrowsAsync<PdmConflictException>(() =>
+            repository.AbandonPreparedArchiveAsync(batch, project.Id, "admin", Guid.NewGuid(), default));
+        Assert.NotNull(await repository.FindPendingArchiveDocumentAsync(part.Id, default));
+        await repository.AbandonPreparedArchiveAsync(batch, project.Id, "admin", session, default);
+        Assert.Null(await repository.FindPendingArchiveDocumentAsync(part.Id, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => repository.CheckInBatchVersionsAsync(batch, "request", "admin", session,
+            [new(part.Id, Commit(project, part, Node(part), 'A'))], default));
+        Assert.Null(await repository.FindArchiveBatchAsync(batch, default));
+        Assert.Empty(await repository.ListDocumentsAsync(project.Id, default));
+    }
+
+    [Fact]
     public async Task CompleteBatchBindsNewChildVersionAndReplaysWithoutDuplicateVersions()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

@@ -11,6 +11,8 @@ public sealed class PdmDatabaseOptions
     public bool RunMigrations { get; set; } = true;
 
     public bool RetryTransientAuditWrites { get; set; } = true;
+
+    public int ArchiveAuditCommandTimeoutSeconds { get; set; } = 120;
 }
 
 public sealed class PdmStorageOptions : Upton.Pdm.Application.IServerStoragePaths

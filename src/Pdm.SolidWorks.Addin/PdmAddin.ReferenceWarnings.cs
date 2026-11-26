@@ -7,20 +7,10 @@ namespace Upton.Pdm.SolidWorks;
 
 public sealed partial class PdmAddin
 {
-    // Missing design sources can be archived as notices. Actual model occurrences,
-    // drawing models and unverified embedded storage still require their existing checks.
+    // An unresolved reference supplies no bytes and cannot grant access to another file.
     private static bool CanArchiveMissingSource(CadTreeNode owner, string path, IEnumerable<string> designSources = null)
-    {
-        if (owner == null || owner.Kind == CadDocumentKind.Drawing
-            || NativeArchiveManifest.IsInterconnectCachePath(path)
-            || IsSolidWorksTemporaryVirtualComponentPath(path)) return false;
-        if (EnumerateArchiveNodes(owner).Any(node => node != owner
-            && node.Role != CadReferenceRole.ExternalFileDependency
-            && (PathsEqual(node.FullPath, path) || PathsEqual(node.SourceReferencePath, path)))) return false;
-        if (owner.Kind == CadDocumentKind.Part) return true;
-        return !IsPdmNativeFile(path) || owner.EmbeddedDesignDependencies.Any(source => PathsEqual(source, path))
-            || (designSources ?? Array.Empty<string>()).Any(source => PathsEqual(source, path));
-    }
+        => owner != null && !PathsEqual(owner.FullPath, path) && !File.Exists(path)
+            && !NativeArchiveManifest.IsInterconnectCachePath(path) && !IsSolidWorksTemporaryVirtualComponentPath(path);
 
     private static void RecordReferenceWarning(CadTreeNode owner, string source, string reason,
         IEnumerable<string> searched = null)

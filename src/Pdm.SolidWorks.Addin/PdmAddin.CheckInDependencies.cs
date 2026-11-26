@@ -14,8 +14,7 @@ public sealed partial class PdmAddin
     {
         var scope = new HashSet<string>(scopePaths, StringComparer.OrdinalIgnoreCase);
         var paths = PdmDependencyEntries(saved, owner.FullPath).SelectMany(entry => entry.Value).ToArray();
-        if (paths.All(path => scope.Contains(path) || owner.ConfirmedArchivePaths != null
-            && !ArchiveMissingReferencePolicy.BlockMissingReferences && !owner.ConfirmedArchivePaths.Contains(path) && !File.Exists(path)))
+        if (paths.All(scope.Contains))
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var previousDirectory = application.GetCurrentWorkingDirectory();
         try

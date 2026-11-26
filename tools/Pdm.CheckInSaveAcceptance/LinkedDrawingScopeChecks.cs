@@ -279,13 +279,14 @@ internal static partial class Program
             }
         }).GetTransparentProxy();
         SetField(plugin, "application", app); SetField(plugin, "scanner", New("SolidWorksReferenceTreeScanner", app));
-        var plan = New("PdmAddin+BatchCheckInPlan", LinkedItems(drawing), 0, null); Exception failure = null;
+        var plan = New("PdmAddin+BatchCheckInPlan", LinkedItems(drawing), 0, null);
         var bytes = File.ReadAllBytes((string)Get(drawing, "FullPath"));
-        try { await (Task)TreeCall(plugin, "UpdateLinkedDrawingsAsync", plan, Guid.NewGuid(), CancellationToken.None); }
-        catch (InvalidOperationException error) { failure = error; }
-        if (failure == null || !failure.Message.Contains("实际视图") || failure.Message.Contains("被占用") || rebuilds != 1)
-            throw new Exception("视图引用不一致未返回准确中文原因", failure);
+        await (Task)TreeCall(plugin, "UpdateLinkedDrawingsAsync", plan, Guid.NewGuid(), CancellationToken.None);
+        var warnings = ((System.Collections.IEnumerable)Get(drawing, "ReferenceWarnings")).Cast<string>();
+        if (rebuilds != 0 || !(bool)Get(drawing, "StructureIndexPending")
+            || !warnings.Any(warning => warning.Contains("工程图视图未能核对模型")))
+            throw new Exception("视图引用不一致时应保留诊断及待补读状态，并跳过自动重建");
         if (!bytes.SequenceEqual(File.ReadAllBytes((string)Get(drawing, "FullPath")))) throw new Exception("引用不一致时改写了原图");
-        Console.WriteLine("PASS: 真正选中工程图引用不一致仍在上传前阻止，准确提示实际视图问题，原文件不变");
+        Console.WriteLine("PASS: 工程图视图待核对时仅记录诊断，不改写原图");
     }
 }

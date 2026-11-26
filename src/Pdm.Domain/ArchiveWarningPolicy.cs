@@ -13,6 +13,7 @@ public sealed class ArchiveWarningDefinition
     public string Source { get; set; }
     public bool Supported { get; set; }
     public bool AlwaysBlocks { get; set; }
+    public bool DiagnosticOnly => ArchiveWarningPolicy.IsAdvisory(Code);
 }
 
 public sealed class ArchiveWarningPolicy
@@ -25,16 +26,54 @@ public sealed class ArchiveWarningPolicy
     public const int DefaultMaxBatchRequestMiB = 256;
     public const int MinimumBatchRequestMiB = 16;
     public const int MaximumBatchRequestMiB = 512;
+    public const string ToolboxReferenceWarningPrefix = "Toolbox引用提醒：";
+    public const string ToolboxReferenceWarningReason = "Toolbox引用待核对，本次不上传";
     public long GetMaxBatchRequestBytes() => (long)(MaxBatchRequestMiB ?? DefaultMaxBatchRequestMiB) * 1024 * 1024;
+
+    public static bool IsReferenceDiagnostic(string code) =>
+        code == "MissingFile" || code == "OutsideVault" || code == "MissingConfiguration" || code == "ConfigurationUnreadable";
+
+    public static bool IsAdvisory(string code) => IsReferenceDiagnostic(code)
+        || code == "PropertyIndexPending" || code == "ReferenceTypeUnknown" || code == "DrawingOutOfSync";
+
+    public static bool IsReferenceDiagnosticMessage(string message) => message != null
+        && (IsReferenceDiagnostic(CodeOf(message)) || message.StartsWith(ToolboxReferenceWarningPrefix, StringComparison.Ordinal)
+            || message.StartsWith("来源：", StringComparison.Ordinal));
 
     public bool Blocks(string code)
     {
         var definition = Catalog.FirstOrDefault(item => item.Code == code);
-        return definition != null && definition.Supported && (definition.AlwaysBlocks || BlockAll
+        return !IsAdvisory(code) && definition != null && definition.Supported && (definition.AlwaysBlocks || BlockAll
             || (BlockingCodes ?? Array.Empty<string>()).Contains(code, StringComparer.Ordinal));
     }
 
     public static string Format(string code, string detail) => "存档警告[" + code + "]：" + detail;
+
+    public static bool TryReadToolboxReferenceWarning(string warning, out string path, out string instance)
+    {
+        path = instance = string.Empty;
+        if (warning == null || !warning.StartsWith(ToolboxReferenceWarningPrefix, StringComparison.Ordinal)) return false;
+        var start = ToolboxReferenceWarningPrefix.Length;
+        var end = warning.IndexOf("；" + ToolboxReferenceWarningReason + "；", start, StringComparison.Ordinal);
+        if (end <= start) return false;
+        var original = warning.Substring(start, end - start);
+        var absolute = original.StartsWith("\\\\", StringComparison.Ordinal) || original.StartsWith("/", StringComparison.Ordinal)
+            || original.Length > 3 && char.IsLetter(original[0]) && original[1] == ':' && (original[2] == '\\' || original[2] == '/');
+        if (!absolute || !original.EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase)) return false;
+        path = original;
+        const string instanceLabel = "；实例 ";
+        var instanceStart = warning.IndexOf(instanceLabel, end, StringComparison.Ordinal);
+        if (instanceStart >= 0)
+        {
+            instanceStart += instanceLabel.Length;
+            var instanceEnd = warning.IndexOf('；', instanceStart);
+            if (instanceEnd >= 0) instance = warning.Substring(instanceStart, instanceEnd - instanceStart);
+        }
+        return true;
+    }
+
+    public static bool IsToolboxReferenceWarning(string warning) => TryReadToolboxReferenceWarning(warning, out _, out _);
+
     public static string CodeOf(string message)
     {
         if (message == null) return null;

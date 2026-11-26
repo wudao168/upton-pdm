@@ -93,7 +93,12 @@ internal static partial class Program
      if(call.MethodName=="GetDocuments")return memoryModels.Select(m=>m.GetTransparentProxy()).ToArray();if(call.MethodName=="get_ActiveDoc")return null;if(call.MethodName=="GetUserPreferenceStringValue")return "";
      if(call.MethodName=="GetDocumentDependencies2")return warningMode&&(string)call.Args[0]==(string)Get(nodes[0],"FullPath")?absentPaths.SelectMany(path=>new[]{Path.GetFileName(path),path}).ToArray():new string[0];
      if((warningMode||memoryMode||pendingFromLaterProperties)&&call.MethodName=="GetCurrentWorkingDirectory")return folder;
-     if(warningMode&&call.MethodName=="GetOpenDocumentByName")return null;
+     if(call.MethodName=="GetOpenDocumentByName")return null;
+     if(call.MethodName=="GetDocumentVisible")return true;
+     if(call.MethodName=="DocumentVisible")return null;
+     // The saved fixture bytes are deliberately not SolidWorks files. The native
+     // reader may fail to load the file for properties, but never writes it.
+     if(call.MethodName=="OpenDoc6")return null;
      if(warningMode&&call.MethodName=="SetCurrentWorkingDirectory")return true;
      nativeWrites++;throw new Exception("Unexpected native mutation "+call.MethodName);
     }));
@@ -271,7 +276,7 @@ internal static partial class Program
      }
      if(mode=="missing-references"||mode=="missing-references-cache")
      {
-      if(absentPaths.Any(File.Exists)||!handler.WarningSnapshotCommitted||((IList)Get(nodes[0],"ReferenceWarnings")).Count!=3)throw new Exception("缺失提示未随快照提交，或缺失文件被制造/范围被扩大");
+      if(absentPaths.Any(File.Exists)||!handler.WarningSnapshotCommitted||((IEnumerable)Get(nodes[0],"ReferenceWarnings")).Cast<string>().Count(w=>absentPaths.Any(path=>w.Contains(Path.GetFileName(path))))!=3)throw new Exception("缺失提示未随快照提交，或缺失文件被制造/范围被扩大");
       Console.WriteLine("PASS: missing-reference notices persist in committed snapshot; only two checked files upload and commit");
      }
      Console.WriteLine("PASS: real batch pipeline "+mode+"; one initial confirm, no later operator action; uploads="+handler.Uploads+", commits="+handler.Commits+", native mutations=0");
@@ -304,7 +309,7 @@ internal static partial class Program
 
  sealed class ArchiveGateHandler:HttpMessageHandler
  {
-  readonly object[] nodes;readonly Dictionary<Guid,object> versions;readonly Guid project,checkout;readonly string mode;readonly Dictionary<Guid,Dictionary<string,object>> transfers=new Dictionary<Guid,Dictionary<string,object>>();
+  readonly object[] nodes;readonly Dictionary<Guid,object> versions;readonly Guid project,checkout;readonly string mode;readonly System.Collections.Concurrent.ConcurrentDictionary<Guid,Dictionary<string,object>> transfers=new System.Collections.Concurrent.ConcurrentDictionary<Guid,Dictionary<string,object>>();
   public readonly List<byte[]> UploadedChunks=new List<byte[]>();
   public volatile bool Confirmed;public int Uploads,Commits,Preflights,CompletedUploads,OwnerThread;public Action OnPreflight,OnUploadStart,OnUploadCompleted,OnHistoryRead;public bool WarningSnapshotCommitted;
   public ArchiveGateHandler(object[] nodes,Dictionary<Guid,object> versions,Guid project,Guid checkout,string mode){this.nodes=nodes;this.versions=versions;this.project=project;this.checkout=checkout;this.mode=mode;}
@@ -325,8 +330,8 @@ internal static partial class Program
    else if(route.EndsWith("/uploads/sessions"))
    {
     if(Thread.CurrentThread.ManagedThreadId==OwnerThread)throw new Exception("上传仍在 SolidWorks 主线程启动");
-    if(Uploads!=CompletedUploads)throw new Exception("上传并发或次序改变");
-    if(!Confirmed)throw new Exception("未确认即开始上传");Uploads++;OnUploadStart?.Invoke();
+    var configured=Environment.GetEnvironmentVariable("UPLM_ARCHIVE_UPLOAD_CONCURRENCY");var limit=int.TryParse(configured,out var n)?Math.Max(1,Math.Min(4,n)):2;
+    if(!Confirmed)throw new Exception("未确认即开始上传");if(Interlocked.Increment(ref Uploads)-Volatile.Read(ref CompletedUploads)>limit)throw new Exception("上传超出并发上限");OnUploadStart?.Invoke();
     var payload=json.Deserialize<Dictionary<string,object>>(await request.Content.ReadAsStringAsync());var id=Guid.NewGuid();transfers[id]=payload;
     if(mode=="long-upload-staging-name")
     {
@@ -355,11 +360,11 @@ internal static partial class Program
      if(Path.GetFileName(relativePath)!=(string)pair.Value["fileName"])
       throw new Exception("服务端未提供路径时，提交目标未沿用原图档名称");
     }
-    value=new{relativePath,length=pair.Value["totalLength"],sha256=pair.Value["sha256"]};CompletedUploads++;OnUploadCompleted?.Invoke();
+    value=new{relativePath,length=pair.Value["totalLength"],sha256=pair.Value["sha256"]};Interlocked.Increment(ref CompletedUploads);OnUploadCompleted?.Invoke();
    }
    else if(route.EndsWith("/archive-batches"))
    {
-    if(!Confirmed)throw new Exception("未确认即提交");Commits++;var body=await request.Content.ReadAsStringAsync();var missingExtension=mode=="missing-references-cache"?".stp.SLDASM":".SLDPRT";WarningSnapshotCommitted=Enumerable.Range(0,3).All(i=>body.Contains("MISSING-"+i+missingExtension));var payload=json.Deserialize<Dictionary<string,object>>(body);
+    if(!Confirmed||CompletedUploads!=nodes.Length)throw new Exception("未确认或暂存不完整即提交");Commits++;var body=await request.Content.ReadAsStringAsync();var missingExtension=mode=="missing-references-cache"?".stp.SLDASM":".SLDPRT";WarningSnapshotCommitted=Enumerable.Range(0,3).All(i=>body.Contains("MISSING-"+i+missingExtension));var payload=json.Deserialize<Dictionary<string,object>>(body);
     var submitted=((IEnumerable)payload["files"]).Cast<Dictionary<string,object>>().ToDictionary(row=>Guid.Parse((string)row["documentId"]),row=>(Dictionary<string,object>)row["request"]);
     if(mode=="long-upload-staging-name")foreach(var node in nodes)
     {

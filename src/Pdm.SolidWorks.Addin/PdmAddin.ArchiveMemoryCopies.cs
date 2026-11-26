@@ -187,6 +187,7 @@ public sealed partial class PdmAddin
                     throw new InvalidOperationException("仍有文件加载未结束，未开始生成提交副本：" + node.FileName);
                 var startLoadEpoch = nativeLoadEpoch;
                 var completedLoadEpoch = startLoadEpoch;
+                var completedCommandSequence = nativeCommandSequence;
                 var workingDirectory = application.GetCurrentWorkingDirectory();
                 Interlocked.Increment(ref refreshSuppressionDepth);
                 try
@@ -196,6 +197,7 @@ public sealed partial class PdmAddin
                         throw new InvalidOperationException("生成提交副本前发生新的文件加载，请等待加载完成后重试：" + node.FileName);
                     path = CreateCheckInUploadCopy(model, node.FullPath, node.DocumentId ?? Guid.Empty);
                     completedLoadEpoch = nativeLoadEpoch;
+                    completedCommandSequence = nativeCommandSequence;
                 }
                 finally
                 {
@@ -207,7 +209,8 @@ public sealed partial class PdmAddin
                     }
                     finally { Interlocked.Decrement(ref refreshSuppressionDepth); }
                 }
-                CompleteArchiveMemoryCopyLoad(model, node.FullPath, startLoadEpoch, completedLoadEpoch);
+                await CompleteArchiveMemoryCopyLoadAsync(model, node.FullPath, startLoadEpoch, completedLoadEpoch,
+                    completedCommandSequence, token);
                 RestoreArchiveToolboxCopyReferences(node, path, token);
                 var stamp = model.GetUpdateStamp();
                 var revision = copy.Revision;
@@ -229,33 +232,99 @@ public sealed partial class PdmAddin
         return changed;
     }
 
-    private void CompleteArchiveMemoryCopyLoad(IModelDoc2 model, string sourcePath, int startEpoch, int completedEpoch)
+    private const int NativeOpenComponentFileCommand = 970; // swCommands_Open_Comp_File
+    private static readonly TimeSpan ArchiveCopyLoadSettleLimit = TimeSpan.FromSeconds(10);
+
+    private async Task CompleteArchiveMemoryCopyLoadAsync(IModelDoc2 model, string sourcePath, int startEpoch,
+        int completedEpoch, int completedCommandSequence, CancellationToken token)
     {
         if (Volatile.Read(ref nativeFileOpenInProgress) == 0 && nativeLoadEpoch == completedEpoch) return;
-        // SaveAs3 can emit FileOpenPreNotify for imported cache documents without
-        // FileOpenPostNotify. Only acknowledge notifications from this completed
-        // copy call, never a previous load or an event pumped by these COM queries.
+        // SaveAs3 can resolve an imported component and emit only FileOpenPreNotify.
+        // Scope any reconciliation to the notifications inside this successful call.
         try
         {
-            if (completedEpoch == startEpoch || nativeLoadEpoch != completedEpoch)
-                throw new InvalidOperationException("副本调用以外发生了文件加载");
-            application.GetRunningCommandInfo(out var command, out var title, out var active);
+            if (completedEpoch == startEpoch || nativeLoadEpoch != completedEpoch || nativeCommandSequence != completedCommandSequence)
+                throw new InvalidOperationException("副本调用以外发生了文件加载或命令");
+            if (nativeFileOpenCommandId == NativeOpenComponentFileCommand && model is IAssemblyDoc)
+            {
+                var notifiedPaths = pendingNativeOpenPaths.ToArray();
+                var idleAtReturn = nativeIdleSequence;
+                await WaitForArchiveCopyComponentLoadAsync(model, sourcePath, completedEpoch,
+                    completedCommandSequence, notifiedPaths, idleAtReturn, token);
+                return;
+            }
+            application.GetRunningCommandInfo(out var command, out _, out var active);
             var ready = application.StartupProcessCompleted;
             var sameDocument = PathsEqual(model.GetPathName(), sourcePath);
             if (active || !ready || !sameDocument || disconnecting || nativeUiCommandId != 0
-                || nativeFileOpenCommandId != 0 || nativeLoadEpoch != completedEpoch)
-                throw new InvalidOperationException("原生命令、图档或加载批次仍需核对");
-            Interlocked.Exchange(ref nativeFileOpenInProgress, 0);
-            nativeFileOpenCommandId = 0;
-            unknownLoadOwner = null; unknownLoadOwnerPath = null; unknownAddedEpoch = unknownSavedEpoch = 0;
+                || nativeFileOpenCommandId != 0 || nativeLoadEpoch != completedEpoch || nativeCommandSequence != completedCommandSequence)
+                throw new InvalidOperationException("原生命令、图档或加载批次仍需核对，命令=" + command + "，活动=" + active
+                    + "，记录命令=" + nativeUiCommandId + "，加载命令=" + nativeFileOpenCommandId
+                    + "，宿主一致=" + sameDocument + "，启动完成=" + ready);
+            CompleteNativeFileOpen(pendingOpenPath);
             LogOperation("当前状态副本生成完成，已核对并结束本次导入加载标记：" + sourcePath + "；epoch=" + completedEpoch);
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception error)
         {
             LogDiagnostic("生成提交副本后核对原生加载状态", error);
             throw new InvalidOperationException("提交副本已生成，但SolidWorks加载状态尚未确认，已停止本次提交；原文件和当前修改保留。请等待加载完成后重试："
                 + Path.GetFileName(sourcePath), error);
         }
+    }
+
+    private async Task WaitForArchiveCopyComponentLoadAsync(IModelDoc2 owner, string path, int epoch, int commandSequence,
+        string[] notifiedPaths, int idleAtReturn, CancellationToken token)
+    {
+        if (notifiedPaths.Length == 0 || notifiedPaths.Any(source => !IsNativeModelReference(source) || PathsEqual(source, path)))
+            throw new InvalidOperationException("副本调用未能确认组件文件通知");
+        bool SameLoad() => !disconnecting && !ControlledOpenBoundary.IsActive && nativeFileOpenInProgress != 0
+            && nativeCommandSequence == commandSequence && nativeLoadEpoch == epoch
+            && nativeFileOpenCommandId == NativeOpenComponentFileCommand
+            && (nativeUiCommandId == 0 || nativeUiCommandId == NativeOpenComponentFileCommand)
+            && pendingNativeOpenPaths.SetEquals(notifiedPaths);
+
+        ArchiveSession.Current?.SetStage("提交副本已生成，正在核对本次组件加载完成：" + Path.GetFileName(path));
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        (int Count, int Stamp, IModelDoc2 Active)? previous = null;
+        var sampledIdle = idleAtReturn;
+        while (elapsed.Elapsed < ArchiveCopyLoadSettleLimit)
+        {
+            await Task.Delay(50, token);
+            if (!disconnecting && nativeFileOpenInProgress == 0 && nativeLoadEpoch == unchecked(epoch + 1)
+                && nativeCommandSequence == commandSequence && PathsEqual(owner.GetPathName(), path)
+                && notifiedPaths.Any(source => PathsEqual(source, lastNativeOpenCompletionPath)))
+                return; // Native FileOpenPostNotify completed the original load.
+            if (!SameLoad()) throw new InvalidOperationException("等待组件期间发生了另一项文件加载或命令");
+            if (pendingOpenIdleEpoch != epoch || nativeIdleSequence == sampledIdle) continue;
+            sampledIdle = nativeIdleSequence;
+            application.GetRunningCommandInfo(out _, out _, out var busy);
+            var active = application.ActiveDoc as IModelDoc2;
+            if (busy || application.CommandInProgress || !application.StartupProcessCompleted
+                || active == null || active.GetBlockingState() != 0 || owner.GetBlockingState() != 0
+                || !PathsEqual(owner.GetPathName(), path) || !ReferenceEquals(owner, application.GetOpenDocumentByName(path))
+                || notifiedPaths.Any(source => application.GetOpenDocumentByName(source) is IModelDoc2 reference
+                    && (!PathsEqual(reference.GetPathName(), source) || reference.GetBlockingState() != 0)))
+            {
+                previous = null;
+                continue;
+            }
+            var count = application.GetDocumentCount();
+            var stamp = owner.GetUpdateStamp();
+            if (!SameLoad()) throw new InvalidOperationException("读取组件状态时发生了另一项文件加载或命令");
+            if (previous.HasValue && previous.Value.Count == count && previous.Value.Stamp == stamp
+                && count > 0 && ReferenceEquals(previous.Value.Active, active) && ReferenceEquals(application.ActiveDoc, active)
+                && !application.CommandInProgress && SameLoad())
+            {
+                if (nativeUiCommandId == NativeOpenComponentFileCommand) nativeUiCommandId = 0;
+                CompleteNativeFileOpen(pendingOpenPath);
+                LogOperation("提交副本组件加载已核对完成，复用已生成副本：" + path
+                    + "；组件数=" + notifiedPaths.Length + "；耗时毫秒=" + elapsed.ElapsedMilliseconds);
+                return;
+            }
+            previous = (count, stamp, active);
+        }
+        throw new InvalidOperationException("本次组件打开通知在等待期内尚无连续空闲证据");
     }
 
     private void ValidateCurrentMemoryCopy(CadTreeNode node)
